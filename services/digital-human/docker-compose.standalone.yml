@@ -1,0 +1,13 @@
+# Run with: docker compose -f docker-compose.standalone.yml up -d --build
+services:
+  studio:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file: .env.standalone
+    environment:
+      NODE_ENV: production
+      AUTH_MODE: standalone
+    volumes:
+      - ./data/standalone:/app/.runtime

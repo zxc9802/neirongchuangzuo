@@ -1,0 +1,9 @@
+{
+  "name": "pixverse-ingest",
+  "version": "1.0.0",
+  "private": true,
+  "main": "app.js",
+  "dependencies": {
+    "cos-nodejs-sdk-v5": "^3.0.0"
+  }
+}

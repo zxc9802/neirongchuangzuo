@@ -1,0 +1,59 @@
+{
+  "name": "digital-human-studio-desktop",
+  "productName": "数字人工作室",
+  "version": "1.0.2",
+  "description": "数字人制作独立桌面客户端",
+  "author": "Digital Human Studio",
+  "private": true,
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "pack": "electron-builder --dir --publish never",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:win": "electron-builder --win --x64 --publish never"
+  },
+  "devDependencies": {
+    "electron": "44.4.2",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.digitalhuman.studio",
+    "productName": "数字人工作室",
+    "directories": {
+      "output": "../release"
+    },
+    "files": [
+      "main.cjs",
+      "policy.cjs",
+      "preload.cjs",
+      "setup.html",
+      "setup.js",
+      "setup.css",
+      "package.json"
+    ],
+    "artifactName": "DigitalHumanStudio-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.video",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "hardenedRuntime": true
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "数字人工作室"
+    }
+  }
+}

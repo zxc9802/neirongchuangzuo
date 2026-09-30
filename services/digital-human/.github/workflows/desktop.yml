@@ -1,0 +1,34 @@
+name: Build desktop installers
+on:
+  workflow_dispatch:
+jobs:
+  desktop:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            command: dist:mac
+          - os: windows-latest
+            command: dist:win
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+      - run: npm ci
+        working-directory: desktop
+      - run: npm test
+        working-directory: desktop
+      - run: npm run ${{ matrix.command }}
+        working-directory: desktop
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+          if-no-files-found: error
