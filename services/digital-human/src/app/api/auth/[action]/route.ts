@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supportsStandaloneAuth } from "@/lib/auth-mode";
 import {
-  AUTH_COOKIE, AuthError, changePassword, consumeAuthAttempt, loginAccount, normalizeEmail,
+  AUTH_COOKIE, AuthError, changePassword, consumeAuthAttempt, loginAccount, normalizeAccount,
   readStandaloneSession, registerAccount, revokeSession, standaloneCookieOptions,
 } from "@/lib/server/standalone-auth";
 import { logServerError } from "@/lib/server/safe-log";
@@ -57,13 +57,13 @@ export async function POST(request: NextRequest, context: Context) {
       await consumeAuthAttempt(`password:${current.user.id}`, 10);
       session = await changePassword(current.user.id, body.currentPassword, body.password);
     } else {
-      const email = normalizeEmail(body.email);
-      await consumeAuthAttempt(`account:${email}`, 10);
+      const account = normalizeAccount(body.account ?? body.email);
+      await consumeAuthAttempt(`account:${account}`, 10);
       // A persistent global bound also covers random account names and forged proxy headers.
       await consumeAuthAttempt(`global:${action}`, action === "register" ? 30 : 300);
       session = action === "register"
-        ? await registerAccount(email, body.nickname, body.password)
-        : await loginAccount(email, body.password);
+        ? await registerAccount(account, body.nickname, body.password)
+        : await loginAccount(account, body.password);
     }
     const response = json({ success: true });
     response.cookies.set(AUTH_COOKIE, session.token, standaloneCookieOptions(session.expiresAt));

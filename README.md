@@ -6,7 +6,9 @@
 
 Agent 对话已接入 OpenLux 的 `gpt-6-luna`，AI 图片已接入 `gpt-image-2.5-sunburst-c`，本轮已实际完成文字回复与原图编辑出图。图片生成至少需要一张原图，作品和任务会保存在本地服务端；当前不支持纯文生图、链接导入或 PDF 等文档上传。AI 视频和 AI 混剪仍未接入生成服务。5173 的数字人模块支持真实上传、素材管理和任务接口，但配音、对口型及公共媒体访问仍需独立配置。
 
-首页与工作台共用的展示库包含摄影参考和 AI 风格示例，用于展示创作方向，不是用户自己的素材或生成结果。本项目目前仅作为本机单实例开发工作台，尚未部署；Agent 与图片接口尚无用户隔离，不能直接开放为多人生产服务。模型能力、配置与验证边界见 [模型接入](docs/模型接入.md)。
+首页与工作台共用的展示库包含摄影参考和 AI 风格示例，用于展示创作方向，不是用户自己的素材或生成结果。项目尚未部署；已加入全站登录、注册和 Agent / 图片任务的账号隔离。内部账号从原库只读验证，新注册账号写入独立数据库，配置及边界见 [双库登录](docs/双库登录.md)。模型能力、配置与验证边界见 [模型接入](docs/模型接入.md)。
+
+生产启动使用 `npm start`，主站监听 `0.0.0.0:$PORT`，数字人后端由启动脚本一并启动。Zeabur 使用仓库根目录的 Dockerfile，配置方法与持久化目录见 [Zeabur 部署](docs/Zeabur部署.md)。
 
 ## 本地打开
 
@@ -18,7 +20,7 @@ npm run dev
 
 打开 http://127.0.0.1:5173；数字人入口为 http://127.0.0.1:5173/#avatar。该命令由 `scripts/dev.mjs` 启动工作台与数字人后端；如果 3001 已有可用的数字人服务，会复用它。
 
-`npm run dev:design` 启动工作台、Agent / 图片模型接口和数字人同源代理，不会启动数字人后端。仅联调 Agent 与 AI 图片时可使用该命令；数字人后端未启动时，其页面会显示连接状态。
+`npm run dev:design` 启动工作台、Agent / 图片模型接口和数字人同源代理，不会启动数字人后端。启用独立账号后，登录与工作台访问也需要数字人后端运行。
 
 ## Agent 与 AI 图片配置
 
@@ -40,7 +42,7 @@ Agent 支持文字多轮对话和参考图片。AI 图片支持上传 PNG、JPEG
 npm run setup:digital-human
 ```
 
-首次将 `services/digital-human/.env.example` 复制为该目录下的 `.env.local`；已有配置时不要覆盖。当前本机已准备无密钥的本地配置。然后启动：
+首次将 `services/digital-human/.env.example` 复制为该目录下的 `.env.local`；已有配置时不要覆盖。根目录及数字人服务均设置 `AUTH_MODE=standalone`，并按 [双库登录](docs/双库登录.md) 配置账号数据库。然后启动：
 
 ```sh
 npm run dev:digital-human
@@ -52,7 +54,7 @@ npm run dev:digital-human
 
 前端流程、页面文件和真实接口见 [数字人前端对接](docs/数字人前端对接.md)；来源及本地调整见 [UPSTREAM](services/digital-human/UPSTREAM.md)。新页面为 `design/digital-human.js` 和 `design/digital-human.css`，接口适配层为 `design/digital-human-api.js`；`preview.mjs` 将数字人的接口、素材和结果请求流式转发至 3001，本站 `/api/ai/` 单独处理。
 
-可用检查命令：`npm run check`、`npm test`、`npm run check:digital-human`、`npm run test:digital-human`、`npm run build:digital-human`。数字人已执行的检查、页面联调及未完成项记录在 [数字人接入验收](docs/数字人接入验收.md)。尚未验证数字人真实成片、PostgreSQL 账号联调或生产部署。
+可用检查命令：`npm run check`、`npm test`、`npm run check:digital-human`、`npm run test:digital-human`、`npm run build:digital-human`。数字人已执行的检查、页面联调及未完成项记录在 [数字人接入验收](docs/数字人接入验收.md)。PostgreSQL 双库账号流程已完成集成验证；数字人真实成片及生产部署尚未验证。
 
 `/api/digital-human/status` 只报告服务配置是否齐备；显示就绪不代表供应商账号、额度或真实生成已实测可用。
 

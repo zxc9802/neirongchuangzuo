@@ -1,4 +1,5 @@
 import {renderHomeView,bindHomeView,handleHomeAction} from './home.js';
+import {accountStorageKey} from './account-storage.js';
 import {renderGeneratedAssets,bindGeneratedAssets,disposeGeneratedAssets,handleGeneratedAssetsAction} from './generated-assets.js';
 import {renderStudio,bindStudio,handleStudioAction} from './studios.js';
 import {renderWorkbench,bindWorkbench,handleWorkbenchAction} from './workbench.js';
@@ -57,8 +58,8 @@ let businessProfileVersion = 0;
 let materialIndustry = storeInfo.name ? createBrief(storeInfo).industry : 'all';
 const selectedDrafts = {};
 const modal = $('#modal');
-function load(key,fallback){try{return JSON.parse(localStorage.getItem(key)||'null')||fallback;}catch{return fallback;}}
-function persist(){try{localStorage.setItem('store-ai-design-drafts',JSON.stringify(drafts)); localStorage.setItem('store-ai-design-profile',JSON.stringify(storeInfo));return true;}catch{toast('浏览器存储不可用，本次数据只保留在页面中。');return false;}}
+function load(key,fallback){try{return JSON.parse(localStorage.getItem(accountStorageKey(key))||'null')||fallback;}catch{return fallback;}}
+function persist(){try{localStorage.setItem(accountStorageKey('store-ai-design-drafts'),JSON.stringify(drafts)); localStorage.setItem(accountStorageKey('store-ai-design-profile'),JSON.stringify(storeInfo));return true;}catch{toast('浏览器存储不可用，本次数据只保留在页面中。');return false;}}
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').classList.remove('show'),3800);}
 function openModal(title,subtitle,content,wide=false){$('#modal-title').textContent=title;$('#modal-subtitle').textContent=subtitle;$('#modal-body').innerHTML=content;modal.classList.toggle('wide',wide);if(!modal.open)modal.showModal();}
 $('#close-modal').onclick=()=>modal.close(); modal.addEventListener('click',e=>{if(e.target===modal){const r=modal.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)modal.close();}});

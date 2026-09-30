@@ -77,7 +77,7 @@ export function createImageRetention({ storageDir, now = Date.now, logger = cons
   }
   function isExpired(task) { return task.status === 'expired' || (task.status === 'completed' && expiresAt(task) <= now()); }
   function publicTask(task) {
-    const { fingerprint, ...output } = task;
+    const { fingerprint, userId, ...output } = task;
     if (task.status === 'completed' || task.status === 'expired') output.expiresAt = new Date(expiresAt(task)).toISOString();
     if (isExpired(task)) Object.assign(output, { status: 'expired', code: 'RESULT_EXPIRED', images: [] });
     if (isExpired(task) || failure(task)) delete output.text;

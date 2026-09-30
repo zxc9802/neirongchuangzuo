@@ -1,5 +1,6 @@
+import { accountStorageKey } from './account-storage.js';
 const API = '/api/ai';
-const PENDING_KEY = 'store-ai-pending-image-request';
+const PENDING_KEY = accountStorageKey('store-ai-pending-image-request');
 const ACTIVE = new Set(['queued', 'running']);
 const QUALITY_NAMES = { auto: '自动', low: '快速', medium: '标准', high: '精细' };
 const state = { status: null, statusError: '', tasks: [], loaded: false, loading: false, submitting: false, error: '', submissionError: '', pendingId: readPending(), timer: null, expiryTimer: null, lastRead: 0, ctx: null };

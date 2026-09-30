@@ -2,6 +2,7 @@ import "server-only";
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import type { MainAppSession } from "../main-app-sso";
+import { authenticateInternal, internalAccountExists, internalIdentity, internalRevision, validateInternalAccount } from "./internal-auth";
 
 export const AUTH_COOKIE = "digital_human_session";
 const SESSION_MS = 30 * 24 * 60 * 60_000;
@@ -34,6 +35,9 @@ async function db() {
           hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES digital_human_auth.users(id), expires_at BIGINT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS sessions_user ON digital_human_auth.sessions(user_id);
+        CREATE TABLE IF NOT EXISTS digital_human_auth.internal_sessions (
+          hash TEXT PRIMARY KEY, source_user_id TEXT NOT NULL, source_revision TEXT NOT NULL, expires_at BIGINT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS digital_human_auth.attempts (
           bucket TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at BIGINT NOT NULL
         );
@@ -62,9 +66,9 @@ export class AuthError extends Error {
   constructor(message: string, status = 400) { super(message); this.status = status; }
 }
 
-export function normalizeEmail(value: unknown): string {
-  if (typeof value !== "string" || value.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) {
-    throw new AuthError("请输入有效的邮箱地址");
+export function normalizeAccount(value: unknown): string {
+  if (typeof value !== "string" || value.length > 254 || !/^[^\s\u0000-\u001f\u007f]+$/.test(value.trim())) {
+    throw new AuthError("账号需要 1–254 个字符，不能包含空格或控制字符");
   }
   return value.trim().toLowerCase();
 }
@@ -88,9 +92,10 @@ async function hashPassword(password: string): Promise<string> {
 
 async function matches(password: string, encoded?: string): Promise<boolean> {
   // Unknown accounts do the same expensive work as existing accounts.
-  const [salt, digest] = (encoded || `${"0".repeat(32)}:${"0".repeat(128)}`).split(":");
+  const valid = typeof encoded === "string" && /^[0-9a-f]{32}:[0-9a-f]{128}$/.test(encoded);
+  const [salt, digest] = (valid ? encoded : `${"0".repeat(32)}:${"0".repeat(128)}`).split(":");
   const actual = await derive(password, salt);
-  return timingSafeEqual(actual, Buffer.from(digest, "hex")) && Boolean(encoded);
+  return timingSafeEqual(actual, Buffer.from(digest, "hex")) && valid;
 }
 
 const digestToken = (token: string) => createHash("sha256").update(token).digest("hex");
@@ -115,9 +120,11 @@ async function issueSession(client: PoolClient, userId: string) {
 
 export async function registerAccount(email: string, nickname: unknown, password: unknown) {
   validatePassword(password);
+  if (nickname === undefined) nickname = email.slice(0, 30);
   if (typeof nickname !== "string" || nickname.trim().length < 1 || nickname.trim().length > 30) {
     throw new AuthError("昵称需要 1–30 个字符");
   }
+  if (await internalAccountExists(email)) throw new AuthError("此账号已有内部账号记录，请使用原账号登录", 409);
   const encoded = await hashPassword(password);
   try {
     return await transaction(async client => {
@@ -126,15 +133,28 @@ export async function registerAccount(email: string, nickname: unknown, password
       return issueSession(client, id);
     });
   } catch (error) {
-    if ((error as { code?: string }).code === "23505") throw new AuthError("这个邮箱已注册，请直接登录", 409);
+    if ((error as { code?: string }).code === "23505") throw new AuthError("这个账号已注册，请直接登录", 409);
     throw error;
   }
 }
 
 export async function loginAccount(email: string, password: unknown) {
-  validatePassword(password);
+  if (typeof password !== "string" || password.length < 1 || password.length > 128) throw new AuthError("请输入有效的密码");
   const { rows: [user] } = await (await db()).query<UserRow>("SELECT * FROM digital_human_auth.users WHERE email = $1", [email]);
-  if (!await matches(password, user?.password)) throw new AuthError("邮箱或密码不正确", 401);
+  const localMatch = await matches(password, user?.password);
+  if (!user) {
+    const internal = await authenticateInternal(email, password);
+    if (!internal) throw new AuthError("账号或密码不正确", 401);
+    return transaction(async client => {
+      const token = randomBytes(32).toString("base64url");
+      const expiresAt = Date.now() + SESSION_MS;
+      const revision = internalRevision(internal);
+      await client.query("DELETE FROM digital_human_auth.internal_sessions WHERE expires_at <= $1 OR (source_user_id=$2 AND source_revision<>$3)", [Date.now(), internal.id, revision]);
+      await client.query("INSERT INTO digital_human_auth.internal_sessions VALUES ($1,$2,$3,$4)", [digestToken(token), internal.id, revision, expiresAt]);
+      return { token, expiresAt };
+    });
+  }
+  if (!localMatch) throw new AuthError("账号或密码不正确", 401);
   return transaction(async client => {
     const result = await client.query("SELECT id FROM digital_human_auth.users WHERE id = $1 AND password = $2 FOR UPDATE", [user.id, user.password]);
     if (!result.rowCount) throw new AuthError("密码已变更，请重新登录", 401);
@@ -148,7 +168,19 @@ export async function readStandaloneSession(token?: string): Promise<MainAppSess
     SELECT u.*, s.expires_at FROM digital_human_auth.sessions s
     JOIN digital_human_auth.users u ON u.id = s.user_id WHERE hash = $1 AND expires_at > $2`,
   [digestToken(token), Date.now()]);
-  if (!row) return null;
+  if (!row) {
+    const { rows: [saved] } = await (await db()).query<{ source_user_id: string; source_revision: string; expires_at: string }>(
+      "SELECT source_user_id,source_revision,expires_at FROM digital_human_auth.internal_sessions WHERE hash=$1 AND expires_at>$2", [digestToken(token), Date.now()]);
+    if (!saved) return null;
+    const internal = await validateInternalAccount(saved.source_user_id, saved.source_revision);
+    if (!internal) {
+      await revokeSession(token);
+      return null;
+    }
+    return { token: "", expiresAt: Number(saved.expires_at), validatedAt: Date.now(),
+      user: { id: internalIdentity(internal.id), account: internal.email, nickname: internal.nickname,
+        role: "member", billingAudience: "standalone", authSource: "internal" } };
+  }
   return {
     // The opaque local token is never sent to a provider or returned in JSON.
     token: "", expiresAt: Number(row.expires_at), validatedAt: Date.now(),
@@ -157,10 +189,14 @@ export async function readStandaloneSession(token?: string): Promise<MainAppSess
 }
 
 export async function revokeSession(token?: string): Promise<void> {
-  if (token) await (await db()).query("DELETE FROM digital_human_auth.sessions WHERE hash = $1", [digestToken(token)]);
+  if (token) await transaction(async client => {
+    await client.query("DELETE FROM digital_human_auth.sessions WHERE hash = $1", [digestToken(token)]);
+    await client.query("DELETE FROM digital_human_auth.internal_sessions WHERE hash = $1", [digestToken(token)]);
+  });
 }
 
 export async function changePassword(userId: string, current: unknown, next: unknown) {
+  if (userId.startsWith("internal_")) throw new AuthError("内部账号请前往原系统修改密码", 403);
   validatePassword(current);
   validatePassword(next);
   const { rows: [user] } = await (await db()).query<UserRow>("SELECT * FROM digital_human_auth.users WHERE id = $1", [userId]);

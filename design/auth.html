@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>登录 · 店 AI</title><link rel="stylesheet" href="/auth.css"></head>
+<body>
+<header class="auth-header"><a class="auth-brand" href="/login"><span>店<span>AI</span></span><strong>店 AI</strong></a><span>实体生意宣传工作台</span></header>
+<main class="auth-layout">
+  <section class="auth-story" aria-label="店 AI 创作工作台">
+    <div class="auth-story-copy"><p>让创作，成为生意的日常</p><h1>好生意，<br>值得被看见。</h1><span>从真实素材开始，整理文案、制作图片与数字人口播。</span></div>
+    <img src="/media/ai-retail-flowers.png" alt="花店陈列创作示例" class="auth-cover">
+    <div class="auth-caption"><span>每个生意，都有自己的故事。</span></div>
+  </section>
+  <section class="auth-panel">
+    <p class="auth-eyebrow">欢迎来到店 AI</p><h2 id="auth-title">登录你的工作台</h2><p id="auth-description" class="auth-description">内部账号可使用原账号和密码登录。</p>
+    <form id="auth-form">
+      <label>账号<input name="account" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="254" placeholder="输入账号"></label>
+      <label>密码<span class="password-field"><input name="password" type="password" autocomplete="current-password" required minlength="1" maxlength="128" placeholder="输入密码"><button id="toggle-password" type="button" aria-label="显示密码" aria-pressed="false">显示</button></span></label>
+      <p id="auth-error" class="auth-error" role="alert" hidden></p>
+      <button id="auth-submit" class="auth-submit" type="submit">登录并进入工作台 <span aria-hidden="true">→</span></button>
+    </form>
+    <p class="auth-switch"><span id="switch-description">还没有账号？</span><a id="switch-link" href="/register">注册新账号</a></p>
+    <p class="auth-note" id="auth-note">共用电脑使用后，请退出登录。</p>
+  </section>
+</main>
+<footer class="auth-footer">店 AI · 让真实的好生意被更多人看见</footer>
+<script type="module" src="/auth.js"></script>
+</body></html>

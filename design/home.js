@@ -1,3 +1,4 @@
+import { accountStorageKey } from './account-storage.js';
 // Sources: photography and original AI style examples; see media/SOURCES.md.
 // Visual thesis: a calm, spacious creation surface with blue actions and warm, real shop photography.
 // Content: business brief → shortcut tools → useful scenarios → browsable inspiration.
@@ -56,7 +57,7 @@ function renderIndustryOptions(ctx) {
 
 function syncFavorites() {
   try {
-    const saved = JSON.parse(localStorage.getItem('store-ai-inspiration-favorites') || '[]');
+    const saved = JSON.parse(localStorage.getItem(accountStorageKey('store-ai-inspiration-favorites')) || '[]');
     if (Array.isArray(saved)) favorites = new Set(saved.filter(id => typeof id === 'string'));
   } catch { /* Keep this page's current favorites if storage is unavailable. */ }
 }
@@ -394,7 +395,7 @@ export function handleHomeAction(action, element, ctx) {
       syncFavorites();
       const id = element.dataset.id;
       if (favorites.has(id)) favorites.delete(id); else favorites.add(id);
-      try { localStorage.setItem('store-ai-inspiration-favorites', JSON.stringify([...favorites])); } catch { ctx.toast('收藏未保存，请检查浏览器存储设置。'); }
+      try { localStorage.setItem(accountStorageKey('store-ai-inspiration-favorites'), JSON.stringify([...favorites])); } catch { ctx.toast('收藏未保存，请检查浏览器存储设置。'); }
       updateGallery(ctx);
       document.querySelectorAll('.home-detail-favorite').forEach(btn => {
         btn.innerHTML = icon('star') + (favorites.has(id) ? '已收藏' : '收藏灵感');

@@ -1,4 +1,5 @@
-const STORAGE_KEY = 'store-ai-agent-conversations-v1';
+import { accountStorageKey } from './account-storage.js';
+const STORAGE_KEY = accountStorageKey('store-ai-agent-conversations-v1');
 const MAX_LENGTH = 2000;
 const MAX_CONTEXT_MESSAGES = 20;
 const MAX_CONTEXT_TEXT = 32000;

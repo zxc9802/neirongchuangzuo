@@ -14,12 +14,11 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     setError("");
-    if (register && form.get("password") !== form.get("confirm")) { setError("两次输入的密码不一致"); return; }
     setBusy(true);
     try {
       const response = await fetch(`/api/auth/${mode}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: form.get("email"), password: form.get("password"), nickname: form.get("nickname") }),
+        body: JSON.stringify({ account: form.get("account"), password: form.get("password") }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "暂时无法登录，请稍后重试");
@@ -55,15 +54,13 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
         <h2 className="text-3xl font-semibold tracking-tight">{register ? "创建你的创作账号" : "欢迎回到工作室"}</h2>
         <p className="mb-8 mt-3 text-sm leading-6 text-zinc-400">{register ? "用一个账号，保存你的形象、声音和作品。" : "登录后，继续你的下一支作品。"}</p>
         <form onSubmit={submit} className="space-y-5">
-          {register && <label className="block text-xs text-zinc-300">怎么称呼你<input name="nickname" autoComplete="nickname" required maxLength={30} placeholder="输入昵称" className={`${inputClass} mt-2`} disabled={busy} /></label>}
-          <label className="block text-xs text-zinc-300">邮箱地址<input name="email" type="email" autoComplete="username" required maxLength={254} placeholder="you@example.com" className={`${inputClass} mt-2`} disabled={busy} /></label>
-          <label className="block text-xs text-zinc-300">密码<span className="relative mt-2 block"><input name="password" type={visible ? "text" : "password"} autoComplete={register ? "new-password" : "current-password"} required minLength={10} maxLength={128} placeholder={register ? "至少 10 个字符" : "输入你的密码"} className={`${inputClass} pr-12`} disabled={busy} /><button type="button" aria-label={visible ? "隐藏密码" : "显示密码"} onClick={() => setVisible(!visible)} className="absolute right-4 top-4 text-zinc-500 hover:text-zinc-200">{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button></span></label>
-          {register && <label className="block text-xs text-zinc-300">确认密码<input name="confirm" type={visible ? "text" : "password"} autoComplete="new-password" required minLength={10} maxLength={128} placeholder="再次输入密码" className={`${inputClass} mt-2`} disabled={busy} /></label>}
+          <label className="block text-xs text-zinc-300">账号<input name="account" type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} required maxLength={254} placeholder="输入账号" className={`${inputClass} mt-2`} disabled={busy} /></label>
+          <label className="block text-xs text-zinc-300">密码<span className="relative mt-2 block"><input name="password" type={visible ? "text" : "password"} autoComplete={register ? "new-password" : "current-password"} required minLength={register ? 10 : 1} maxLength={128} placeholder={register ? "至少 10 个字符" : "输入你的密码"} className={`${inputClass} pr-12`} disabled={busy} /><button type="button" aria-label={visible ? "隐藏密码" : "显示密码"} onClick={() => setVisible(!visible)} className="absolute right-4 top-4 text-zinc-500 hover:text-zinc-200">{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button></span></label>
           {error && <p role="alert" className="rounded-xl border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-300">{error}</p>}
           <button type="submit" disabled={busy} className="flex w-full items-center justify-center gap-3 rounded-xl bg-blue-500 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-wait disabled:opacity-60">{busy ? <><LoaderCircle size={17} className="animate-spin" />正在处理</> : <>{register ? "创建账号并进入工作室" : "登录工作室"}<ArrowRight size={17} /></>}</button>
         </form>
         <p className="mt-7 text-center text-sm text-zinc-500">{register ? "已经有账号？" : "还没有账号？"}<Link href={register ? "/login" : "/register"} className="ml-2 text-blue-300 hover:text-blue-200">{register ? "前往登录" : "免费注册"}</Link></p>
-        <p className="mt-10 border-t border-white/[0.07] pt-5 text-center text-xs leading-6 text-zinc-600">{register ? "请妥善保存密码。当前版本暂不提供邮件找回。" : "在这台电脑上保持登录。共用电脑使用后请退出。"}</p>
+        <p className="mt-10 border-t border-white/[0.07] pt-5 text-center text-xs leading-6 text-zinc-600">{register ? "请妥善保存密码。当前版本暂不提供密码找回。" : "在这台电脑上保持登录。共用电脑使用后请退出。"}</p>
       </section>
     </div>
   );

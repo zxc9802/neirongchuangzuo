@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createPreviewServer } from '../preview.mjs';
+import { workspaceAuthRequired } from '../services/auth/workspace.mjs';
 
 const serviceDir = fileURLToPath(new URL('../services/digital-human/', import.meta.url));
 const nextBin = fileURLToPath(new URL('../services/digital-human/node_modules/next/dist/bin/next', import.meta.url));
@@ -11,7 +12,7 @@ if (!existsSync(nextBin)) {
 }
 let child;
 let stopping = false;
-const server = createPreviewServer();
+const server = createPreviewServer({ authRequired: workspaceAuthRequired() });
 async function stop(code = 0) {
   if (stopping) return;
   stopping = true;
@@ -47,6 +48,14 @@ if (!stopping) server.listen(5173, '127.0.0.1', async () => {
     if (data.service === 'digital-human') {
       console.log('已连接本机现有数字人服务。');
       return;
+    }
+    if (response.status === 401) {
+      const discovery = await fetch('http://127.0.0.1:3001/api/auth/info', { signal: AbortSignal.timeout(12_000) });
+      const info = await discovery.json();
+      if (discovery.ok && info.app === 'digital-human-studio' && info.authMode === 'standalone') {
+        console.log('已连接本机现有数字人账号服务。');
+        return;
+      }
     }
     throw new Error('3001 端口已有其他服务，请关闭该服务或检查配置。');
   } catch (error) {

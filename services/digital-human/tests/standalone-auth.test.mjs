@@ -70,8 +70,30 @@ test("duplicate normalized emails are rejected even with concurrent registration
   assert.deepEqual(responses.map(r => r.status).sort(), [200, 409]);
 });
 
+test("plain accounts register with only an account and password, then log in without an email address", async () => {
+  const response = await post("register", { account: " Creator_9802 ", password: "correct horse 123" });
+  assert.equal(response.status, 200);
+  const registered = await auth.readStandaloneSession(tokenOf(response));
+  assert.equal(registered.user.account, "creator_9802");
+  assert.equal(registered.user.nickname, "creator_9802");
+  assert.equal((await post("register", { account: "CREATOR_9802", password: "correct horse 123" })).status, 409);
+  const login = await post("login", { account: "CREATOR_9802", password: "correct horse 123" });
+  assert.equal(login.status, 200);
+  assert.equal((await auth.readStandaloneSession(tokenOf(login))).user.id, registered.user.id);
+  assert.equal((await post("login", { account: "creator_9802", password: "incorrect password" })).status, 401);
+  // Existing clients may continue sending the historical email field.
+  assert.equal((await post("login", { email: "creator_9802", password: "correct horse 123" })).status, 200);
+});
+
+test("account validation accepts Chinese names and rejects empty, spaced, control or oversized identifiers", async () => {
+  assert.equal((await post("register", { account: "创作者9802", password: "correct horse 123" })).status, 200);
+  for (const account of ["", "   ", "user name", "user\u0000name", "a".repeat(255), 9802]) {
+    assert.equal((await post("register", { account, password: "correct horse 123" })).status, 400);
+  }
+});
+
 test("password and input validation reject malformed requests", async () => {
-  for (const data of [{ email: "bad" }, { password: "short" }, { password: "a".repeat(129) }, { nickname: "" }]) {
+  for (const data of [{ email: "bad account" }, { password: "short" }, { password: "a".repeat(129) }, { nickname: "" }]) {
     assert.equal((await signup("invalid@example.com", data)).status, 400);
   }
   assert.equal((await post("login", { email: "invalid@example.com", password: "a".repeat(5000) })).status, 413);

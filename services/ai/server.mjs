@@ -278,9 +278,11 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
   async function handle(req, res, url) {
     try {
       await ready;
+      const userId = req.authenticatedUserId;
+      const ownsTask = task => task && task.userId === userId;
       let host;
       try { host = new URL(`http://${req.headers.host || ''}`).hostname; } catch { throw new ApiError('请求地址不正确。', 400, 'INVALID_HOST'); }
-      if (!['127.0.0.1', 'localhost', '[::1]'].includes(host)) throw new ApiError('此服务仅供本地工作台使用。', 403, 'HOST_REJECTED');
+      if (!userId && !['127.0.0.1', 'localhost', '[::1]'].includes(host)) throw new ApiError('此服务仅供本地工作台使用。', 403, 'HOST_REJECTED');
       if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) throw new ApiError('请从本站页面发起请求。', 403, 'ORIGIN_REJECTED');
       if (req.headers['sec-fetch-site'] === 'cross-site') throw new ApiError('请从本站页面发起请求。', 403, 'ORIGIN_REJECTED');
       await retention.sweep(jobs);
@@ -294,6 +296,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       const media = /^\/api\/ai\/media\/([a-f0-9-]+)\/(result-[1-4]\.(png|jpg|webp))$/i.exec(url.pathname);
       if (media && ['GET', 'HEAD'].includes(req.method)) {
         const task = findTask(media[1].toLowerCase());
+        if (!ownsTask(task)) throw new ApiError('未找到这张作品。', 404);
         if (task && retention.isExpired(task)) throw new ApiError('这份素材已超过 3 天保留期，无法继续下载。', 410, 'RESULT_EXPIRED');
         if (!task || task.kind === 'chat' || task.status !== 'completed' || !task.images.some(image => image.filename === media[2])) throw new ApiError('未找到这张作品。', 404);
         const bytes = await readFile(await retention.resultPath(task.id, media[2]));
@@ -302,7 +305,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
         res.end(req.method === 'HEAD' ? undefined : bytes); return true;
       }
       if (url.pathname === '/api/ai/images' && req.method === 'GET') {
-        const active = [...jobs.values()].filter(task => task.kind !== 'chat' && !retention.isExpired(task));
+        const active = [...jobs.values()].filter(task => ownsTask(task) && task.kind !== 'chat' && !retention.isExpired(task));
         const tasks = url.searchParams.get('completed') === 'true'
           ? active.filter(task => task.status === 'completed').sort((a, b) => retention.expiresAt(b) - retention.expiresAt(a))
           : active.sort((a, b) => b.createdAt.localeCompare(a.createdAt)).slice(0, 100);
@@ -311,7 +314,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       const taskMatch = /^\/api\/ai\/(images|chat)\/([a-f0-9-]+)$/i.exec(url.pathname);
       if (taskMatch && req.method === 'GET') {
         const task = findTask(taskMatch[2].toLowerCase());
-        if (!task || (task.kind === 'chat') !== (taskMatch[1] === 'chat')) throw new ApiError('未找到任务；请先确认上次是否提交成功。', 404, 'TASK_NOT_FOUND');
+        if (!ownsTask(task) || (task.kind === 'chat') !== (taskMatch[1] === 'chat')) throw new ApiError('未找到任务；请先确认上次是否提交成功。', 404, 'TASK_NOT_FOUND');
         if (taskMatch[1] === 'chat') chatResult(res, task);
         else json(res, 200, { task: retention.publicTask(task) });
         return true;
@@ -340,7 +343,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       const model = kind === 'chat' ? config.chatModel : config.imageModel;
       const existing = findTask(body.requestId);
       if (existing) {
-        if (existing.fingerprint !== fingerprint || (existing.kind === 'chat') !== (kind === 'chat')) throw new ApiError('任务标识已使用，请重新开始创作。', 409, 'ID_CONFLICT');
+        if (!ownsTask(existing) || existing.fingerprint !== fingerprint || (existing.kind === 'chat') !== (kind === 'chat')) throw new ApiError('任务标识已使用，请重新开始创作。', 409, 'ID_CONFLICT');
         if (kind === 'chat') chatResult(res, existing);
         else json(res, 200, { task: retention.publicTask(existing) });
         return true;
@@ -351,7 +354,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       try {
         reservation = await ledger.reserve({ id: body.requestId, kind, fingerprint, model });
         if (!reservation.created) throw new ApiError('此任务已有调用记录，无法重复提交；请核对原记录。', 409, 'REQUEST_ALREADY_RECORDED');
-        task = { id: body.requestId, kind, status: 'queued', model, createdAt: new Date(now()).toISOString(), images: [], fingerprint, ...(kind === 'image' ? { prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, size: SIZES[body.ratio] } : {}) };
+        task = { id: body.requestId, userId, kind, status: 'queued', model, createdAt: new Date(now()).toISOString(), images: [], fingerprint, ...(kind === 'image' ? { prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, size: SIZES[body.ratio] } : {}) };
         await persist(task);
         jobs.set(task.id, task);
       } catch (error) {

@@ -1,6 +1,7 @@
 import { INDUSTRIES, PLATFORMS, getPurposes, createBrief, normalizeBrief, getBriefFields, validateBrief, buildContentPlan } from './business-catalog.js';
 
-const storageKey = 'business-ai-brief-v1';
+import { accountStorageKey } from './account-storage.js';
+const storageKey = accountStorageKey('business-ai-brief-v1');
 const modes = ['image', 'video', 'mix', 'avatar'];
 let cachedBrief;
 let session;

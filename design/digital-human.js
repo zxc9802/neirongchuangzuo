@@ -1,6 +1,7 @@
 import { digitalHumanApi as api } from './digital-human-api.js';
+import { accountStorageKey } from './account-storage.js';
 
-const STORAGE_KEY = 'store-studio:digital-human:v1';
+const STORAGE_KEY = accountStorageKey('store-studio:digital-human:v1');
 const state = {
   hydrated: false, loaded: false, loading: false, status: null, session: null,
   avatars: [], voices: [], tasks: [], avatarId: '', voiceId: '', activeTaskId: '',

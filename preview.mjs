@@ -2,8 +2,13 @@ import { createServer, request } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { createAIHandler } from './services/ai/server.mjs';
+import { getWorkspaceUser, workspaceAuthRequired } from './services/auth/workspace.mjs';
 const files = new Map([
   ['/', ['design/index.html', 'text/html; charset=utf-8']],
+  ['/login', ['design/auth.html', 'text/html; charset=utf-8']],
+  ['/register', ['design/auth.html', 'text/html; charset=utf-8']],
+  ['/auth.css', ['design/auth.css', 'text/css; charset=utf-8']],
+  ...['auth', 'workspace-account', 'account-storage'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/app.js', ['design/app.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['design/style.css', 'text/css; charset=utf-8']],
   ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-presets', 'image-preset-ui', 'generated-assets'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
@@ -17,11 +22,11 @@ function proxyHeaders(headers) {
   return Object.fromEntries(Object.entries(headers).filter(([key]) => !names.has(key.toLowerCase())));
 }
 
-function forward(req, res, backend) {
+function forward(req, res, backend, publicOrigin) {
   const headers = proxyHeaders(req.headers);
   headers.host = backend.host;
-  headers['x-forwarded-host'] = req.headers.host || '127.0.0.1:5173';
-  headers['x-forwarded-proto'] = 'http';
+  headers['x-forwarded-host'] = publicOrigin?.host || req.headers.host || '127.0.0.1:5173';
+  headers['x-forwarded-proto'] = publicOrigin?.protocol.slice(0, -1) || 'http';
   const upstream = request({ hostname: backend.hostname, port: backend.port, path: req.url, method: req.method, headers }, response => {
     const responseHeaders = proxyHeaders(response.headers);
     if (responseHeaders.location?.startsWith(backend.origin + '/')) {
@@ -51,8 +56,9 @@ function safeError(res, status, code, message, close = false) {
   res.end(JSON.stringify({ error: message, code }));
 }
 
-export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', aiOptions, createAI = createAIHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
+export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, aiOptions, createAI = createAIHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
  const backend = new URL(backendUrl);
+ const externalOrigin = publicOrigin ? new URL(publicOrigin) : undefined;
  if (backend.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(backend.hostname)) throw new Error('The development backend must use loopback HTTP.');
  const handleAI = createAI(aiOptions);
  const ready = Promise.resolve(handleAI.ready);
@@ -72,6 +78,21 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', aiOp
     safeError(res, 400, 'INVALID_REQUEST_URL', '请求地址无效。', true);
     return;
   }
+  if (path === '/api/workspace/session' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/'))) {
+    let user = null;
+    try { if (authRequired) user = await getWorkspaceUser(req, backend); }
+    catch { safeError(res, 503, 'AUTH_UNAVAILABLE', '账号服务暂时不可用，请稍后重试。'); return; }
+    if (authRequired && !user) {
+      if (path === '/') { res.writeHead(302, { Location: '/login', 'Cache-Control': 'no-store' }); res.end(); }
+      else safeError(res, 401, 'UNAUTHENTICATED', '请先登录后继续。');
+      return;
+    }
+    req.authenticatedUserId = user?.id;
+    if (path === '/api/workspace/session') {
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+      res.end(JSON.stringify({ required: authRequired, user })); return;
+    }
+  }
   if (path === '/api/ai' || path.startsWith('/api/ai/')) {
     if (req.method === 'POST' && (closing || handleAI.isClosing)) {
       safeError(res, 503, 'SERVICE_STOPPING', '服务正在重启，请稍后重试。', true);
@@ -87,8 +108,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', aiOp
     safeError(res, 404, 'NOT_FOUND', '接口不存在。');
     return;
   }
-  if (/^\/(api(?:\/|$)|jobs\/|uploads\/|_next\/|login(?:\/|$)|register(?:\/|$))/.test(path)) {
-    forward(req, res, backend);
+  if (/^\/(api(?:\/|$)|jobs\/|uploads\/|_next\/)/.test(path)) {
+    forward(req, res, backend, externalOrigin);
     return;
   }
   if (!['GET', 'HEAD'].includes(req.method)) { res.writeHead(405, { Allow: 'GET, HEAD' }); res.end(); return; }
@@ -135,7 +156,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', aiOp
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
- const server = createPreviewServer();
+ const server = createPreviewServer({ authRequired: workspaceAuthRequired() });
  let stopping = false;
  const stop = async (code = 0) => {
    stopping = true;
