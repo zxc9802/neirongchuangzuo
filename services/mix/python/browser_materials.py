@@ -310,17 +310,21 @@ class BrowserMaterials:
             raise HTTPException(422, '原片无法解码为有效视频，请检查本地文件') from None
         if any(request['end'] > duration + .1 for request in requests):
             raise HTTPException(422, '原片时长与素材区间不一致，请重新扫描文件版本')
+        color_filter, _ = media.sdr_filter(media.video_color(path))
+        scale_filter = ("scale=w='if(gte(iw,ih),min(iw,1920),min(iw,1080))':"
+                        "h='if(gte(iw,ih),min(ih,1080),min(ih,1920))':"
+                        'force_original_aspect_ratio=decrease:force_divisible_by=2')
         for request in requests:
             if request['state'] != 'pending':
                 continue
             with tempfile.TemporaryDirectory(prefix='source-' + PROCESS_ID + '-', dir=self.folder) as temporary:
                 segment = Path(temporary) / 'segment.mp4'
                 # Re-encode after accurate seek; every extracted clip begins at timestamp zero.
-                media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', str(request['start']),
+                media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-threads', '2', '-ss', str(request['start']),
                            '-i', str(path), '-t', str(request['end'] - request['start']),
-                           '-map', '0:v:0', '-an', '-vf', 'setpts=PTS-STARTPTS', '-c:v', 'libx264',
-                           '-threads', '2', '-preset', 'fast', '-crf', '16', '-pix_fmt', 'yuv420p',
-                           '-map_metadata', '-1', str(segment)])
+                           '-map', '0:v:0', '-an', '-vf', f'setpts=PTS-STARTPTS,fps=25,{scale_filter},{color_filter}', '-c:v', 'libx264',
+                           '-threads', '2', '-filter_threads', '1', '-preset', 'fast', '-crf', '0', '-pix_fmt', 'yuv420p',
+                           '-map_metadata', '-1', *media.SDR_FLAGS, str(segment)])
                 self.fulfill(device_id, request, segment)
 
     def complete_file(self, device_id, upload_id):

@@ -33,12 +33,17 @@
 | --- | --- |
 | `OPENLUX_API_KEY` | 已有 OpenLux 密钥，素材 embedding、描述和画面核验 |
 | `RERANK_API_KEY` | 文本重排服务密钥 |
+| `RERANK_URL` | 使用 OpenLux 重排时设置为 `https://api.openlux.ai/v1/rerank` |
 | `INDEXTTS_302_API_KEY` | 已有 IndexTTS2 配音密钥 |
 | `INDEXTTS_SPEAKER_AUDIO_URL` | 管理员配置的参考音色 HTTPS URL |
 | `INDEXTTS_EMOTION_AUDIO_URL` | 可选的情绪参考 HTTPS URL |
 | `INDEXTTS_EMOTION_AUDIO_PATH` | 可选的情绪参考文件路径，可替代上面的 URL |
 
 没有配置情绪参考时使用通用情绪向量，不需要用户上传参考音频。可选覆盖 `EMBEDDING_URL`、`LLM_URL`、`RERANK_URL`、`INDEXTTS_BASE_URL`、`INDEXTTS_DOWNLOAD_HOSTS`。这些是固定部署配置，不能来自用户请求。无需 COS 就能通过本站的受保护下载接口交付成片。继续挂载 `/app/.data` 和数字人的运行目录；不要部署多个进程共用同一混剪数据目录。
+
+同一 OpenLux 密钥可分别配置到 `OPENLUX_API_KEY` 和 `RERANK_API_KEY`，对应 `gemini-embedding-2-preview`、`gemini-3.7-flash` 和 `qwen3-rerank`。此时必须同时设置上表的 `RERANK_URL`；未覆盖时重排仍使用 302 地址，不能混用服务商密钥。IndexTTS2 使用单独的 302 配音密钥。
+
+取片统一到最终 25 FPS，并按方向限制到最高支持的 1920×1080 或 1080×1920，不放大小尺寸原片。HDR 按线性光色调映射为 BT.709 SDR，普通 BT.709 原片保留色彩；提取片段使用 H.264 CRF 0，避免增加一次有损压缩。最终交付为 H.264 CRF 16、8 位 BT.709 SDR，中间文件会占用更多临时空间。它保留的是帧率、尺寸与色彩转换后的像素，不保留原始 4K/60 FPS/HDR 规格。
 
 本地首次使用：
 
@@ -51,6 +56,10 @@ npm run dev
 
 ## 验证边界
 
-回归测试和浏览器验收可使用付费模型、TTS 的测试替身，传片及 FFmpeg 则使用真实视频。它们验证目录扫描、增量复用、账号隔离和媒体传输，不代表生产模型余额、权限及配音 URL 已完成付费联调。Windows Chromium 验收不能代替真实 Mac/Safari 验收。
+回归测试和早期浏览器验收使用付费模型、TTS 的测试替身，传片及 FFmpeg 则使用真实视频。另完成了以下真实付费服务验收。Windows Chromium 验收不能代替真实 Mac/Safari 验收。
 
-本机验证：JavaScript 全量串行回归 249 项通过、1 项按原有配置跳过，Python 混剪测试 96 项通过；独立 Chromium 使用真实 OPFS 目录句柄代替系统选择窗口，验证首次/再次/新增/修改/删除的 embedding 次数为 2/2/4/6/6，服务器导出并播放 1.6 秒成片，原文件 SHA256 未改变。小型进度区约 195×196 像素，桌面和 390px 窄屏无横向溢出。测试模型和配音使用替身。最终页面证据在本地忽略的 `outputs/mix-acceptance-reviewed/`，回归日志在 `outputs/mix-acceptance-final/`。Docker 配置已审查，本机未构建镜像。
+本机验证：JavaScript 全量串行回归 249 项通过、1 项按原有配置跳过，Python 混剪测试 101 项通过；独立 Chromium 使用真实 OPFS 目录句柄代替系统选择窗口，验证首次/再次/新增/修改/删除的 embedding 次数为 2/2/4/6/6，服务器导出并播放 1.6 秒成片，原文件 SHA256 未改变。小型进度区约 195×196 像素，桌面和 390px 窄屏无横向溢出。此轮模型和配音使用替身，页面证据在本地忽略的 `outputs/mix-acceptance-reviewed/`，回归日志在 `outputs/mix-acceptance-final/`。
+
+2026-10-07，Windows Chrome 目录输入流程使用 Z 盘真实视频和真实模型完成四条短文案成片，覆盖竖屏 1080p、横屏 720p、方形 720p、字幕开关及三个场景连续混剪。前三轮索引六个视频、十个片段；第四轮使用三份与 Z 盘 SHA256 一致的素材副本，索引五个片段，没有进行全盘向量化。视频向量为 3072 维，刷新并重新选择目录后未重复 embedding。四条均通过完整解码、网页播放及 Gemini 含声音成片检查，原文件摘要不变。
+
+第四轮恢复同一任务后，新增 embedding、rerank 和配音次数均为零，复用已保存阶段完成 7.28 秒混剪。新增逐帧像素、60 FPS 转换和横竖屏 4K 尺寸回归；最新版取片另直接使用真实 Z 盘 4K HDR 原片验证。测试报告和成片位于本地忽略的 `outputs/z-drive-real-models-20261007/` 及 `outputs/z-drive-real-multiscene-20261007/`。这些结果没有覆盖长视频、并发和大型素材库性能。Docker 配置已审查，本机未构建镜像，也未部署线上。

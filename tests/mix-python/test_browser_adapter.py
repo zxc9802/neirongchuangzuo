@@ -297,6 +297,61 @@ class BrowserMaterialBackendTests(unittest.TestCase):
         models.assert_not_called()
         self.assertAlmostEqual(media.duration(self.broker.wait_clip(request['id'], timeout=0)), 2, delta=.05)
 
+    def assert_source_pixels_preserved(self, hdr=False, fps=25):
+        source = self.root / 'detailed-source.mp4'
+        color_flags = (['-color_primaries', 'bt2020', '-color_trc', 'arib-std-b67',
+                        '-colorspace', 'bt2020nc', '-color_range', 'tv'] if hdr else media.SDR_FLAGS)
+        media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i',
+                   f'testsrc2=s=64x64:r={fps}:d=4', '-c:v', 'libx264', '-crf', '0',
+                   '-pix_fmt', 'yuv420p10le' if hdr else 'yuv420p', *color_flags, str(source)])
+        original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.analyze()
+        request = self.request()
+        url = self.transfer(request, source.read_bytes())
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        extracted = self.broker.wait_clip(request['id'], timeout=0)
+        color_filter, _ = media.sdr_filter(media.video_color(source))
+        expected, actual = self.root / 'expected.md5', self.root / 'actual.md5'
+        media.run(['ffmpeg', '-v', 'error', '-y', '-ss', '1', '-i', str(source), '-t', '2',
+                   '-an', '-vf', 'fps=25,' + color_filter, '-pix_fmt', 'yuv420p', '-f', 'framemd5', str(expected)])
+        media.run(['ffmpeg', '-v', 'error', '-y', '-i', str(extracted), '-an',
+                   '-pix_fmt', 'yuv420p', '-f', 'framemd5', str(actual)])
+        hashes = lambda path: [line.rsplit(',', 1)[1].strip() for line in path.read_text().splitlines()
+                               if line and not line.startswith('#')]
+        self.assertEqual(hashes(actual), hashes(expected), 'Source transfer must retain every converted pixel')
+        self.assertEqual(media.video_color(extracted), {
+            'color_range': 'tv', 'color_space': 'bt709', 'color_transfer': 'bt709', 'color_primaries': 'bt709'})
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), original_hash)
+
+    def test_source_transfer_preserves_sdr_pixels_without_extra_lossy_encode(self):
+        self.assert_source_pixels_preserved()
+
+    def test_source_transfer_tone_maps_10bit_hdr_before_quantizing_to_sdr(self):
+        self.assert_source_pixels_preserved(hdr=True)
+
+    def test_source_transfer_normalizes_60fps_hdr_to_export_rate(self):
+        self.assert_source_pixels_preserved(hdr=True, fps=60)
+
+    def assert_source_fits_export(self, size, expected):
+        source = self.root / '4k-source.mp4'
+        media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i',
+                   f'color=c=blue:s={size}:r=1:d=4', '-c:v', 'libx264', '-threads', '2',
+                   '-crf', '0', '-pix_fmt', 'yuv420p', *media.SDR_FLAGS, str(source)])
+        self.analyze()
+        request = self.request()
+        url = self.transfer(request, source.read_bytes())
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        extracted = self.broker.wait_clip(request['id'], timeout=0)
+        info = self.adapter.video_info(extracted)
+        self.assertEqual((info['width'], info['height']), expected)
+        self.assertAlmostEqual(media.duration(extracted), 2, delta=.05)
+
+    def test_source_transfer_bounds_landscape_4k_to_supported_export(self):
+        self.assert_source_fits_export('3840x2160', (1920, 1080))
+
+    def test_source_transfer_bounds_portrait_4k_to_supported_export(self):
+        self.assert_source_fits_export('2160x3840', (1080, 1920))
+
     def test_source_cache_counts_with_broker_quota_and_removal_deletes_all_copies(self):
         self.analyze()
         content = self.source()

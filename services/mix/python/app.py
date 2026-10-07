@@ -187,7 +187,7 @@ class Jobs:
                 with self.connect() as db:
                     db.execute("UPDATE jobs SET state='queued',updated=? WHERE id=? AND state='waiting_materials'",
                                (time.time(), job_id))
-            self.log(job_id, '等待网页连接并上传所需素材，已完成配音和计划保留')
+            self.log(job_id, '等待网页连接并上传所需素材，已完成的步骤会保留')
         except Exception as exc:
             error = clean_error(exc)
             self.log(job_id, '失败：' + error)
