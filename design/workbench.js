@@ -1,6 +1,6 @@
 import { accountStorageKey } from './account-storage.js';
 import { displayModelName } from './model-labels.js';
-import { renderImageGenerationNotice, renderImageTaskQueue, renderImageResults, bindImageGeneration, updateImageGenerationControls, handleImageGenerationAction, imageQualityName, validateImageRequest } from './image-generation.js';
+import { renderImageGenerationNotice, renderImageGenerationOptions, imageGenerationLabel, renderImageTaskQueue, renderImageResults, bindImageGeneration, updateImageGenerationControls, handleImageGenerationAction, imageQualityName, validateImageRequest } from './image-generation.js';
 import { renderImagePresetEntry } from './image-preset-ui.js';
 import { inspirationItems, getMaterialItems, MATERIAL_FILTERS, industryForMaterial, getMaterialPrompt } from './material-catalog.js';
 
@@ -24,7 +24,8 @@ function renderSimpleImageEditor(ctx, media) {
  <div class="input-shell"><div class="input-tools"><label for="prompt">自定义创作要求</label><span>${button('saveprompt',icon('save'),'iconbutton','aria-label="保存文案草稿"')}${button('expand',icon('expand'),'iconbutton','aria-label="展开编辑"')}</span></div>
  <textarea id="prompt" maxlength="${m.max}" aria-label="创作要求" placeholder="也可以自己描述想做的图片，无需选择风格。">${esc(c.prompt)}</textarea><footer class="input-bottom">${button('references','引用原图','textbutton')}<small id="char-count">${c.prompt.length} / ${m.max}</small></footer></div>
  <div class="settings-row">${button('settings',icon('settings')+'图片比例与画质','setting-button')}${button('store',icon('store')+'商家资料','setting-button')}</div>${ctx.renderBusinessEntry?.('image')||''}</details>
- ${button('generate','立即生成图片'+icon('arrow'),'primary generate')}<span id="input-requirement" class="input-requirement" aria-live="polite"></span>${renderImageGenerationNotice(ctx)}
+ <div id="image-generation-options">${renderImageGenerationOptions(ctx)}</div>
+ ${button('generate',imageGenerationLabel(c)+icon('arrow'),'primary generate')}<span id="input-requirement" class="input-requirement" aria-live="polite"></span>${renderImageGenerationNotice(ctx)}
  </section>`;
 }
 

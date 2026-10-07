@@ -239,33 +239,49 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
     return result;
   }
 
+  function validateReservation({ id, kind, fingerprint, model = '' } = {}) {
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id || '') || !['image', 'chat'].includes(kind)
+      || typeof fingerprint !== 'string' || fingerprint.length < 1 || fingerprint.length > 256
+      || typeof model !== 'string' || model.length > 200) throw error('INVALID_REQUEST_ID', '调用标识无效，请刷新页面后重试。', 400);
+    return { id, kind, fingerprint, model };
+  }
+
+  async function reserveInputs(inputs) {
+    const checked = inputs.map(validateReservation);
+    if (new Set(checked.map(item => item.id)).size !== checked.length) throw error('INVALID_REQUEST_ID', '调用标识重复，请刷新页面后重试。', 400);
+    const existing = checked.map(item => records.get(item.id));
+    for (const [index, record] of existing.entries()) {
+      const input = checked[index];
+      if (record && (record.kind !== input.kind || record.fingerprint !== input.fingerprint || record.model !== input.model)) throw error('REQUEST_ID_CONFLICT', '该请求标识已经用于不同内容，请重新发起。', 409);
+    }
+    if (existing.every(Boolean)) return { created: false, records: existing.map(copy) };
+    if (existing.some(Boolean)) throw error('REQUEST_ID_CONFLICT', '套图已有调用记录，请查询原任务。', 409);
+    const timestamp = now(), day = dayAt(timestamp);
+    const active = [...records.values()].filter(counted);
+    for (const kind of ['image', 'chat']) {
+      const requested = checked.filter(item => item.kind === kind).length;
+      if (requested && active.filter(record => record.kind === kind && record.day === day).length + requested > effectiveLimits[`${kind}Daily`]) throw quotaError(kind);
+    }
+    if (active.filter(record => recentAttempt(record, timestamp)).length + checked.length > effectiveLimits.perMinute) throw rateError();
+    const reserved = checked.map(input => ({ ...input, status: 'reserved', day, createdAt: timestamp }));
+    const next = new Map(records);
+    for (const record of reserved) next.set(record.id, record);
+    await persist(next);
+    return { created: true, records: reserved.map(copy) };
+  }
+
   return {
     ready,
     reserve(input = {}) {
       return run(async () => {
-        const { id, kind, fingerprint, model = '' } = input;
-        if (!/^[A-Za-z0-9_-]{1,128}$/.test(id || '') || !['image', 'chat'].includes(kind)
-          || typeof fingerprint !== 'string' || fingerprint.length < 1 || fingerprint.length > 256
-          || typeof model !== 'string' || model.length > 200) throw error('INVALID_REQUEST_ID', '调用标识无效，请刷新页面后重试。', 400);
-        const existing = records.get(id);
-        if (existing) {
-          if (existing.kind !== kind || existing.fingerprint !== fingerprint || existing.model !== model) {
-            throw error('REQUEST_ID_CONFLICT', '该请求标识已经用于不同内容，请重新发起。', 409);
-          }
-          return { created: false, record: copy(existing) };
-        }
-        const timestamp = now();
-        const day = dayAt(timestamp);
-        const active = [...records.values()].filter(counted);
-        if (active.filter(record => record.kind === kind && record.day === day).length >= effectiveLimits[`${kind}Daily`]) {
-          throw quotaError(kind);
-        }
-        if (active.filter(record => recentAttempt(record, timestamp)).length >= effectiveLimits.perMinute) {
-          throw rateError();
-        }
-        const record = { id, kind, fingerprint, model, status: 'reserved', day, createdAt: timestamp };
-        await persist(new Map(records).set(id, record));
-        return { created: true, record: copy(record) };
+        const reserved = await reserveInputs([input]);
+        return { created: reserved.created, record: reserved.records[0] };
+      });
+    },
+    reserveBatch(inputs) {
+      return run(async () => {
+        if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 4) throw error('INVALID_REQUEST_ID', '一次最多预留四张图片。', 400);
+        return reserveInputs(inputs);
       });
     },
     markDispatched(id) {

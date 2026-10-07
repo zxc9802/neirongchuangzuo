@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, lstat, unlink, rmdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createPreviewServer } from '../preview.mjs';
 import { createAIHandler, downloadImage, isPublicAddress } from '../services/ai/server.mjs';
+import { createRequestLedger } from '../services/ai/request-ledger.mjs';
 import { request } from 'node:http';
 
 const CONFIG = { apiKey: 'test-secret', chatModel: 'gpt-6-luna', imageModel: 'gpt-image-2.5-sunburst-c', baseUrl: 'https://mock.invalid/v1' };
@@ -158,6 +159,217 @@ test('image input validation rejects missing images, excess prompt, invalid MIME
     assert.equal(response.status, 400);
   }
   assert.equal(calls, 0);
+});
+
+test('generation modes validate counts before reserving quota or calling the provider', async t => {
+  let calls = 0;
+  const app = await server(t, { fetchImpl: async () => { calls++; return imageResult(); } });
+  for (const options of [{ generationMode: 'unknown', outputCount: 2 }, { generationMode: null }, { generationMode: 'single', outputCount: 2 }, { generationMode: 'series', outputCount: 1 }, { generationMode: 'variations', outputCount: 5 }, { generationMode: 'series', outputCount: '2' }, { generationMode: 'series' }, { outputCount: 0 }]) {
+    const response = await app.post('/api/ai/images', input(options));
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'INVALID_GENERATION_MODE');
+  }
+  assert.equal(calls, 0);
+  assert.equal((await (await fetch(app.base + '/api/ai/usage')).json()).used.image, 0);
+});
+
+test('series generates ordered independent images, adds a safe visual reference, and duplicate delivery never calls again', async t => {
+  const calls = []; let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const app = await server(t, { fetchImpl: async (_url, options) => {
+    const form = options.body;
+    calls.push({ prompt: form.get('prompt'), images: form.getAll('image'), n: form.get('n') });
+    if (calls.length === 1) await gate;
+    return imageResult();
+  } });
+  const body = input({ generationMode: 'series', outputCount: 4 });
+  let task;
+  try {
+    const submitted = await app.post('/api/ai/images', body);
+    const queued = (await submitted.json()).task;
+    assert.equal(queued.generationMode, 'series'); assert.equal(queued.outputCount, 4); assert.equal(queued.completedCount, 0);
+    assert.equal((await app.post('/api/ai/images', body)).status, 200);
+    assert.equal((await app.post('/api/ai/images', { ...body, outputCount: 3 })).status, 409);
+    assert.equal((await app.post('/api/ai/images', { ...body, generationMode: 'variations' })).status, 409);
+  } finally { release(); task = await finished(app, body.requestId); }
+  assert.equal(task.status, 'completed'); assert.equal(task.partial, false); assert.equal(task.completedCount, 4);
+  assert.deepEqual(task.images.map(image => image.index), [1, 2, 3, 4]);
+  assert.equal(calls.length, 4);
+  for (const [index, call] of calls.entries()) {
+    assert.equal(call.n, '1');
+    assert.match(call.prompt, /一张独立完整图片.*不是拼图/);
+    assert.match(call.prompt, /固定色调、字体风格、文字层级、版式体系和光线/);
+    assert.match(call.prompt, new RegExp(['主题封面', '主体细节', '场景用途', '信息汇总'][index]));
+    assert.equal(call.images.length, index === 0 ? 1 : 2);
+    if (index) { assert.match(call.prompt, /仅参考其色调、字体、版式和光线.*不作为.*事实依据/); assert.equal(call.images.at(-1).name, 'series-style-reference.png'); }
+  }
+  for (const image of task.images) assert.deepEqual(Buffer.from(await (await fetch(app.base + image.url + '?download=1')).arrayBuffer()), PNG);
+  assert.equal((await (await fetch(app.base + '/api/ai/usage')).json()).used.image, 4);
+  assert.equal((await app.post('/api/ai/images', body)).status, 200);
+  assert.equal(calls.length, 4);
+});
+
+test('four variations override preset visual instructions with distinct styles and never use generated pictures as fact sources', async t => {
+  const prompts = [];
+  const app = await server(t, { fetchImpl: async (_url, options) => { prompts.push(options.body.get('prompt')); assert.equal(options.body.getAll('image').length, 1); return imageResult(); } });
+  const body = input({ generationMode: 'variations', outputCount: 4 });
+  await app.post('/api/ai/images', body);
+  const task = await finished(app, body.requestId);
+  assert.equal(task.completedCount, 4);
+  assert.deepEqual(task.images.map(image => image.style), ['简洁纪实', '杂志编辑', '生活方式手账', '醒目文字海报']);
+  prompts.forEach((prompt, index) => { assert.match(prompt, new RegExp(task.images[index].style)); assert.match(prompt, /覆盖用户预设中的视觉布局和风格指令/); assert.match(prompt, /只能依据用户上传的原图/); });
+});
+
+test('nine original references remain attached to every series request without dropping facts for an extra style image', async t => {
+  const calls = [];
+  const app = await server(t, { fetchImpl: async (_url, options) => { calls.push(options.body); return imageResult(); } });
+  const body = input({ images: Array.from({ length: 9 }, () => IMAGE), generationMode: 'series', outputCount: 2 });
+  await app.post('/api/ai/images', body);
+  assert.equal((await finished(app, body.requestId)).completedCount, 2);
+  assert.ok(calls.every(form => form.getAll('image').length === 9));
+  assert.doesNotMatch(calls[1].get('prompt'), /最后一张附图/);
+});
+
+test('image sets require enough quota for the whole set before dispatch and successful images each count once', async t => {
+  let calls = 0;
+  const app = await server(t, { config: { ...CONFIG, limits: { imageDaily: 3, chatDaily: 100, perMinute: 10 } }, fetchImpl: async () => { calls++; return imageResult(); } });
+  const rejected = await app.post('/api/ai/images', input({ generationMode: 'series', outputCount: 4 }));
+  assert.equal(rejected.status, 429); assert.equal((await rejected.json()).code, 'DAILY_QUOTA_EXCEEDED');
+  assert.equal(calls, 0); assert.equal((await (await fetch(app.base + '/api/ai/usage')).json()).used.image, 0);
+  const body = input({ generationMode: 'variations', outputCount: 2 });
+  await app.post('/api/ai/images', body); await finished(app, body.requestId);
+  assert.equal(calls, 2); assert.equal((await (await fetch(app.base + '/api/ai/usage')).json()).remaining.image, 1);
+});
+
+test('a known failed position is not retried while other set positions finish and successful files remain downloadable', async t => {
+  let calls = 0;
+  const app = await server(t, { fetchImpl: async () => ++calls === 2 ? result({ data: [] }) : imageResult() });
+  const body = input({ generationMode: 'series', outputCount: 3 });
+  await app.post('/api/ai/images', body);
+  const task = await finished(app, body.requestId);
+  assert.equal(task.status, 'completed'); assert.equal(task.partial, true); assert.equal(task.completedCount, 2);
+  assert.match(task.warning, /2\/3/); assert.deepEqual(task.images.map(image => image.index), [1, 3]);
+  assert.equal(calls, 3); assert.equal((await (await fetch(app.base + '/api/ai/usage')).json()).used.image, 3);
+  for (const image of task.images) assert.equal((await fetch(app.base + image.url)).status, 200);
+  assert.equal((await fetch(app.base + `/api/ai/media/${body.requestId}/result-2.png`)).status, 404);
+});
+
+test('uncertain set requests stop further dispatch, release unused reservations, retain successes, and never automatically replay', async t => {
+  let calls = 0;
+  const app = await server(t, { fetchImpl: async () => { if (++calls === 2) throw new Error('connection interrupted'); return imageResult(); } });
+  const body = input({ generationMode: 'variations', outputCount: 4 });
+  await app.post('/api/ai/images', body);
+  const task = await finished(app, body.requestId);
+  assert.equal(task.status, 'completed'); assert.equal(task.partial, true); assert.equal(task.completedCount, 1);
+  assert.match(task.warning, /不会自动重复生成/); assert.equal(calls, 2);
+  const usage = await (await fetch(app.base + '/api/ai/usage')).json();
+  assert.equal(usage.used.image, 2);
+  assert.equal(usage.recent.find(record => record.id === `${body.requestId}-2`).status, 'uncertain');
+  assert.equal(usage.recent.find(record => record.id === `${body.requestId}-3`).status, 'cancelled');
+  assert.equal((await app.post('/api/ai/images', body)).status, 200); assert.equal(calls, 2);
+  assert.equal((await fetch(app.base + task.images[0].url)).status, 200);
+});
+
+test('restart recovers persisted set progress without rerunning sent or cancelled positions', async t => {
+  const storageDir = await storage(t), id = randomUUID();
+  const now = Date.now(), successAt = new Date(now - 60_000).toISOString();
+  const ledger = createRequestLedger({ storageDir });
+  await ledger.reserveBatch([id, `${id}-2`, `${id}-3`].map(child => ({ id: child, kind: 'image', fingerprint: 'legacy-set', model: CONFIG.imageModel })));
+  await ledger.markDispatched(id); await ledger.finish(id, { status: 'completed' });
+  await ledger.markDispatched(`${id}-2`); await ledger.close();
+  await mkdir(join(storageDir, id));
+  await writeFile(join(storageDir, id, 'result-1.png'), PNG);
+  await writeFile(join(storageDir, id, 'task.json'), JSON.stringify({ id, kind: 'image', status: 'running', generationMode: 'series', outputCount: 3, completedCount: 1, model: CONFIG.imageModel, fingerprint: 'legacy-set', createdAt: new Date(now - 73 * 3600_000).toISOString(), updatedAt: successAt, images: [{ filename: 'result-1.png', url: `/api/ai/media/${id}/result-1.png`, index: 1, label: '系列第 1 张', style: '统一系列' }] }));
+  let calls = 0;
+  const app = await server(t, { storageDir, fetchImpl: async () => { calls++; return imageResult(); } });
+  const task = (await (await fetch(app.base + `/api/ai/images/${id}`)).json()).task;
+  assert.equal(task.status, 'completed'); assert.equal(task.partial, true); assert.equal(task.completedCount, 1); assert.equal(task.warningCode, 'INTERRUPTED');
+  assert.equal(task.completedAt, successAt);
+  assert.equal(task.expiresAt, new Date(Date.parse(successAt) + 72 * 3600_000).toISOString());
+  assert.equal((await fetch(app.base + task.images[0].url)).status, 200);
+  const usage = await (await fetch(app.base + '/api/ai/usage')).json();
+  assert.equal(usage.used.image, 2); assert.equal(usage.recent.find(record => record.id === `${id}-3`).status, 'cancelled');
+  assert.equal(calls, 0);
+});
+
+test('every saved series result records its actual success time before the next position dispatches', async t => {
+  let clock = Date.now(), successfulAt, release, notify;
+  const gate = new Promise(resolve => { release = resolve; });
+  const secondStarted = new Promise(resolve => { notify = resolve; });
+  let calls = 0;
+  const app = await server(t, { now: () => clock, fetchImpl: async () => {
+    if (++calls === 1) { clock += 60_000; successfulAt = new Date(clock).toISOString(); return imageResult(); }
+    notify(); await gate; throw new Error('unknown interrupted result');
+  } });
+  const body = input({ generationMode: 'series', outputCount: 2 });
+  await app.post('/api/ai/images', body); await secondStarted;
+  try {
+    const running = JSON.parse(await readFile(join(app.storageDir, body.requestId, 'task.json'), 'utf8'));
+    assert.equal(running.status, 'running'); assert.equal(running.completedCount, 1);
+    assert.equal(running.updatedAt, successfulAt); assert.notEqual(running.updatedAt, running.createdAt);
+  } finally { release(); }
+  await finished(app, body.requestId);
+});
+
+test('restart treats all persisted set outputs as complete without warning and retains them from their last success time', async t => {
+  const storageDir = await storage(t), id = randomUUID(), now = Date.now();
+  const successAt = new Date(now - 5 * 60_000).toISOString();
+  await mkdir(join(storageDir, id));
+  const images = [1, 2].map(index => ({ filename: `result-${index}.png`, url: `/api/ai/media/${id}/result-${index}.png`, index, label: `系列第 ${index} 张`, style: '统一系列' }));
+  for (const image of images) await writeFile(join(storageDir, id, image.filename), PNG);
+  await writeFile(join(storageDir, id, 'task.json'), JSON.stringify({ id, kind: 'image', status: 'running', generationMode: 'series', outputCount: 2, completedCount: 2, model: CONFIG.imageModel, createdAt: new Date(now - 73 * 3600_000).toISOString(), updatedAt: successAt, warning: '旧的临时提示', warningCode: 'INTERRUPTED', images }));
+  let calls = 0;
+  const app = await server(t, { storageDir, now: () => now, fetchImpl: async () => { calls++; return imageResult(); } });
+  const task = (await (await fetch(app.base + `/api/ai/images/${id}`)).json()).task;
+  assert.equal(task.status, 'completed'); assert.equal(task.partial, false); assert.equal(task.completedCount, 2);
+  assert.equal(task.warning, undefined); assert.equal(task.warningCode, undefined);
+  assert.equal(task.completedAt, successAt); assert.equal(task.expiresAt, new Date(Date.parse(successAt) + 72 * 3600_000).toISOString());
+  for (const image of task.images) assert.equal((await fetch(app.base + image.url)).status, 200);
+  assert.equal(calls, 0);
+});
+
+test('legacy single-image fingerprints still match new explicit single/1 requests after deployment', async t => {
+  const storageDir = await storage(t), body = input();
+  const fingerprint = createHash('sha256').update(JSON.stringify({ prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, images: [createHash('sha256').update(PNG).digest('hex')] })).digest('hex');
+  await mkdir(join(storageDir, body.requestId));
+  await writeFile(join(storageDir, body.requestId, 'task.json'), JSON.stringify({ id: body.requestId, kind: 'image', status: 'completed', model: CONFIG.imageModel, createdAt: new Date().toISOString(), completedAt: new Date().toISOString(), fingerprint, prompt: body.prompt, images: [] }));
+  let calls = 0;
+  const app = await server(t, { storageDir, fetchImpl: async () => { calls++; return imageResult(); } });
+  for (const request of [body, { ...body, generationMode: 'single', outputCount: 1 }]) {
+    const response = await app.post('/api/ai/images', request);
+    assert.equal(response.status, 200);
+    const task = (await response.json()).task;
+    assert.equal(task.generationMode, 'single'); assert.equal(task.outputCount, 1);
+  }
+  assert.equal(calls, 0);
+});
+
+test('all failed set positions produce a failed task while dispatched attempts remain counted', async t => {
+  let calls = 0;
+  const app = await server(t, { fetchImpl: async () => { calls++; return result({ data: [] }); } });
+  const body = input({ generationMode: 'variations', outputCount: 2 });
+  await app.post('/api/ai/images', body);
+  const task = await finished(app, body.requestId);
+  assert.equal(task.status, 'failed'); assert.equal(task.completedCount, 0); assert.deepEqual(task.images, []);
+  assert.equal(calls, 2); assert.equal((await (await fetch(app.base + '/api/ai/usage')).json()).used.image, 2);
+});
+
+test('shutdown finishes the dispatched position, preserves its result, and cancels later positions without calls', async t => {
+  let calls = 0, release, notify;
+  const gate = new Promise(resolve => { release = resolve; });
+  const started = new Promise(resolve => { notify = resolve; });
+  const app = await server(t, { fetchImpl: async () => { calls++; notify(); await gate; return imageResult(); } });
+  const body = input({ generationMode: 'series', outputCount: 3 });
+  await app.post('/api/ai/images', body); await started;
+  const stopped = app.preview.shutdown();
+  release(); await stopped;
+  const restarted = await server(t, { storageDir: app.storageDir });
+  const task = (await (await fetch(restarted.base + `/api/ai/images/${body.requestId}`)).json()).task;
+  assert.equal(task.status, 'completed'); assert.equal(task.partial, true); assert.equal(task.completedCount, 1);
+  assert.equal(calls, 1); assert.equal((await fetch(restarted.base + task.images[0].url)).status, 200);
+  const usage = await (await fetch(restarted.base + '/api/ai/usage')).json();
+  assert.equal(usage.used.image, 1);
+  assert.equal(usage.recent.find(record => record.id === `${body.requestId}-2`).status, 'cancelled');
 });
 
 test('image submission sends multipart fields once, survives duplicate delivery, and stores downloadable results', async t => {
