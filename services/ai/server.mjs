@@ -388,6 +388,8 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     return promise;
   };
   handleAI.ready = ready;
+  // Only server-side workflows share this ledger. It is never included in HTTP responses.
+  handleAI.callLedger = ledger;
   Object.defineProperty(handleAI, 'isClosing', { get: () => closing });
   handleAI.shutdown = () => {
     if (shutdownPromise) return shutdownPromise;

@@ -28,9 +28,11 @@ test("shuziren site keeps the main-site SSO callback and encrypted session contr
   assert.match(middleware, /export const runtime = ["']nodejs["']/);
   assert.match(middleware, /request\.nextUrl\.pathname\.startsWith\(["']\/api\/["']\)/);
   assert.match(middleware, /getMainAppSsoLaunchUrl/);
-  assert.match(env, /MAIN_APP_SSO_EXCHANGE_URL=https:\/\/www\.qycm\.top\/api\/external-sso\/shuziren\/exchange/);
-  assert.match(env, /MAIN_APP_SSO_CLIENT_SECRET=/);
-  assert.match(env, /APP_SESSION_SECRET=/);
+  // A distributable example must not carry another deployment's endpoints or signing secrets.
+  // The callback/session/middleware checks above continue to enforce the SSO protocol.
+  for (const field of ["MAIN_APP_URL", "MAIN_APP_SSO_EXCHANGE_URL", "MAIN_APP_SSO_CLIENT_SECRET", "APP_SESSION_SECRET"]) {
+    assert.match(env, new RegExp(`^${field}=[\\t ]*\\r?$`, "m"), `${field} must remain an empty deployment-specific placeholder`);
+  }
 });
 
 test("shuziren SSO tolerates main-site cold starts without creating a login loop", async () => {

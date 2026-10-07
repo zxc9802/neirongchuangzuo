@@ -39,6 +39,8 @@ test('production launcher binds PORT publicly, starts a private production backe
   const root = await mkdtemp(join(tmpdir(), 'workspace-production-'));
   const service = join(root, 'services/digital-human');
   await mkdir(join(root, 'scripts'), { recursive: true });
+  await mkdir(join(root, 'services'), { recursive: true });
+  await writeFile(join(root, 'services/runtime-paths.mjs'), await readFile(new URL('../services/runtime-paths.mjs', import.meta.url)));
   await mkdir(join(service, 'node_modules/next/dist/bin'), { recursive: true });
   await mkdir(join(service, '.next'), { recursive: true });
   await writeFile(join(root, 'scripts/start.mjs'), await readFile(new URL('../scripts/start.mjs', import.meta.url)));
@@ -59,7 +61,7 @@ test('production launcher binds PORT publicly, starts a private production backe
   const port = await freePort(); const backendPort = await freePort();
   const child = spawn(process.execPath, [join(root, 'scripts/start.mjs')], {
     env: { ...process.env, PORT: String(port), DIGITAL_HUMAN_PORT: String(backendPort), AUTH_MODE: 'standalone',
-      AUTH_DATABASE_URL: 'postgresql://test:test@127.0.0.1:1/test', AUTH_PUBLIC_URL: 'https://studio.example.com', OPENLUX_API_KEY: '' },
+      AUTH_DATABASE_URL: 'postgresql://test:test@127.0.0.1:1/test', AUTH_PUBLIC_URL: 'https://studio.example.com', OPENLUX_API_KEY: '', PERSISTENT_STORAGE_CONFIRMED: '1' },
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let output = ''; child.stdout.on('data', data => { output += data; }); child.stderr.on('data', data => { output += data; });

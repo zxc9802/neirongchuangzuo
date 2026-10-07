@@ -8,6 +8,9 @@ import test from "node:test";
 
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "shuziren-media-"));
 const REFERENCE_URL = "https://ref.example.test/speaker.wav";
+const originalCwd = process.cwd();
+const originalReference = process.env.INDEXTTS_SPEAKER_AUDIO_URL;
+const originalEmotion = process.env.INDEXTTS_EMOTION_AUDIO_URL;
 
 // 让 config / media-path-policy 以临时目录为工作目录，并预置一个受信任的参考音频地址
 process.chdir(tmpRoot);
@@ -32,29 +35,55 @@ fs.mkdirSync(path.join(tmpRoot, ".runtime/uploads/users/u1/videos/dir.mp4"), { r
 
 const fakeRequest = (headers = {}) => ({ headers: new Headers(headers) });
 const originalFetch = globalThis.fetch;
+const openedResponses = new Set();
+
+function trackResponse(response) {
+  if (response?.body) openedResponses.add(response);
+  return response;
+}
+const serveMedia = async (...args) => trackResponse(await media["servePrivateMedia"](...args));
+async function releaseResponses() {
+  for (const response of openedResponses) {
+    if (!response.body.locked) await response.body.cancel().catch(() => {});
+  }
+  openedResponses.clear();
+  // Stream EOF/cancellation can precede fs.ReadStream's asynchronous close on Windows.
+  await new Promise(resolve => setImmediate(resolve));
+  await new Promise(resolve => setImmediate(resolve));
+}
 
 function stubFetch(responders) {
   const calls = [];
+  responders.filter(responder => responder instanceof Response).forEach(trackResponse);
   globalThis.fetch = async (input, init) => {
     calls.push({ url: String(input), init });
     const responder = responders[Math.min(calls.length - 1, responders.length - 1)];
-    return typeof responder === "function" ? responder(calls.length - 1) : responder;
+    return trackResponse(await (typeof responder === "function" ? responder(calls.length - 1) : responder));
   };
   return calls;
 }
 
-test.after(() => {
+test.after(async () => {
   globalThis.fetch = originalFetch;
-  fs.rmSync(tmpRoot, { recursive: true, force: true });
+  await releaseResponses();
+  process.chdir(originalCwd);
+  for (const [key, value] of [["INDEXTTS_SPEAKER_AUDIO_URL", originalReference], ["INDEXTTS_EMOTION_AUDIO_URL", originalEmotion]]) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  }
+  const cleanupRoot = path.resolve(tmpRoot);
+  assert.equal(path.dirname(cleanupRoot), path.resolve(os.tmpdir()));
+  assert.ok(path.basename(cleanupRoot).startsWith("shuziren-media-"));
+  await fs.promises.rm(cleanupRoot, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
 });
-test.afterEach(() => {
+test.afterEach(async () => {
   globalThis.fetch = originalFetch;
+  await releaseResponses();
 });
 
 test("missing or empty sources return 404 without touching the filesystem or network", async () => {
   const calls = stubFetch([]);
   for (const source of [undefined, "", null]) {
-    const response = await media.servePrivateMedia(fakeRequest(), source);
+    const response = await serveMedia(fakeRequest(), source);
     assert.equal(response.status, 404);
   }
   assert.equal(calls.length, 0);
@@ -68,7 +97,7 @@ test("absolute paths outside the media roots are rejected even when the file exi
     "/proc/self/environ",
     path.join(tmpRoot, ".runtime/uploads/../../.settings.json"),
   ]) {
-    const response = await media.servePrivateMedia(fakeRequest(), source);
+    const response = await serveMedia(fakeRequest(), source);
     assert.equal(response.status, 404, `必须拒绝 ${source}`);
   }
 });
@@ -80,13 +109,13 @@ test("relative /uploads and /jobs references cannot traverse out of public/", as
     "/jobs/../../.settings.json",
     "/uploads/..%2F..%2F.settings.json",
   ]) {
-    const response = await media.servePrivateMedia(fakeRequest(), source);
+    const response = await serveMedia(fakeRequest(), source);
     assert.equal(response.status, 404, `必须拒绝 ${source}`);
   }
 });
 
 test("files inside the private runtime root are served with private, non-sniffable headers", async () => {
-  const response = await media.servePrivateMedia(fakeRequest(), PRIVATE_VIDEO, {
+  const response = await serveMedia(fakeRequest(), PRIVATE_VIDEO, {
     contentType: "video/mp4",
     downloadName: "digital-human-video.mp4",
   });
@@ -103,12 +132,12 @@ test("files inside the private runtime root are served with private, non-sniffab
 });
 
 test("legacy public/uploads and public/jobs references remain readable for compatibility", async () => {
-  const legacy = await media.servePrivateMedia(fakeRequest(), "/uploads/legacy.mp4");
+  const legacy = await serveMedia(fakeRequest(), "/uploads/legacy.mp4");
   assert.equal(legacy.status, 200);
   assert.equal(await legacy.text(), "legacy-video-bytes");
   assert.equal(legacy.headers.get("content-type"), "application/octet-stream");
 
-  const job = await media.servePrivateMedia(fakeRequest(), "/jobs/task_1/final.mp4", { contentType: "video/mp4" });
+  const job = await serveMedia(fakeRequest(), "/jobs/task_1/final.mp4", { contentType: "video/mp4" });
   assert.equal(job.status, 200);
   assert.equal(await job.text(), "final-video-bytes");
 });
@@ -116,7 +145,7 @@ test("legacy public/uploads and public/jobs references remain readable for compa
 test("private local videos serve byte ranges so crop preview can seek", async () => {
   const bytes="private-video-bytes";
   for(const [range,start,end] of [["bytes=2-6",2,6],["bytes=8-",8,18],["bytes=-5",14,18],["bytes=10-999",10,18]]) {
-    const response=await media.servePrivateMedia(fakeRequest({range}),PRIVATE_VIDEO,{contentType:"video/mp4"});
+    const response=await serveMedia(fakeRequest({range}),PRIVATE_VIDEO,{contentType:"video/mp4"});
     assert.equal(response.status,206);
     assert.equal(await response.text(),bytes.slice(start,end+1));
     assert.equal(response.headers.get("content-range"),`bytes ${start}-${end}/${bytes.length}`);
@@ -126,19 +155,19 @@ test("private local videos serve byte ranges so crop preview can seek", async ()
     assert.equal(response.headers.get("x-content-type-options"),"nosniff");
   }
   for(const range of ["bytes=19-","bytes=9-2","bytes=-0","bytes=0-1,4-5","bytes=999999999999999999999999-"]) {
-    const response=await media.servePrivateMedia(fakeRequest({range}),PRIVATE_VIDEO);
+    const response=await serveMedia(fakeRequest({range}),PRIVATE_VIDEO);
     assert.equal(response.status,416); assert.equal(response.headers.get("content-range"),"bytes */19");
     assert.equal(await response.text(),"");
   }
-  const head=await media.servePrivateMedia({...fakeRequest({range:"bytes=2-6"}),method:"HEAD"},PRIVATE_VIDEO);
+  const head=await serveMedia({...fakeRequest({range:"bytes=2-6"}),method:"HEAD"},PRIVATE_VIDEO);
   assert.equal(head.status,206); assert.equal(head.headers.get("content-length"),"5"); assert.equal(await head.text(),"");
-  assert.equal((await media.servePrivateMedia(fakeRequest({range:"bytes=0-4"}),SECRET)).status,404);
+  assert.equal((await serveMedia(fakeRequest({range:"bytes=0-4"}),SECRET)).status,404);
 });
 
 test("allowed roots still 404 for missing files and directories", async () => {
-  const missing = await media.servePrivateMedia(fakeRequest(), "/uploads/does-not-exist.mp4");
+  const missing = await serveMedia(fakeRequest(), "/uploads/does-not-exist.mp4");
   assert.equal(missing.status, 404);
-  const directory = await media.servePrivateMedia(
+  const directory = await serveMedia(
     fakeRequest(),
     path.join(tmpRoot, ".runtime/uploads/users/u1/videos/dir.mp4")
   );
@@ -160,7 +189,7 @@ test("remote sources outside the allow-list are never fetched (no SSRF)", async 
     `${REFERENCE_URL}?x=1`,
     "https://ref.example.test/other.wav",
   ]) {
-    const response = await media.servePrivateMedia(fakeRequest(), source);
+    const response = await serveMedia(fakeRequest(), source);
     assert.equal(response.status, 404, `必须拒绝 ${source}`);
   }
   assert.equal(calls.length, 0, "任何未授权远程地址都不应触发网络请求");
@@ -183,7 +212,7 @@ test("the configured reference audio is only fetchable when explicitly allowed, 
     }),
   ]);
 
-  const response = await media.servePrivateMedia(fakeRequest({ range: "bytes=0-8" }), REFERENCE_URL, {
+  const response = await serveMedia(fakeRequest({ range: "bytes=0-8" }), REFERENCE_URL, {
     allowConfiguredReference: true,
   });
 
@@ -209,14 +238,14 @@ test("redirects are followed only within the same allowed origin and capped", as
     new Response(null, { status: 302, headers: { location: "https://evil.example.test/steal" } }),
     new Response("evil", { status: 200 }),
   ]);
-  const blocked = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
+  const blocked = await serveMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
   assert.equal(blocked.status, 404);
   assert.equal(crossOrigin.length, 1, "跨域重定向后不得继续请求");
 
   const downgrade = stubFetch([
     new Response(null, { status: 302, headers: { location: "http://ref.example.test/speaker.wav" } }),
   ]);
-  const downgraded = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
+  const downgraded = await serveMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
   assert.equal(downgraded.status, 404);
   assert.equal(downgrade.length, 1, "降级到 http 的重定向必须拒绝");
 
@@ -224,7 +253,7 @@ test("redirects are followed only within the same allowed origin and capped", as
     new Response(null, { status: 302, headers: { location: "/cdn/speaker.wav" } }),
     new Response("wav-bytes", { status: 200, headers: { "content-type": "audio/wav" } }),
   ]);
-  const followed = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
+  const followed = await serveMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
   assert.equal(followed.status, 200);
   assert.equal(await followed.text(), "wav-bytes");
   assert.deepEqual(
@@ -235,7 +264,7 @@ test("redirects are followed only within the same allowed origin and capped", as
   const loop = stubFetch([
     () => new Response(null, { status: 302, headers: { location: "/loop" } }),
   ]);
-  const looped = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
+  const looped = await serveMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
   assert.equal(looped.status, 404);
   assert.ok(loop.length <= 5, `重定向必须有上限，实际请求了 ${loop.length} 次`);
 });
@@ -247,15 +276,15 @@ test("oversized or failing upstream responses are not proxied", async () => {
       headers: { "content-length": String(media.MAX_REMOTE_MEDIA_BYTES + 1) },
     }),
   ]);
-  const tooLarge = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
+  const tooLarge = await serveMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
   assert.equal(tooLarge.status, 413);
 
   stubFetch([new Response("upstream error", { status: 500 })]);
-  const failing = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
+  const failing = await serveMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
   assert.equal(failing.status, 404);
 
   stubFetch([new Response("forbidden", { status: 403 })]);
-  const forbidden = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
+  const forbidden = await serveMedia(fakeRequest(), REFERENCE_URL, { allowConfiguredReference: true });
   assert.equal(forbidden.status, 404);
 });
 
@@ -331,7 +360,7 @@ test("downloadTrustedMediaToFile copies only allowed local files and enforces th
 test("remote preview propagates an upstream timeout without an uncaught server exception", {timeout:2000}, async () => {
   let upstream;
   stubFetch([new Response(new ReadableStream({start(controller) {upstream = controller;}}))]);
-  const response = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, {allowConfiguredReference:true});
+  const response = await serveMedia(fakeRequest(), REFERENCE_URL, {allowConfiguredReference:true});
   const reading = response.arrayBuffer();
   const rejected = assert.rejects(reading, /preview timeout/);
   upstream.error(new DOMException("preview timeout", "TimeoutError"));
@@ -341,7 +370,7 @@ test("remote preview propagates an upstream timeout without an uncaught server e
 test("cancelling a video preview also cancels its upstream body", async () => {
   let cancelled = false;
   stubFetch([new Response(new ReadableStream({cancel() {cancelled = true;}}))]);
-  const response = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, {allowConfiguredReference:true});
+  const response = await serveMedia(fakeRequest(), REFERENCE_URL, {allowConfiguredReference:true});
   await response.body.cancel();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(cancelled, true);
@@ -355,17 +384,22 @@ test("preview still enforces the byte limit when upstream omits Content-Length",
     pull(controller) {controller.enqueue(chunk);},
     cancel() {cancelled = true;},
   }))]);
-  const response = await media.servePrivateMedia(fakeRequest(), REFERENCE_URL, {allowConfiguredReference:true});
+  const response = await serveMedia(fakeRequest(), REFERENCE_URL, {allowConfiguredReference:true});
   const reader = response.body.getReader();
   let bytes = 0;
-  await assert.rejects(async () => {
-    for (;;) {
-      const {done, value} = await reader.read();
-      if (done) break;
-      bytes += value.byteLength;
-    }
-  }, /size limit/);
-  await new Promise(resolve => setImmediate(resolve));
-  assert.equal(bytes, media.MAX_REMOTE_MEDIA_BYTES);
-  assert.equal(cancelled, true);
+  try {
+    await assert.rejects(async () => {
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+      }
+    }, /size limit/);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(bytes, media.MAX_REMOTE_MEDIA_BYTES);
+    assert.equal(cancelled, true);
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 });

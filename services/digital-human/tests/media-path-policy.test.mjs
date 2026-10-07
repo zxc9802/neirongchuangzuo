@@ -4,12 +4,28 @@ import assert from "node:assert/strict";
 import path from "node:path";
 import test from "node:test";
 
+// Host parsing is configuration-bound even though these tests never contact object storage.
+// Use fixed fake hosts before importing config, and isolate all developer credentials.
+const fixtureEnvironmentKeys = ["COS_BUCKET", "COS_REGION", "COS_CUSTOM_DOMAIN", "COS_SECRET_ID", "COS_SECRET_KEY"];
+const previousEnvironment = Object.fromEntries(fixtureEnvironmentKeys.map(key => [key, process.env[key]]));
+process.env.COS_BUCKET = "media-path-fixture-1250000000";
+process.env.COS_REGION = "ap-test";
+process.env.COS_CUSTOM_DOMAIN = "https://media-path-fixture.example.test";
+delete process.env.COS_SECRET_ID;
+delete process.env.COS_SECRET_KEY;
+test.after(() => {
+  for (const key of fixtureEnvironmentKeys) {
+    if (previousEnvironment[key] === undefined) delete process.env[key];
+    else process.env[key] = previousEnvironment[key];
+  }
+});
+
 const policy = await import("../src/lib/media-path-policy.ts");
 const upload = await import("../src/lib/server/upload-policy.ts");
 const { CosService } = await import("../src/lib/cos.ts");
 const { getAppConfig } = await import("../src/lib/config.ts");
 
-const CWD = "/srv/app";
+const CWD = path.resolve("/srv/app");
 
 test("isPathInside treats the root itself and its descendants as inside, and rejects escapes", () => {
   assert.equal(policy.isPathInside("/srv/app/.runtime", "/srv/app/.runtime"), true);
@@ -22,12 +38,12 @@ test("isPathInside treats the root itself and its descendants as inside, and rej
 
 test("resolveAllowedLocalMediaPath only accepts files under the private runtime or legacy public media roots", () => {
   const allowed = [
-    [`${CWD}/.runtime/uploads/users/u1/videos/a.mp4`, `${CWD}/.runtime/uploads/users/u1/videos/a.mp4`],
-    [`${CWD}/.runtime/jobs/task_1/final.mp4`, `${CWD}/.runtime/jobs/task_1/final.mp4`],
-    [`${CWD}/.runtime/provider-input/task_1/source-video.mp4`, `${CWD}/.runtime/provider-input/task_1/source-video.mp4`],
-    ["/uploads/users/u1/videos/a.mp4", `${CWD}/public/uploads/users/u1/videos/a.mp4`],
-    ["/jobs/task_1/voice-track.wav", `${CWD}/public/jobs/task_1/voice-track.wav`],
-    [`${CWD}/public/jobs/task_1/final.mp4`, `${CWD}/public/jobs/task_1/final.mp4`],
+    [`${CWD}/.runtime/uploads/users/u1/videos/a.mp4`, path.resolve(CWD, ".runtime/uploads/users/u1/videos/a.mp4")],
+    [`${CWD}/.runtime/jobs/task_1/final.mp4`, path.resolve(CWD, ".runtime/jobs/task_1/final.mp4")],
+    [`${CWD}/.runtime/provider-input/task_1/source-video.mp4`, path.resolve(CWD, ".runtime/provider-input/task_1/source-video.mp4")],
+    ["/uploads/users/u1/videos/a.mp4", path.resolve(CWD, "public/uploads/users/u1/videos/a.mp4")],
+    ["/jobs/task_1/voice-track.wav", path.resolve(CWD, "public/jobs/task_1/voice-track.wav")],
+    [`${CWD}/public/jobs/task_1/final.mp4`, path.resolve(CWD, "public/jobs/task_1/final.mp4")],
   ];
   for (const [source, expected] of allowed) {
     assert.equal(policy.resolveAllowedLocalMediaPath(source, CWD), expected, source);
@@ -66,8 +82,8 @@ test("mediaRoots are all absolute and scoped to the working directory", () => {
     assert.ok(root.startsWith(`${CWD}${path.sep}`), `${root} 必须位于工作目录内`);
     assert.ok(!root.endsWith(path.sep));
   }
-  assert.ok(roots.includes(`${CWD}/.runtime/uploads`));
-  assert.ok(roots.includes(`${CWD}/.runtime/jobs`));
+  assert.ok(roots.includes(path.resolve(CWD, ".runtime/uploads")));
+  assert.ok(roots.includes(path.resolve(CWD, ".runtime/jobs")));
 });
 
 test("CosService.getManagedObjectKey only recognises the configured bucket host and rejects traversal", () => {
@@ -86,6 +102,11 @@ test("CosService.getManagedObjectKey only recognises the configured bucket host 
   assert.equal(
     CosService.getManagedObjectKey(`https://${host}/uploads/users/u1/videos/%E4%B8%AD%E6%96%87.mp4`),
     "uploads/users/u1/videos/中文.mp4"
+  );
+  assert.equal(
+    CosService.getManagedObjectKey(`${config.cosCustomDomain}/uploads/users/u1/videos/a.mp4`),
+    "uploads/users/u1/videos/a.mp4",
+    "the explicitly configured fake custom host is allowed"
   );
 
   for (const source of [
@@ -124,6 +145,10 @@ test("legacy avatar key parsing is explicit, host-bound, flat and never broadens
   );
   assert.equal(CosService.getManagedObjectKey(video), null);
   assert.equal(CosService.getManagedObjectKey(cover), null);
+  assert.equal(
+    CosService.getLegacyAvatarObjectKey(`${config.cosCustomDomain}/uploads/videos/custom.mp4`, "videos"),
+    "uploads/videos/custom.mp4"
+  );
   assert.equal(
     CosService.getLegacyAvatarObjectKey(`https://${host}/uploads/videos/a.m4v`, "videos"),
     "uploads/videos/a.m4v",

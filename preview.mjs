@@ -1,7 +1,11 @@
 import { createServer, request } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import { createAIHandler } from './services/ai/server.mjs';
+import { createRestaurantHandler } from './services/restaurant/server.mjs';
+import { workspaceDataRoot } from './services/runtime-paths.mjs';
+import { loadWorkspaceSettings } from './services/runtime-settings.mjs';
 import { getWorkspaceUser, workspaceAuthRequired } from './services/auth/workspace.mjs';
 const files = new Map([
   ['/', ['design/index.html', 'text/html; charset=utf-8']],
@@ -11,6 +15,8 @@ const files = new Map([
   ...['auth', 'workspace-account', 'account-storage'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/app.js', ['design/app.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['design/style.css', 'text/css; charset=utf-8']],
+  ['/restaurant.js', ['design/restaurant.js', 'text/javascript; charset=utf-8']],
+  ['/restaurant.css', ['design/restaurant.css', 'text/css; charset=utf-8']],
   ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-presets', 'image-preset-ui', 'generated-assets'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ...['digital-human', 'digital-human-api'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ['/digital-human.css', ['design/digital-human.css', 'text/css; charset=utf-8']],
@@ -56,12 +62,19 @@ function safeError(res, status, code, message, close = false) {
   res.end(JSON.stringify({ error: message, code }));
 }
 
-export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, aiOptions, createAI = createAIHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
+export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, aiOptions, restaurantOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
  const backend = new URL(backendUrl);
  const externalOrigin = publicOrigin ? new URL(publicOrigin) : undefined;
  if (backend.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(backend.hostname)) throw new Error('The development backend must use loopback HTTP.');
- const handleAI = createAI(aiOptions);
- const ready = Promise.resolve(handleAI.ready);
+ const runtimeSettings = loadWorkspaceSettings();
+ const dataRoot = workspaceDataRoot(runtimeSettings);
+ const handleAI = createAI({ storageDir: join(dataRoot, 'ai'), ...aiOptions });
+ let handleRestaurant;
+ const restaurant = () => handleRestaurant ||= createRestaurant({ dataDir: join(dataRoot, 'restaurant'),
+   databaseUrl: runtimeSettings.RESTAURANT_DATABASE_URL || process.env.AUTH_DATABASE_URL,
+   packageDailyLimit: Number(runtimeSettings.RESTAURANT_PACKAGE_DAILY_LIMIT || 20),
+   mediaEnv: runtimeSettings, providerLedger: handleAI.callLedger, ...restaurantOptions });
+ const ready = Promise.all([Promise.resolve(handleAI.ready), ...(restaurantOptions?.initialize ? [restaurant().ready] : [])]);
  ready.catch(() => {});
  let closing = false;
  let shutdownPromise;
@@ -78,7 +91,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
     safeError(res, 400, 'INVALID_REQUEST_URL', '请求地址无效。', true);
     return;
   }
-  if (path === '/api/workspace/session' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/'))) {
+  const restaurantPath = path === '/api/restaurant' || path.startsWith('/api/restaurant/');
+  if (path === '/api/workspace/session' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/') || restaurantPath)) {
     let user = null;
     try { if (authRequired) user = await getWorkspaceUser(req, backend); }
     catch { safeError(res, 503, 'AUTH_UNAVAILABLE', '账号服务暂时不可用，请稍后重试。'); return; }
@@ -92,6 +106,28 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ required: authRequired, user })); return;
     }
+  }
+  if (restaurantPath) {
+    if (closing && !['GET', 'HEAD'].includes(req.method)) {
+      safeError(res, 503, 'SERVICE_STOPPING', '服务正在重启，请稍后重试。', true); return;
+    }
+    const length = req.headers['content-length'];
+    if (length !== undefined && (!/^\d+$/.test(length) || Number(length) > MAX_AI_BODY_BYTES)) {
+      safeError(res, 413, 'BODY_TOO_LARGE', '上传内容过大，请减少图片数量或压缩图片。', true); return;
+    }
+    // Production identities come exclusively from the verified account service.
+    if (!authRequired) {
+      let host;
+      try { host = new URL('http://' + req.headers.host).hostname; } catch {}
+      if (!['localhost', '127.0.0.1', '[::1]'].includes(host) || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+        safeError(res, 403, 'HOST_REJECTED', '本地预览仅允许本机访问。'); return;
+      }
+      req.authenticatedUserId = 'local-dev';
+    }
+    const handler = restaurant();
+    await handler.ready;
+    if (await handler(req, res)) return;
+    safeError(res, 404, 'NOT_FOUND', '接口不存在。'); return;
   }
   if (path === '/api/ai' || path.startsWith('/api/ai/')) {
     if (req.method === 'POST' && (closing || handleAI.isClosing)) {
@@ -137,6 +173,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
    closing = true;
    shutdownPromise = (async () => {
      let failure;
+     try { await handleRestaurant?.shutdown?.(); }
+     catch (error) { failure = error; report('RESTAURANT_SHUTDOWN_FAILED'); }
      try {
        if (handleAI.shutdown) await handleAI.shutdown();
        else await handleAI.dispose?.();

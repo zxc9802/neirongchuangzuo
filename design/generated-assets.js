@@ -27,7 +27,7 @@ function imageTitle(prompt) {
 }
 
 // Only successful generated outputs enter the library; uploads and example images never do.
-export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = Date.now()) {
+export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = Date.now(), restaurantTasks = []) {
   const records = [];
   for (const task of imageTasks) {
     const window = generatedAssetWindow(task, now);
@@ -46,6 +46,20 @@ export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = 
     for (const [type, field, kind, filename] of [['video', 'finalVideoUrl', 'final', 'final.mp4'], ['audio', 'exactAudioUrl', 'voice', task.results?.audioFormat === 'mp3' ? 'voice-track.mp3' : 'voice-track.wav']]) {
       if (task.results?.[field] !== `${base}/media/${kind}`) continue;
       records.push({ key: `avatar:${task.id}:${type}`, type, source: '数字人', title, url: `${base}/media/${kind}`, download: `${base}/download/${filename}`, filename, ...window });
+    }
+  }
+  for (const task of restaurantTasks) {
+    const window = generatedAssetWindow(task, now);
+    if (!window || task.filesExpired || task.review?.status === 'blocked' || typeof task.id !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(task.id)) continue;
+    for (const file of Array.isArray(task.files) ? task.files : []) {
+      if (file?.role !== 'image' || file.expired || !/^0[1-9]\.(?:jpg|png|webp)$/i.test(file.filename || '')) continue;
+      const url = localUrl(file.url, /^\/api\/restaurant\/tasks\/[a-f\d-]{36}\/files\/0[1-9]\.(?:jpg|png|webp)$/i);
+      if (!url || url !== `/api/restaurant/tasks/${task.id}/files/${file.filename}`) continue;
+      const fileExpiry = timestamp(file.expiresAt);
+      const expires = Math.min(window.expires, fileExpiry);
+      if (!Number.isFinite(expires) || expires <= now) continue;
+      const title = String(task.copy?.titles?.[0] || task.selection?.direction?.label || task.selectedDirection?.label || task.profileSnapshot?.name || '餐饮图文').slice(0, 64);
+      records.push({ key: `restaurant:${task.id}:${file.filename}`, type: 'image', source: '餐饮小红书', title, url, download: url, filename: file.filename, completed: window.completed, expires });
     }
   }
   return [...new Map(records.map(record => [record.key, record])).values()].sort((a, b) => b.completed - a.completed);
@@ -92,13 +106,27 @@ function scheduleExpiry() {
     paint(); scheduleExpiry();
   }, Math.max(1, next - Date.now() + 10));
 }
-async function fetchTasks(path, signal, source) {
+async function fetchTaskPage(path, signal, source) {
   const response = await fetch(path, { cache: 'no-store', credentials: 'same-origin', signal });
   if (response.status === 401 || response.status === 403) throw new Error(`${source}作品需登录后查看。`);
   if (!response.ok) throw new Error(`${source}作品暂时无法加载，请稍后刷新。`);
   const body = await response.json();
   if (!Array.isArray(body.tasks)) throw new Error(`${source}作品列表暂时无法读取。`);
-  return body.tasks;
+  return body;
+}
+async function fetchTasks(path, signal, source) { return (await fetchTaskPage(path, signal, source)).tasks; }
+async function fetchRestaurantTasks(signal) {
+  const tasks = [], cursors = new Set();
+  const after = Date.now() - RETENTION_MS;
+  let cursor;
+  do {
+    const page = await fetchTaskPage('/api/restaurant/tasks?limit=50&completed=true&completedAfter=' + after + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), signal, '餐饮图文');
+    tasks.push(...page.tasks);
+    cursor = page.nextCursor;
+    if (cursor && (typeof cursor !== 'string' || cursors.has(cursor))) throw new Error('餐饮图文作品分页暂时无法读取，请刷新重试。');
+    if (cursor) cursors.add(cursor);
+  } while (cursor);
+  return tasks;
 }
 async function load() {
   if (!active() || state.loading) return;
@@ -106,11 +134,13 @@ async function load() {
   const controller = new AbortController(); state.controller = controller;
   const timer = setTimeout(() => controller.abort(), 15000);
   state.loading = true; paint();
-  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', controller.signal, '图片'), fetchTasks('/api/tasks?completed=true', controller.signal, '数字人')]);
+  const sources = ['图片', '数字人', '餐饮图文'];
+  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', controller.signal, sources[0]), fetchTasks('/api/tasks?completed=true', controller.signal, sources[1]), fetchRestaurantTasks(controller.signal)]);
   clearTimeout(timer);
   if (revision !== state.revision || !active()) return;
-  state.errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${index ? '数字人' : '图片'}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${index ? '数字人' : '图片'}作品暂时无法读取。`] : []);
-  state.records = collectGeneratedAssets(...results.map(result => result.status === 'fulfilled' ? result.value : []));
+  state.errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${sources[index]}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${sources[index]}作品暂时无法读取。`] : []);
+  const [images, avatars, restaurant] = results.map(result => result.status === 'fulfilled' ? result.value : []);
+  state.records = collectGeneratedAssets(images, avatars, Date.now(), restaurant);
   state.loading = false; state.controller = null; paint(); scheduleExpiry();
 }
 export function bindGeneratedAssets(ctx) { state.ctx = ctx; void load(); }

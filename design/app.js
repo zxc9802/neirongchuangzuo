@@ -4,6 +4,7 @@ import {renderGeneratedAssets,bindGeneratedAssets,disposeGeneratedAssets,handleG
 import {renderStudio,bindStudio,handleStudioAction} from './studios.js';
 import {renderWorkbench,bindWorkbench,handleWorkbenchAction} from './workbench.js';
 import {disposeImageGeneration} from './image-generation.js';
+import {renderRestaurant,bindRestaurant,handleRestaurantAction,disposeRestaurant} from './restaurant.js';
 import {renderAgentChat,bindAgentChat,handleAgentChatAction} from './agent-chat.js';
 import {renderDigitalHuman,bindDigitalHuman,handleDigitalHumanAction,disposeDigitalHuman} from './digital-human.js';
 import {openBusinessFlow,renderBusinessEntry,getBusinessBrief,handleBusinessAction,updateBusinessProfile,renderContentPlanPreview} from './business-flow.js';
@@ -49,6 +50,7 @@ const modules = {
 for(const module of Object.values(modules))for(const purpose of PURPOSES)if(!module.names.some(item=>item[0]===purpose.label))module.names.push([purpose.label,'行业宣传',purpose.description]);
 const validPage=page=>page==='home'||page==='agent'||page==='assets'||Object.hasOwn(modules,page);
 let mode = validPage(location.hash.slice(1)) ? location.hash.slice(1) : 'home';
+let imageMode = 'restaurant';
 const configs = Object.fromEntries(Object.keys(modules).map(k=>[k,{skill:modules[k].names[0][0],prompt:'',files:[],ratio:k==='image'?'3:4':'9:16',quality:k==='image'?'auto':'1080p',duration:'30',format:'PNG',count:'1',voice:'自然讲述',subtitles:true,music:true,director:false,person:'老板本人',background:'门店实景'}]));
 let assets = [], queueOpen = window.innerWidth>1140, previewTab = '参考示例', selectedDraft = null, activeClip = 0;
 let drafts = load('store-ai-design-drafts', []), storeInfo = load('store-ai-design-profile', {name:'',industry:'餐饮',address:'',feature:'',hours:''});
@@ -65,8 +67,8 @@ function openModal(title,subtitle,content,wide=false){$('#modal-title').textCont
 $('#close-modal').onclick=()=>modal.close(); modal.addEventListener('click',e=>{if(e.target===modal){const r=modal.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)modal.close();}});
 $('#guide-button').onclick=guide;
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.dataset.icon));
-function guide(){openModal('实体生意创作工作台使用帮助','素材、文案、草稿与创作设置',`<div class="prose"><p>先选择行业与宣传用途，填写真实信息，再将文案、镜头顺序和素材清单带入创作。业务内容面向餐饮、美业、零售、健身、工厂与批发供货。</p><dl><dt>Agent 对话</dt><dd>通过 Luna 分析宣传需求与参考图片，连续问答后转入创作</dd><dt>AI 图片</dt><dd>门店原图 → 宣传场景 → 海报或图组</dd><dt>AI 视频</dt><dd>图片与宣传目标 → 脚本分镜 → 新视频</dd><dt>AI 混剪</dt><dd>实拍视频 → 自动选片编排 → 多条宣传片</dd><dt>数字人</dt><dd>老板形象与声音 → 口播文案 → 宣传视频</dd></dl><p><strong>数字人已接入生成后端。</strong>可保存视频形象和声音，填写口播稿、查看任务记录；生成服务配置完成后可制作并下载成片。AI 图片已接入 Image 2.5，可用自己的原图生成并下载作品；AI 视频与混剪生成仍待接入。</p><p>生成图片、数字人成片与配音可在「资产」查看，自生成成功起保留 72 小时，到期清理，请及时下载。上传形象与声音继续保留，待生成的原图只保留在当前页面。草稿、行业宣传方案与商家资料保存在当前浏览器。画布页面与功能已排除。</p></div>`);}
-function context(){return {mode,configs,modules,assets,storeInfo,icon,button,esc,queueOpen,previewTab,setPreviewTab:value=>{previewTab=value;},selectedDraft,drafts,navigate,beginCreation,openModal,toast,picker,saveDraft,generate,settings,personModal,scriptModal,refresh:render,businessProfileVersion,materialIndustry,setMaterialIndustry:industry=>{if(industry==='all'||INDUSTRIES.some(item=>item.id===industry))materialIndustry=industry;},selectImagePreset:(id,options)=>selectImagePreset(context(),id,options),openBusinessFlow:options=>openBusinessFlow(context(),options),renderBusinessEntry:target=>renderBusinessEntry(context(),target),renderContentPlanPreview:target=>renderContentPlanPreview(context(),target),getBusinessBrief:()=>getBusinessBrief(storeInfo),importBusinessAssets,media:{owner:'/media/owner-reference.png'}};}
+function guide(){openModal('实体生意创作工作台使用帮助','素材、文案、草稿与创作设置',`<div class="prose"><p>先选择行业与宣传用途，填写真实信息，再将文案、镜头顺序和素材清单带入创作。业务内容面向餐饮、美业、零售、健身、工厂与批发供货。</p><dl><dt>Agent 对话</dt><dd>通过 Luna 分析宣传需求与参考图片，连续问答后转入创作</dd><dt>餐饮小红书</dt><dd>实拍照片 → 选择方向 → 自然美化、封面及老板文案 → 下载发布包</dd><dt>通用图片</dt><dd>门店原图 → 宣传场景 → 海报或图组</dd><dt>AI 视频</dt><dd>图片与宣传目标 → 脚本分镜 → 新视频</dd><dt>AI 混剪</dt><dd>实拍视频 → 自动选片编排 → 多条宣传片</dd><dt>数字人</dt><dd>老板形象与声音 → 口播文案 → 宣传视频</dd></dl><p><strong>数字人已接入生成后端。</strong>可保存视频形象和声音，填写口播稿、查看任务记录；生成服务配置完成后可制作并下载成片。餐饮模式分析真实照片、整理文案并进行常规美化，保留门店和菜品事实。通用图片已接入 Image 2.5，可用自己的原图生成并下载作品；AI 视频与混剪生成仍待接入。</p><p>生成图片、数字人成片与配音可在「资产」查看，自生成成功起保留 72 小时，到期清理，请及时下载。餐饮原图与成品保留 3 天，任务文字保留 30 天，餐饮门店资料服务端长期保存。上传形象与声音继续保留；其他模式的待生成原图只保留在当前页面，草稿、行业宣传方案与商家资料保存在当前浏览器。画布页面与功能已排除。</p></div>`);}
+function context(){return {mode,configs,modules,assets,storeInfo,icon,button,esc,queueOpen,previewTab,setPreviewTab:value=>{previewTab=value;},selectedDraft,drafts,navigate,beginCreation,openModal,toast,picker,saveDraft,generate,settings,personModal,scriptModal,refresh:render,businessProfileVersion,materialIndustry,setMaterialIndustry:industry=>{if(industry==='all'||INDUSTRIES.some(item=>item.id===industry))materialIndustry=industry;},selectImagePreset:(id,options)=>{imageMode='generic';return selectImagePreset(context(),id,options);},setImageMode:value=>{if(!['restaurant','generic'].includes(value))return;imageMode=value;render();},openBusinessFlow:options=>openBusinessFlow(context(),options),renderBusinessEntry:target=>renderBusinessEntry(context(),target),renderContentPlanPreview:target=>renderContentPlanPreview(context(),target),getBusinessBrief:()=>getBusinessBrief(storeInfo),importBusinessAssets,media:{owner:'/media/owner-reference.png'}};}
 function importBusinessAssets(files,target,selectedCount=0){
  const module=modules[target],ids=[];if(!module)return ids;
  for(const file of [...files]){
@@ -78,20 +80,22 @@ function importBusinessAssets(files,target,selectedCount=0){
  }
  return ids;
 }
-function beginCreation(next){if(mode===next)selectedDraft=null;selectedDrafts[next]=null;navigate(next);}
+function beginCreation(next){if(next==='image')imageMode='generic';if(mode===next)selectedDraft=null;selectedDrafts[next]=null;navigate(next);}
 function navigate(next){if(!validPage(next))return;modal.close();pickerContext=null;if(modules[mode])selectedDrafts[mode]=selectedDraft;mode=next;selectedDraft=selectedDrafts[next]||null;previewTab=configs[next]?.contentPlan?'宣传方案':'参考示例';location.hash=next;render();}
 window.addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(validPage(next)&&next!==mode)navigate(next);});
 function render(){
+ if(mode!=='image'||imageMode!=='restaurant')disposeRestaurant();
  if(mode!=='avatar')disposeDigitalHuman();
- if(mode!=='image')disposeImageGeneration();
+ if(mode!=='image'||imageMode==='restaurant')disposeImageGeneration();
  if(mode!=='assets')disposeGeneratedAssets();
  document.body.dataset.page=mode;
  $('#nav').innerHTML=[['home','首页'],['agent','Agent 对话'],...Object.entries(modules).map(([k,v])=>[k,v.title])].map(([k,title])=>`<a href="#${k}" class="navitem ${mode===k?'active':''}" ${mode===k?'aria-current="page"':''}>${icon(k)}<small>${title}</small></a>`).join('')+`<a href="#assets" class="navitem ${mode==='assets'?'active':''}" ${mode==='assets'?'aria-current="page"':''}>${icon('folder')}<small>资产</small></a>`+button('store',icon('store')+'<small>商家资料</small>','navitem');
  const ctx=context(),main=$('#main');
- $('#workbar').innerHTML=`<div class="workbar-breadcrumb"><span>创作工作台</span>${icon('chevron')}<strong>${modules[mode]?.title||(mode==='assets'?'资产':mode==='agent'?'Agent 对话':'首页')}</strong></div><div>${button('prompts',icon('list')+'我的草稿','textbutton')}${button('store',icon('store')+esc(storeInfo.name||'我的商家'),'textbutton')}</div>`;
+ $('#workbar').innerHTML=`<div class="workbar-breadcrumb"><span>创作工作台</span>${icon('chevron')}<strong>${modules[mode]?.title||(mode==='assets'?'资产':mode==='agent'?'Agent 对话':'首页')}</strong></div>${mode==='image'?`<div class="image-mode-switch" role="tablist" aria-label="图片创作模式">${['restaurant','generic'].map(value=>button('image-mode',value==='restaurant'?'餐饮小红书':'通用图片',imageMode===value?'active':'',`data-value="${value}" role="tab" aria-selected="${imageMode===value}"`)).join('')}</div>`:''}<div>${mode==='image'&&imageMode==='restaurant'?'':button('prompts',icon('list')+'我的草稿','textbutton')}${button('store',icon('store')+(mode==='image'&&imageMode==='restaurant'?'门店资料':esc(storeInfo.name||'我的商家')),'textbutton')}</div>`;
  if(mode==='assets'){main.className='generated-assets-workspace';main.innerHTML=renderGeneratedAssets(ctx);bindGeneratedAssets(ctx);return;}
  if(mode==='home'){main.className='home';main.innerHTML=renderHomeView(ctx);bindHomeView(ctx);return;}
  if(mode==='agent'){main.className='agent-workspace';main.innerHTML=renderAgentChat(ctx);bindAgentChat(ctx);return;}
+ if(mode==='image'&&imageMode==='restaurant'){main.className='restaurant-shell';main.innerHTML=renderRestaurant(ctx);bindRestaurant(ctx);return;}
  if(mode==='avatar'){main.className='special-workspace avatar-studio';main.innerHTML=renderDigitalHuman(ctx);bindDigitalHuman(ctx);return;}
  if(mode==='mix'){main.className='special-workspace mix-studio';main.innerHTML=renderStudio(mode,ctx);bindStudio(mode,ctx);return;}
  main.className=`workspace ${queueOpen?'queue-expanded':'queue-hidden'}`;
@@ -126,7 +130,7 @@ function saveDraft(){const c=configs[mode];if(!c)return;const id=selectedDraft||
 function generate(){const c=configs[mode];if(!c.prompt.trim()&&!c.files.length){toast('先添加素材或填写宣传要求。');return;}if(c.prompt.length>modules[mode].max){toast('创作要求超出字数限制，请缩短后继续。');return;}openModal('生成服务待接入','本次内容还未提交生成',`<div class="generation-notice">${icon(mode)}<h3>先保存这份创作，稍后继续</h3><p>当前版本可编辑素材、文案和参数。接入生成服务后，才能制作和导出作品。</p><div class="generation-summary"><strong>${esc(c.skill)}</strong><span>${esc(c.ratio)} · ${esc(c.quality)}</span></div></div><footer class="modal-actions">${button('cancel','继续编辑','secondary')}${button('save-close','保存草稿','primary')}</footer>`);}
 function personModal(){const c=configs.avatar;openModal('形象与背景','选择出镜身份和画面背景',`<form id="person-form"><fieldset><legend>使用谁来讲？</legend><div class="radio-grid">${['老板本人','店员形象','授权主持人'].map(x=>`<label><input type="radio" name="person" value="${x}" ${c.person===x?'checked':''}><span>${x}</span></label>`).join('')}</div></fieldset><fieldset><legend>画面背景</legend><div class="radio-grid">${['门店实景','简洁背景','形象原背景'].map(x=>`<label><input type="radio" name="background" value="${x}" ${c.background===x?'checked':''}><span>${x}</span></label>`).join('')}</div></fieldset><p class="muted">自有形象和声音将作为可复用资产。上传照片在设计稿中仅用于构图参考。</p><footer class="modal-actions"><button class="primary">确认设置</button></footer></form>`);$('#person-form').onsubmit=e=>{e.preventDefault();Object.assign(c,Object.fromEntries(new FormData(e.target)));modal.close();render();};}
 function scriptModal(){openModal('口播文案模板','按门店资料填入的文案模板，可继续调整',`<div class="prose"><p>大家好，我是${esc(storeInfo.name||'【门店名称】')}的老板。</p><p>我们最想让你体验的是${esc(storeInfo.feature||'【招牌项目与特色】')}。</p><p>门店在${esc(storeInfo.address||'【门店地址】')}，欢迎你有空来坐坐。</p></div><footer class="modal-actions">${button('use-script','填入口播稿','primary')}</footer>`);}
-function handle(action,el){const ctx=context();if(handleGeneratedAssetsAction(action,el,ctx)||handleImagePresetAction(action,el,ctx)||handleBusinessAction(action,el,ctx)||handleDigitalHumanAction(action,el,ctx)||handleAgentChatAction(action,el,ctx)||handleHomeAction(action,el,ctx)||handleWorkbenchAction(action,el,ctx)||handleStudioAction(action,el,ctx))return;const c=configs[mode];switch(action){
+function handle(action,el){const ctx=context();if(action==='image-mode'){ctx.setImageMode(el.dataset.value);return;}if(handleRestaurantAction(action,el,ctx)||handleGeneratedAssetsAction(action,el,ctx)||handleImagePresetAction(action,el,ctx)||handleBusinessAction(action,el,ctx)||handleDigitalHumanAction(action,el,ctx)||handleAgentChatAction(action,el,ctx)||handleHomeAction(action,el,ctx)||handleWorkbenchAction(action,el,ctx)||handleStudioAction(action,el,ctx))return;const c=configs[mode];switch(action){
  case 'skills':skills();break;
  case 'skill-category':skillCategory=el.dataset.value;document.querySelectorAll('.skill-filters button').forEach(b=>b.classList.toggle('active',b===el));filterSkills();break;
  case 'select-skill':delete c.imagePreset;c.skill=el.dataset.value;modal.close();render();break;
@@ -139,13 +143,13 @@ function handle(action,el){const ctx=context();if(handleGeneratedAssetsAction(ac
  case 'asset-filter':pickerType=el.dataset.type;document.querySelectorAll('.picker-tabs button').forEach(b=>b.classList.toggle('active',b===el));drawAssets();break;
  case 'confirm-assets':if(!pickerContext)return;if(!pickerContext.library&&configs[pickerContext.owner])configs[pickerContext.owner].files=[...pickerContext.preserved,...pickerIds];pickerContext.onConfirm?.([...pickerIds]);pickerContext=null;modal.close();render();break;
  case 'remove-file':c.files=c.files.filter(x=>x!==el.dataset.id);render();break;
- case 'store':storeModal();break;
+ case 'store':if(mode==='image'&&imageMode==='restaurant')handleRestaurantAction('rest-edit-profile',el,ctx);else storeModal();break;
  case 'preview':previewTab=el.dataset.value;render();break;
  case 'queue':queueOpen=!queueOpen;render();break;
  case 'saveprompt':saveDraft();break;
  case 'save-close':saveDraft();modal.close();break;
  case 'prompts':openModal('我的文案草稿','选择草稿恢复文字与参数，素材需要重新选择。',`<div class="saved-prompts">${drafts.filter(d=>mode==='home'||mode==='assets'||d.mode===mode).map(d=>button('restore',`<strong>${esc(d.skill)}</strong><p>${esc(d.prompt||'未填写要求')}</p><small>${esc(d.time)}</small>`,'saved-prompt','data-id="'+d.id+'"')).join('')||'<p class="muted">还没有保存过草稿。</p>'}</div>`);break;
- case 'restore':{const d=drafts.find(x=>x.id===el.dataset.id);if(!d)return;mode=d.mode;location.hash=mode;configs[mode]={...structuredClone(d),files:[]};selectedDraft=d.id;selectedDrafts[mode]=d.id;previewTab='草稿详情';modal.close();render();toast('草稿已恢复。素材文件请重新选择。');break;}
+ case 'restore':{const d=drafts.find(x=>x.id===el.dataset.id);if(!d)return;if(d.mode==='image')imageMode='generic';mode=d.mode;location.hash=mode;configs[mode]={...structuredClone(d),files:[]};selectedDraft=d.id;selectedDrafts[mode]=d.id;previewTab='草稿详情';modal.close();render();toast('草稿已恢复。素材文件请重新选择。');break;}
  case 'new':openModal('开始一份新创作','当前未保存的文字和素材选择将清空。已保存草稿不受影响。',`<footer class="modal-actions">${button('cancel','返回','secondary')}${button('reset','新建创作','primary')}</footer>`);break;
  case 'reset':c.prompt='';c.files=[];if(c.imagePreset)c.skill=modules[mode].names[0][0];delete c.imagePreset;delete c.brief;delete c.contentPlan;selectedDraft=null;selectedDrafts[mode]=null;modal.close();render();break;
  case 'expand':openModal('展开编辑','专注整理这次创作的要求',`<textarea id="expanded-prompt" aria-label="完整创作要求" maxlength="${modules[mode].max}">${esc(c.prompt)}</textarea><footer class="modal-actions">${button('apply-prompt','完成编辑','primary')}</footer>`,true);break;

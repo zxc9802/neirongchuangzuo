@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets } from '../design/generated-assets.js';
+import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets, bindGeneratedAssets, disposeGeneratedAssets } from '../design/generated-assets.js';
 
 const now = Date.parse('2026-09-30T06:00:00Z');
 const hour = 3600000;
 const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const image = (overrides = {}) => ({ id, status: 'completed', createdAt: new Date(now - 74 * hour).toISOString(), completedAt: new Date(now - hour).toISOString(), images: [{ url: `/api/ai/media/${id}/result-1.png`, filename: 'result-1.png' }], prompt: '设计宣传海报\n主标题：真实工艺，看细节\n要点：打样流程', ...overrides });
+const restaurant = (overrides = {}) => ({ id, status: 'completed', completedAt: now - hour, copy: { titles: ['附近午餐来吃一碗面'] }, files: [{ role: 'image', filename: '01.jpg', url: `/api/restaurant/tasks/${id}/files/01.jpg`, expiresAt: now + 2 * hour }, { role: 'zip', filename: 'package.zip', url: `/api/restaurant/tasks/${id}/files/package.zip`, expiresAt: now + 2 * hour }], sourceImages: [{ filename: 'original-1.jpg', url: `/api/restaurant/tasks/${id}/files/original-1.jpg` }], ...overrides });
 
 test('asset retention starts when generation completes and ends exactly at 72 hours', () => {
   assert.ok(generatedAssetWindow(image(), now));
@@ -48,6 +49,72 @@ test('server expiry caps lifetime and mixed outputs are sorted by completion rat
   assert.equal(records[0].expires, now + 2 * hour);
   assert.ok(records[0].completed > records[1].completed);
   assert.equal(collectGeneratedAssets([image(), image()], [], now).length, 1);
+});
+
+test('restaurant assets include only completed unexpired processed photos, never originals or ZIP files', () => {
+  const records = collectGeneratedAssets([], [], now, [restaurant(), restaurant({ status: 'awaiting_confirmation' }), restaurant({ status: 'failed' }), restaurant({ filesExpired: true }), restaurant({ review: { status: 'blocked' } }), restaurant({ completedAt: now - 73 * hour })]);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].source, '餐饮小红书');
+  assert.equal(records[0].title, '附近午餐来吃一碗面');
+  assert.equal(records[0].download, `/api/restaurant/tasks/${id}/files/01.jpg`);
+  assert.equal(records[0].expires, now + 2 * hour);
+  assert.equal(records[0].filename, '01.jpg');
+  assert.equal(collectGeneratedAssets([], [], now, [restaurant(), restaurant()]).length, 1);
+});
+
+test('restaurant file expiry and task identity are independently enforced at the three-day boundary', () => {
+  const good = restaurant().files[0];
+  const badFiles = [
+    { ...good, expired: true }, { ...good, expiresAt: now }, { ...good, expiresAt: 'invalid' },
+    { ...good, role: 'original' }, { ...good, filename: 'original-1.jpg', url: `/api/restaurant/tasks/${id}/files/original-1.jpg` },
+    { ...good, url: 'https://outside.example' + good.url }, { ...good, url: '//outside.example' + good.url },
+    { ...good, url: good.url + '?download=1' }, { ...good, url: good.url + '#x' },
+    { ...good, url: '/api/restaurant/tasks/aaaaaaaa-bbbb-cccc-dddd-ffffffffffff/files/01.jpg' },
+    { ...good, filename: '02.jpg' }, { ...good, url: good.url.replace('files/', 'files/../files/') },
+  ];
+  for (const file of badFiles) assert.equal(collectGeneratedAssets([], [], now, [restaurant({ files: [file] })]).length, 0);
+  assert.equal(collectGeneratedAssets([], [], now, [restaurant({ completedAt: now - 72 * hour, files: [{ ...good, expiresAt: now + hour }] })]).length, 0);
+  const capped = collectGeneratedAssets([], [], now, [restaurant({ completedAt: now - 71 * hour, files: [{ ...good, expiresAt: now + 10 * hour }] })]);
+  assert.equal(capped[0].expires, now + hour);
+});
+
+test('asset loading paginates restaurant metadata without paid calls and keeps existing source error handling', async () => {
+  const original = Object.fromEntries(['document', 'fetch'].map(key => [key, globalThis[key]]));
+  let markup = '';
+  const calls = [];
+  const host = { set innerHTML(value) { markup = value; } };
+  globalThis.document = { body: { dataset: { page: 'assets' } }, querySelector: selector => selector === '#generated-assets-results' ? host : null };
+  const current = Date.now();
+  const pageTask = (taskId, title) => restaurant({ id: taskId, completedAt: current - 1000, copy: { titles: [title] }, files: [{ role: 'image', filename: '01.jpg', url: `/api/restaurant/tasks/${taskId}/files/01.jpg`, expiresAt: current + hour }] });
+  globalThis.fetch = async (path, options = {}) => {
+    calls.push({ path, method: options.method || 'GET' });
+    if (path.startsWith('/api/ai/images')) return Response.json({ tasks: [image({ completedAt: current - 2000, expiresAt: current + hour })] });
+    if (path.startsWith('/api/tasks?')) return Response.json({}, { status: 503 });
+    if (path.startsWith('/api/restaurant/tasks?')) {
+      const query = new URL(path, 'http://localhost').searchParams;
+      assert.equal(query.get('limit'), '50'); assert.equal(query.get('completed'), 'true');
+      assert.ok(Number(query.get('completedAfter')) <= current);
+      if (!query.get('cursor')) return Response.json({ tasks: [pageTask(id, '餐饮第一页')], nextCursor: 'older-cursor' });
+      assert.equal(query.get('cursor'), 'older-cursor');
+      return Response.json({ tasks: [pageTask('aaaaaaaa-bbbb-cccc-dddd-ffffffffffff', '餐饮第二页')], nextCursor: null });
+    }
+    throw new Error('Unexpected request');
+  };
+  const ctx = { mode: 'assets', esc: value => String(value), icon: () => '', button: (action, label) => `<button data-action="${action}">${label}</button>` };
+  try {
+    bindGeneratedAssets(ctx);
+    for (let count = 0; count < 50 && !markup.includes('餐饮第二页'); count++) await new Promise(resolve => setImmediate(resolve));
+    assert.match(markup, /餐饮第一页/); assert.match(markup, /餐饮第二页/);
+    assert.match(markup, /真实工艺，看细节/);
+    assert.match(markup, /数字人作品暂时无法加载/);
+    assert.equal(calls.filter(call => call.path.startsWith('/api/restaurant/')).length, 2);
+    assert.ok(calls.every(call => call.method === 'GET'));
+    assert.ok(!calls.some(call => /generate|\/status|\/profile|\/usage/.test(call.path)));
+    assert.ok(!markup.includes(`/api/restaurant/tasks/${id}/files/01.jpg?download=1`));
+  } finally {
+    disposeGeneratedAssets();
+    for (const [key, value] of Object.entries(original)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value;
+  }
 });
 
 test('the assets entry presents retention and generated type filters without an upload flow', () => {

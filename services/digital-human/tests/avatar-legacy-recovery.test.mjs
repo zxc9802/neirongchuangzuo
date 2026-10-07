@@ -4,7 +4,32 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-test("ownerless cloud avatar metadata is assigned to the authenticated recovery admin", async () => {
+// URL ownership checks require a configured bucket even when every COS operation is mocked.
+// Keep this fixture independent of the developer's machine and never use real credentials.
+const fixtureEnvironmentKeys = ["COS_BUCKET", "COS_REGION", "COS_CUSTOM_DOMAIN", "COS_SECRET_ID", "COS_SECRET_KEY"];
+const previousEnvironment = Object.fromEntries(fixtureEnvironmentKeys.map(key => [key, process.env[key]]));
+process.env.COS_BUCKET = "legacy-fixture-1250000000";
+process.env.COS_REGION = "ap-test";
+delete process.env.COS_CUSTOM_DOMAIN;
+delete process.env.COS_SECRET_ID;
+delete process.env.COS_SECRET_KEY;
+test.after(() => {
+  for (const key of fixtureEnvironmentKeys) {
+    if (previousEnvironment[key] === undefined) delete process.env[key];
+    else process.env[key] = previousEnvironment[key];
+  }
+});
+
+async function waitForCopyStarted(signal) {
+  let timeout;
+  try {
+    await Promise.race([signal, new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error("Mocked legacy copy did not start within 10 seconds; check fixture ownership configuration.")), 10_000);
+    })]);
+  } finally { clearTimeout(timeout); }
+}
+
+test("ownerless cloud avatar metadata is assigned to the authenticated recovery admin", { timeout: 30_000 }, async () => {
   const originalCwd = process.cwd();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "avatar-recovery-test-"));
   process.chdir(tempDir);
@@ -57,7 +82,7 @@ test("ownerless cloud avatar metadata is assigned to the authenticated recovery 
   }
 });
 
-test("admin recovery merges unindexed legacy videos into a non-empty cloud index without duplicates", async () => {
+test("admin recovery merges unindexed legacy videos into a non-empty cloud index without duplicates", { timeout: 30_000 }, async () => {
   const originalCwd = process.cwd();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "avatar-reconcile-test-"));
   process.chdir(tempDir);
@@ -245,7 +270,7 @@ test("admin recovery merges unindexed legacy videos into a non-empty cloud index
   }
 });
 
-test("failed legacy copies keep the old record and retry on the next admin request", async () => {
+test("failed legacy copies keep the old record and retry on the next admin request", { timeout: 30_000 }, async () => {
   const originalCwd = process.cwd();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "avatar-retry-test-"));
   process.chdir(tempDir);
@@ -323,7 +348,7 @@ test("failed legacy copies keep the old record and retry on the next admin reque
   }
 });
 
-test("legacy migration preserves edits made while an object copy is in flight", async () => {
+test("legacy migration preserves edits made while an object copy is in flight", { timeout: 30_000 }, async () => {
   const originalCwd = process.cwd();
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "avatar-concurrent-edit-test-"));
   process.chdir(tempDir);
@@ -378,7 +403,7 @@ test("legacy migration preserves edits made while an object copy is in flight", 
       `../src/lib/store/avatar-store.ts?legacy-concurrent-edit=${Date.now()}`
     );
     const migration = AvatarStore.getAllAsync("admin-user-id");
-    await copyStarted;
+    await waitForCopyStarted(copyStarted);
     assert.equal(
       AvatarStore.update("concurrent-avatar", { name: "renamed-during-copy" })?.name,
       "renamed-during-copy",
@@ -391,6 +416,7 @@ test("legacy migration preserves edits made while an object copy is in flight", 
       /^uploads\/users\/[a-zA-Z0-9_-]+\/videos\/legacy-[0-9a-f]{32}\.mp4$/,
     );
   } finally {
+    releaseCopy();
     CosService.isConfigured = originals.isConfigured;
     CosService.getJsonFromCos = originals.getJsonFromCos;
     CosService.listFiles = originals.listFiles;

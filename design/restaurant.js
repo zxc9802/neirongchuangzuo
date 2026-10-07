@@ -1,0 +1,405 @@
+import { accountStorageKey } from './account-storage.js';
+
+const API = '/api/restaurant';
+const ACTIVE = new Set(['uploading', 'analysing', 'generating', 'retrying']);
+const LABELS = { uploading: '保存照片中', analysing: '分析照片中', awaiting_selection: '待选内容方向', awaiting_facts: '待补充信息', generating: '制作发布包中', retrying: '自动重试中', awaiting_confirmation: '待确认提示', completed: '生成成功', failed: '生成失败' };
+const REQUIRED = [['name', '门店名称'], ['city', '城市 / 商圈'], ['address', '门店地址'], ['category', '主营品类']];
+const OPTIONAL = [['hours', '营业时间'], ['signatureDishes', '招牌菜'], ['averagePrice', '大致人均'], ['parking', '停车信息'], ['groupBuy', '团购套餐、价格及使用条件'], ['features', '其他真实特点'], ['history', '可确认的门店历史'], ['craft', '制作工艺'], ['ingredients', '食材来源']];
+const FACT_NAMES = Object.fromEntries([...REQUIRED, ...OPTIONAL, ['dishName', '菜品名称'], ['price', '真实价格'], ['portion', '菜品分量'], ['taste', '口味'], ['setMeal', '套餐内容'], ['conditions', '使用条件'], ['verifiedHistory', '可核实的历史信息']]);
+const IMAGE_NAMES = { food: '菜品', interior: '店内环境', exterior: '门头', customers: '顾客消费场景', staff: '员工工作', owner: '老板', preparation: '制作过程', people: '人物 / 消费场景', menu: '菜单', other: '其他实拍' };
+const timestamp = value => value == null || value === '' ? NaN : new Date(value).getTime();
+const state = { ownerKey: null, ctx: null, profile: {}, profileDraft: {}, profileDirty: false, profileOpen: false, files: [], rights: false, status: null, usage: null, task: null, tasks: [], cursor: null, selected: '', imageMode: 'natural', facts: {}, acceptSparse: false, confirmWarnings: false, pending: null, busy: false, loading: false, error: '', notice: '', controllers: new Set(), timer: null, expiryTimer: null, quotaTimer: null, observer: null, revision: 0, loaded: false };
+
+const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+const txt = value => typeof value === 'string' ? value : value?.message || value?.reason || value?.label || '';
+const message = value => String(txt(value) || '服务暂时不可用，请稍后刷新。').replace(/sk-[\w.-]+/gi, '[已隐藏]').slice(0, 300);
+const icon = name => state.ctx?.icon?.(name) || '';
+const button = (action, label, cls = 'restaurant-secondary', extra = '') => `<button type="button" class="${cls}" data-action="rest-${action}" ${extra}>${label}</button>`;
+const dateLabel = value => { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); };
+
+export function validateRestaurantProfile(profile = {}) {
+  const missing = REQUIRED.filter(([field]) => typeof profile[field] !== 'string' || !profile[field].trim());
+  if (missing.length) return `请填写${missing.map(([, label]) => label).join('、')}。`;
+  return Object.values(profile).some(value => typeof value === 'string' && value.length > 1500) ? '门店资料过长，请精简后保存。' : '';
+}
+export function validateRestaurantUploads(files = []) {
+  if (!files.length) return '请添加至少 1 张门店实拍照片。';
+  if (files.length > 9) return '一次最多上传 9 张照片，请移除多余照片。';
+  let total = 0;
+  for (const item of files) {
+    const file = item?.file || item;
+    if (!file || !['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return '照片仅支持 JPG、PNG 和 WebP，请替换其他格式。';
+    if (!Number.isFinite(file.size) || file.size <= 0) return '有照片无法读取，请重新上传。';
+    if (file.size > 8 * 1024 * 1024) return '单张照片不能超过 8MB，请压缩后上传。';
+    total += file.size;
+  }
+  return total > 24 * 1024 * 1024 ? '照片总大小不能超过 24MB，请减少或压缩照片。' : '';
+}
+export function safeRestaurantFileUrl(value, origin = globalThis.location?.origin) {
+  if (typeof value !== 'string' || !value.startsWith('/') || value.startsWith('//') || /[\\\u0000-\u001f]/.test(value)) return '';
+  try {
+    const url = new URL(value, origin);
+    return url.origin === origin && /^\/api\/restaurant\/tasks\/[\da-f-]{36}\/files\/[\w.-]+$/i.test(url.pathname) && !url.search && !url.hash ? url.pathname : '';
+  } catch { return ''; }
+}
+export function restaurantMissingFacts(task, direction, facts = {}) {
+  const previousDirectionId = task?.selectedDirectionId || task?.selection?.directionId;
+  const taskFacts = direction?.id && previousDirectionId === direction.id ? task?.missingFacts || [] : [];
+  const items = [...(direction?.missingFacts || []), ...taskFacts];
+  const unique = [...new Map(items.filter(item => item && typeof item.field === 'string').map(item => [item.field, item])).values()];
+  return unique.filter(item => !String(facts[item.field] || '').trim());
+}
+export function restaurantCanGenerate(task, direction, options = {}) {
+  if (!task || !direction || !['awaiting_selection', 'awaiting_facts'].includes(task.status)) return false;
+  if (!(task.analysis || []).some(item => item.usable)) return false;
+  if (task.sourceImages?.some(file => file.expired || timestamp(file.expiresAt) <= Date.now())) return false;
+  if (task.sparsePhotos && !options.acceptSparse) return false;
+  return !restaurantMissingFacts(task, direction, options.facts).some(item => item.requiredForGeneration);
+}
+export function restaurantCopyText(task, section) {
+  const copy = task?.copy || {};
+  if (section === 'body') return String(copy.body || '');
+  if (section === 'tags') return (copy.tags || []).map(tag => String(tag).startsWith('#') ? String(tag) : '#' + tag).join(' ');
+  if (/^title-[0-2]$/.test(section)) return String(copy.titles?.[Number(section.slice(-1))] || '');
+  return [...(copy.titles || []).map((title, index) => `标题 ${index + 1}：${title}`), '', String(copy.body || ''), '', restaurantCopyText(task, 'tags')].join('\n').trim();
+}
+
+function active() { return !!state.ctx && state.ownerKey === memoryKey() && typeof document !== 'undefined' && !!document.querySelector('#restaurant-workspace'); }
+function memoryKey() { return accountStorageKey('restaurant-active-task'); }
+function clearAccountData(ownerKey) {
+  Object.assign(state, { ownerKey, profile: {}, profileDraft: {}, profileDirty: false, profileOpen: false, rights: false, status: null, usage: null, task: null, tasks: [], cursor: null, selected: '', imageMode: 'natural', facts: {}, acceptSparse: false, confirmWarnings: false, pending: null, busy: false, loading: false, error: '', notice: '', loaded: false });
+}
+function ensureAccount() {
+  const key = memoryKey();
+  if (state.ownerKey === key) return;
+  disposeRestaurant(); clearAccountData(key);
+}
+function remember(id) { try { if (id) sessionStorage.setItem(memoryKey(), id); else sessionStorage.removeItem(memoryKey()); } catch { /* Server history remains available. */ } }
+function remembered() { try { const id = sessionStorage.getItem(memoryKey()); return /^[\da-f-]{36}$/i.test(id || '') ? id : null; } catch { return null; } }
+async function request(path, options = {}) {
+  const ownerKey = memoryKey();
+  if (state.ownerKey !== ownerKey) throw Object.assign(new Error('账号已切换'), { name: 'DisposedError' });
+  const controller = new AbortController();
+  state.controllers.add(controller);
+  const timeout = setTimeout(() => controller.abort(), options.method === 'POST' ? 45000 : 18000);
+  const revision = state.revision;
+  try {
+    const response = await fetch(API + path, { ...options, headers: { 'Content-Type': 'application/json', ...options.headers }, credentials: 'same-origin', cache: 'no-store', signal: controller.signal });
+    let body;
+    try { body = await response.json(); } catch { throw new Error('服务未返回有效数据，请刷新任务状态。'); }
+    if (revision !== state.revision || ownerKey !== memoryKey()) throw Object.assign(new Error('离开页面'), { name: 'DisposedError' });
+    if (!response.ok) throw Object.assign(new Error(message(body.error || body.message)), { status: response.status, code: body.code, missingFacts: body.missingFacts });
+    return body;
+  } catch (error) {
+    if (revision !== state.revision || ownerKey !== memoryKey()) throw Object.assign(new Error('离开页面'), { name: 'DisposedError' });
+    if (error.name === 'AbortError') throw new Error('连接超时，请刷新任务状态。已提交的任务不会自动重复发送。');
+    throw error;
+  } finally { clearTimeout(timeout); state.controllers.delete(controller); }
+}
+function mergeTask(task) {
+  if (!task?.id) return;
+  state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => timestamp(b.createdAt) - timestamp(a.createdAt));
+}
+function chooseTask(task, reset = false) {
+  if (!task?.id) return;
+  const changed = state.task?.id !== task.id;
+  state.task = task; mergeTask(task); remember(task.id);
+  if (changed || reset) {
+    state.selected = task.selectedDirectionId || task.selection?.directionId || task.directionId || '';
+    state.imageMode = task.selection?.imageMode || task.imageMode || 'natural';
+    state.facts = { ...(task.selection?.facts || task.facts || {}) }; state.acceptSparse = false; state.confirmWarnings = false;
+    state.error = ''; state.notice = '';
+  }
+  if (!state.selected && task.directions?.length === 1) state.selected = task.directions[0].id;
+}
+function selectedDirection() { return state.task?.directions?.find(item => item.id === state.selected); }
+function taskFiles(task) { return (task?.files || []).map(file => ({ ...file, url: safeRestaurantFileUrl(file.url) })).filter(file => file.url); }
+function filesExpired(task) { return task?.filesExpired || (task?.files?.length && task.files.every(file => file.expired || file.expiresAt && timestamp(file.expiresAt) <= Date.now())); }
+function originalsExpired(task) { return !task?.sourceImages?.length || task.sourceImages.some(file => file.expired || timestamp(file.expiresAt) <= Date.now()); }
+function warnings(task) { return [...(task?.review?.warnings || []), ...(task?.riskWarnings || [])].map(txt).filter(Boolean); }
+function paint() {
+  if (!active()) return;
+  const current = document.querySelector('#restaurant-workspace');
+  const focused = current.contains(document.activeElement) ? document.activeElement : null;
+  const focusId = focused?.id;
+  const selection = focused?.selectionStart;
+  current.outerHTML = renderRestaurant(state.ctx);
+  attachInputs();
+  scheduleExpiry();
+  if (focusId) { const replacement = document.getElementById(focusId); replacement?.focus({ preventScroll: true }); if (Number.isInteger(selection) && replacement?.setSelectionRange) replacement.setSelectionRange(selection, selection); }
+}
+function renderProfile() {
+  const complete = !validateRestaurantProfile(state.profile);
+  const value = state.profileDraft;
+  const field = ([key, label], required = false) => `<label class="restaurant-field"><span>${escape(label)}${required ? '<b aria-label="必填">*</b>' : ''}</span><input id="rest-profile-${key}" data-rest-profile="${key}" value="${escape(value[key] || '')}" maxlength="${key === 'groupBuy' || key === 'features' ? 1500 : 300}" ${required ? 'required' : ''} ${state.busy ? 'disabled' : ''} autocomplete="${key === 'name' ? 'organization' : key === 'address' ? 'street-address' : 'off'}" placeholder="${key === 'address' ? '真实地址，便于顾客导航' : key === 'category' ? '例如：面馆、火锅、家常菜' : key === 'groupBuy' ? '套餐：牛肉面和饮料；价格：18元；使用条件：工作日午餐' : '填写真实信息'}"></label>`;
+  return `<section class="restaurant-profile"><div class="restaurant-section-heading"><div><h2>${icon('store')} 门店资料</h2><p>${complete ? `${escape(state.profile.name)} · ${escape(state.profile.city)} · ${escape(state.profile.category)}` : '首次填写，保存后自动使用。'}</p></div>${complete ? button('profile-toggle', state.profileOpen ? '收起' : '修改资料', 'restaurant-text') : ''}</div>${!complete || state.profileOpen ? `<form id="restaurant-profile-form" class="restaurant-profile-form"><div class="restaurant-field-grid">${REQUIRED.map(item => field(item, true)).join('')}</div><details class="restaurant-profile-optional"><summary>补充资料 <small>营业时间、菜品、团购等，可稍后补充</small></summary><div class="restaurant-field-grid">${OPTIONAL.map(item => field(item)).join('')}</div></details><div class="restaurant-profile-actions"><small>没有填写的信息，生成时会避开相关描述。</small><button type="submit" class="restaurant-secondary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在保存…' : '保存门店资料'}</button></div></form>` : ''}</section>`;
+}
+function renderUpload() {
+  return `<section class="restaurant-upload-section"><div class="restaurant-section-heading"><div><h2>上传门店实拍</h2><p>菜品、环境、门头或消费场景，共 1—9 张</p></div><span class="restaurant-count">${state.files.length} / 9</span></div><div class="restaurant-upload-grid" id="restaurant-dropzone">${state.files.map((item, index) => `<figure class="restaurant-source"><img src="${escape(item.url)}" alt="待分析照片 ${index + 1}：${escape(item.file.name)}"><figcaption>${escape(item.file.name)}</figcaption>${button('remove-photo', '×', 'restaurant-remove', `data-index="${index}" aria-label="移除照片 ${index + 1}" ${state.busy ? 'disabled' : ''}`)}</figure>`).join('')}${state.files.length < 9 ? `<label class="restaurant-upload-picker${state.files.length ? '' : ' empty'}">${icon('plus')}<strong>${state.files.length ? '添加照片' : '选择照片，或拖放到这里'}</strong><small>JPG / PNG / WebP · 单张 ≤ 8MB · 总计 ≤ 24MB</small><input type="file" id="restaurant-file-input" accept="image/jpeg,image/png,image/webp" multiple ${state.busy || state.pending ? 'disabled' : ''} aria-label="上传门店实拍照片"></label>` : ''}</div><label class="restaurant-check"><input id="restaurant-rights" type="checkbox" ${state.rights ? 'checked' : ''} ${state.busy ? 'disabled' : ''}><span>我拥有这些照片的使用权，并已获得照片中人物的使用授权。</span></label><div class="restaurant-submit-row"><p>分析照片不扣正式生成额度；成功交付一套发布包扣 1 次。</p>${button('analyse', state.busy ? '正在提交…' : state.pending ? '正在核对提交状态' : `分析照片，推荐方向 ${icon('arrow')}`, 'restaurant-primary', state.busy || state.pending || !state.loaded || state.status?.enabled === false ? 'disabled' : '')}</div></section>`;
+}
+function renderAnalysis(task) {
+  const sources = task.sourceImages || [];
+  const items = task.analysis || [];
+  const usable = items.filter(item => item.usable).length;
+  return `<details class="restaurant-analysis"><summary>照片分析 <span>${usable} / ${sources.length || items.length} 张可用</span></summary><div class="restaurant-analysis-grid">${items.map((item, index) => {
+    const source = sources.find(image => image.id === item.imageId);
+    const url = source?.expired || timestamp(source?.expiresAt) <= Date.now() ? '' : safeRestaurantFileUrl(source?.url);
+    return `<article class="restaurant-analysis-item ${item.usable ? '' : 'excluded'}">${url ? `<img src="${escape(url)}" alt="照片 ${index + 1} ${escape(IMAGE_NAMES[item.imageType] || '实拍')}" loading="lazy">` : '<div class="restaurant-file-placeholder">原图已过期</div>'}<div><strong>照片 ${index + 1} · ${escape(IMAGE_NAMES[item.imageType] || '实拍')}</strong><span>${item.usable ? '可用' : '不采用'}${Number.isFinite(item.qualityScore) ? ` · 质量 ${escape(item.qualityScore)}` : ''}</span><p>${escape(item.usable ? (item.visibleObjects || []).map(txt).join('、') : item.rejectionReason || '不适合当前内容')}</p>${item.privacyRisk === 'high' ? '<small>隐私风险较高</small>' : ''}</div></article>`;
+  }).join('')}</div></details>`;
+}
+function renderDirections(task) {
+  const directions = task.directions || [];
+  if (!directions.length) return `<div class="restaurant-empty"><h3>暂时没有可靠的内容方向</h3><p>${escape(task.message || '请补充清晰照片或门店资料后再试。')}</p>${button('new', '重新上传照片')}</div>`;
+  const direction = selectedDirection();
+  const facts = restaurantMissingFacts(task, direction);
+  const canGenerate = restaurantCanGenerate(task, direction, state);
+  return `<section class="restaurant-directions"><div class="restaurant-section-heading"><div><h2>选择一个内容方向</h2><p>${directions.length === 1 ? '这组照片适合以下方向，无需再做筛选。' : '根据你的真实照片推荐，选一个即可开始。'}</p></div>${button('new', '重新上传', 'restaurant-text')}</div><div class="restaurant-direction-grid" role="radiogroup" aria-label="内容方向">${directions.map(item => `<button type="button" role="radio" aria-checked="${state.selected === item.id}" class="restaurant-direction${state.selected === item.id ? ' selected' : ''}" data-action="rest-select" data-id="${escape(item.id)}"><div class="restaurant-direction-top"><span>${escape(item.consumptionScene || '门店日常')}</span><i>${state.selected === item.id ? icon('check') : ''}</i></div><h3>${escape(item.label || item.contentGoal || '门店分享')}</h3><p>${escape(item.targetCustomer)}</p><div class="restaurant-direction-reason">${escape(item.recommendationReason)}</div><small>依据：${(item.supportingImageIds || []).map(id => { const index = (task.sourceImages || []).findIndex(source => source.id === id); return index >= 0 ? `照片 ${index + 1}` : '实拍照片'; }).map(escape).join('、') || '门店资料'}${item.expectedAction ? ` · ${escape(item.expectedAction)}` : ''}</small></button>`).join('')}</div>${direction ? `<div class="restaurant-selection-settings">${facts.length ? `<div class="restaurant-facts"><h3>${facts.some(item => item.requiredForGeneration) ? '还需要确认几件事' : '以下信息可以补充，也可以避开'}</h3><p>只填写你能够确认的真实信息；无法确认时可以改选其他方向。</p>${facts.map((item, index) => `<label class="restaurant-field"><span>${escape(item.label || FACT_NAMES[item.field] || '补充信息')} ${item.requiredForGeneration ? '<b>必须补充</b>' : '<small>可选</small>'}</span><input id="restaurant-fact-${index}" data-rest-fact="${escape(item.field)}" value="${escape(state.facts[item.field] || '')}" maxlength="1500" placeholder="${escape(item.reason || '填写真实信息')}" ${item.requiredForGeneration ? 'required' : ''}><small>${escape(item.reason)}${item.supportedAlternative ? ` · 可改选：${escape(Array.isArray(item.supportedAlternative) ? item.supportedAlternative.join('、') : item.supportedAlternative)}` : ''}</small></label>`).join('')}</div>` : ''}<fieldset class="restaurant-modes"><legend>图片处理</legend><label><input type="radio" name="restaurant-image-mode" value="natural" ${state.imageMode === 'natural' ? 'checked' : ''}><span><strong>自然美化</strong><small>改善亮度、色彩和构图，保留真实照片</small></span></label><label><input type="radio" name="restaurant-image-mode" value="cover" ${state.imageMode === 'cover' ? 'checked' : ''}><span><strong>封面加字</strong><small>自然美化后，只在第一张图加入主题文字</small></span></label></fieldset>${task.sparsePhotos ? `<label class="restaurant-check restaurant-sparse"><input id="restaurant-sparse" type="checkbox" ${state.acceptSparse ? 'checked' : ''}><span>当前只有 1—2 张可用照片，我选择继续生成简版图文。也可以重新上传补充照片。</span></label>` : ''}<div class="restaurant-submit-row"><p>系统自动选图、排序和撰写文案；成功交付扣 1 次。</p>${button('generate', state.busy ? '正在提交…' : state.usage?.remaining === 0 ? '今日额度已用完' : `生成图文发布包 ${icon('arrow')}`, 'restaurant-primary', !canGenerate || state.busy || state.pending || state.usage?.remaining === 0 ? 'disabled' : '')}</div></div>` : '<p class="restaurant-selection-hint">选择上方内容方向后，即可生成。</p>'}</section>`;
+}
+function renderProgress(task) {
+  const steps = task.status === 'uploading' ? ['保存原图', '检查照片格式', '准备分析任务'] : task.status === 'analysing' ? ['识别实拍内容', '检查照片质量与风险', '推荐合适方向'] : ['自动选图与排序', '处理真实照片', '生成文案并检查事实'];
+  return `<section class="restaurant-progress" role="status" aria-live="polite"><div class="restaurant-progress-icon">${icon('clock')}</div><div><h2>${LABELS[task.status] || '任务处理中'}</h2><p>${escape(task.progress?.message || task.message || '任务已保存，刷新或离开页面不会重复调用。')}</p><ul>${steps.map(step => `<li>${escape(step)}</li>`).join('')}</ul><small>稍后可在下方任务记录中查看结果。</small></div>${button('refresh', '刷新状态', 'restaurant-text')}</section>`;
+}
+function renderDraftPreview(task) {
+  const order = task.copy?.imageOrder || task.selection?.imageIds || [];
+  const sources = order.map(id => (task.sourceImages || []).find(photo => photo.id === id)).filter(Boolean);
+  return `<section class="restaurant-draft-preview" aria-label="待确认草稿预览"><header><h3>待确认预览</h3><p>请核对文字和照片。下方图片是原图参考，成品在确认后交付。</p></header><div class="restaurant-draft-images">${sources.map((source, index) => {
+    const url = source.expired || timestamp(source.expiresAt) <= Date.now() ? '' : safeRestaurantFileUrl(source.url);
+    return `<figure>${url ? `<img src="${escape(url)}" alt="${index === 0 ? '封面原图参考' : '配图原图参考'} ${index + 1}" loading="lazy">` : '<div class="restaurant-file-placeholder">原图已过期</div>'}<figcaption>${String(index + 1).padStart(2, '0')} · ${index === 0 ? '封面原图参考' : '配图原图参考'}</figcaption></figure>`;
+  }).join('') || '<p class="restaurant-draft-no-source">原图参考暂时无法显示，请核对下方文字和发布提示。</p>'}</div><div class="restaurant-draft-copy"><section><h4>三个标题</h4><ol>${(task.copy?.titles || []).map(title => `<li>${escape(title)}</li>`).join('')}</ol></section><section><h4>封面文字</h4><p>${escape(task.copy?.coverText || '')}</p></section><section><h4>正文</h4><p class="restaurant-body-copy">${escape(task.copy?.body || '')}</p></section><section><h4>话题</h4><p class="restaurant-tag-copy">${escape(restaurantCopyText(task, 'tags'))}</p></section></div></section>`;
+}
+function renderReview(task) {
+  const list = [...warnings(task), ...(task.review?.errors || []).map(txt).filter(Boolean)];
+  const blocked = task.review?.status === 'blocked';
+  return `<section class="restaurant-review ${blocked ? 'blocked' : ''}"><h2>${blocked ? '暂时不能交付发布包' : '发布前，请确认这些提示'}</h2><ul>${list.map(item => `<li>${escape(item)}</li>`).join('') || `<li>${escape(task.review?.reason || task.message || '请核对内容真实性。')}</li>`}</ul>${blocked ? `<p>补充必要信息或改选其他方向后再试。</p>${button('new', '重新开始')}` : `${renderDraftPreview(task)}<label class="restaurant-check"><input id="restaurant-confirm-warnings" type="checkbox" ${state.confirmWarnings ? 'checked' : ''}><span>我已核对预览和上述提示，确认可以使用这些照片和内容。</span></label>${button('confirm', state.busy ? '正在确认…' : '确认并完成发布包', 'restaurant-primary', !state.confirmWarnings || state.busy || state.pending ? 'disabled' : '')}`}</section>`;
+}
+function renderResult(task) {
+  const files = taskFiles(task);
+  const expired = filesExpired(task);
+  const images = files.filter(file => file.role === 'image');
+  const zip = files.find(file => file.role === 'zip');
+  const titles = Array.isArray(task.copy?.titles) ? task.copy.titles : [];
+  const list = warnings(task);
+  const compact = !expired && images.length > 0 && images.length <= 2;
+  return `<section class="restaurant-result"><div class="restaurant-section-heading"><div><h2>${icon('check')} 图文发布包已完成</h2><p>${escape(task.storeProfile?.name || task.profileSnapshot?.name || state.profile.name || '餐饮门店')} · ${escape(task.selection?.direction?.label || task.selectedDirection?.label || selectedDirection()?.label || '门店分享')} · ${escape(dateLabel(task.completedAt || task.updatedAt))}</p></div>${button('new-direction', '换个方向再生成', 'restaurant-text', state.busy || originalsExpired(task) ? 'disabled' : '')}</div><div class="restaurant-result-toolbar"><span>${expired ? '文件已过期 · 文字记录保留 30 天' : '图片和下载包保留 3 天，请及时下载'}</span>${zip && !expired ? `<a class="restaurant-primary" href="${escape(zip.url)}" download="${escape(zip.filename)}">${icon('save')} 下载完整发布包</a>` : ''}</div><div class="restaurant-result-content${compact ? ' compact' + (images.length === 1 ? ' single' : ' double') : ''}">${expired ? '<div class="restaurant-expired">图片和下载包已过期，仍可复制下方文字。重新制作需要上传原图。</div>' : `<div class="restaurant-result-images">${images.map((file, index) => `<figure><a href="${escape(file.url)}" target="_blank" rel="noopener" aria-label="查看照片 ${index + 1}"><img src="${escape(file.url)}" alt="${index === 0 ? '封面' : '正文配图'} ${index + 1}" loading="lazy"></a><figcaption><span>${String(index + 1).padStart(2, '0')}${index === 0 ? ' · 封面' : ''}</span><a href="${escape(file.url)}" download="${escape(file.filename)}">下载</a></figcaption></figure>`).join('') || '<div class="restaurant-expired">结果图片暂时无法读取，请刷新状态。</div>'}</div>`}<div class="restaurant-result-copy"><section><div class="restaurant-copy-heading"><h3>三个标题，选择一个发布</h3></div><ol class="restaurant-titles">${titles.map((title, index) => `<li><span>${escape(title)}</span>${button('copy', '复制', 'restaurant-text', `data-section="title-${index}"`)}</li>`).join('')}</ol></section><section><div class="restaurant-copy-heading"><h3>正文</h3>${button('copy', '复制正文', 'restaurant-text', 'data-section="body"')}</div><p class="restaurant-body-copy">${escape(task.copy?.body || '')}</p></section><section><div class="restaurant-copy-heading"><h3>话题</h3>${button('copy', '复制话题', 'restaurant-text', 'data-section="tags"')}</div><p class="restaurant-tag-copy">${escape(restaurantCopyText(task, 'tags'))}</p></section></div></div>${list.length ? `<details class="restaurant-risk-details"><summary>已确认的发布提示 · ${list.length} 条</summary><ul>${list.map(item => `<li>${escape(item)}</li>`).join('')}</ul></details>` : ''}<div class="restaurant-result-footer"><small>使用老板本人账号口吻，下载后由你人工发布。</small>${button('copy', '复制全部文字', 'restaurant-secondary', 'data-section="all"')}</div></section>`;
+}
+function renderTask() {
+  const task = state.task;
+  if (!task) return renderUpload();
+  if (ACTIVE.has(task.status)) return renderProgress(task);
+  const analysis = task.analysis?.length ? renderAnalysis(task) : '';
+  if (task.review?.status === 'blocked') return analysis + renderReview(task);
+  if (task.status === 'completed') return renderResult(task);
+  if (['awaiting_selection', 'awaiting_facts'].includes(task.status) && originalsExpired(task)) return `${analysis}<section class="restaurant-empty"><h2>原图已过期，请重新上传</h2><p>照片和下载包保留 3 天；任务文字记录保留 30 天。</p>${button('new', '重新上传照片')}</section>`;
+  if (task.status === 'awaiting_confirmation' && filesExpired(task)) return `<section class="restaurant-empty"><h2>发布包已过期，请重新开始</h2><p>这次任务未确认交付，没有扣除正式生成额度。</p>${button('new', '重新上传照片')}</section>`;
+  if (task.status === 'awaiting_confirmation') return analysis + renderReview(task);
+  if (task.status === 'failed') return `${analysis}<section class="restaurant-empty restaurant-failure" role="status"><h2>这次没有完成发布包</h2><p>${escape(message(task.error || task.failureReason || task.message || '请稍后重试，或调整照片和门店资料。'))}</p><small>没有扣除正式生成额度。</small><div>${task.retryable !== false && !task.uncertain && !filesExpired(task) ? button('retry', '重试任务', 'restaurant-secondary', state.busy || state.pending ? 'disabled' : '') : ''}${button('new', '重新上传照片')}</div></section>`;
+  return analysis + renderDirections(task);
+}
+function renderHistory() {
+  return `<section class="restaurant-history"><div class="restaurant-section-heading"><div><h2>我的图文任务</h2><p>文字记录保留 30 天，图片与下载包保留 3 天</p></div>${button('history-refresh', state.loading ? '正在刷新…' : `${icon('refresh')} 刷新记录`, 'restaurant-text', state.loading ? 'disabled' : '')}</div>${state.tasks.length ? `<div class="restaurant-history-grid">${state.tasks.map(task => {
+    const file = task.status !== 'completed' || task.review?.status === 'blocked' || filesExpired(task) ? null : taskFiles(task).find(item => item.role === 'image');
+    return `<button type="button" class="restaurant-history-item${task.id === state.task?.id ? ' current' : ''}" data-action="rest-open-task" data-id="${escape(task.id)}">${file ? `<img src="${escape(file.url)}" alt="任务封面" loading="lazy">` : `<div class="restaurant-history-placeholder">${icon(task.status === 'completed' ? 'image' : 'clock')}<span>${filesExpired(task) ? '文件已过期' : LABELS[task.status] || '任务记录'}</span></div>`}<div><strong>${escape((task.review?.status !== 'blocked' ? task.copy?.titles?.[0] : '') || task.selection?.direction?.label || task.selectedDirection?.label || task.profileSnapshot?.name || task.storeProfile?.name || '餐饮图文任务')}</strong><small>${escape(dateLabel(task.createdAt))}</small><span class="restaurant-status ${escape(task.status)}">${escape(LABELS[task.status] || '任务记录')}</span></div></button>`;
+  }).join('')}</div>` : `<div class="restaurant-history-empty">${icon('image')}<p>${state.loading ? '正在读取任务记录…' : '完成第一套图文后，会在这里显示。'}</p></div>`}${state.cursor ? `<div class="restaurant-load-more">${button('more', state.loading ? '正在加载…' : '加载更多任务', 'restaurant-secondary', `id="restaurant-history-more" ${state.loading ? 'disabled' : ''}`)}</div>` : ''}</section>`;
+}
+export function renderRestaurant(ctx = {}) {
+  ensureAccount();
+  if (ctx) state.ctx = ctx;
+  const task = state.task;
+  const step = !task || ['uploading', 'analysing'].includes(task.status) ? 1 : ['completed', 'awaiting_confirmation'].includes(task.status) || ACTIVE.has(task.status) ? 3 : 2;
+  const remaining = state.usage?.remaining;
+  return `<div id="restaurant-workspace" class="restaurant-workspace"><header class="restaurant-heading"><div><span class="restaurant-eyebrow">餐饮小红书</span><h1>实拍照片，生成一套图文</h1><p>上传照片 → 选择内容方向 → 下载图片、复制文案</p></div><div class="restaurant-heading-actions">${Number.isFinite(remaining) ? `<span class="restaurant-quota">今日剩余 <strong>${escape(remaining)}</strong> / ${escape(state.usage.limit)} 套</span>` : '<span class="restaurant-quota">按成功发布包计算额度</span>'}${task ? button('new', `${icon('plus')} 新建图文`, 'restaurant-secondary', state.busy || state.pending ? 'disabled' : '') : ''}</div></header><ol class="restaurant-steps" aria-label="创作步骤">${['上传照片', '选择方向', '图文发布包'].map((label, index) => `<li class="${step === index + 1 ? 'active' : step > index + 1 ? 'done' : ''}"><span>${step > index + 1 ? icon('check') : index + 1}</span>${label}</li>`).join('')}</ol>${state.error ? `<div class="restaurant-error" role="alert">${escape(state.error)} ${state.pending ? button('refresh', '查询已提交任务', 'restaurant-text') : ''}</div>` : ''}${state.notice ? `<div class="restaurant-notice" role="status">${escape(state.notice)}</div>` : ''}${state.status?.enabled === false ? '<div class="restaurant-notice">餐饮内容服务尚未启用，请联系管理员配置。</div>' : ''}<div class="restaurant-creation">${renderProfile()}${renderTask()}</div>${renderHistory()}</div>`;
+}
+function attachInputs() {
+  const root = document.querySelector('#restaurant-workspace');
+  if (!root) return;
+  root.querySelector('#restaurant-profile-form')?.addEventListener('submit', event => { event.preventDefault(); void saveProfile(); });
+  root.querySelectorAll('[data-rest-profile]').forEach(input => input.addEventListener('input', () => { state.profileDraft[input.dataset.restProfile] = input.value; state.profileDirty = true; }));
+  root.querySelectorAll('[data-rest-fact]').forEach(input => input.addEventListener('input', () => { state.facts[input.dataset.restFact] = input.value; updateGenerateButton(); }));
+  root.querySelectorAll('[name="restaurant-image-mode"]').forEach(input => input.addEventListener('change', () => { state.imageMode = input.value; }));
+  root.querySelector('#restaurant-rights')?.addEventListener('change', event => { state.rights = event.target.checked; });
+  root.querySelector('#restaurant-sparse')?.addEventListener('change', event => { state.acceptSparse = event.target.checked; updateGenerateButton(); });
+  root.querySelector('#restaurant-confirm-warnings')?.addEventListener('change', event => { state.confirmWarnings = event.target.checked; const control = root.querySelector('[data-action="rest-confirm"]'); if (control) control.disabled = !state.confirmWarnings || state.busy || !!state.pending; });
+  root.querySelector('#restaurant-file-input')?.addEventListener('change', event => { addFiles([...event.target.files]); event.target.value = ''; });
+  const dropzone = root.querySelector('#restaurant-dropzone');
+  if (dropzone) {
+    dropzone.addEventListener('dragover', event => { event.preventDefault(); if (!state.busy) dropzone.classList.add('dragover'); });
+    dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+    dropzone.addEventListener('drop', event => { event.preventDefault(); dropzone.classList.remove('dragover'); if (!state.busy && !state.pending) addFiles([...event.dataTransfer.files]); });
+  }
+  state.observer?.disconnect();
+  const more = root.querySelector('#restaurant-history-more');
+  if (more && typeof IntersectionObserver !== 'undefined') { state.observer = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting) && !state.loading) void loadHistory(true); }, { rootMargin: '180px' }); state.observer.observe(more); }
+}
+function updateGenerateButton() {
+  const control = document.querySelector('[data-action="rest-generate"]');
+  if (control) control.disabled = !restaurantCanGenerate(state.task, selectedDirection(), state) || state.busy || !!state.pending || state.usage?.remaining === 0;
+}
+function releaseFiles() { for (const item of state.files) URL.revokeObjectURL(item.url); state.files = []; }
+function addFiles(files) {
+  const combined = [...state.files, ...files.map(file => ({ file }))];
+  const error = validateRestaurantUploads(combined);
+  if (error) { state.error = error; paint(); return; }
+  for (const file of files) state.files.push({ file, url: URL.createObjectURL(file) });
+  state.rights = false;
+  state.error = ''; paint();
+}
+async function saveProfile({ silent = false } = {}) {
+  const revision = state.revision;
+  const error = validateRestaurantProfile(state.profileDraft);
+  if (error) { state.error = error; state.profileOpen = true; paint(); return false; }
+  if (!silent) { state.busy = true; state.error = ''; paint(); }
+  try {
+    const body = await request('/profile', { method: 'PUT', body: JSON.stringify({ profile: state.profileDraft }) });
+    state.profile = body.profile || state.profileDraft; state.profileDraft = { ...state.profile }; state.profileDirty = false; state.profileOpen = false;
+    if (!silent) state.ctx?.toast?.('门店资料已保存。');
+    return true;
+  } catch (error) { if (error.name !== 'DisposedError') state.error = message(error.message); return false; }
+  finally { if (!silent && revision === state.revision) { state.busy = false; paint(); } }
+}
+async function loadUsage() { try { const data = await request('/usage'); state.usage = data.usage || null; } catch (error) { if (error.name !== 'DisposedError') state.notice = '暂时无法读取正式额度，生成前会由服务器校验。'; } finally { scheduleQuotaRefresh(); } }
+async function loadHistory(more = false) {
+  if (state.loading || more && !state.cursor) return;
+  const revision = state.revision;
+  state.loading = true;
+  try {
+    const data = await request('/tasks?limit=12' + (more ? '&cursor=' + encodeURIComponent(state.cursor) : ''));
+    if (!Array.isArray(data.tasks)) throw new Error('任务列表暂时无法读取。');
+    state.tasks = more ? [...new Map([...state.tasks, ...data.tasks].map(item => [item.id, item])).values()] : data.tasks;
+    state.cursor = data.nextCursor || null;
+    if (state.task) { const fresh = data.tasks.find(item => item.id === state.task.id); if (fresh) chooseTask(fresh); }
+  } catch (error) { if (error.name !== 'DisposedError') state.error = message(error.message); }
+  finally { if (revision === state.revision) { state.loading = false; paint(); } }
+}
+async function loadInitial() {
+  state.loading = true; paint();
+  const revision = state.revision;
+  const results = await Promise.allSettled([request('/status'), request('/profile'), request('/usage'), request('/tasks?limit=12')]);
+  if (revision !== state.revision) return;
+  const [status, profile, usage, history] = results;
+  if (status.status === 'fulfilled') state.status = status.value;
+  if (profile.status === 'fulfilled') { state.profile = profile.value.profile || {}; if (!state.profileDirty) state.profileDraft = { ...state.profile }; }
+  if (usage.status === 'fulfilled') state.usage = usage.value.usage || null;
+  if (history.status === 'fulfilled' && Array.isArray(history.value.tasks)) { state.tasks = history.value.tasks; state.cursor = history.value.nextCursor || null; }
+  const rejected = results.find(item => item.status === 'rejected');
+  state.error = rejected ? message(rejected.reason.message) : '';
+  state.loaded = status.status === 'fulfilled' && profile.status === 'fulfilled';
+  state.loading = false;
+  const pendingId = state.pending?.id || remembered();
+  if (pendingId) {
+    try { const data = await request('/tasks/' + encodeURIComponent(pendingId)); if (data.task) { chooseTask(data.task); state.pending = null; } }
+    catch (error) { if (error.status === 404) { state.pending = null; remember(null); state.notice = '上次提交未建立任务，请核对资料和照片后手动开始。'; } else if (error.name !== 'DisposedError') state.error = message(error.message); }
+  } else if (!state.task) {
+    const running = state.tasks.find(task => ACTIVE.has(task.status));
+    if (running) chooseTask(running);
+  }
+  paint(); schedulePoll(); scheduleQuotaRefresh();
+}
+function schedulePoll() {
+  clearTimeout(state.timer);
+  if (!active() || !state.pending && !ACTIVE.has(state.task?.status)) return;
+  state.timer = setTimeout(() => { if (active()) void refreshTask(); }, 3500);
+}
+function scheduleExpiry() {
+  clearTimeout(state.expiryTimer);
+  if (!active()) return;
+  const times = [...state.tasks, ...(state.task ? [state.task] : [])].flatMap(task => [...(task.sourceImages || []), ...(task.files || [])]).map(file => timestamp(file.expiresAt)).filter(time => Number.isFinite(time) && time > Date.now());
+  const nearest = Math.min(...times);
+  if (Number.isFinite(nearest)) state.expiryTimer = setTimeout(() => paint(), Math.min(2147483647, Math.max(1, nearest - Date.now() + 25)));
+}
+function scheduleQuotaRefresh() {
+  clearTimeout(state.quotaTimer);
+  if (!active()) return;
+  const offsetTime = Date.now() + 8 * 3600000;
+  const nextMidnight = Math.floor(offsetTime / 86400000) * 86400000 + 86400000 - 8 * 3600000;
+  state.quotaTimer = setTimeout(async () => { await loadUsage(); paint(); }, nextMidnight - Date.now() + 1000);
+}
+async function refreshTask() {
+  const id = state.pending?.id || state.task?.id || remembered();
+  if (!id) { await loadInitial(); return; }
+  try {
+    const data = await request('/tasks/' + encodeURIComponent(id));
+    if (data.task) { const previous = state.task?.status; if (state.pending?.kind === 'analysis') releaseFiles(); chooseTask(data.task); state.pending = null; state.error = ''; if (previous !== data.task.status && !ACTIVE.has(data.task.status)) await loadUsage(); }
+  } catch (error) {
+    if (error.name !== 'DisposedError') state.error = error.status === 404 && state.pending ? '尚未查到已提交任务，请稍后再次查询。不会自动重复生成。' : message(error.message);
+  } finally { paint(); schedulePoll(); }
+}
+function readFile(item) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve({ name: item.file.name, dataUrl: reader.result }); reader.onerror = () => reject(new Error('无法读取照片，请移除后重新上传。')); reader.readAsDataURL(item.file); }); }
+async function analyse() {
+  if (state.busy || state.pending || !state.loaded || state.status?.enabled === false) return;
+  state.error = validateRestaurantProfile(state.profileDraft) || validateRestaurantUploads(state.files) || (!state.rights ? '请确认照片使用权和人物授权后继续。' : '');
+  if (state.error) { if (validateRestaurantProfile(state.profileDraft)) state.profileOpen = true; paint(); return; }
+  state.busy = true; paint();
+  const revision = state.revision;
+  try {
+    if (!await saveProfile({ silent: true })) return;
+    const images = await Promise.all(state.files.map(readFile));
+    if (revision !== state.revision) return;
+    const id = crypto.randomUUID(); state.pending = { id, kind: 'analysis' }; remember(id);
+    const data = await request('/tasks', { method: 'POST', body: JSON.stringify({ requestId: id, images, rightsConfirmed: true }) });
+    if (!data.task?.id) throw new Error('提交状态待确认，请查询任务状态。');
+    chooseTask(data.task, true); state.pending = null; releaseFiles(); state.ctx?.toast?.('照片已提交，正在分析可用方向。');
+  } catch (error) {
+    if (error.name !== 'DisposedError') { if (error.status >= 400 && error.status < 500) { state.pending = null; remember(state.task?.id); } state.error = state.pending ? '提交连接中断，正在查询同一任务。不会重复提交照片。' : message(error.message); }
+  } finally { if (revision === state.revision) { state.busy = false; paint(); schedulePoll(); } }
+}
+async function mutateTask(action, body = {}) {
+  if (state.busy || state.pending || !state.task) return;
+  const taskId = state.task.id;
+  state.busy = true; state.error = ''; paint();
+  const revision = state.revision;
+  try {
+    state.pending = { id: action === 'fork' && body.requestId ? body.requestId : taskId, kind: action };
+    remember(state.pending.id);
+    const data = await request('/tasks/' + encodeURIComponent(taskId) + '/' + action, { method: 'POST', body: JSON.stringify(body) });
+    if (!data.task?.id) throw new Error('任务提交状态待确认，请查询任务状态。');
+    chooseTask(data.task, data.task.id !== taskId); state.pending = null;
+    if (action === 'fork') { state.selected = ''; state.acceptSparse = false; state.confirmWarnings = false; }
+    if (['completed', 'generating', 'retrying'].includes(data.task.status)) await loadUsage();
+  } catch (error) {
+    if (error.name !== 'DisposedError') {
+      if (error.status >= 400 && error.status < 500) { state.pending = null; remember(taskId); }
+      if (error.missingFacts && state.task) state.task.missingFacts = error.missingFacts;
+      state.error = state.pending ? '连接中断，正在核对已提交任务，不会自动再次调用。' : message(error.message);
+    }
+  } finally { if (revision === state.revision) { state.busy = false; paint(); schedulePoll(); } }
+}
+async function copySection(section) {
+  const value = restaurantCopyText(state.task, section);
+  if (!value) return;
+  try { await navigator.clipboard.writeText(value); state.ctx?.toast?.('已复制，可粘贴到小红书。'); }
+  catch { state.error = '浏览器暂不允许自动复制，请选中文字后手动复制。'; paint(); }
+}
+export function bindRestaurant(ctx) {
+  ensureAccount();
+  state.ctx = ctx; attachInputs();
+  void loadInitial();
+}
+export function handleRestaurantAction(action, el, ctx) {
+  if (!String(action).startsWith('rest-')) return false;
+  ensureAccount();
+  state.ctx = ctx || state.ctx;
+  switch (action.slice(5)) {
+    case 'edit-profile': state.profileOpen = true; paint(); document.querySelector('.restaurant-profile')?.scrollIntoView({ behavior: globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' }); document.querySelector('#rest-profile-name')?.focus({ preventScroll: true }); break;
+    case 'profile-toggle': state.profileOpen = !state.profileOpen; paint(); break;
+    case 'remove-photo': { if (state.busy) break; const index = Number(el.dataset.index); const item = state.files[index]; if (item) { URL.revokeObjectURL(item.url); state.files.splice(index, 1); state.error = ''; paint(); } break; }
+    case 'analyse': void analyse(); break;
+    case 'select': if (state.task?.directions?.some(item => item.id === el.dataset.id)) { state.selected = el.dataset.id; state.error = ''; state.confirmWarnings = false; paint(); } break;
+    case 'generate': if (restaurantCanGenerate(state.task, selectedDirection(), state)) void mutateTask('generate', { directionId: state.selected, imageMode: state.imageMode, facts: state.facts, acceptSparse: state.acceptSparse }); break;
+    case 'confirm': if (state.confirmWarnings) void mutateTask('confirm', { confirmWarnings: true }); break;
+    case 'retry': void mutateTask('retry'); break;
+    case 'new-direction': if (!originalsExpired(state.task)) void mutateTask('fork', { requestId: crypto.randomUUID() }); break;
+    case 'refresh': void refreshTask(); break;
+    case 'history-refresh': void loadHistory(); void loadUsage(); break;
+    case 'more': void loadHistory(true); break;
+    case 'copy': void copySection(el.dataset.section); break;
+    case 'open-task': { const task = state.tasks.find(item => item.id === el.dataset.id); if (task) { chooseTask(task, true); paint(); document.querySelector('.restaurant-creation')?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' }); void refreshTask(); } break; }
+    case 'new': if (!state.busy && !state.pending) { state.task = null; state.selected = ''; state.facts = {}; state.rights = false; state.acceptSparse = false; state.confirmWarnings = false; state.error = ''; state.notice = ''; remember(null); releaseFiles(); clearTimeout(state.timer); paint(); } break;
+  }
+  return true;
+}
+export function disposeRestaurant() {
+  state.revision++; state.ctx = null; clearTimeout(state.timer); clearTimeout(state.expiryTimer); clearTimeout(state.quotaTimer); state.observer?.disconnect(); state.observer = null;
+  for (const controller of state.controllers) controller.abort(); state.controllers.clear();
+  state.busy = false; state.loading = false; state.rights = false; releaseFiles();
+  if (state.ownerKey !== null && state.ownerKey !== memoryKey()) clearAccountData(memoryKey());
+}

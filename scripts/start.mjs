@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createPreviewServer } from '../preview.mjs';
+import { assertPersistentStorage } from '../services/runtime-paths.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const serviceDir = join(root, 'services/digital-human');
@@ -41,6 +42,7 @@ async function start() {
   const backendPort = portValue('DIGITAL_HUMAN_PORT', 3001);
   if (port === backendPort) throw new Error('PORT 与 DIGITAL_HUMAN_PORT 不能相同。');
   process.env.NODE_ENV = 'production';
+  const dataRoot = assertPersistentStorage({ root });
   process.env.AUTH_MODE ||= 'standalone';
   if (process.env.AUTH_MODE !== 'standalone' || !process.env.AUTH_DATABASE_URL) throw new Error('请配置 AUTH_MODE=standalone 和 AUTH_DATABASE_URL。');
   let publicOrigin;
@@ -49,7 +51,10 @@ async function start() {
   if (!existsSync(nextBin) || !existsSync(join(serviceDir, '.next/BUILD_ID'))) throw new Error('缺少生产构建，请先安装数字人依赖并执行 npm run build。');
 
   const backendUrl = `http://127.0.0.1:${backendPort}`;
-  server = createPreviewServer({ backendUrl, publicOrigin, authRequired: true, aiOptions: { storageDir: join(root, '.data/ai') } });
+  server = createPreviewServer({ backendUrl, publicOrigin, authRequired: true,
+    aiOptions: { storageDir: join(dataRoot, 'ai') },
+    restaurantOptions: { dataDir: join(dataRoot, 'restaurant'), databaseUrl: process.env.RESTAURANT_DATABASE_URL || process.env.AUTH_DATABASE_URL },
+  });
   server.on('error', () => { console.error('主站端口监听失败。'); void stop(1); });
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => void stop());
   await server.ready;

@@ -3,7 +3,8 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY services/digital-human/package*.json ./services/digital-human/
 RUN npm ci --prefix services/digital-human --include=dev
-COPY package.json preview.mjs ./
+COPY package.json package-lock.json preview.mjs ./
+RUN npm ci --include=dev
 COPY scripts ./scripts
 COPY design ./design
 COPY services ./services
@@ -24,5 +25,6 @@ RUN npx remotion browser ensure
 RUN mkdir -p .runtime/jobs .runtime/uploads .runtime/provider-input .runtime/state
 WORKDIR /app
 RUN mkdir -p .data/ai
+VOLUME ["/app/.data", "/app/services/digital-human/.runtime"]
 EXPOSE 8080
 CMD ["node", "scripts/start.mjs"]

@@ -1,6 +1,7 @@
 # Only application source and build configuration enter the image.
 **
 !package.json
+!package-lock.json
 !preview.mjs
 !scripts/
 !scripts/**
@@ -11,6 +12,10 @@
 !services/ai/**
 !services/auth/
 !services/auth/**
+!services/runtime-paths.mjs
+!services/runtime-settings.mjs
+!services/restaurant/
+!services/restaurant/**
 !services/digital-human/
 !services/digital-human/package.json
 !services/digital-human/package-lock.json

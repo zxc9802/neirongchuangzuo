@@ -29,14 +29,17 @@ PUBLIC_BASE_URL=${ZEABUR_WEB_URL}
 
 此项目仍为单实例运行；在 Zeabur 的硬盘设置中分别挂载：
 
-- `/app/.data`：AI 图片、对话任务及调用计数。
+- `/app/.data`：通用图片、对话调用计数，以及餐饮本地媒体与运行控制。
 - `/app/services/digital-human/.runtime`：数字人素材索引、任务状态与本地处理文件。
 
-PostgreSQL 保存账号和会话；COS 保存媒体对象，不能替代上述本地状态目录的持久化。模型、COS 和默认声音的配置见 [双库登录](双库登录.md) 及数字人环境变量示例。
+PostgreSQL 保存账号、会话及餐饮门店资料、任务和正式额度账本；COS 保存媒体对象，不能替代上述本地状态目录的持久化。模型、COS 和默认声音的配置见 [双库登录](双库登录.md) 及数字人环境变量示例。
+
+2026-10-07 只读检查确认旧版本已在线上运行，但应用容器没有挂载这两个目录。**更新前先备份现有目录，挂载后恢复文件，再更新代码。** 新版启动会检查实际挂载并拒绝使用未持久化的容器目录；根目录 Dockerfile 的 VOLUME 声明不能替代平台实际数据卷。餐饮数据库、COS、额度与迁移步骤见 [餐饮小红书实施与部署](餐饮小红书实施与部署.md)。本轮只推送代码，没有执行生产迁移或部署。
 
 ## 本地命令
 
 ```sh
+npm ci
 npm run setup:digital-human
 npm run build
 npm start
@@ -48,6 +51,6 @@ npm start
 
 2026-09-30：JavaScript 语法检查通过，生产启动、HTTPS 代理、服务关闭和工作台鉴权共 12 项测试通过。独立目录中的真实生产构建成功，启动日志确认主站监听 `0.0.0.0`，数字人后端监听 `127.0.0.1`。生产构建下已验证普通账号注册、登录、会话查询、退出、未登录拦截及 Secure/HttpOnly Cookie；临时测试账号已从新库清理。
 
-首次注册探测曾返回 503，随后注册验证成功，原因未确认。既有完整测试的失败记录见 [双库登录](双库登录.md)。本机没有 Docker，尚未构建或运行 Linux 镜像，也尚未在 Zeabur 上线；FFmpeg、Remotion 与供应商真实成片不在此次启动验证范围内。
+以上是 2026-09-30 的历史记录：首次注册探测曾返回 503，随后注册验证成功，原因未确认。2026-10-07 已同步同事线上登录与生产启动代码，新版生产构建和类型检查通过。本机 Docker daemon 不可用，未构建或运行新版 Linux 镜像；FFmpeg、Remotion 与供应商真实成片不在餐饮此次验证范围内。
 
 Zeabur 官方说明：[Dockerfile 部署](https://zeabur.com/docs/en-US/deploy/methods/dockerfile)、[环境变量引用](https://zeabur.com/docs/zh-CN/deploy/config/environment-variables)。

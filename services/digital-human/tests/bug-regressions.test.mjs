@@ -32,7 +32,9 @@ function sandbox() {
     }],
   ]);
   function load(relative) {
-    relative = path.normalize(relative);
+    // Fixture keys use '/', while path.normalize() returns '\\' on Windows.
+    // Use the same cache/mock identity on every OS; native path.join still opens the source file.
+    relative = path.normalize(relative).split(path.sep).join("/");
     if (overrides.has(relative)) return overrides.get(relative);
     if (cache.has(relative)) return cache.get(relative).exports;
     const filename = path.join(repo, relative);
