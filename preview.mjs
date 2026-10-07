@@ -4,6 +4,8 @@ import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { createAIHandler } from './services/ai/server.mjs';
 import { createRestaurantHandler } from './services/restaurant/server.mjs';
+import { createMixHandler } from './services/mix/server.mjs';
+import { loadAIConfig } from './services/ai/server.mjs';
 import { workspaceDataRoot } from './services/runtime-paths.mjs';
 import { loadWorkspaceSettings } from './services/runtime-settings.mjs';
 import { getWorkspaceUser, workspaceAuthRequired } from './services/auth/workspace.mjs';
@@ -14,6 +16,7 @@ const files = new Map([
   ['/auth.css', ['design/auth.css', 'text/css; charset=utf-8']],
   ...['auth', 'workspace-account', 'account-storage'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/app.js', ['design/app.js', 'text/javascript; charset=utf-8']],
+  ...['browser-materials', 'mix-materials'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/style.css', ['design/style.css', 'text/css; charset=utf-8']],
   ['/restaurant.js', ['design/restaurant.js', 'text/javascript; charset=utf-8']],
   ['/restaurant.css', ['design/restaurant.css', 'text/css; charset=utf-8']],
@@ -62,7 +65,7 @@ function safeError(res, status, code, message, close = false) {
   res.end(JSON.stringify({ error: message, code }));
 }
 
-export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, aiOptions, restaurantOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
+export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, aiOptions, restaurantOptions, mixOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
  const backend = new URL(backendUrl);
  const externalOrigin = publicOrigin ? new URL(publicOrigin) : undefined;
  if (backend.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(backend.hostname)) throw new Error('The development backend must use loopback HTTP.');
@@ -70,6 +73,9 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
  const dataRoot = workspaceDataRoot(runtimeSettings);
  const handleAI = createAI({ storageDir: join(dataRoot, 'ai'), ...aiOptions });
  let handleRestaurant;
+ let handleMix;
+ const mix = () => handleMix ||= createMix({ dataDir: join(dataRoot, 'mix'), publicOrigin: externalOrigin?.origin,
+   requireOrigin: authRequired, env: { ...runtimeSettings, OPENLUX_API_KEY: loadAIConfig(runtimeSettings).apiKey }, ...mixOptions });
  const restaurant = () => handleRestaurant ||= createRestaurant({ dataDir: join(dataRoot, 'restaurant'),
    databaseUrl: runtimeSettings.RESTAURANT_DATABASE_URL || process.env.AUTH_DATABASE_URL,
    packageDailyLimit: Number(runtimeSettings.RESTAURANT_PACKAGE_DAILY_LIMIT || 20),
@@ -92,7 +98,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
     return;
   }
   const restaurantPath = path === '/api/restaurant' || path.startsWith('/api/restaurant/');
-  if (path === '/api/workspace/session' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/') || restaurantPath)) {
+  const mixPath = path === '/api/mix' || path.startsWith('/api/mix/') || path === '/api/browser-materials' || path.startsWith('/api/browser-materials/');
+  if (path === '/api/workspace/session' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/') || restaurantPath || mixPath)) {
     let user = null;
     try { if (authRequired) user = await getWorkspaceUser(req, backend); }
     catch { safeError(res, 503, 'AUTH_UNAVAILABLE', '账号服务暂时不可用，请稍后重试。'); return; }
@@ -106,6 +113,18 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ required: authRequired, user })); return;
     }
+  }
+  if (mixPath) {
+    if (!authRequired) {
+      let host;
+      try { host = new URL('http://' + req.headers.host).hostname; } catch {}
+      if (!['localhost', '127.0.0.1', '[::1]'].includes(host) || !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+        safeError(res, 403, 'HOST_REJECTED', '本地预览仅允许本机访问。'); return;
+      }
+      req.authenticatedUserId = 'local-dev';
+    }
+    if (closing) { safeError(res, 503, 'SERVICE_STOPPING', '服务正在重启，请稍后重试。'); return; }
+    await mix()(req, res); return;
   }
   if (restaurantPath) {
     if (closing && !['GET', 'HEAD'].includes(req.method)) {
@@ -173,6 +192,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
    closing = true;
    shutdownPromise = (async () => {
      let failure;
+     try { await handleMix?.shutdown?.(); }
+     catch (error) { failure = error; report('MIX_SHUTDOWN_FAILED'); }
      try { await handleRestaurant?.shutdown?.(); }
      catch (error) { failure = error; report('RESTAURANT_SHUTDOWN_FAILED'); }
      try {

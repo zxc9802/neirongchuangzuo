@@ -192,7 +192,7 @@ function renderPlan(ctx, existing = false) {
     <section class="business-plan-checklist"><h4>准备这些真实素材</h4><ul>${plan.checklist.map(item => `<li>${ctx.icon('check')}${esc(item)}</li>`).join('')}</ul></section>
     <details class="business-plan-details"><summary>查看完整创作要求</summary><p>${esc(plan.prompt)}</p></details>
     ${tooLong ? '<p class="business-form-message" role="alert">这份方案超出当前模块字数限制，请返回精简宣传信息或补充要求。</p>' : ''}
-    <p class="business-plan-note">${session.mode === 'avatar' ? '下一步选择形象和声音，确认口播稿后再提交生成。补充的画面要求保留在完整方案中。' : session.mode === 'image' ? '下一步上传原图，确认创作要求后提交图片生成。' : '这是可编辑的创作方案，视频与混剪生成服务待接入。'}${!existing && ctx.configs[session.mode].prompt ? ' 使用方案会替换当前创作要求，素材继续保留。' : ''}</p>
+    <p class="business-plan-note">${session.mode === 'avatar' ? '下一步选择形象和声音，确认口播稿后再提交生成。补充的画面要求保留在完整方案中。' : session.mode === 'image' ? '下一步上传原图，确认创作要求后提交图片生成。' : session.mode === 'mix' ? '下一步选择素材文件夹，把宣传文案交给服务器匹配实拍镜头并混剪。' : '这是可编辑的创作方案，视频生成服务待接入。'}${!existing && ctx.configs[session.mode].prompt ? ' 使用方案会替换当前创作要求，素材继续保留。' : ''}</p>
     <footer class="business-plan-footer"><div><button type="button" data-plan-action="back" class="secondary">${existing ? '修改信息' : '返回修改'}</button><button type="button" data-plan-action="download" class="business-link">下载方案</button></div><button type="button" data-plan-action="${existing ? 'close' : 'apply'}" class="primary" ${tooLong && !existing ? 'disabled' : ''}>${existing ? '完成' : `用于${esc(ctx.modules[session.mode].title)} ${ctx.icon('arrow')}`}</button></footer>
     </section>`, true);
   document.querySelectorAll('[data-plan-action]').forEach(button => button.addEventListener('click', () => {
