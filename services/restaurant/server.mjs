@@ -5,6 +5,7 @@ import { createRestaurantStore, FILES_TTL_MS } from './store.mjs';
 import { createRestaurantMedia } from './media.mjs';
 import * as images from './images.mjs';
 import { createRestaurantModel } from './model.mjs';
+import { displayModelName } from '../../design/model-labels.js';
 import { inspectCopyQuality } from './copy-quality.mjs';
 import { RestaurantError, UUID, fingerprint, normalizeProfile, requireProfile, normalizeFacts, resolveDirectionFacts, pendingFacts, validateAnalysis, validateDirections, validateCopy, validateAudit, localReview } from './rules.mjs';
 
@@ -76,6 +77,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   function publicTask(task) {
     if (!task) return null;
     const { userId, fingerprint: ignored, ...output } = task;
+    if (Object.hasOwn(output, 'model')) output.model = displayModelName(output.model, 'Plus模型');
     output.files = (task.files ?? []).map(({ key, ...file }) => ({ ...file, expired: file.expired || file.expiresAt <= now(), url: `/api/restaurant/tasks/${task.id}/files/${encodeURIComponent(file.filename)}` }));
     output.sourceImages = (task.sourceImages ?? []).map(({ key, ...photo }) => ({ ...photo, expired: photo.expired || photo.expiresAt <= now(), url: `/api/restaurant/tasks/${task.id}/files/${encodeURIComponent(photo.filename)}` }));
     output.filesExpired = Boolean(output.files.length) && output.files.every(file => file.expired);
@@ -285,7 +287,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
         let origin; try { origin = new URL(req.headers.origin); } catch { throw new RestaurantError('请求来源不正确。', 403); }
         if (origin.host !== req.headers.host) throw new RestaurantError('请求来源不正确。', 403, 'ORIGIN_REJECTED');
       }
-      if (path === '/api/restaurant/status' && req.method === 'GET') { reply(res, 200, { enabled: model.enabled ?? true, packageDailyLimit, retention: { filesDays: 3, tasksDays: 30 }, model: config.chatModel }); return true; }
+      if (path === '/api/restaurant/status' && req.method === 'GET') { reply(res, 200, { enabled: model.enabled ?? true, packageDailyLimit, retention: { filesDays: 3, tasksDays: 30 }, model: displayModelName(config.chatModel, 'Plus模型') }); return true; }
       if (path === '/api/restaurant/usage' && req.method === 'GET') { const usage = await store.usage(userId), raw = await model.usage?.(); reply(res, 200, { usage, budget: raw ? { day: raw.day, limits: raw.limits, used: raw.used, remaining: raw.remaining } : null }); return true; }
       if (path === '/api/restaurant/profile') {
         if (req.method === 'GET') { reply(res, 200, { profile: await store.getProfile(userId) }); return true; }

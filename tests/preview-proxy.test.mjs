@@ -84,5 +84,5 @@ test('unavailable backend returns a readable error while the main workspace rema
   assert.equal((await failed.json()).code, 'SERVICE_UNAVAILABLE');
   const home = await fetch(base + '/');
   assert.equal(home.status, 200);
-  assert.match(await home.text(), /门店 AI/);
+  assert.match(await home.text(), /起芽内容创作/);
 });

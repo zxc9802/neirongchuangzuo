@@ -80,13 +80,14 @@ test('AI routes expose capability status without secrets and preserve the main w
   const body = await status.text();
   assert.doesNotMatch(body, /test-secret|mock\.invalid|Bearer/);
   const data = JSON.parse(body);
-  assert.equal(data.chat.model, CONFIG.chatModel);
-  assert.equal(data.image.model, CONFIG.imageModel);
+  assert.equal(data.chat.model, 'Plus模型');
+  assert.equal(data.image.model, 'Max模型');
+  assert.doesNotMatch(body, /gpt-6-luna|gpt-image|sunburst/i);
   assert.equal(data.image.requiresImage, true);
   assert.equal(calls, 0);
   const home = await fetch(app.base + '/');
   assert.equal(home.status, 200);
-  assert.match(await home.text(), /门店 AI/);
+  assert.match(await home.text(), /起芽内容创作/);
 });
 
 test('cross-site requests are rejected before any model call; same-origin chat preserves history and image input', async t => {
@@ -108,7 +109,9 @@ test('cross-site requests are rejected before any model call; same-origin chat p
   assert.equal(calls.length, 0);
   const response = await app.post('/api/ai/chat', { messages });
   assert.equal(response.status, 200);
-  assert.match((await response.json()).text, /门店环境/);
+  const answer = await response.json();
+  assert.match(answer.text, /门店环境/);
+  assert.equal(answer.model, 'Plus模型');
   assert.equal(calls.length, 1);
   const sent = calls[0];
   assert.equal(sent.url, CONFIG.baseUrl + '/chat/completions');
@@ -117,6 +120,7 @@ test('cross-site requests are rejected before any model call; same-origin chat p
   assert.equal(sent.body.model, CONFIG.chatModel);
   assert.equal(sent.body.stream, false);
   assert.equal(sent.body.messages[0].role, 'system');
+  assert.match(sent.body.messages[0].content, /起芽内容创作.*Plus模型/);
   assert.deepEqual(sent.body.messages.slice(1, 3), messages.slice(0, 2));
   assert.deepEqual(sent.body.messages[3].content, [
     { type: 'text', text: messages[2].content },
@@ -170,9 +174,12 @@ test('image submission sends multipart fields once, survives duplicate delivery,
   try {
     const accepted = await app.post('/api/ai/images', body);
     assert.equal(accepted.status, 202);
-    assert.doesNotMatch(await accepted.text(), /test-secret|fingerprint/);
+    const acceptedBody = await accepted.text();
+    assert.doesNotMatch(acceptedBody, /test-secret|fingerprint|gpt-image|sunburst/i);
+    assert.equal(JSON.parse(acceptedBody).task.model, 'Max模型');
     const duplicate = await app.post('/api/ai/images', body);
     assert.equal(duplicate.status, 200);
+    assert.equal((await duplicate.json()).task.model, 'Max模型');
     const conflict = await app.post('/api/ai/images', { ...body, prompt: '另一张图' });
     assert.equal(conflict.status, 409);
     assert.equal((await conflict.json()).code, 'ID_CONFLICT');
@@ -183,6 +190,8 @@ test('image submission sends multipart fields once, survives duplicate delivery,
     terminal = await finished(app, body.requestId);
   }
   assert.equal(terminal.status, 'completed');
+  assert.equal(terminal.model, 'Max模型');
+  assert.equal(JSON.parse(await readFile(join(app.storageDir, body.requestId, 'task.json'), 'utf8')).model, CONFIG.imageModel);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].url, CONFIG.baseUrl + '/images/edits');
   assert.equal(calls[0].options.headers.Authorization, 'Bearer test-secret');
@@ -211,12 +220,14 @@ test('image submission sends multipart fields once, survives duplicate delivery,
   const tasks = await (await fetch(app.base + '/api/ai/images')).json();
   assert.equal(tasks.tasks.length, 1);
   assert.equal(tasks.tasks[0].id, body.requestId);
+  assert.equal(tasks.tasks[0].model, 'Max模型');
   assert.equal(Object.hasOwn(tasks.tasks[0], 'fingerprint'), false);
 
   await app.close();
   const restarted = await server(t, { storageDir: app.storageDir, fetchImpl: async () => { assert.fail('Completed task was resubmitted'); } });
   const restored = await (await fetch(`${restarted.base}/api/ai/images/${body.requestId}`)).json();
   assert.equal(restored.task.status, 'completed');
+  assert.equal(restored.task.model, 'Max模型');
   assert.equal((await restarted.post('/api/ai/images', body)).status, 200);
   assert.deepEqual(Buffer.from(await (await fetch(restarted.base + media)).arrayBuffer()), PNG);
 });
@@ -258,7 +269,10 @@ test('restarting marks queued or running jobs failed without resubmitting or exp
     assert.equal(task.code, 'INTERRUPTED');
     assert.match(task.error, /可能已经执行/);
     assert.equal(Object.hasOwn(task, 'fingerprint'), false);
-    assert.equal(JSON.parse(await readFile(join(storageDir, task.id, 'task.json'), 'utf8')).status, 'failed');
+    assert.equal(task.model, 'Max模型');
+    const persisted = JSON.parse(await readFile(join(storageDir, task.id, 'task.json'), 'utf8'));
+    assert.equal(persisted.status, 'failed');
+    assert.equal(persisted.model, CONFIG.imageModel);
   }
   assert.equal(calls, 0);
 });
@@ -527,8 +541,15 @@ test('global quotas survive restart, count dispatched failures, and expose only 
   const usage = await (await fetch(app.base + '/api/ai/usage')).json();
   assert.deepEqual(usage.used, { image: 1, chat: 1 });
   assert.deepEqual(usage.remaining, { image: 0, chat: 0 });
-  assert.doesNotMatch(JSON.stringify(usage), /test-secret|private|私密|fingerprint|prompt|messages|base64/);
+  assert.doesNotMatch(JSON.stringify(usage), /test-secret|private|私密|fingerprint|prompt|messages|base64|gpt-6-luna|gpt-image|sunburst/);
   assert.equal(usage.recent.find(item => item.kind === 'chat').status, 'uncertain');
+  assert.equal(usage.recent.find(item => item.kind === 'chat').model, 'Plus模型');
+  assert.equal(usage.recent.find(item => item.kind === 'image').model, 'Max模型');
+  const status = await (await fetch(app.base + '/api/ai/status')).json();
+  assert.deepEqual(status.usage.recent, usage.recent);
+  const ledger = JSON.parse(await readFile(join(app.storageDir, '.runtime-control', 'requests.json'), 'utf8'));
+  assert.equal(ledger.records.find(record => record.id === image.requestId).model, CONFIG.imageModel);
+  assert.equal(ledger.records.find(record => record.id === chat.requestId).model, CONFIG.chatModel);
   await app.close();
   const restarted = await server(t, { storageDir: app.storageDir, config });
   assert.deepEqual((await (await fetch(restarted.base + '/api/ai/usage')).json()).remaining, { image: 0, chat: 0 });

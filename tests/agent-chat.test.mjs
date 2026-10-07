@@ -95,6 +95,9 @@ test('Agent sends multi-turn roles once, escapes the reply, and transfers the se
   await h.respond(0, { text: '先确认材质 <img src=x onerror=alert(1)>', model: 'test-luna' });
   assert.match(h.html(), /&lt;img src=x onerror=alert\(1\)&gt;/);
   assert.doesNotMatch(h.html(), /<img src=x/);
+  assert.match(h.html(), /宣传助手 · Plus模型/);
+  assert.doesNotMatch(h.html(), /test-luna/);
+  assert.equal(h.read().sessions[0].messages.at(-1).model, 'test-luna');
   h.type('材料是棉布');
   h.submit();
   await flush();

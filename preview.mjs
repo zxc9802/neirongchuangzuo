@@ -17,7 +17,7 @@ const files = new Map([
   ['/style.css', ['design/style.css', 'text/css; charset=utf-8']],
   ['/restaurant.js', ['design/restaurant.js', 'text/javascript; charset=utf-8']],
   ['/restaurant.css', ['design/restaurant.css', 'text/css; charset=utf-8']],
-  ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-presets', 'image-preset-ui', 'generated-assets'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
+  ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-presets', 'image-preset-ui', 'generated-assets', 'model-labels'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ...['digital-human', 'digital-human-api'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ['/digital-human.css', ['design/digital-human.css', 'text/css; charset=utf-8']],
   ...['home', 'studios', 'product', 'agent-chat', 'business-flow', 'generated-assets'].map(name=>[`/${name}.css`,[`design/${name}.css`,'text/css; charset=utf-8']]),

@@ -1,4 +1,5 @@
 import { accountStorageKey } from './account-storage.js';
+import { displayModelName, brandModelText } from './model-labels.js';
 const API = '/api/ai';
 const PENDING_KEY = accountStorageKey('store-ai-pending-image-request');
 const ACTIVE = new Set(['queued', 'running']);
@@ -27,7 +28,7 @@ export function validateImageRequest(prompt, images, maxLength = 1000) {
 export function safeImageResultUrl(value, origin = globalThis.location?.origin) {
   try { const url = new URL(value, origin); return url.origin === origin && /^\/api\/ai\/media\/[\da-f-]+\/[\w.-]+$/i.test(url.pathname) && !url.search && !url.hash ? url.pathname : ''; } catch { return ''; }
 }
-function shortError(value) { return String(value || '暂时无法获取任务状态，请稍后刷新。').replace(/sk-[a-z\d_-]+/ig, '[已隐藏]').slice(0, 240); }
+function shortError(value) { return brandModelText(String(value || '暂时无法获取任务状态，请稍后刷新。').replace(/sk-[a-z\d_-]+/ig, '[已隐藏]')).slice(0, 240); }
 function dateLabel(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
 function visibleTasks() { return state.tasks.filter(task => task.status !== 'expired' && (!task.expiresAt || Date.parse(task.expiresAt) > Date.now())); }
 function statusLabel(task) { return ({ queued: '等待生成', running: '正在生成', completed: '已完成', failed: '生成失败' })[task.status] || '状态待确认'; }
@@ -93,7 +94,7 @@ export function updateImageGenerationControls(ctx) {
 }
 export function renderImageGenerationNotice(ctx) {
   const { esc, button, icon } = ctx;
-  return `<div id="image-generation-notice"><div class="image-service-note"><span>${icon('image')} ${esc(state.status?.configured ? 'Image 2.5 · 图片创作' : '图片生成服务')}${Number.isInteger(state.status?.remaining) ? ` · 今日剩余 ${state.status.remaining}/${state.status.dailyLimit}` : ''}</span>${button('image-refresh', '刷新状态', 'textbutton', state.loading ? 'disabled' : '')}</div>${state.submissionError || state.error ? `<p class="image-generation-error" role="alert">${esc(state.submissionError || state.error)}</p>` : ''}</div>`;
+  return `<div id="image-generation-notice"><div class="image-service-note"><span>${icon('image')} ${esc(state.status?.configured ? `${displayModelName(state.status.model, 'Max模型')} · 图片创作` : '图片生成服务')}${Number.isInteger(state.status?.remaining) ? ` · 今日剩余 ${state.status.remaining}/${state.status.dailyLimit}` : ''}</span>${button('image-refresh', '刷新状态', 'textbutton', state.loading ? 'disabled' : '')}</div>${state.submissionError || state.error ? `<p class="image-generation-error" role="alert">${esc(state.submissionError || state.error)}</p>` : ''}</div>`;
 }
 export function renderImageTaskQueue(ctx) {
   const { esc, icon, button } = ctx;

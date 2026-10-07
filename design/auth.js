@@ -7,7 +7,7 @@ const destination = () => {
   return next && /^\/(?!\/)/.test(next) && !/[\\\u0000-\u0020]/.test(next) && !/^\/(login|register)(?:[/?#]|$)/.test(next) ? next : '/';
 };
 if (register) {
-  document.title = '邀请码注册 · 店 AI';
+  document.title = '邀请码注册 · 起芽内容创作';
   document.querySelector('#auth-title').textContent = '使用邀请码创建账号';
   document.querySelector('#auth-description').textContent = '邀请码仅可注册一次，请向管理员获取。';
   document.querySelector('#invite-code-field').hidden = false;
