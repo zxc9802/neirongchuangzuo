@@ -14,10 +14,11 @@
     <form id="auth-form">
       <label>账号<input name="account" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required maxlength="254" placeholder="输入账号"></label>
       <label>密码<span class="password-field"><input name="password" type="password" autocomplete="current-password" required minlength="1" maxlength="128" placeholder="输入密码"><button id="toggle-password" type="button" aria-label="显示密码" aria-pressed="false">显示</button></span></label>
+      <label id="invite-code-field" hidden>邀请码<input name="inviteCode" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" minlength="6" maxlength="6" pattern="(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{6}" placeholder="输入6位邀请码（数字和大写字母）" aria-describedby="auth-description" disabled></label>
       <p id="auth-error" class="auth-error" role="alert" hidden></p>
       <button id="auth-submit" class="auth-submit" type="submit">登录并进入工作台 <span aria-hidden="true">→</span></button>
     </form>
-    <p class="auth-switch"><span id="switch-description">还没有账号？</span><a id="switch-link" href="/register">注册新账号</a></p>
+    <p class="auth-switch"><span id="switch-description">还没有账号？</span><a id="switch-link" href="/register">邀请码注册</a></p>
     <p class="auth-note" id="auth-note">共用电脑使用后，请退出登录。</p>
   </section>
 </main>

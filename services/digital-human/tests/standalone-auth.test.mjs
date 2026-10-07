@@ -21,6 +21,8 @@ await database.connect();
 process.env.AUTH_PUBLIC_URL = "https://studio.test";
 process.env.NODE_ENV = "production";
 const auth = await import("../src/lib/server/standalone-auth.ts");
+const invites = await import("../src/lib/server/registration-invites.mjs");
+await auth.consumeAuthAttempt("test-fixture-schema", 1);
 const { POST, GET } = await import("../src/app/api/auth/[action]/route.ts");
 const { GET: sessionGET } = await import("../src/app/api/session/route.ts");
 const { middleware } = await import("../src/middleware.ts");
@@ -40,7 +42,15 @@ function request(url, { cookie, body, origin = "https://studio.test" } = {}) {
   });
 }
 const context = action => ({ params: Promise.resolve({ action }) });
-const post = (action, body = {}, options = {}) => POST(request(`/api/auth/${action}`, { body, ...options }), context(action));
+async function issueTestInvite() {
+  const code = invites.generateInviteCode();
+  await database.query("INSERT INTO digital_human_auth.registration_invites(code_hash,created_at) VALUES ($1,$2)", [invites.hashInviteCode(code), Date.now()]);
+  return code;
+}
+const post = async (action, body = {}, options = {}) => {
+  if (action === "register" && !Object.hasOwn(body, "inviteCode")) body = { ...body, inviteCode: await issueTestInvite() };
+  return POST(request(`/api/auth/${action}`, { body, ...options }), context(action));
+};
 const tokenOf = response => response.cookies.get(auth.AUTH_COOKIE)?.value;
 const signup = (email, extra = {}) => post("register", { email, nickname: "创作者", password: "correct horse 123", ...extra });
 
@@ -70,7 +80,7 @@ test("duplicate normalized emails are rejected even with concurrent registration
   assert.deepEqual(responses.map(r => r.status).sort(), [200, 409]);
 });
 
-test("plain accounts register with only an account and password, then log in without an email address", async () => {
+test("plain accounts redeem an invitation, then log in with only an account and password", async () => {
   const response = await post("register", { account: " Creator_9802 ", password: "correct horse 123" });
   assert.equal(response.status, 200);
   const registered = await auth.readStandaloneSession(tokenOf(response));

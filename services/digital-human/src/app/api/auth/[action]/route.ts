@@ -62,7 +62,7 @@ export async function POST(request: NextRequest, context: Context) {
       // A persistent global bound also covers random account names and forged proxy headers.
       await consumeAuthAttempt(`global:${action}`, action === "register" ? 30 : 300);
       session = action === "register"
-        ? await registerAccount(account, body.nickname, body.password)
+        ? await registerAccount(account, body.nickname, body.password, body.inviteCode)
         : await loginAccount(account, body.password);
     }
     const response = json({ success: true });

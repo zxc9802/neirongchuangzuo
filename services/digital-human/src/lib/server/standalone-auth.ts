@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "no
 import { Pool, type PoolClient } from "pg";
 import type { MainAppSession } from "../main-app-sso";
 import { authenticateInternal, internalAccountExists, internalIdentity, internalRevision, validateInternalAccount } from "./internal-auth";
+import { hashInviteCode, normalizeInviteCode, REGISTRATION_INVITES_SCHEMA_SQL } from "./registration-invites.mjs";
 
 export const AUTH_COOKIE = "digital_human_session";
 const SESSION_MS = 30 * 24 * 60 * 60_000;
@@ -42,6 +43,7 @@ async function db() {
           bucket TEXT PRIMARY KEY, count INTEGER NOT NULL, expires_at BIGINT NOT NULL
         );
       `);
+      await client.query(REGISTRATION_INVITES_SCHEMA_SQL);
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
@@ -64,6 +66,17 @@ async function transaction<T>(action: (client: PoolClient) => Promise<T>): Promi
 export class AuthError extends Error {
   readonly status: number;
   constructor(message: string, status = 400) { super(message); this.status = status; }
+}
+
+const INVALID_INVITE = "邀请码无效或已使用，请向管理员获取新邀请码";
+
+export function requireRegistrationInvite(value: unknown): string {
+  if (value === undefined || value === null || (typeof value === "string" && !value.trim())) {
+    throw new AuthError("请输入邀请码");
+  }
+  const code = normalizeInviteCode(value);
+  if (!code) throw new AuthError(INVALID_INVITE, 403);
+  return code;
 }
 
 export function normalizeAccount(value: unknown): string {
@@ -118,18 +131,27 @@ async function issueSession(client: PoolClient, userId: string) {
   return { token, expiresAt };
 }
 
-export async function registerAccount(email: string, nickname: unknown, password: unknown) {
+export async function registerAccount(email: string, nickname: unknown, password: unknown, inviteCode?: unknown) {
+  const codeHash = hashInviteCode(requireRegistrationInvite(inviteCode));
   validatePassword(password);
   if (nickname === undefined) nickname = email.slice(0, 30);
   if (typeof nickname !== "string" || nickname.trim().length < 1 || nickname.trim().length > 30) {
     throw new AuthError("昵称需要 1–30 个字符");
   }
-  if (await internalAccountExists(email)) throw new AuthError("此账号已有内部账号记录，请使用原账号登录", 409);
-  const encoded = await hashPassword(password);
   try {
     return await transaction(async client => {
+      // The row lock and redemption share the account/session transaction: a
+      // failed registration rolls back the code; concurrent users cannot reuse it.
+      const { rows: [invite] } = await client.query<{ redeemed_at: string | null; expires_at: string | null }>(
+        "SELECT redeemed_at, expires_at FROM digital_human_auth.registration_invites WHERE code_hash = $1 FOR UPDATE", [codeHash]);
+      if (!invite || invite.redeemed_at !== null || (invite.expires_at !== null && Number(invite.expires_at) <= Date.now())) {
+        throw new AuthError(INVALID_INVITE, 403);
+      }
+      if (await internalAccountExists(email)) throw new AuthError("此账号已有内部账号记录，请使用原账号登录", 409);
+      const encoded = await hashPassword(password);
       const id = `account_${randomUUID()}`;
       await client.query("INSERT INTO digital_human_auth.users VALUES ($1, $2, $3, $4, $5)", [id, email, nickname.trim(), encoded, Date.now()]);
+      await client.query("UPDATE digital_human_auth.registration_invites SET redeemed_at=$1, redeemed_by=$2 WHERE code_hash=$3", [Date.now(), id, codeHash]);
       return issueSession(client, id);
     });
   } catch (error) {
