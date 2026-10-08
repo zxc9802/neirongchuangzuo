@@ -57,7 +57,6 @@ export function renderVideoReplica(ctx) {
   const task = state.current, finished = task && ['completed', 'failed', 'expired'].includes(task.status);
   return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · SEEDANCE 2.0</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}</div>
-      <div class="replica-direction"><strong>已为你设定复刻要求</strong><div><span>保持人物形象</span><span>自然情绪与表情</span><span>无字幕、无文字</span></div><details><summary>查看复刻提示词</summary><p>${ctx.esc(state.config?.prompt || '正在读取…')}</p></details></div>
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
       <div class="replica-submit-area"><p id="replica-cost">${task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '上传后确认时长和积分；失败退回预留积分。'}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(state.error || state.pollError || (!state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : ''))}</p>
         <button type="button" id="replica-submit" class="primary" ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传与提交…' : pending(task) ? labels[task.status] : state.uploaded || (task?.photo && task?.video && !Object.keys(state.files).length) ? '开始人物复刻' : '上传素材，查看费用'}</button>
