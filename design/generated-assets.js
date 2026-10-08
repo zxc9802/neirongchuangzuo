@@ -33,7 +33,7 @@ export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = 
     const window = generatedAssetWindow(task, now);
     if (!window || typeof task.id !== 'string') continue;
     for (const [index, image] of (Array.isArray(task.images) ? task.images : []).entries()) {
-      const url = localUrl(image?.url, /^\/api\/ai\/media\/[a-f\d-]+\/result-[1-4]\.(?:png|jpg|webp)$/i);
+      const url = localUrl(image?.url, /^\/api\/ai\/media\/[a-f\d-]+\/result-(?:[1-9]|1[0-5])\.(?:png|jpg|webp)$/i);
       if (!url || !url.startsWith(`/api/ai/media/${task.id}/`)) continue;
       records.push({ key: `image:${task.id}:${index}`, type: 'image', source: 'AI 图片', title: imageTitle(task.prompt), url, download: url + '?download=1', filename: image.filename || 'generated-image.png', ...window });
     }
@@ -52,8 +52,8 @@ export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = 
     const window = generatedAssetWindow(task, now);
     if (!window || task.filesExpired || task.review?.status === 'blocked' || typeof task.id !== 'string' || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(task.id)) continue;
     for (const file of Array.isArray(task.files) ? task.files : []) {
-      if (file?.role !== 'image' || file.expired || !/^0[1-9]\.(?:jpg|png|webp)$/i.test(file.filename || '')) continue;
-      const url = localUrl(file.url, /^\/api\/restaurant\/tasks\/[a-f\d-]{36}\/files\/0[1-9]\.(?:jpg|png|webp)$/i);
+      if (file?.role !== 'image' || file.expired || !/^(?:0[1-9]|1[0-5])\.(?:jpg|png|webp)$/i.test(file.filename || '')) continue;
+      const url = localUrl(file.url, /^\/api\/restaurant\/tasks\/[a-f\d-]{36}\/files\/(?:0[1-9]|1[0-5])\.(?:jpg|png|webp)$/i);
       if (!url || url !== `/api/restaurant/tasks/${task.id}/files/${file.filename}`) continue;
       const fileExpiry = timestamp(file.expiresAt);
       const expires = Math.min(window.expires, fileExpiry);

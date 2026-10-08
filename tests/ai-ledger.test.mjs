@@ -66,7 +66,7 @@ test('batch reservations atomically reserve every image or none, and duplicate b
 test('concurrent image batches cannot overbook quota and invalid batches leave no reservations', async t => {
   const { create } = await fixture(t, { limits: { imageDaily: 3, perMinute: 10 } });
   const ledger = create();
-  for (const bad of [[], null, [input('same'), input('same')], Array.from({ length: 5 }, (_, i) => input(`too-many-${i}`)), [input('valid'), input('bad', { model: 2 })]]) {
+  for (const bad of [[], null, [input('same'), input('same')], Array.from({ length: 16 }, (_, i) => input(`too-many-${i}`)), [input('valid'), input('bad', { model: 2 })]]) {
     await assert.rejects(ledger.reserveBatch(bad), { code: 'INVALID_REQUEST_ID' });
   }
   const results = await Promise.allSettled([ledger.reserveBatch([input('one'), input('one-2')]), ledger.reserveBatch([input('two'), input('two-2')])]);

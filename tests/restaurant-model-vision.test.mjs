@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import sharp from 'sharp';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createRestaurantModel } from '../services/restaurant/model.mjs';
 import { COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT } from '../services/restaurant/prompts.mjs';
 
@@ -98,6 +101,54 @@ test('publication audit receives the same attachments separately from its struct
   assert.deepEqual(input.facts, facts); assert.deepEqual(input.copy, copy());
   assert.deepEqual(structuredClone(payload), snapshot);
   assertCompletedAttempt(app);
+});
+
+test('known unsent reserve and dispatch rate limits wait in short steps using the same id and only send once', async () => {
+  let reserves = 0, dispatches = 0, calls = 0;
+  const ids = [], delays = [], waits = [], finishes = [];
+  const limited = () => Object.assign(new Error('unsent rate limit'), { code: 'RATE_LIMITED' });
+  const ledger = { ready: Promise.resolve(), async reserve(record) { ids.push(record.id); if (++reserves === 1) throw limited(); }, async markDispatched(id) { ids.push(id); if (++dispatches === 1) throw limited(); }, async finish(id, details) { finishes.push({ id, ...details }); }, async summary() { return {}; } };
+  const model = createRestaurantModel({ config, ledger, sleepImpl: async ms => { delays.push(ms); }, fetchImpl: async () => { calls++; return new Response(JSON.stringify({ choices: [{ message: { content: '{"directions":[]}' } }] })); } });
+  assert.deepEqual(await model.recommend([], profile, { onBudgetWait: info => waits.push(info.waitedMs) }), []);
+  assert.equal(calls, 1); assert.equal(new Set(ids).size, 1); assert.deepEqual(delays, [5000, 5000]); assert.deepEqual(waits, [0, 5000]);
+  assert.equal(finishes.length, 1); assert.equal(finishes[0].status, 'completed');
+});
+
+test('waiting closes before dispatch, daily exhausted budgets do not wait, and bounded waits cannot replay model calls', async t => {
+  for (const scenario of ['stop', 'daily', 'timeout']) await t.test(scenario, async () => {
+    let calls = 0, sleeps = 0, model;
+    const ledger = { ready: Promise.resolve(), async reserve() { throw Object.assign(new Error('budget'), { code: scenario === 'daily' ? 'DAILY_QUOTA_EXCEEDED' : 'RATE_LIMITED' }); }, async markDispatched() { throw new Error('must not dispatch'); }, async finish() {}, async summary() { return {}; } };
+    model = createRestaurantModel({ config, ledger, budgetWaitMaxMs: 10_000, sleepImpl: async () => { sleeps++; if (scenario === 'stop') model.stop(); }, fetchImpl: async () => { calls++; } });
+    await assert.rejects(model.recommend([], profile), { code: scenario === 'stop' ? 'SERVICE_CLOSING' : scenario === 'daily' ? 'DAILY_QUOTA_EXCEEDED' : 'RATE_LIMITED' });
+    assert.equal(calls, 0); assert.equal(sleeps, scenario === 'stop' ? 1 : scenario === 'daily' ? 0 : 2);
+  });
+});
+
+test('thirty-photo analysis plus recommendation, writing and audit complete thirteen charged calls with a shared ten-per-minute ledger', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'restaurant-budget-'));
+  let clock = Date.now(), calls = 0;
+  const delays = [];
+  const model = createRestaurantModel({ config: { ...config, limits: { imageDaily: 20, chatDaily: 100, perMinute: 10 } }, storageDir: root, now: () => clock,
+    sleepImpl: async ms => { delays.push(ms); clock += ms; }, fetchImpl: async (_url, options) => {
+      calls++;
+      const body = JSON.parse(options.body), message = body.messages[1].content;
+      const data = JSON.parse(Array.isArray(message) ? message[0].text : message);
+      let output;
+      if (body.messages[0].content.includes('逐张分析本批')) output = { images: data.images.map(item => ({ imageId: item.imageId, imageType: 'food', visibleObjects: ['真实餐盘'], possibleScene: ['午餐'], qualityScore: 80, privacyRisk: 'none', usable: true, rejectionReason: '', visibleTexts: [], textRisk: 'none', riskReasons: [] })) };
+      else if (body.messages[0].content.includes('推荐1至4个')) output = { directions: [{ ...direction, contentGoal: '真实午餐', recommendationReason: '真实餐盘', expectedAction: '到店', supportingImageIds: data.images.map(item => item.imageId), missingFacts: [] }] };
+      else if (body.messages[0].content === AUDIT_PROMPT) output = { status: 'passed', warnings: [], errors: [] };
+      else output = { ...copy(), imageOrder: data.images.map(item => item.imageId), claims: [{ text: profile.name, factKeys: ['name'], imageIds: [] }] };
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }));
+    } });
+  t.after(async () => { await model.close(); await rm(root, { recursive: true, force: true }); });
+  const all = [];
+  for (let start = 0; start < 30; start += 3) all.push(...await model.analyse(Array.from({ length: 3 }, (_, index) => ({ ...photos[0], id: `photo-${start + index + 1}` })), profile));
+  const recommended = await model.recommend(all, profile);
+  const output = await model.write({ profile, analysis: all.slice(0, 15), direction: recommended[0], facts: {} });
+  assert.equal(output.imageOrder.length, 15);
+  await model.audit({ copy: output, profile, images: all.slice(0, 15) });
+  assert.equal(calls, 13); assert.equal((await model.usage()).used.chat, 13); assert.equal((await model.usage()).remaining.chat, 87);
+  assert.ok(delays.length > 0); assert.ok(delays.every(ms => ms <= 5000));
 });
 
 test('unknown write or audit transport failure is charged as uncertain once and never automatically replayed', async t => {

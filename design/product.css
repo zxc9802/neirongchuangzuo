@@ -68,6 +68,10 @@
 .image-count-options>div{display:flex;gap:5px}
 .image-count-options button,.image-single-count{display:inline-flex;align-items:center;justify-content:center;min-width:38px;min-height:30px;padding:4px 7px;border:1px solid #e0e5ec;border-radius:6px;color:#647083;background:#fff;font-size:11px}
 .image-count-options button.selected{color:#24518c;background:#edf4fd;border-color:#5b82b5}
+.image-count-options{font-size:11px;color:#596778}
+.image-count-options select{min-height:36px;min-width:78px;border:1px solid #dce3ed;border-radius:7px;background:#fff;color:#4b6281;padding:5px 8px;font:inherit}
+.image-upload-progress{display:flex;flex-wrap:wrap;align-items:center;gap:7px 12px;margin:10px 3px 0;padding:10px 11px;background:#f1f6fd;border:1px solid #dbe7f6;border-radius:8px;font-size:11px;line-height:1.7;color:#5e7798}
+.image-upload-progress small{flex-basis:100%;font-size:10px;color:#7d8ca0}
 .image-quota-estimate{font-size:10px;color:#6b7788;line-height:1.6;white-space:nowrap}
 .image-mode-description{font-size:10px;color:#788392;line-height:1.7;margin:10px 0 0}
 .image-mode-option:disabled,.image-count-options button:disabled{opacity:.65;cursor:default}

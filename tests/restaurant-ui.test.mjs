@@ -10,12 +10,12 @@ const direction = { id: 'food', supportingImageIds: ['photo-1'], missingFacts: [
 test('restaurant entry requires four real merchant fields and validates original photos before upload', () => {
   assert.equal(validateRestaurantProfile(profile), '');
   assert.match(validateRestaurantProfile({ ...profile, address: '  ' }), /门店地址/);
-  assert.match(validateRestaurantUploads([]), /至少 1 张/);
-  assert.match(validateRestaurantUploads(Array.from({ length: 10 }, () => photo())), /最多上传 9/);
+  assert.match(validateRestaurantUploads([]), /至少.*1 张/);
+  assert.match(validateRestaurantUploads(Array.from({ length: 31 }, () => photo())), /最多添加 30/);
   assert.match(validateRestaurantUploads([photo(1, 'image/svg+xml')]), /JPG/);
   assert.match(validateRestaurantUploads([photo(0)]), /重新上传/);
-  assert.match(validateRestaurantUploads([photo(8 * 1024 * 1024 + 1)]), /单张/);
-  assert.match(validateRestaurantUploads(Array.from({ length: 4 }, () => photo(7 * 1024 * 1024))), /总大小/);
+  assert.match(validateRestaurantUploads([photo(20 * 1024 * 1024 + 1)]), /单张/);
+  assert.match(validateRestaurantUploads(Array.from({ length: 21 }, () => photo(20 * 1024 * 1024))), /总大小/);
   assert.equal(validateRestaurantUploads(Array.from({ length: 3 }, () => photo(8 * 1024 * 1024))), '');
 });
 
@@ -43,7 +43,7 @@ test('switching to a conservative direction excludes required facts left over fr
   const task = { status: 'awaiting_facts', selectedDirectionId: 'group-buy', missingFacts: staleFacts, analysis: [{ usable: true }] };
   const conservative = { id: 'store-scene', missingFacts: [] };
   assert.deepEqual(restaurantMissingFacts(task, conservative), []);
-  assert.equal(restaurantCanGenerate(task, conservative), true);
+  assert.equal(restaurantCanGenerate(task, conservative, { acceptSparse: true }), true);
   assert.deepEqual(restaurantMissingFacts(task, { id: 'group-buy', missingFacts: [] }), staleFacts);
   assert.equal(restaurantCanGenerate(task, { id: 'group-buy', missingFacts: [] }), false);
   assert.deepEqual(restaurantMissingFacts({ selection: { directionId: 'group-buy' }, missingFacts: staleFacts }, { id: 'group-buy' }), staleFacts);
@@ -182,15 +182,16 @@ test('restaurant merchant entry opens the server profile and switching accounts 
 });
 
 test('double click submits one analysis task; interrupted submission only queries its saved ID and escapes model text', async () => {
-  const keys = ['document', 'fetch', 'FileReader', 'sessionStorage', 'location'];
+  const keys = ['document', 'fetch', 'FileReader', 'sessionStorage', 'location', 'createImageBitmap'];
   const original = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
   const originalCreate = URL.createObjectURL, originalRevoke = URL.revokeObjectURL;
   const saved = new Map(), calls = [];
   const listeners = {};
   const inputs = Object.fromEntries(['restaurant-file-input', 'restaurant-rights'].map(name => [name, { addEventListener: (event, callback) => { listeners[name + ':' + event] = callback; } }]));
-  let markup = '', releasePost, taskId;
+  let markup = '', releasePost, taskId, currentTask;
   const root = { contains: () => false, querySelector: selector => inputs[selector.slice(1)] || null, querySelectorAll: () => [], set outerHTML(value) { markup = value; } };
-  globalThis.document = { activeElement: null, querySelector: selector => selector === '#restaurant-workspace' ? root : null, getElementById: () => null };
+  globalThis.document = { activeElement: null, querySelector: selector => selector === '#restaurant-workspace' ? root : null, getElementById: () => null , createElement: () => ({ width: 1, height: 1, getContext: () => ({ fillRect() {}, drawImage() {} }), toBlob: callback => callback(new Blob(['encoded'], { type: 'image/jpeg' })) }) };
+  globalThis.createImageBitmap = async () => ({ width: 1200, height: 900, close() {} });
   globalThis.location = { origin: 'http://127.0.0.1:5173' };
   globalThis.sessionStorage = { getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value), removeItem: key => saved.delete(key) };
   URL.createObjectURL = () => 'blob:local-test'; URL.revokeObjectURL = () => {};
@@ -200,7 +201,9 @@ test('double click submits one analysis task; interrupted submission only querie
     if (url.endsWith('/status')) return Response.json({ enabled: true });
     if (url.endsWith('/profile')) return Response.json({ profile });
     if (url.endsWith('/usage')) return Response.json({ usage: { limit: 20, remaining: 20 } });
-    if (options.method === 'POST') { taskId = JSON.parse(options.body).requestId; return new Promise((resolve, reject) => { releasePost = () => reject(new TypeError('Connection interrupted')); }); }
+    if (options.method === 'POST' && url.endsWith('/tasks')) {taskId=JSON.parse(options.body).requestId;currentTask={id:taskId,status:'uploading',imageCount:1,uploadedCount:0,createdAt:Date.now()};return Response.json({task:currentTask});}
+    if (options.method === 'POST' && url.endsWith('/photos')) {currentTask={...currentTask,uploadedCount:1};return Response.json({task:currentTask});}
+    if (options.method === 'POST' && url.endsWith('/analyse')) { return new Promise((resolve, reject) => { releasePost = () => reject(new TypeError('Connection interrupted')); }); }
     if (url === `/api/restaurant/tasks/${taskId}`) return Response.json({ task: { id: taskId, status: 'awaiting_selection', createdAt: Date.now(), sourceImages: [{ id: 'photo-1', expiresAt: Date.now() + 60000, url: `/api/restaurant/tasks/${taskId}/files/original.jpg` }], analysis: [{ imageId: 'photo-1', usable: true }], directions: [{ id: 'food', label: '<img src=x onerror=alert(1)>', targetCustomer: '附近居民', recommendationReason: '<script>alert(1)</script>', supportingImageIds: ['photo-1'], missingFacts: [] }] } });
     return Response.json({ tasks: [], nextCursor: null });
   };
@@ -215,13 +218,15 @@ test('double click submits one analysis task; interrupted submission only querie
     module.handleRestaurantAction('rest-analyse', {}, ctx);
     module.handleRestaurantAction('rest-analyse', {}, ctx);
     await settle(() => !!releasePost);
-    assert.equal(calls.filter(call => call.method === 'POST').length, 1);
+    assert.equal(calls.filter(call => call.method === 'POST' && call.url.endsWith('/analyse')).length, 1);
+    assert.equal(calls.filter(call => call.method === 'POST' && call.url.endsWith('/tasks')).length, 1);
     assert.equal(saved.get('restaurant-active-task'), taskId);
     releasePost();
     await settle(() => markup.includes('提交连接中断'));
     module.handleRestaurantAction('rest-refresh', {}, ctx);
     await settle(() => markup.includes('选择一个内容方向'));
-    assert.equal(calls.filter(call => call.method === 'POST').length, 1);
+    assert.equal(calls.filter(call => call.method === 'POST' && call.url.endsWith('/analyse')).length, 1);
+    assert.equal(calls.filter(call => call.method === 'POST' && call.url.endsWith('/tasks')).length, 1);
     assert.ok(markup.includes('&lt;img src=x onerror=alert(1)&gt;'));
     assert.ok(markup.includes('&lt;script&gt;alert(1)&lt;/script&gt;'));
     assert.ok(!markup.includes('<script>'));

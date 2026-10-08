@@ -33,9 +33,9 @@ async function storage(t) {
   return directory;
 }
 
-async function server(t, { storageDir, config = CONFIG, fetchImpl = async () => { throw new Error('Unexpected paid operation'); }, downloadImpl = async () => { throw new Error('Unexpected remote download'); }, now = Date.now, cleanupIntervalMs = 60_000, bodyTimeoutMs, retentionOptions } = {}) {
+async function server(t, { storageDir, config = CONFIG, fetchImpl = async () => { throw new Error('Unexpected paid operation'); }, downloadImpl = async () => { throw new Error('Unexpected remote download'); }, now = Date.now, cleanupIntervalMs = 60_000, bodyTimeoutMs, retentionOptions, logger = console } = {}) {
   storageDir ||= await storage(t);
-  const preview = createPreviewServer({ aiOptions: { config, storageDir, fetchImpl, downloadImpl, now, cleanupIntervalMs, bodyTimeoutMs, retentionOptions } });
+  const preview = createPreviewServer({ aiOptions: { config, storageDir, fetchImpl, downloadImpl, now, cleanupIntervalMs, bodyTimeoutMs, retentionOptions, logger } });
   await preview.ready;
   preview.listen(0, '127.0.0.1');
   await once(preview, 'listening');
@@ -164,7 +164,7 @@ test('image input validation rejects missing images, excess prompt, invalid MIME
 test('generation modes validate counts before reserving quota or calling the provider', async t => {
   let calls = 0;
   const app = await server(t, { fetchImpl: async () => { calls++; return imageResult(); } });
-  for (const options of [{ generationMode: 'unknown', outputCount: 2 }, { generationMode: null }, { generationMode: 'single', outputCount: 2 }, { generationMode: 'series', outputCount: 1 }, { generationMode: 'variations', outputCount: 5 }, { generationMode: 'series', outputCount: '2' }, { generationMode: 'series' }, { outputCount: 0 }]) {
+  for (const options of [{ generationMode: 'unknown', outputCount: 2 }, { generationMode: null }, { generationMode: 'single', outputCount: 2 }, { generationMode: 'series', outputCount: 1 }, { generationMode: 'variations', outputCount: 16 }, { generationMode: 'series', outputCount: '2' }, { generationMode: 'series' }, { outputCount: 0 }]) {
     const response = await app.post('/api/ai/images', input(options));
     assert.equal(response.status, 400);
     assert.equal((await response.json()).code, 'INVALID_GENERATION_MODE');
@@ -220,14 +220,17 @@ test('four variations override preset visual instructions with distinct styles a
   prompts.forEach((prompt, index) => { assert.match(prompt, new RegExp(task.images[index].style)); assert.match(prompt, /覆盖用户预设中的视觉布局和风格指令/); assert.match(prompt, /只能依据用户上传的原图/); });
 });
 
-test('nine original references remain attached to every series request without dropping facts for an extra style image', async t => {
+test('nine originals are distributed into bounded per-position groups plus a separate visual style reference', async t => {
   const calls = [];
   const app = await server(t, { fetchImpl: async (_url, options) => { calls.push(options.body); return imageResult(); } });
   const body = input({ images: Array.from({ length: 9 }, () => IMAGE), generationMode: 'series', outputCount: 2 });
   await app.post('/api/ai/images', body);
   assert.equal((await finished(app, body.requestId)).completedCount, 2);
-  assert.ok(calls.every(form => form.getAll('image').length === 9));
-  assert.doesNotMatch(calls[1].get('prompt'), /最后一张附图/);
+  assert.equal(calls[0].getAll('image').length, 4);
+  assert.equal(calls[1].getAll('image').length, 5);
+  assert.match(calls[1].get('prompt'), /最后一张附图.*不作为.*事实依据/);
+  assert.match(calls[0].get('prompt'), /第 1、2、3、4 张/);
+  assert.match(calls[1].get('prompt'), /第 5、6、7、8 张/);
 });
 
 test('image sets require enough quota for the whole set before dispatch and successful images each count once', async t => {
@@ -573,6 +576,7 @@ test('completed images expire exactly 72 hours after completion across list, det
   release();
   const task = await finished(app, body.requestId);
   const deadline = clock + RETENTION_MS;
+  assert.equal(task.status, 'completed', `generation failed before retention assertions: ${task.code || 'UNKNOWN'}`);
   assert.equal(task.createdAt, '2026-09-01T00:00:00.000Z');
   assert.equal(task.completedAt, '2026-09-01T01:00:00.000Z');
   assert.equal(task.expiresAt, new Date(deadline).toISOString());
@@ -845,7 +849,8 @@ test('failed multi-image outputs are immediately removed and remain inaccessible
 
 test('storage write failures stop paid calls and release known unsent reservations', async t => {
   let calls = 0; let writes = 0;
-  const app = await server(t, { fetchImpl: async () => { calls++; return imageResult(); }, retentionOptions: { fsOverrides: { writeFile: async () => { writes++; throw Object.assign(new Error('private disk full'), { code: 'ENOSPC' }); } } } });
+  const logs = [];
+  const app = await server(t, { logger: { warn: value => logs.push(value) }, fetchImpl: async () => { calls++; return imageResult(); }, retentionOptions: { fsOverrides: { writeFile: async () => { writes++; throw Object.assign(new Error('private disk full'), { code: 'ENOSPC' }); } } } });
   assert.equal((await app.post('/api/ai/images', input())).status, 503);
   assert.equal((await app.post('/api/ai/images', input())).status, 503);
   const usage = await (await fetch(app.base + '/api/ai/usage')).json();
@@ -853,6 +858,8 @@ test('storage write failures stop paid calls and release known unsent reservatio
   assert.equal(usage.healthy, false);
   assert.ok(writes > 0);
   assert.equal(calls, 0);
+  assert.ok(logs.some(value => value.filesystemCode === 'ENOSPC'));
+  assert.doesNotMatch(JSON.stringify(logs), /private disk full|store-ai-contract|task\.json|test-secret/);
 });
 
 test('slow unfinished JSON uploads time out without a model call and do not block shutdown', async t => {

@@ -262,8 +262,10 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
       const requested = checked.filter(item => item.kind === kind).length;
       if (requested && active.filter(record => record.kind === kind && record.day === day).length + requested > effectiveLimits[`${kind}Daily`]) throw quotaError(kind);
     }
-    if (active.filter(record => recentAttempt(record, timestamp)).length + checked.length > effectiveLimits.perMinute) throw rateError();
-    const reserved = checked.map(input => ({ ...input, status: 'reserved', day, createdAt: timestamp }));
+    // A set reserves its daily allowance atomically. Its individual calls are
+    // paced at dispatch; reserving 15 positions must not require a 15/min limit.
+    if (checked.length === 1 && active.filter(record => recentAttempt(record, timestamp) && (Number.isFinite(record.dispatchedAt) || !record.batchReservation)).length >= effectiveLimits.perMinute) throw rateError();
+    const reserved = checked.map(input => ({ ...input, status: 'reserved', day, createdAt: timestamp, ...(checked.length > 1 ? { batchReservation: true } : {}) }));
     const next = new Map(records);
     for (const record of reserved) next.set(record.id, record);
     await persist(next);
@@ -280,7 +282,7 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
     },
     reserveBatch(inputs) {
       return run(async () => {
-        if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 4) throw error('INVALID_REQUEST_ID', '一次最多预留四张图片。', 400);
+        if (!Array.isArray(inputs) || inputs.length < 1 || inputs.length > 15) throw error('INVALID_REQUEST_ID', '一次最多预留十五张图片。', 400);
         return reserveInputs(inputs);
       });
     },
@@ -296,7 +298,7 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
         if (others.filter(candidate => candidate.kind === record.kind && candidate.day === day).length >= effectiveLimits[`${record.kind}Daily`]) {
           throw quotaError(record.kind);
         }
-        if (others.filter(candidate => recentAttempt(candidate, timestamp)).length >= effectiveLimits.perMinute) throw rateError();
+        if (others.filter(candidate => Number.isFinite(candidate.dispatchedAt) && recentAttempt(candidate, timestamp)).length >= effectiveLimits.perMinute) throw rateError();
         const updated = { ...record, status: 'dispatched', dispatchedAt: timestamp, day };
         await persist(new Map(records).set(id, updated));
         return copy(updated);

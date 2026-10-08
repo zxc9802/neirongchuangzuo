@@ -83,5 +83,6 @@ test('ZIP packages use ordered safe filenames and contain the publishable copy',
   assert.match(strFromU8(extracted['发布文案.txt']), /老板真实分享/);
   assert.match(strFromU8(extracted['发布文案.txt']), /人工确认/);
   assert.throws(() => createPackageZip([], ''), { code: 'invalid_image' });
-  assert.throws(() => createPackageZip(Array(10).fill(image), ''), { code: 'invalid_image' });
+  assert.equal(Object.keys(unzipSync(createPackageZip(Array(15).fill(image), {}))).length, 16);
+  assert.throws(() => createPackageZip(Array(16).fill(image), ''), { code: 'invalid_image' });
 });

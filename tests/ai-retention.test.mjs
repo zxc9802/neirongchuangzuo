@@ -99,14 +99,14 @@ test('failed and interrupted tasks immediately discard managed half-results and 
     await ctx.output(task.id);
     await ctx.output(task.id, 'result-4.webp');
     await ctx.output(task.id, 'source.png', 'keep');
-    await ctx.output(task.id, 'result-5.png', 'unknown keep');
+    await ctx.output(task.id, 'result-16.png', 'unknown keep');
   }
   await ctx.store.start(jobs);
   for (const task of jobs.values()) {
     await missing(join(ctx.storageDir, task.id, 'result-1.png'));
     await missing(join(ctx.storageDir, task.id, 'result-4.webp'));
     assert.equal(await readFile(join(ctx.storageDir, task.id, 'source.png'), 'utf8'), 'keep');
-    assert.equal(await readFile(join(ctx.storageDir, task.id, 'result-5.png'), 'utf8'), 'unknown keep');
+    assert.equal(await readFile(join(ctx.storageDir, task.id, 'result-16.png'), 'utf8'), 'unknown keep');
   }
   assert.equal(ctx.store.status().deletedFiles, 4);
 });

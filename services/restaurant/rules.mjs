@@ -94,7 +94,7 @@ export function validateDirections(value, analysis, profile) {
   return value.directions.map((item, index) => {
     if (!item || !['id', 'label', 'targetCustomer', 'consumptionScene', 'contentGoal', 'recommendationReason', 'expectedAction'].every(key => text(item[key], 600) && item[key].trim())
       || !/^[A-Za-z0-9_-]{1,40}$/.test(item.id) || ids.has(item.id)
-      || !strings(item.supportingImageIds, 9) || !item.supportingImageIds.length || item.supportingImageIds.some(id => !usable.has(id))
+      || !strings(item.supportingImageIds, 30) || !item.supportingImageIds.length || item.supportingImageIds.some(id => !usable.has(id))
       || new Set(item.supportingImageIds).size !== item.supportingImageIds.length) bad('模型推荐引用了不可用照片或缺少必要字段。');
     ids.add(item.id);
     const facts = missing(item.missingFacts);
@@ -127,10 +127,10 @@ export function validateCopy(value, imageIds) {
   if (!value || !strings(value.titles, 3) || value.titles.length !== 3 || new Set(value.titles).size !== 3
     || !text(value.body, 3000) || !value.body.trim() || !strings(value.tags, 8) || value.tags.length < 5
     || titles.some(item => !item) || new Set(titles).size !== 3 || tags.some(item => !item || /\s|#/.test(item)) || new Set(tags).size !== tags.length
-    || !text(value.coverText, 40) || !value.coverText.trim() || !strings(value.imageOrder, 9) || !value.imageOrder.length
+    || !text(value.coverText, 40) || !value.coverText.trim() || !strings(value.imageOrder, 15) || !value.imageOrder.length
     || value.imageOrder.some(id => !imageIds.includes(id)) || new Set(value.imageOrder).size !== value.imageOrder.length
     || !Array.isArray(value.claims) || value.claims.length > 30) bad('模型发布文案不符合约定格式。');
-  for (const claim of value.claims) if (!text(claim?.text, 500) || !claim.text.trim() || !strings(claim.factKeys, 15) || claim.factKeys.some(key => !FACT_FIELDS.includes(key)) || !strings(claim.imageIds, 9) || claim.imageIds.some(id => !imageIds.includes(id)) || (!claim.factKeys.length && !claim.imageIds.length)) bad('文案事实缺少可追踪依据。');
+  for (const claim of value.claims) if (!text(claim?.text, 500) || !claim.text.trim() || !strings(claim.factKeys, 15) || claim.factKeys.some(key => !FACT_FIELDS.includes(key)) || !strings(claim.imageIds, 15) || claim.imageIds.some(id => !imageIds.includes(id)) || (!claim.factKeys.length && !claim.imageIds.length)) bad('文案事实缺少可追踪依据。');
   return { titles, body: value.body.trim(), tags, coverText: value.coverText.trim(), imageOrder: value.imageOrder, claims: value.claims };
 }
 const ABSOLUTE = /全网第一|当地第一|最好吃|必吃|百分百|100[%％]|保证|一定|绝对|天天排队|场场爆满|明星来过|销量第一|回头客最多|顾客一致好评|减肥|养生|治疗|改善疾病|治愈|零添加|有机|非遗|独家配方|网红店|今天来探店|亲测|我来探店/;

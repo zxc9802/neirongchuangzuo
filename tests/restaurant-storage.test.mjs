@@ -108,6 +108,20 @@ test('restart fails interrupted work without repeating model calls or charging u
   assert.equal((await reopened.usage('alice')).reserved, 0);
 });
 
+test('batch upload drafts and pending object intents survive restart and expire after three days', async t => {
+  const f = await fixture(t), expiresAt = f.now() + FILES_TTL_MS;
+  await f.store.createTask('alice', { id: 'draft', status: 'uploading', uploadProtocol: 'batches', imageCount: 6, uploadExpiresAt: expiresAt,
+    sourceImages: [{ id: 'photo-1', key: 'alice/draft/original.jpg', expiresAt }], uploadBatches: [{ startIndex: 0, count: 1, fingerprint: 'acknowledged' }],
+    pendingUpload: { startIndex: 1, fingerprint: 'pending', sourceImages: [{ id: 'photo-2', key: 'alice/draft/pending.jpg', expiresAt }] } });
+  await f.store.close(); const reopened = f.make(); await reopened.ready;
+  const task = await reopened.getTask('alice', 'draft');
+  assert.equal(task.status, 'uploading'); assert.equal(task.sourceImages.length, 1); assert.equal(task.pendingUpload.startIndex, 1);
+  f.advance(FILES_TTL_MS + 1);
+  const expired = await reopened.sweep();
+  assert.equal(expired.expiredFiles.length, 2); assert.deepEqual(new Set(expired.expiredFiles.map(file => file.key)), new Set(['alice/draft/original.jpg', 'alice/draft/pending.jpg']));
+  assert.equal((await reopened.getTask('alice', 'draft')).code, 'FILES_EXPIRED'); assert.equal((await reopened.usage('alice')).used, 0);
+});
+
 test('files expire after three days while text lasts thirty; failed deletion remains retryable after task expiry', async t => {
   const f = await fixture(t);
   const expiresAt = f.now() + FILES_TTL_MS;

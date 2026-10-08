@@ -49,7 +49,7 @@ function mockModel(overrides = {}) { const counts = { analyse: 0, recommend: 0, 
   async analyse(photos) { counts.analyse++; return analysis(photos); }, async recommend(items) { counts.recommend++; return [direction(items)]; },
   async write(input) { counts.write++; return copy(input.analysis); }, async audit() { counts.audit++; return { status: 'passed', warnings: [], errors: [] }; },
   async usage() { return { day: '2026-10-07', used: { chat: 0 }, remaining: { chat: 100 }, limits: config.limits }; }, async close() {}, ...overrides }; }
-async function photos(count = 2) { return Promise.all(Array.from({ length: count }, async (_, index) => ({ name: `photo${index}.png`, dataUrl: `data:image/png;base64,${(await sharp({ create: { width: 300, height: 400, channels: 3, background: { r: 80 + index * 15, g: 50, b: 120 } } }).png().toBuffer()).toString('base64')}` }))); }
+async function photos(count = 2) { return Promise.all(Array.from({ length: count }, async (_, index) => ({ name: `photo${index}.png`, dataUrl: `data:image/png;base64,${(await sharp({ create: { width: 300, height: 400, channels: 3, background: { r: 80 + (index * 15) % 176, g: 50, b: 120 } } }).png().toBuffer()).toString('base64')}` }))); }
 async function setup(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'restaurant-flow-'));
   const model = options.model ?? mockModel();
@@ -64,6 +64,239 @@ async function setup(t, options = {}) {
   return { api, wait, model, handler, root };
 }
 async function newTask(app, input = {}) { await app.api('/profile', { profile }); const id = randomUUID(); const result = await app.api('/tasks', { requestId: id, images: await photos(), rightsConfirmed: true, ...input }); assert.equal(result.status, 202); return { id, task: await app.wait(id, ['awaiting_selection', 'failed']) }; }
+async function uploadPool(app, count) {
+  await app.api('/profile', { profile });
+  const id = randomUUID(), inputs = await photos(count);
+  const draft = await app.api('/tasks', { requestId: id, imageCount: count, rightsConfirmed: true });
+  assert.equal(draft.status, 202); assert.equal(draft.body.task.status, 'uploading');
+  for (let startIndex = 0; startIndex < count; startIndex += 3) assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex, images: inputs.slice(startIndex, startIndex + 3) })).status, 202);
+  assert.equal((await app.api(`/tasks/${id}/analyse`, {})).status, 202);
+  return { id, task: await app.wait(id, ['awaiting_selection', 'failed']), inputs };
+}
+
+test('30-photo draft accepts contiguous resumable batches, detects changed deliveries, and analyse starts only once', async t => {
+  const app = await setup(t); await app.api('/profile', { profile });
+  const id = randomUUID(), input = await photos(30), create = { requestId: id, imageCount: 30, rightsConfirmed: true };
+  assert.equal((await app.api('/tasks', { ...create, rightsConfirmed: false })).status, 422);
+  assert.equal((await app.api('/tasks', { ...create, imageCount: 31 })).status, 400);
+  assert.equal((await app.api('/tasks', create)).body.task.imageCount, 30);
+  assert.equal((await app.api('/tasks', create)).body.task.uploadedCount, 0);
+  assert.equal((await app.api('/tasks', { ...create, imageCount: 29 })).status, 409);
+  assert.equal((await app.api(`/tasks/${id}/analyse`, {})).body.code, 'UPLOAD_INCOMPLETE');
+  assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex: 1, images: input.slice(0, 3) })).body.code, 'UPLOAD_SEQUENCE_CONFLICT');
+  assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex: 0, images: input.slice(0, 4) })).status, 400);
+  const first = { startIndex: 0, images: input.slice(0, 3) };
+  const [one, duplicate] = await Promise.all([app.api(`/tasks/${id}/photos`, first), app.api(`/tasks/${id}/photos`, first)]);
+  assert.equal(one.body.task.uploadedCount, 3); assert.equal(duplicate.body.task.uploadedCount, 3);
+  assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex: 0, images: input.slice(3, 6) })).body.code, 'UPLOAD_BATCH_CONFLICT');
+  assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex: 3, images: input.slice(3, 6) }, 'another-owner')).status, 404);
+  for (let startIndex = 3; startIndex < 30; startIndex += 3) {
+    const uploaded = await app.api(`/tasks/${id}/photos`, { startIndex, images: input.slice(startIndex, startIndex + 3) });
+    assert.equal(uploaded.body.task.uploadedCount, startIndex + 3);
+    assert.equal(uploaded.body.task.status, 'uploading');
+  }
+  assert.equal(app.model.counts.analyse, 0);
+  await Promise.all([app.api(`/tasks/${id}/analyse`, {}), app.api(`/tasks/${id}/analyse`, {})]);
+  const task = await app.wait(id, ['awaiting_selection']);
+  assert.equal(task.analysis.length, 30); assert.equal(task.directions[0].supportingImageIds.length, 30);
+  assert.equal(app.model.counts.analyse, 10); assert.equal(app.model.counts.recommend, 1);
+  assert.equal((await app.api(`/tasks/${id}/analyse`, {})).body.task.status, 'awaiting_selection');
+  assert.equal((await app.api(`/tasks/${id}/photos`, first)).body.task.uploadedCount, 30);
+  assert.equal(app.model.counts.analyse, 10);
+});
+
+test('unfinished upload drafts survive restart and continue from the acknowledged batch without analysis replay', async t => {
+  const app = await setup(t), inputs = await photos(6), id = randomUUID();
+  await app.api('/profile', { profile });
+  await app.api('/tasks', { requestId: id, imageCount: 6, rightsConfirmed: true });
+  const first = { startIndex: 0, images: inputs.slice(0, 3) };
+  await app.api(`/tasks/${id}/photos`, first);
+  await app.handler.shutdown();
+  const reopened = await setup(t, { dataDir: app.root, model: app.model });
+  const draft = (await reopened.api(`/tasks/${id}`)).body.task;
+  assert.equal(draft.status, 'uploading'); assert.equal(draft.uploadedCount, 3); assert.equal(app.model.counts.analyse, 0);
+  assert.equal((await reopened.api(`/tasks/${id}/photos`, first)).body.task.uploadedCount, 3);
+  assert.equal((await reopened.api(`/tasks/${id}/photos`, { startIndex: 3, images: inputs.slice(3) })).body.task.uploadedCount, 6);
+  await reopened.api(`/tasks/${id}/analyse`, {});
+  assert.equal((await reopened.wait(id, ['awaiting_selection'])).analysis.length, 6);
+  assert.equal(app.model.counts.analyse, 2); assert.equal(app.model.counts.recommend, 1);
+});
+
+test('cancelling stale drafts is idempotent, releases the active slot, protects ownership and cannot cancel analysis', async t => {
+  const app = await setup(t); await app.api('/profile', { profile });
+  const first = randomUUID(), second = randomUUID(), third = randomUUID();
+  for (const id of [first, second]) await app.api('/tasks', { requestId: id, imageCount: 3, rightsConfirmed: true });
+  await app.api(`/tasks/${first}/photos`, { startIndex: 0, images: await photos(3) });
+  assert.equal((await app.api('/tasks', { requestId: third, imageCount: 3, rightsConfirmed: true })).status, 429);
+  assert.equal((await app.api(`/tasks/${first}/cancel-upload`, {}, 'another-owner')).status, 404);
+  for (let repeat = 0; repeat < 2; repeat++) {
+    const cancelled = await app.api(`/tasks/${first}/cancel-upload`, {});
+    assert.equal(cancelled.status, 200); assert.equal(cancelled.body.task.code, 'UPLOAD_CANCELLED');
+  }
+  assert.equal((await app.api(`/tasks/${first}/files/original-photo-1.png`)).status, 410);
+  assert.equal((await app.api('/tasks', { requestId: third, imageCount: 3, rightsConfirmed: true })).status, 202);
+  await app.api(`/tasks/${third}/photos`, { startIndex: 0, images: await photos(3) });
+  await app.api(`/tasks/${third}/analyse`, {});
+  assert.equal((await app.api(`/tasks/${third}/cancel-upload`, {})).status, 409);
+  await app.wait(third, ['awaiting_selection']);
+  assert.equal((await app.api('/usage')).body.usage.used, 0);
+  await app.handler.shutdown();
+  const reopened = await setup(t, { dataDir: app.root, model: app.model });
+  assert.equal((await reopened.api(`/tasks/${first}`)).body.task.code, 'UPLOAD_CANCELLED');
+});
+
+test('an interrupted media batch can be replayed exactly and incompatible payloads at that pending position are rejected', async t => {
+  const files = new Map(); let writes = 0;
+  const media = { ready: Promise.resolve(), async put(key, bytes) { if (++writes === 2) throw new Error('simulated media outage'); files.set(key, Buffer.from(bytes)); }, async get(key) { return files.get(key); }, async remove(key) { files.delete(key); } };
+  const app = await setup(t, { media }), inputs = await photos(3), id = randomUUID();
+  await app.api('/profile', { profile }); await app.api('/tasks', { requestId: id, imageCount: 3, rightsConfirmed: true });
+  const batch = { startIndex: 0, images: inputs };
+  assert.equal((await app.api(`/tasks/${id}/photos`, batch)).status, 500);
+  const pending = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(pending.status, 'uploading'); assert.equal(pending.uploadedCount, 0); assert.equal(Object.hasOwn(pending, 'pendingUpload'), false);
+  assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex: 0, images: [inputs[2], inputs[1], inputs[0]] })).body.code, 'UPLOAD_BATCH_CONFLICT');
+  assert.equal((await app.api(`/tasks/${id}/photos`, batch)).body.task.uploadedCount, 3);
+  await app.api(`/tasks/${id}/analyse`, {}); await app.wait(id, ['awaiting_selection']);
+  assert.equal(files.size, 3); assert.equal(app.model.counts.analyse, 1);
+});
+
+test('expiry cleanup keeps an entire in-flight upload batch queued until late puts and failures finish', async t => {
+  let clock = Date.now(), release, notify, writes = 0, removals = 0;
+  const entered = new Promise(resolve => { notify = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const files = new Map();
+  const media = { ready: Promise.resolve(), async put(key, bytes) {
+    if (++writes === 1) { notify(); await gate; }
+    else throw new Error('second photo failed after expiry');
+    files.set(key, Buffer.from(bytes));
+  }, async get(key) { return files.get(key); }, async remove(key) { removals++; files.delete(key); } };
+  const app = await setup(t, { media, now: () => clock, cleanupIntervalMs: 10 }), id = randomUUID();
+  await app.api('/profile', { profile }); await app.api('/tasks', { requestId: id, imageCount: 3, rightsConfirmed: true });
+  const posting = app.api(`/tasks/${id}/photos`, { startIndex: 0, images: await photos(3) });
+  try {
+    await entered; clock += 3 * 24 * 3600_000 + 1;
+    const queued = await app.handler.store.sweep();
+    assert.equal(queued.expiredFiles.length, 3);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(removals, 0, 'none of the registered keys can be acknowledged before the batch finishes');
+    assert.equal((await app.handler.store.sweep()).expiredFiles.length, 3);
+  } finally { release(); }
+  assert.equal((await posting).status, 500);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (!(await app.handler.store.sweep()).expiredFiles.length) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(files.size, 0, 'the late first put remains discoverable and is actually deleted');
+  assert.equal((await app.handler.store.sweep()).expiredFiles.length, 0);
+});
+
+test('expiry cleanup protects every pre-registered package key until the complete background write group ends', async t => {
+  let clock = Date.now(), release, notify, resultPuts = 0, resultRemovals = 0, failRollback = true;
+  const entered = new Promise(resolve => { notify = resolve; }), gate = new Promise(resolve => { release = resolve; });
+  const files = new Map();
+  const media = { ready: Promise.resolve(), async put(key, bytes) {
+    if (key.includes('/results/')) {
+      if (++resultPuts === 1) { notify(); await gate; }
+      else throw new Error('second result failed after expiry');
+    }
+    files.set(key, Buffer.from(bytes));
+  }, async get(key) { return files.get(key); }, async remove(key) {
+    if (key.includes('/results/')) {
+      resultRemovals++;
+      if (files.has(key) && failRollback) { failRollback = false; throw new Error('one transient rollback failure'); }
+    }
+    files.delete(key);
+  } };
+  const app = await setup(t, { media, now: () => clock, cleanupIntervalMs: 10 }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  try {
+    await entered; clock += 3 * 24 * 3600_000 + 1;
+    const queued = await app.handler.store.sweep();
+    assert.equal(queued.expiredFiles.filter(file => file.key.includes('/results/')).length, 3);
+    await new Promise(resolve => setTimeout(resolve, 60));
+    assert.equal(resultRemovals, 0, 'background writes protect future image and ZIP keys, not just the current put');
+    assert.equal((await app.handler.store.sweep()).expiredFiles.filter(file => file.key.includes('/results/')).length, 3);
+  } finally { release(); }
+  await app.wait(id, ['failed']);
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (!(await app.handler.store.sweep()).expiredFiles.length) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(files.size, 0); assert.equal((await app.handler.store.sweep()).expiredFiles.length, 0);
+  assert.equal((await app.api('/usage')).body.usage.used, 0);
+});
+
+test('upload pool byte cap is cumulative across batches and no oversized pool enters analysis', async t => {
+  const app = await setup(t), base = Buffer.from((await photos(1))[0].dataUrl.split(',')[1], 'base64'), id = randomUUID();
+  await app.api('/profile', { profile }); await app.api('/tasks', { requestId: id, imageCount: 9, rightsConfirmed: true });
+  const oversized = Buffer.alloc(8 * 1024 * 1024 + 1); base.copy(oversized);
+  assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex: 0, images: [{ name: 'too-big.png', dataUrl: `data:image/png;base64,${oversized.toString('base64')}` }] })).status, 413);
+  const bigImages = Array.from({ length: 3 }, (_, index) => { const bytes = Buffer.alloc(8 * 1024 * 1024 - 1); base.copy(bytes); bytes[bytes.length - 1] = index; return { name: `large${index}.png`, dataUrl: `data:image/png;base64,${bytes.toString('base64')}` }; });
+  assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex: 0, images: bigImages })).body.task.uploadedCount, 3);
+  assert.equal((await app.api(`/tasks/${id}/photos`, { startIndex: 3, images: bigImages })).body.task.uploadedCount, 6);
+  const rejected = await app.api(`/tasks/${id}/photos`, { startIndex: 6, images: bigImages });
+  assert.equal(rejected.status, 413); assert.equal(rejected.body.code, 'UPLOAD_POOL_TOO_LARGE');
+  assert.equal((await app.api(`/tasks/${id}`)).body.task.uploadedCount, 6); assert.equal(app.model.counts.analyse, 0);
+});
+
+test('a known pre-dispatch budget failure resumes saved photo analysis rather than paying to analyse acknowledged photos twice', async t => {
+  const batches = []; let limited = true;
+  const model = mockModel({ async analyse(input) {
+    batches.push(input.map(item => item.id));
+    if (batches.length === 2 && limited) { limited = false; throw Object.assign(new Error('known unsent budget exhausted'), { code: 'DAILY_QUOTA_EXCEEDED', status: 429 }); }
+    return analysis(input);
+  } });
+  const app = await setup(t, { model }), { id, task } = await uploadPool(app, 6);
+  assert.equal(task.status, 'failed'); assert.equal(task.analysis.length, 3); assert.equal(task.retryable, true);
+  await app.api(`/tasks/${id}/retry`, {});
+  const complete = await app.wait(id, ['awaiting_selection']);
+  assert.equal(complete.analysis.length, 6);
+  assert.deepEqual(batches, [['photo-1', 'photo-2', 'photo-3'], ['photo-4', 'photo-5', 'photo-6'], ['photo-4', 'photo-5', 'photo-6']]);
+  assert.equal((await app.api('/usage')).body.usage.used, 0);
+});
+
+test('explicit six and fifteen-photo packages use unique real candidates and changing count forks a new charged task', async t => {
+  const app = await setup(t), { id } = await uploadPool(app, 30);
+  const request = { directionId: 'D01', outputCount: 6 };
+  await app.api(`/tasks/${id}/generate`, request);
+  const six = await app.wait(id, ['completed', 'failed']); assert.equal(six.status, 'completed', six.error);
+  assert.equal(six.outputCount, 6); assert.equal(six.copy.imageOrder.length, 6); assert.equal(six.files.length, 7);
+  assert.equal((await app.api(`/tasks/${id}/generate`, request)).body.task.id, id);
+  assert.equal((await app.api('/usage')).body.usage.used, 1);
+  const nextId = randomUUID(), next = await app.api(`/tasks/${id}/generate`, { ...request, outputCount: 15, requestId: nextId });
+  assert.equal(next.body.task.id, nextId);
+  const fifteen = await app.wait(nextId, ['completed', 'failed']); assert.equal(fifteen.status, 'completed', fifteen.error);
+  assert.equal(fifteen.outputCount, 15); assert.equal(new Set(fifteen.copy.imageOrder).size, 15); assert.equal(fifteen.files.length, 16);
+  const zip = unzipSync((await app.api(`/tasks/${nextId}/files/package.zip`)).body);
+  assert.ok(zip['15.jpg']); assert.equal(Object.keys(zip).length, 16);
+  assert.equal((await app.api('/usage')).body.usage.used, 2);
+});
+
+test('explicit counts reject insufficient direction evidence and permit small packages only for genuinely small pools', async t => {
+  const app = await setup(t), { id } = await uploadPool(app, 6);
+  for (const outputCount of [5, 7]) assert.equal((await app.api(`/tasks/${id}/generate`, { directionId: 'D01', outputCount })).body.code, 'INSUFFICIENT_DIRECTION_IMAGES');
+  for (const outputCount of [0, 16, '6']) assert.equal((await app.api(`/tasks/${id}/generate`, { directionId: 'D01', outputCount })).body.code, 'INVALID_OUTPUT_COUNT');
+  assert.equal(app.model.counts.write, 0); assert.equal((await app.api('/usage')).body.usage.reserved, 0);
+  const sparse = await uploadPool(app, 2);
+  await app.api(`/tasks/${sparse.id}/generate`, { directionId: 'D01', outputCount: 2, acceptSparse: true });
+  const task = await app.wait(sparse.id, ['completed', 'failed']); assert.equal(task.status, 'completed', task.error); assert.equal(task.outputCount, 2);
+});
+
+test('strict image counts replace failed photos with real same-direction backups or fail without consuming package quota', async t => {
+  const imageProcessor = { ...processor, async processPhoto(bytes, options) {
+    const meta = await sharp(bytes).metadata(), pixel = await sharp(bytes).raw().toBuffer();
+    if (pixel[0] === 80 && meta.width === 300) throw new Error('one failed real photo');
+    return processor.processPhoto(bytes, options);
+  } };
+  const app = await setup(t, { imageProcessor }), { id } = await uploadPool(app, 7);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', outputCount: 6 });
+  const task = await app.wait(id, ['completed', 'failed']); assert.equal(task.status, 'completed', task.error);
+  assert.equal(task.copy.imageOrder.length, 6); assert.ok(task.copy.imageOrder.includes('photo-7')); assert.ok(!task.copy.imageOrder.includes('photo-1'));
+  assert.equal((await app.api('/usage')).body.usage.used, 1);
+  const short = await uploadPool(app, 6);
+  await app.api(`/tasks/${short.id}/generate`, { directionId: 'D01', outputCount: 6 });
+  const failed = await app.wait(short.id, ['failed', 'completed']); assert.equal(failed.status, 'failed'); assert.equal(failed.code, 'INSUFFICIENT_PROCESSED_IMAGES');
+  assert.equal(failed.files.length, 0); assert.equal((await app.api('/usage')).body.usage.used, 1); assert.equal((await app.api('/usage')).body.usage.reserved, 0);
+});
 
 test('real image processing and ZIP complete one package; duplicate requests charge once and files are account protected', async t => {
   const app = await setup(t), input = { requestId: randomUUID(), images: await photos(), rightsConfirmed: true };

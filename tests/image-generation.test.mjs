@@ -3,14 +3,16 @@ import assert from 'node:assert/strict';
 import { validateImageRequest, safeImageResultUrl, imageQualityName } from '../design/image-generation.js';
 
 const asset = (size = 1024, type = 'image/png') => ({ file: { size, type } });
+function canvasMock() { return { width: 1, height: 1, getContext: () => ({ fillRect() {}, drawImage() {} }), toBlob: callback => callback(new Blob(['encoded'], { type: 'image/jpeg' })) }; }
+function bitmapMock() { return Promise.resolve({ width: 1200, height: 900, close() {} }); }
 
 test('image submission validates actual source files, count, type and total upload size', () => {
   assert.match(validateImageRequest('门店宣传图', []), /至少 1 张/);
   assert.match(validateImageRequest('门店宣传图', [{}]), /重新上传/);
   assert.match(validateImageRequest('门店宣传图', [asset(1, 'image/svg+xml')]), /仅支持/);
-  assert.match(validateImageRequest('门店宣传图', [asset(8 * 1024 * 1024 + 1)]), /单张/);
-  assert.match(validateImageRequest('门店宣传图', Array.from({ length: 4 }, () => asset(7 * 1024 * 1024))), /总大小/);
-  assert.match(validateImageRequest('门店宣传图', Array.from({ length: 10 }, () => asset())), /最多添加 9/);
+  assert.match(validateImageRequest('门店宣传图', [asset(20 * 1024 * 1024 + 1)]), /单张/);
+  assert.match(validateImageRequest('门店宣传图', Array.from({ length: 21 }, () => asset(20 * 1024 * 1024))), /总大小/);
+  assert.match(validateImageRequest('门店宣传图', Array.from({ length: 31 }, () => asset())), /最多添加 30/);
   assert.match(validateImageRequest('x'.repeat(1001), [asset()]), /最多 1000/);
   assert.equal(validateImageRequest('门店宣传图', [asset(8 * 1024 * 1024), asset(8 * 1024 * 1024), asset(8 * 1024 * 1024)]), '');
 });
@@ -23,18 +25,25 @@ test('only same-origin generated media URLs can render or download', () => {
 });
 
 test('double-clicking submits once; ambiguous network failure only queries the existing request', async () => {
-  const original = Object.fromEntries(['document', 'fetch', 'FileReader', 'sessionStorage'].map(key => [key, globalThis[key]]));
+  const original = Object.fromEntries(['document', 'fetch', 'FileReader', 'sessionStorage', 'createImageBitmap'].map(key => [key, globalThis[key]]));
   const saved = new Map();
   globalThis.sessionStorage = { getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value), removeItem: key => saved.delete(key) };
-  globalThis.document = { body: { dataset: { page: 'image' } }, querySelector: () => null };
+  globalThis.document = { body: { dataset: { page: 'image' } }, querySelector: () => null, createElement: canvasMock };
+  globalThis.createImageBitmap = bitmapMock;
   globalThis.FileReader = class { readAsDataURL() { queueMicrotask(() => { this.result = 'data:image/png;base64,iVBORw0KGgo='; this.onload(); }); } };
   const calls = [];
   let releasePost;
   let id;
-  let detailRead = false;
+  let detailRead = false; let upload;
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : undefined });
     if (url.endsWith('/status')) return Response.json({ image: { configured: true, model: 'gpt-image-2.5-sunburst-c' } });
+    if (url.includes('/image-uploads')) {
+      const body=options.body?JSON.parse(options.body):null;
+      if(url==='/api/ai/image-uploads'&&options.method==='POST'){ upload={id:body.requestId,imageCount:body.imageCount,uploadedCount:0,submitted:false};return Response.json({upload}); }
+      if(options.method==='POST'){upload.uploadedCount=body.startIndex+body.images.length;upload.complete=true;return Response.json({upload});}
+      return upload?Response.json({upload}):Response.json({error:'not found'},{status:404});
+    }
     if (options.method === 'POST') {
       id = JSON.parse(options.body).requestId;
       return new Promise((resolve, reject) => { releasePost = () => reject(new TypeError('network connection lost after acceptance')); });
@@ -43,7 +52,7 @@ test('double-clicking submits once; ambiguous network failure only queries the e
     return Response.json({ tasks: [] });
   };
   const generation = await import('../design/image-generation.js?submission-test');
-  const ctx = { mode: 'image', modules: { image: { max: 1000 } }, configs: { image: { prompt: '门店宣传图', files: ['one'], ratio: '3:4', quality: 'auto' } }, assets: [{ id: 'one', name: 'store.png', file: asset().file }], icon: () => '', refresh() {}, toast() {}, setPreviewTab() {} };
+  const ctx = { mode: 'image', modules: { image: { max: 1000 } }, configs: { image: { prompt: '门店宣传图', files: ['one'], ratio: '3:4', quality: 'auto' } }, assets: [{ id: 'one', name: 'store.png', file: { ...asset().file, name: 'store.png' } }], icon: () => '', refresh() {}, toast() {}, setPreviewTab() {} };
   const settle = async (predicate) => { for (let i = 0; i < 30 && !predicate(); i++) await new Promise(resolve => setImmediate(resolve)); assert.ok(predicate(), 'async operation should settle'); };
   try {
     generation.bindImageGeneration(ctx);
@@ -52,13 +61,13 @@ test('double-clicking submits once; ambiguous network failure only queries the e
     assert.equal(generation.handleImageGenerationAction('generate', {}, ctx), true);
     assert.equal(generation.handleImageGenerationAction('generate', {}, ctx), true);
     await settle(() => !!releasePost);
-    assert.equal(calls.filter(call => call.method === 'POST').length, 1);
-    assert.equal(calls.find(call => call.method === 'POST').body.generationMode, 'single');
-    assert.equal(calls.find(call => call.method === 'POST').body.outputCount, 1);
+    assert.equal(calls.filter(call => call.method === 'POST' && call.url === '/api/ai/images').length, 1);
+    assert.equal(calls.find(call => call.method === 'POST' && call.url === '/api/ai/images').body.generationMode, 'single');
+    assert.equal(calls.find(call => call.method === 'POST' && call.url === '/api/ai/images').body.outputCount, 1);
     assert.equal(saved.get('store-ai-pending-image-request'), id);
     releasePost();
     await settle(() => detailRead && !saved.has('store-ai-pending-image-request'));
-    assert.equal(calls.filter(call => call.method === 'POST').length, 1);
+    assert.equal(calls.filter(call => call.method === 'POST' && call.url === '/api/ai/images').length, 1);
     assert.ok(calls.some(call => call.url === '/api/ai/images/' + id && call.method === 'GET'));
   } finally {
     generation.disposeImageGeneration();
@@ -66,26 +75,40 @@ test('double-clicking submits once; ambiguous network failure only queries the e
   }
 });
 
-async function imagePage(t, { config = {}, remaining = 20, tasks = [] } = {}) {
-  const originals = Object.fromEntries(['document', 'fetch', 'FileReader', 'sessionStorage', 'location'].map(key => [key, globalThis[key]]));
+async function imagePage(t, { config = {}, remaining = 20, tasks = [], uploadDraft = null, pendingId = null, expiredUpload = false } = {}) {
+  const originals = Object.fromEntries(['document', 'fetch', 'FileReader', 'sessionStorage', 'location', 'createImageBitmap'].map(key => [key, globalThis[key]]));
   const saved = new Map();
+  if (uploadDraft) saved.set('store-ai-image-upload-draft', JSON.stringify(uploadDraft));
+  if (pendingId) saved.set('store-ai-pending-image-request', pendingId);
   const nodes = new Map(['[data-action="generate"]', '#input-requirement', '#image-generation-options', '#image-generation-notice', '#image-task-queue', '#image-generated-results'].map(key => [key, { innerHTML: '', outerHTML: '', textContent: '', disabled: false }]));
   globalThis.sessionStorage = { getItem: key => saved.get(key), setItem: (key, value) => saved.set(key, value), removeItem: key => saved.delete(key) };
   globalThis.location = { origin: 'http://127.0.0.1:5173' };
-  globalThis.document = { body: { dataset: { page: 'image' } }, querySelector: key => nodes.get(key) || null };
+  globalThis.document = { body: { dataset: { page: 'image' } }, querySelector: key => nodes.get(key) || null, createElement: canvasMock };
+  globalThis.createImageBitmap = bitmapMock;
   globalThis.FileReader = class {
     readAsDataURL(file) { queueMicrotask(() => { this.result = `data:${file.type};base64,iVBORw0KGgo=`; this.onload(); }); }
   };
   const calls = [];
-  let history = tasks;
+  let history = tasks; let upload = uploadDraft ? { ...uploadDraft, submitted: false, complete: uploadDraft.uploadedCount === uploadDraft.imageCount } : undefined;
   globalThis.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ url, method: options.method || 'GET', body });
     if (url.endsWith('/status')) return Response.json({ image: { configured: true, model: 'Max模型', remaining, dailyLimit: 20 } });
+    if (url.includes('/image-uploads')) {
+      if(url==='/api/ai/image-uploads'&&options.method==='POST'){upload={id:body.requestId,imageCount:body.imageCount,uploadedCount:0,submitted:false};return Response.json({upload});}
+      if(options.method==='POST'){upload.uploadedCount=body.startIndex+body.images.length;upload.complete=upload.uploadedCount===upload.imageCount;return Response.json({upload});}
+      if (upload && url.split('/').pop() !== upload.id) return Response.json({ error: 'not found' }, { status: 404 });
+      if (expiredUpload && upload?.id === uploadDraft?.id) return Response.json({ error: '这组原图已超过3天保留期，请重新上传。', code: 'UPLOAD_EXPIRED' }, { status: 410 });
+      return upload?Response.json({upload}):Response.json({error:'not found'},{status:404});
+    }
     if (options.method === 'POST') {
       const task = { id: body.requestId, status: 'completed', prompt: body.prompt, generationMode: body.generationMode, outputCount: body.outputCount, completedCount: body.outputCount, createdAt: new Date().toISOString(), images: [] };
       history = [task];
       return Response.json({ task });
+    }
+    if (url.startsWith('/api/ai/images/')) {
+      const task = history.find(item => item.id === url.split('/').pop());
+      return task ? Response.json({ task }) : Response.json({ error: 'not found' }, { status: 404 });
     }
     return Response.json({ tasks: history });
   };
@@ -94,7 +117,7 @@ async function imagePage(t, { config = {}, remaining = 20, tasks = [] } = {}) {
   const ctx = {
     mode: 'image', modules: { image: { max: 1000 } },
     configs: { image: { prompt: '保留真实门店和商品，做春日宣传图', files: ['one', 'two'], ratio: '3:4', quality: 'auto', ...config } },
-    assets: [{ id: 'one', name: 'store.png', file: asset().file }, { id: 'two', name: 'product.png', file: asset().file }],
+    assets: [{ id: 'one', name: 'store.png', file: { ...asset().file, name: 'store.png' } }, { id: 'two', name: 'product.png', file: { ...asset().file, name: 'product.png' } }],
     icon: () => '', esc, button: (action, label, className = '', extra = '') => `<button data-action="${action}" class="${className}" ${extra}>${label}</button>`,
     refresh() {}, toast() {}, setPreviewTab() {},
   };
@@ -108,7 +131,7 @@ async function imagePage(t, { config = {}, remaining = 20, tasks = [] } = {}) {
   });
   module.bindImageGeneration(ctx);
   await settle(() => nodes.get('#image-generation-notice').outerHTML.includes('今日剩余'));
-  return { module, ctx, nodes, calls, settle };
+  return { module, ctx, nodes, calls, settle, saved };
 }
 
 test('series and variations submit one task with the chosen output count and all originals', async t => {
@@ -120,13 +143,16 @@ test('series and variations submit one task with the chosen output count and all
     assert.match(app.nodes.get('#image-generation-options').innerHTML, /预计使用4次图片额度/);
     app.module.handleImageGenerationAction('generate', {}, app.ctx);
     app.module.handleImageGenerationAction('generate', {}, app.ctx);
-    await app.settle(() => app.calls.some(call => call.method === 'POST'));
-    const submissions = app.calls.filter(call => call.method === 'POST');
+    await app.settle(() => app.calls.some(call => call.method === 'POST' && call.url === '/api/ai/images'));
+    const submissions = app.calls.filter(call => call.method === 'POST' && call.url === '/api/ai/images');
     assert.equal(submissions.length, 1);
     assert.equal(submissions[0].body.generationMode, generationMode);
     assert.equal(submissions[0].body.outputCount, 4);
     assert.equal(submissions[0].body.prompt, app.ctx.configs.image.prompt);
-    assert.deepEqual(submissions[0].body.images.map(image => image.name), ['store.png', 'product.png']);
+    assert.equal(submissions[0].body.images, undefined);
+    assert.equal(submissions[0].body.uploadId, submissions[0].body.requestId);
+    const batch = app.calls.find(call => call.url.endsWith('/batches') && call.method === 'POST');
+    assert.deepEqual(batch.body.images.map(image => image.name), ['store.jpg', 'product.jpg']);
     await app.settle(() => app.nodes.get('#image-generated-results').outerHTML.includes(submissions[0].body.requestId));
   });
 });
@@ -140,7 +166,7 @@ test('inline generation changes retain originals, presets and hand-edited requir
   assert.match(app.nodes.get('[data-action="generate"]').innerHTML, /立即生成图片/);
   app.module.handleImageGenerationAction('image-generation-mode', { dataset: { value: 'series' } }, app.ctx);
   assert.equal(c.generationMode, 'series');
-  assert.equal(c.count, '4');
+  assert.equal(c.count, '6');
   app.module.handleImageGenerationAction('image-output-count', { dataset: { value: '3' } }, app.ctx);
   app.module.handleImageGenerationAction('image-generation-mode', { dataset: { value: 'variations' } }, app.ctx);
   assert.equal(c.count, '3');
@@ -160,7 +186,7 @@ test('insufficient quota blocks the whole image set and a smaller count can proc
   assert.match(app.nodes.get('#input-requirement').textContent, /需要4次.*仅剩3次/);
   app.module.handleImageGenerationAction('generate', {}, app.ctx);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(app.calls.filter(call => call.method === 'POST').length, 0);
+  assert.equal(app.calls.filter(call => call.method === 'POST' && call.url === '/api/ai/images').length, 0);
   app.module.handleImageGenerationAction('image-output-count', { dataset: { value: '3' } }, app.ctx);
   assert.equal(app.nodes.get('[data-action="generate"]').disabled, false);
   assert.match(app.nodes.get('[data-action="generate"]').innerHTML, /生成3张套图/);
@@ -197,5 +223,109 @@ test('running image sets show saved progress and cannot be submitted again', asy
   assert.match(app.nodes.get('[data-action="generate"]').innerHTML, /图片生成中 1 \/ 4/);
   assert.match(app.module.renderImageResults(app.ctx), /已生成 1 \/ 4 张/);
   app.module.handleImageGenerationAction('generate', {}, app.ctx);
+  assert.equal(app.calls.filter(call => call.method === 'POST' && call.url === '/api/ai/images').length, 0);
+});
+
+test('thirty originals upload in ordered batches before one fifteen-image task', async t => {
+  const app = await imagePage(t, { config: { generationMode: 'series', count: '15' } });
+  app.ctx.assets = Array.from({ length: 30 }, (_, index) => ({ id: `source-${index}`, name: `门店-${index}.png`, file: { ...asset(7 * 1024 * 1024).file, name: `门店-${index}.png`, lastModified: index } }));
+  app.ctx.configs.image.files = app.ctx.assets.map(item => item.id);
+  app.module.updateImageGenerationControls(app.ctx);
+  assert.match(app.nodes.get('#image-generation-options').innerHTML, /预计使用15次图片额度/);
+  app.module.handleImageGenerationAction('generate', {}, app.ctx);
+  await app.settle(() => app.calls.some(call => call.url === '/api/ai/images' && call.method === 'POST'));
+  const batches = app.calls.filter(call => call.url.endsWith('/batches') && call.method === 'POST');
+  assert.equal(batches.length, 10);
+  assert.deepEqual(batches.map(call => call.body.startIndex), Array.from({ length: 10 }, (_, index) => index * 3));
+  assert.ok(batches.every(call => call.body.images.length === 3 && call.body.images.every(image => image.dataUrl.startsWith('data:image/jpeg;'))));
+  const init = app.calls.find(call => call.url === '/api/ai/image-uploads' && call.method === 'POST');
+  const generated = app.calls.find(call => call.url === '/api/ai/images' && call.method === 'POST');
+  assert.equal(init.body.imageCount, 30);
+  assert.equal(generated.body.requestId, init.body.requestId);
+  assert.equal(generated.body.uploadId, init.body.requestId);
+  assert.equal(generated.body.outputCount, 15);
+  assert.equal(generated.body.images, undefined);
+  assert.equal(app.ctx.configs.image.files.length, 30);
+  assert.equal(app.ctx.assets[29].file.name, '门店-29.png');
+});
+
+test('an interrupted upload survives page reload and resumes remaining photos under the same UUID', async t => {
+  const app = await imagePage(t, { config: { generationMode: 'series', count: '6' } });
+  app.ctx.assets = Array.from({ length: 7 }, (_, index) => ({ id: `source-${index}`, file: { ...asset().file, name: `原图-${index}.png`, lastModified: index } }));
+  const ids = app.ctx.assets.map(item => item.id);
+  app.ctx.configs.image.files = [...ids];
+  const originalFetch = globalThis.fetch;
+  let interrupt = true;
+  globalThis.fetch = async (url, options = {}) => {
+    if (url.endsWith('/batches') && options.method === 'POST' && JSON.parse(options.body).startIndex === 3 && interrupt) { interrupt = false; throw new TypeError('网络暂时断开'); }
+    return originalFetch(url, options);
+  };
+  app.module.handleImageGenerationAction('generate', {}, app.ctx);
+  await app.settle(() => app.nodes.get('#image-generation-notice').outerHTML.includes('网络暂时断开'));
+  const draft = JSON.parse(app.saved.get('store-ai-image-upload-draft'));
+  assert.equal(draft.uploadedCount, 3);
+  assert.equal(app.calls.filter(call => call.url === '/api/ai/images' && call.method === 'POST').length, 0);
+  assert.equal(app.ctx.configs.image.files.length, 7);
+  app.module.disposeImageGeneration();
+  app.ctx.configs.image.files = []; app.ctx.configs.image.prompt = '';
+  const reloaded = await import(`../design/image-generation.js?reload-${crypto.randomUUID()}`);
+  t.after(() => reloaded.disposeImageGeneration());
+  reloaded.bindImageGeneration(app.ctx);
+  await app.settle(() => app.nodes.get('#image-generation-notice').outerHTML.includes('素材已保存 3 / 7 张'));
+  assert.match(app.ctx.configs.image.prompt, /真实门店/);
+  assert.equal(app.calls.filter(call => call.url === '/api/ai/images' && call.method === 'POST').length, 0);
+  app.ctx.configs.image.files = [...ids];
+  reloaded.updateImageGenerationControls(app.ctx);
+  await app.settle(() => app.nodes.get('[data-action="generate"]').disabled === false);
+  reloaded.handleImageGenerationAction('image-resume-upload', {}, app.ctx);
+  await app.settle(() => app.calls.some(call => call.url === '/api/ai/images' && call.method === 'POST'));
+  const generated = app.calls.find(call => call.url === '/api/ai/images' && call.method === 'POST');
+  assert.equal(generated.body.requestId, draft.id);
+  assert.equal(app.calls.filter(call => call.url === '/api/ai/image-uploads' && call.method === 'POST').length, 1);
+  assert.deepEqual(app.calls.filter(call => call.url.endsWith('/batches') && call.method === 'POST').map(call => call.body.startIndex), [0, 3, 6]);
+});
+
+test('fifteen image outputs require fifteen remaining calls without hiding retained legacy counts', async t => {
+  const app = await imagePage(t, { config: { generationMode: 'variations', count: '15' }, remaining: 14 });
+  assert.equal(app.nodes.get('[data-action="generate"]').disabled, true);
+  assert.match(app.nodes.get('#input-requirement').textContent, /需要15次.*仅剩14次/);
+  assert.match(app.nodes.get('#image-generation-options').innerHTML, /value="6"/);
+  assert.match(app.nodes.get('#image-generation-options').innerHTML, /value="15"/);
+  app.module.handleImageGenerationAction('image-output-count', { dataset: { value: '14' } }, app.ctx);
+  assert.equal(app.nodes.get('[data-action="generate"]').disabled, false);
+  assert.match(app.nodes.get('[data-action="generate"]').innerHTML, /生成14张不同风格/);
+});
+
+test('completed upload drafts still validate requirements before a paid submission', async t => {
+  const uploadDraft = { id: crypto.randomUUID(), imageCount: 2, uploadedCount: 2, fingerprints: [], stage: 'ready' };
+  const app = await imagePage(t, { uploadDraft, config: { files: [], prompt: '字'.repeat(1001), generationMode: 'series', count: '6' } });
+  assert.equal(app.nodes.get('[data-action="generate"]').disabled, true);
+  assert.match(app.nodes.get('#input-requirement').textContent, /最多 1000 字/);
+  app.module.handleImageGenerationAction('generate', {}, app.ctx);
   assert.equal(app.calls.filter(call => call.method === 'POST').length, 0);
+  app.ctx.configs.image.prompt = ' ';
+  app.module.updateImageGenerationControls(app.ctx);
+  assert.equal(app.nodes.get('[data-action="generate"]').disabled, true);
+  app.ctx.configs.image.prompt = '字'.repeat(1000);
+  app.module.updateImageGenerationControls(app.ctx);
+  assert.equal(app.nodes.get('[data-action="generate"]').disabled, false);
+});
+
+test('expired upload progress clears without generating and the same originals use a new UUID after an explicit click', async t => {
+  const oldId = crypto.randomUUID();
+  const files = ['store.png', 'product.png'].map(name => ({ ...asset().file, name }));
+  const uploadDraft = { id: oldId, imageCount: 2, uploadedCount: 2, fingerprints: files.map(file => [file.name, file.size, file.type, 0]), stage: 'ready', expiresAt: new Date(Date.now() - 1).toISOString() };
+  const app = await imagePage(t, { uploadDraft, expiredUpload: true, pendingId: oldId, config: { generationMode: 'series', count: '6' } });
+  await app.settle(() => !app.saved.has('store-ai-image-upload-draft') && !app.saved.has('store-ai-pending-image-request'));
+  assert.match(app.nodes.get('#image-generation-notice').outerHTML, /超过3天保留期.*已清除/);
+  assert.equal(app.calls.filter(call => call.method === 'POST').length, 0);
+  assert.deepEqual(app.ctx.configs.image.files, ['one', 'two']);
+  assert.equal(app.ctx.assets[0].file.name, 'store.png');
+  app.module.handleImageGenerationAction('generate', {}, app.ctx);
+  await app.settle(() => app.calls.some(call => call.url === '/api/ai/images' && call.method === 'POST'));
+  const init = app.calls.find(call => call.url === '/api/ai/image-uploads' && call.method === 'POST');
+  const generated = app.calls.find(call => call.url === '/api/ai/images' && call.method === 'POST');
+  assert.notEqual(init.body.requestId, oldId);
+  assert.equal(generated.body.requestId, init.body.requestId);
+  assert.equal(app.calls.filter(call => call.url === '/api/ai/images' && call.method === 'POST').length, 1);
 });

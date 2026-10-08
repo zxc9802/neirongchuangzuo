@@ -171,6 +171,7 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
       await stateFor(userId, state => {
         for (const task of Object.values(state.tasks)) {
           if (!INTERRUPTED.has(task.status)) continue;
+          if (task.status === 'uploading' && task.uploadProtocol === 'batches') continue;
           task.status = 'failed'; task.updatedAt = now();
           task.error = '服务重启中断了任务，未扣正式生成额度。上游调用结果尚未核实，请联系管理员核对后重新上传，不会自动重复请求。';
           task.code = 'SERVICE_RESTARTED'; task.retryable = false;
@@ -282,12 +283,15 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
             state.garbage ||= [];
             for (const task of Object.values(state.tasks)) {
               const expiredTask = task.textExpiresAt <= now();
+              if (task.status === 'uploading' && task.uploadProtocol === 'batches' && task.uploadExpiresAt <= now()) {
+                task.status = 'failed'; task.code = 'FILES_EXPIRED'; task.retryable = false; task.updatedAt = now(); task.error = '上传素材已过3天保留期，请创建新任务。';
+              }
               if (task.status === 'awaiting_confirmation' && task.files?.some(file => file.expired || file.expiresAt <= now())) {
                 task.status = 'failed'; task.code = 'FILES_EXPIRED'; task.retryable = false; task.updatedAt = now();
                 task.error = '图片和下载包已过期，未扣正式生成额度。请重新上传照片并创建新的任务。';
                 if (state.ledger[task.id]?.status === 'reserved') state.ledger[task.id].status = 'released';
               }
-              for (const item of [...(task.files || []), ...(task.sourceImages || [])]) {
+              for (const item of [...(task.files || []), ...(task.sourceImages || []), ...(task.pendingUpload?.sourceImages || [])]) {
                 if (item.expired || (!expiredTask && item.expiresAt > now())) continue;
                 if (validMediaKey(item.key) && !state.garbage.some(file => file.key === item.key)) state.garbage.push({ userId, taskId: task.id, key: item.key });
                 item.expired = true;

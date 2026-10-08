@@ -1,12 +1,14 @@
 import * as defaultFs from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join, resolve, relative, isAbsolute, sep } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const IMAGE_RETENTION_HOURS = 72;
 export const IMAGE_RETENTION_MS = IMAGE_RETENTION_HOURS * 60 * 60 * 1000;
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
-const RESULT_FILE = /^result-[1-4]\.(?:png|jpg|webp)$/;
+const RESULT_FILE = /^result-(?:[1-9]|1[0-5])\.(?:png|jpg|webp)$/;
 const STATUSES = new Set(['queued', 'running', 'completed', 'failed', 'interrupted', 'expired']);
+const REPLACE_RETRY_DELAYS = [20, 40, 80];
 const timestamp = value => typeof value === 'number' ? value : Date.parse(value);
 const validTask = (task, id = task?.id) => task && typeof task === 'object' && !Array.isArray(task)
   && typeof id === 'string' && UUID.test(id) && task.id === id && STATUSES.has(task.status)
@@ -111,8 +113,18 @@ export function createImageRetention({ storageDir, now = Date.now, logger = cons
       const temp = join(directory, `task-${randomUUID()}.tmp`);
       try {
         await fs.writeFile(temp, serialized, { flag: 'wx', mode: 0o600 });
-        await taskDirectory(task.id);
-        await fs.rename(temp, metadata);
+        for (let attempt = 0; ; attempt++) {
+          await taskDirectory(task.id);
+          await ordinaryFile(temp);
+          try { await ordinaryFile(metadata); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+          try { await fs.rename(temp, metadata); break; }
+          catch (error) {
+            // Windows readers or scanners can briefly lock the old metadata.
+            // Retry this same local snapshot only, with fresh safety checks.
+            if (process.platform !== 'win32' || !['EPERM', 'EBUSY'].includes(error.code) || attempt >= REPLACE_RETRY_DELAYS.length) throw error;
+            await delay(REPLACE_RETRY_DELAYS[attempt]);
+          }
+        }
       } catch (error) {
         try { await taskDirectory(task.id); await ordinaryFile(temp); await fs.unlink(temp); } catch { /* Leave only a safe temporary file on failure. */ }
         throw error;

@@ -8,7 +8,8 @@ import { request as httpsRequest } from 'node:https';
 import { createRequestLedger } from './request-ledger.mjs';
 import { createImageRetention } from './retention.mjs';
 import { displayModelName } from '../../design/model-labels.js';
-import { GENERATION_MODES, imagePlan, imageRequestId } from './image-sets.mjs';
+import { GENERATION_MODES, imagePlan, imageRequestId, selectImageReferences } from './image-sets.mjs';
+import { createImageUploads } from './image-uploads.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const MB = 1024 * 1024;
@@ -154,15 +155,22 @@ async function downloadResult(url, hops, signal) {
   });
 }
 
-export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROOT, '.data', 'ai'), fetchImpl = fetch, downloadImpl = downloadImage, now = Date.now, cleanupIntervalMs = 60_000, bodyTimeoutMs = 30_000, logger = console, retentionOptions = {} } = {}) {
+export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROOT, '.data', 'ai'), fetchImpl = fetch, downloadImpl = downloadImage, now = Date.now, cleanupIntervalMs = 60_000, bodyTimeoutMs = 30_000, logger = console, retentionOptions = {}, rateLimitWait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
   let jobs = new Map(); let busy = false; let chatCount = 0; let closing = false;
-  let retention; let unhealthy = false; let shutdownPromise;
+  let retention, uploads; let unhealthy = false; let shutdownPromise;
   const posts = new Set(); const running = new Set();
   const ledger = createRequestLedger({ storageDir, now, limits: config.limits || { imageDaily: 20, chatDaily: 100, perMinute: 10 }, logger: event => logger.warn?.({ event: 'ai_control', code: event?.code || 'AI_LEDGER_UNAVAILABLE' }) });
-  const failStorage = () => { unhealthy = true; try { logger.warn?.({ event: 'ai_storage_unavailable', code: 'STORAGE_FAILED' }); } catch {} };
+  const storageErrorCodes = new Set(['ENOENT', 'EPERM', 'EACCES', 'EBUSY', 'ENOSPC', 'EDQUOT', 'EROFS', 'ENOTDIR', 'EISDIR', 'EEXIST', 'EIO', 'EMFILE', 'ENFILE', 'EXDEV']);
+  const failStorage = cause => {
+    unhealthy = true;
+    // Log only an allowlisted filesystem code, never a path, message or task data.
+    try { logger.warn?.({ event: 'ai_storage_unavailable', code: 'STORAGE_FAILED', ...(cause ? { filesystemCode: storageErrorCodes.has(cause.code) ? cause.code : 'UNKNOWN' } : {}) }); } catch {}
+  };
   const ready = (async () => {
     try {
       await ledger.ready;
+      uploads = createImageUploads({ storageDir, now, cleanupIntervalMs, logger });
+      await uploads.ready; await uploads.start();
       retention = createImageRetention({ ...retentionOptions, storageDir, now, cleanupIntervalMs, logger });
       await retention.ready;
       jobs = await retention.loadTasks();
@@ -187,6 +195,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     } catch (error) {
       unhealthy = true;
       await retention?.dispose().catch(() => {});
+      await uploads?.dispose().catch(() => {});
       await ledger.close().catch(() => {});
       throw error;
     }
@@ -195,13 +204,14 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
   const findTask = id => jobs.get(id) || [...jobs.values()].find(task => task.id.toLowerCase() === id.toLowerCase());
   const publicTask = task => {
     const output = { ...retention.publicTask(task), model: displayModelName(task.model, task.kind === 'chat' ? 'Plus模型' : 'Max模型') };
-    if (task.kind !== 'chat') Object.assign(output, { generationMode: task.generationMode || 'single', outputCount: task.outputCount || Math.max(1, task.images?.length || 0), completedCount: task.completedCount ?? task.images?.length ?? 0, partial: task.partial === true,
+    if (task.kind !== 'chat') Object.assign(output, { generationMode: task.generationMode || 'single', outputCount: task.outputCount || Math.max(1, task.images?.length || 0), completedCount: task.completedCount ?? task.images?.length ?? 0, inputCount: task.inputCount || 0, partial: task.partial === true,
       images: (output.images ?? []).map((image, index) => ({ index: index + 1, label: '单图', style: '单图', ...image })) });
     return output;
   };
   const publicUsage = usage => ({ ...usage, recent: (usage.recent ?? []).map(record => ({ ...record, model: displayModelName(record.model, record.kind === 'chat' ? 'Plus模型' : 'Max模型') })) });
   const safeError = error => {
     if (error instanceof ApiError) return error;
+    if (typeof error?.code === 'string' && error.code.startsWith('UPLOAD_')) return error;
     if (['AI_INSTANCE_LOCKED', 'AI_LEDGER_UNAVAILABLE', 'DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED', 'REQUEST_ID_CONFLICT'].includes(error?.code)) return error;
     return new ApiError('服务暂时不可用，请稍后查询任务记录。', 503, 'SERVICE_ERROR');
   };
@@ -212,7 +222,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
   };
   async function persist(task) {
     try { await retention.save(task); }
-    catch { failStorage(); throw new ApiError('任务无法保存，已暂停新的模型调用，请检查存储空间。', 503, 'STORAGE_FAILED'); }
+    catch (cause) { failStorage(cause); throw new ApiError('任务无法保存，已暂停新的模型调用，请检查存储空间。', 503, 'STORAGE_FAILED'); }
   }
   async function provider(path, body, timeout) {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeout);
@@ -248,9 +258,24 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     task.code = error?.code && (error instanceof ApiError || ['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error.code)) ? error.code : 'RESULT_FAILED';
     task.failedAt = new Date(now()).toISOString();
   }
-  async function dispatch(id) {
-    try { await ledger.markDispatched(id); }
-    catch (error) { if (!['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error?.code)) failStorage(); throw error; }
+  async function dispatch(id, task) {
+    for (;;) {
+      if (task && (closing || unhealthy)) throw new ApiError('服务已停止后续生成，请查询已完成图片。', 503, closing ? 'SERVICE_CLOSING' : 'STORAGE_FAILED');
+      try {
+        await ledger.markDispatched(id);
+        if (task) delete task.waitingForRateLimit;
+        return;
+      } catch (error) {
+        if (task && error.code === 'RATE_LIMITED' && (config.limits?.perMinute ?? 10) > 0) {
+          if (!task.waitingForRateLimit) { task.waitingForRateLimit = true; await persist(task); }
+          // Only this definitely-unsent position is resumed. Sent calls, even
+          // failed or uncertain calls, never enter this wait/replay path.
+          await rateLimitWait(1000); continue;
+        }
+        if (!['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error?.code)) failStorage();
+        throw error;
+      }
+    }
   }
   async function runImage(task, images) {
     let info;
@@ -260,7 +285,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       form.set('model', config.imageModel); form.set('prompt', task.prompt);
       form.set('n', '1'); form.set('size', SIZES[task.ratio]); form.set('quality', task.quality);
       form.set('response_format', 'b64_json'); form.set('format', 'png');
-      for (const image of images) form.append('image', new Blob([image.bytes], { type: image.mime }), image.name);
+      for (const image of selectImageReferences(images)) form.append('image', new Blob([image.bytes], { type: image.mime }), image.name);
       await dispatch(task.id);
       info = await provider('/images/edits', form, 10 * 60_000);
       const data = info.data;
@@ -293,16 +318,18 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
         const requestId = imageRequestId(task.id, plan.index);
         let info, dispatched = false;
         try {
+          const references = selectImageReferences(images, plan.index, task.outputCount);
           const form = new FormData();
-          form.set('model', config.imageModel); form.set('prompt', plan.prompt);
+          const prompt = `${plan.prompt}\n本次用户共上传 ${images.length} 张原图，本张使用其中第 ${references.map(image => image.sourceIndex).join('、')} 张作为事实参考。仅依据这些附图和用户明确提供的文字创作，没有出现在本张附图中的对象和细节不得补造。`;
+          form.set('model', config.imageModel); form.set('prompt', prompt);
           form.set('n', '1'); form.set('size', SIZES[task.ratio]); form.set('quality', task.quality);
           form.set('response_format', 'b64_json'); form.set('format', 'png');
-          for (const image of images) form.append('image', new Blob([image.bytes], { type: image.mime }), image.name);
-          if (task.generationMode === 'series' && firstResult && images.length <= 8 && firstResult.bytes.length <= 8 * MB && images.reduce((sum, image) => sum + image.bytes.length, 0) + firstResult.bytes.length <= 24 * MB) {
+          for (const image of references) form.append('image', new Blob([image.bytes], { type: image.mime }), image.name);
+          if (task.generationMode === 'series' && firstResult && firstResult.bytes.length <= 8 * MB && references.reduce((sum, image) => sum + image.bytes.length, 0) + firstResult.bytes.length <= 24 * MB) {
             form.append('image', new Blob([firstResult.bytes], { type: firstResult.mime }), `series-style-reference.${firstResult.ext}`);
-            form.set('prompt', `${plan.prompt}\n最后一张附图是本系列首张成功成品，仅参考其色调、字体、版式和光线等视觉设计，不作为门店、菜品、人物、产品或文字事实依据。事实依据始终为前面的全部用户原图。`);
+            form.set('prompt', `${prompt}\n最后一张附图是本系列首张成功成品，仅参考其色调、字体、版式和光线等视觉设计，不作为门店、菜品、人物、产品或文字事实依据。事实依据始终为前面的本张用户原图。`);
           }
-          await dispatch(requestId); dispatched = true;
+          await dispatch(requestId, task); dispatched = true;
           info = await provider('/images/edits', form, 10 * 60_000);
           if (!Array.isArray(info.data.data) || info.data.data.length !== 1) throw new ApiError('模型没有返回单张完整图片，本张未交付。', 502, 'EMPTY_RESULT');
           const image = info.data.data[0];
@@ -375,14 +402,33 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}` && req.headers.origin !== `https://${req.headers.host}`) throw new ApiError('请从本站页面发起请求。', 403, 'ORIGIN_REJECTED');
       if (req.headers['sec-fetch-site'] === 'cross-site') throw new ApiError('请从本站页面发起请求。', 403, 'ORIGIN_REJECTED');
       await retention.sweep(jobs);
+      await uploads.sweep();
       if (url.pathname === '/api/ai/status' && req.method === 'GET') {
         const usage = publicUsage(await ledger.summary());
-        json(res, 200, { chat: { configured: !!config.apiKey, model: displayModelName(config.chatModel, 'Plus模型'), dailyLimit: usage.limits.chatDaily, remaining: usage.remaining.chat }, image: { configured: !!config.apiKey, model: displayModelName(config.imageModel, 'Max模型'), requiresImage: true, maxImages: 9, maxImageMB: 8, maxTotalMB: 24, maxOutputs: 4, generationModes: GENERATION_MODES, dailyLimit: usage.limits.imageDaily, remaining: usage.remaining.image }, usage, cleanup: retention.status(), healthy: !unhealthy, closing }); return true;
+        json(res, 200, { chat: { configured: !!config.apiKey, model: displayModelName(config.chatModel, 'Plus模型'), dailyLimit: usage.limits.chatDaily, remaining: usage.remaining.chat }, image: { configured: !!config.apiKey, model: displayModelName(config.imageModel, 'Max模型'), requiresImage: true, maxImages: 30, maxReferenceImages: 4, maxImageMB: 8, maxTotalMB: 60, batchImages: 3, maxBatchMB: 24, maxOutputs: 15, generationModes: GENERATION_MODES, dailyLimit: usage.limits.imageDaily, remaining: usage.remaining.image }, usage, cleanup: retention.status(), healthy: !unhealthy, closing }); return true;
       }
       if (url.pathname === '/api/ai/usage' && req.method === 'GET') {
         json(res, 200, { ...publicUsage(await ledger.summary()), cleanup: retention.status(), healthy: !unhealthy, closing }); return true;
       }
-      const media = /^\/api\/ai\/media\/([a-f0-9-]+)\/(result-[1-4]\.(png|jpg|webp))$/i.exec(url.pathname);
+      const uploadRoute = /^\/api\/ai\/image-uploads(?:\/([a-f\d-]+)(\/batches)?)?$/i.exec(url.pathname);
+      if (uploadRoute) {
+        const uploadId = uploadRoute[1]?.toLowerCase();
+        let upload;
+        if (!uploadId && req.method === 'POST') {
+          if (closing) throw new ApiError('服务正在重启，请稍后核对上传进度。', 503, 'SERVICE_CLOSING');
+          const body = await readJSON(req, bodyTimeoutMs);
+          upload = await uploads.init(String(body.requestId || '').toLowerCase(), body.imageCount, userId);
+        } else if (uploadId && req.method === 'GET') upload = await uploads.get(uploadId, userId);
+        else if (uploadId && uploadRoute[2] && req.method === 'POST') {
+          if (closing) throw new ApiError('服务正在重启，请稍后核对上传进度。', 503, 'SERVICE_CLOSING');
+          const body = await readJSON(req, bodyTimeoutMs), decoded = decodeImages(body.images, 3);
+          upload = await uploads.append(uploadId, body.startIndex, decoded.map((image, index) => ({ ...image, originalName: typeof body.images[index]?.name === 'string' ? body.images[index].name : '' })), userId);
+        } else throw new ApiError('上传接口不支持此请求方式。', 405, 'METHOD_NOT_ALLOWED');
+        const task = findTask(upload.id);
+        Object.assign(upload, { submitted: !!task && ownsTask(task), ...(task && ownsTask(task) ? { taskId: task.id, taskStatus: task.status } : {}) });
+        json(res, 200, { upload }); return true;
+      }
+      const media = /^\/api\/ai\/media\/([a-f0-9-]+)\/(result-(?:[1-9]|1[0-5])\.(png|jpg|webp))$/i.exec(url.pathname);
       if (media && ['GET', 'HEAD'].includes(req.method)) {
         const task = findTask(media[1].toLowerCase());
         if (!ownsTask(task)) throw new ApiError('未找到这张作品。', 404);
@@ -424,12 +470,15 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
         fingerprint = createHash('sha256').update(JSON.stringify(messages)).digest('hex');
       } else {
         if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > 1000) throw new ApiError('请填写 1–1000 字的创作要求。');
-        images = decodeImages(body.images);
+        if (body.uploadId !== undefined) {
+          if (typeof body.uploadId !== 'string' || body.uploadId.toLowerCase() !== body.requestId || body.images !== undefined) throw new ApiError('原图上传与本次任务标识不一致。', 400, 'UPLOAD_INVALID');
+          images = await uploads.images(body.requestId, userId);
+        } else images = decodeImages(body.images);
         if (!images.length) throw new ApiError('请先上传至少一张原图，再生成宣传图片。');
         if (!Object.hasOwn(SIZES, body.ratio) || !['auto', 'low', 'medium', 'high'].includes(body.quality)) throw new ApiError('请选择支持的画面比例和画质。');
         generationMode = body.generationMode === undefined ? 'single' : body.generationMode;
         outputCount = body.outputCount === undefined ? 1 : body.outputCount;
-        if (!GENERATION_MODES.includes(generationMode) || !Number.isInteger(outputCount) || outputCount < 1 || outputCount > 4 || (generationMode === 'single' ? outputCount !== 1 : outputCount < 2)) throw new ApiError('请选择单图 1 张，或系列套图、多风格 2—4 张。', 400, 'INVALID_GENERATION_MODE');
+        if (!GENERATION_MODES.includes(generationMode) || !Number.isInteger(outputCount) || outputCount < 1 || outputCount > 15 || (generationMode === 'single' ? outputCount !== 1 : outputCount < 2)) throw new ApiError('请选择单图1张，或系列套图、多风格2—15张。', 400, 'INVALID_GENERATION_MODE');
         fingerprint = createHash('sha256').update(JSON.stringify({ prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, images: images.map(image => createHash('sha256').update(image.bytes).digest('hex')), ...(generationMode === 'single' ? {} : { generationMode, outputCount }) })).digest('hex');
       }
       const model = kind === 'chat' ? config.chatModel : config.imageModel;
@@ -448,7 +497,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
           ? await ledger.reserveBatch(Array.from({ length: outputCount }, (_, index) => ({ id: imageRequestId(body.requestId, index + 1), kind, fingerprint, model })))
           : await ledger.reserve({ id: body.requestId, kind, fingerprint, model });
         if (!reservation.created) throw new ApiError('此任务已有调用记录，无法重复提交；请核对原记录。', 409, 'REQUEST_ALREADY_RECORDED');
-        task = { id: body.requestId, userId, kind, status: 'queued', model, createdAt: new Date(now()).toISOString(), images: [], fingerprint, ...(kind === 'image' ? { prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, size: SIZES[body.ratio], generationMode, outputCount, completedCount: 0 } : {}) };
+        task = { id: body.requestId, userId, kind, status: 'queued', model, createdAt: new Date(now()).toISOString(), images: [], fingerprint, ...(kind === 'image' ? { prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, size: SIZES[body.ratio], generationMode, outputCount, completedCount: 0, inputCount: images.length } : {}) };
         await persist(task);
         jobs.set(task.id, task);
       } catch (error) {
@@ -492,6 +541,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       await ready.catch(() => {});
       while (posts.size || running.size) await Promise.allSettled([...posts, ...running]);
       await retention?.dispose();
+      await uploads?.dispose();
       await ledger.close();
     })();
     return shutdownPromise;

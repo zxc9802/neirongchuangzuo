@@ -28,15 +28,15 @@ async function readJSON(req) {
   try { return await Promise.race([consume, new Promise((_, reject) => { timer = setTimeout(() => reject(new RestaurantError('上传超时，请重试。', 408, 'BODY_TIMEOUT')), 30_000); })]); }
   finally { clearTimeout(timer); }
 }
-function decodeUploads(value) {
-  if (!Array.isArray(value) || !value.length || value.length > 9) throw new RestaurantError('请选择1—9张真实照片。');
+function decodeUploads(value, max = 9, startIndex = 0) {
+  if (!Array.isArray(value) || !value.length || value.length > max) throw new RestaurantError(`每批请选择1—${max}张真实照片。`);
   let total = 0;
   return value.map((item, index) => {
     const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(item?.dataUrl ?? '');
     if (!match || match[2].length > Math.ceil(8 * MB / 3) * 4) throw new RestaurantError('只支持PNG、JPEG、WebP，单张最多8MB。');
     const bytes = Buffer.from(match[2], 'base64'); total += bytes.length;
     if (!bytes.length || bytes.length > 8 * MB || total > 24 * MB || bytes.toString('base64') !== match[2]) throw new RestaurantError('照片大小超限或数据不完整。', 413);
-    return { id: `photo-${index + 1}`, name: typeof item.name === 'string' ? item.name.slice(0, 180).replace(/[\u0000-\u001f]/g, '') : `照片${index + 1}`, mime: match[1], bytes };
+    return { id: `photo-${startIndex + index + 1}`, name: typeof item.name === 'string' ? item.name.slice(0, 180).replace(/[\u0000-\u001f]/g, '') : `照片${startIndex + index + 1}`, mime: match[1], bytes };
   });
 }
 
@@ -52,12 +52,20 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     remove: (_userId, _taskId, key) => rawMedia.remove(key) };
   const model = injectedModel ?? createRestaurantModel({ config, storageDir: join(dataDir, 'model-control'), fetchImpl, now, ledger: providerLedger });
   let closing = false, cleanupTimer, shutdownPromise;
-  const running = new Set(), serial = new Map();
+  const running = new Set(), serial = new Map(), mediaWriteGroups = new Map();
   const report = code => { try { logger.warn?.({ event: 'restaurant', code }); } catch {} };
+  async function protectMediaGroup(keys, operation) {
+    for (const key of keys) mediaWriteGroups.set(key, (mediaWriteGroups.get(key) ?? 0) + 1);
+    try { return await operation(); }
+    finally { for (const key of keys) { const remaining = mediaWriteGroups.get(key) - 1; if (remaining) mediaWriteGroups.set(key, remaining); else mediaWriteGroups.delete(key); } }
+  }
   async function sweep() {
     const result = await store.sweep();
     for (const file of result.expiredFiles ?? []) {
+      // The whole registered batch stays queued until every possible late write ends.
+      if (serial.has(file.userId) || mediaWriteGroups.has(file.key)) continue;
       await media.remove(file.userId, file.taskId, file.key);
+      if (serial.has(file.userId) || mediaWriteGroups.has(file.key)) continue;
       await store.acknowledgeFiles?.(file.userId, [file.key]);
     }
   }
@@ -76,7 +84,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   }
   function publicTask(task) {
     if (!task) return null;
-    const { userId, fingerprint: ignored, ...output } = task;
+    const { userId, fingerprint: ignored, uploadBatches: ignoredBatches, uploadedBytes: ignoredBytes, pendingUpload: ignoredPending, ...output } = task;
     if (Object.hasOwn(output, 'model')) output.model = displayModelName(output.model, 'Plus模型');
     output.files = (task.files ?? []).map(({ key, ...file }) => ({ ...file, expired: file.expired || file.expiresAt <= now(), url: `/api/restaurant/tasks/${task.id}/files/${encodeURIComponent(file.filename)}` }));
     output.sourceImages = (task.sourceImages ?? []).map(({ key, ...photo }) => ({ ...photo, expired: photo.expired || photo.expiresAt <= now(), url: `/api/restaurant/tasks/${task.id}/files/${encodeURIComponent(photo.filename)}` }));
@@ -84,6 +92,9 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     output.selectedDirectionId = task.selection?.directionId ?? task.selectedDirectionId ?? null;
     output.facts = task.selection?.facts ?? {};
     output.imageMode = task.selection?.imageMode ?? 'natural';
+    output.imageCount = task.imageCount ?? task.sourceImages?.length ?? 0;
+    output.uploadedCount = task.sourceImages?.length ?? 0;
+    output.outputCount = task.outputCount ?? task.selection?.outputCount ?? task.copy?.imageOrder?.length ?? null;
     return output;
   }
   async function taskFor(userId, id) {
@@ -111,16 +122,70 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     }
     return loaded;
   }
+  async function uploadPhotos(userId, task, body) {
+    if (task.uploadProtocol !== 'batches') throw new RestaurantError('该任务不支持分批上传。', 409, 'TASK_STATE');
+    if (task.uploadExpiresAt <= now()) throw new RestaurantError('上传素材已过3天保留期，请创建新任务。', 410, 'FILES_EXPIRED');
+    if (!Number.isInteger(body.startIndex) || body.startIndex < 0 || body.startIndex >= task.imageCount) throw new RestaurantError('照片起始序号无效。', 400, 'INVALID_UPLOAD_INDEX');
+    const decoded = decodeUploads(body.images, 3, body.startIndex), inspected = [];
+    if (body.startIndex + decoded.length > task.imageCount) throw new RestaurantError('本批照片超过声明的总张数。', 400, 'IMAGE_COUNT_EXCEEDED');
+    for (const photo of decoded) {
+      const meta = await imageProcessor.inspectPhoto(photo.bytes), mime = meta.format === 'jpeg' ? 'image/jpeg' : `image/${meta.format}`;
+      if (mime !== photo.mime) throw new RestaurantError('图片内容与格式不一致。');
+      inspected.push({ ...photo, ...meta });
+    }
+    const fp = fingerprint(inspected.map(photo => ({ hash: photo.hash, name: photo.name })));
+    const previous = (task.uploadBatches ?? []).find(batch => batch.startIndex === body.startIndex);
+    if (previous) {
+      if (previous.fingerprint !== fp || previous.count !== inspected.length) throw new RestaurantError('该序号已上传不同照片，请重新创建素材任务。', 409, 'UPLOAD_BATCH_CONFLICT');
+      return task;
+    }
+    if (task.status !== 'uploading') throw new RestaurantError('素材任务已进入分析，不能再追加照片。', 409, 'TASK_STATE');
+    if (body.startIndex !== task.sourceImages.length) throw new RestaurantError('请从已上传照片后的连续序号继续。', 409, 'UPLOAD_SEQUENCE_CONFLICT');
+    if (task.pendingUpload && (task.pendingUpload.startIndex !== body.startIndex || task.pendingUpload.fingerprint !== fp)) throw new RestaurantError('该序号有未确认的上传批次，请恢复原批次。', 409, 'UPLOAD_BATCH_CONFLICT');
+    const batchBytes = inspected.reduce((sum, photo) => sum + photo.bytes.length, 0);
+    if ((task.uploadedBytes ?? 0) + batchBytes > 60 * MB) throw new RestaurantError('压缩后的素材总大小最多60MB，请减少照片或进一步压缩。', 413, 'UPLOAD_POOL_TOO_LARGE');
+    const sourceImages = inspected.map(photo => {
+      const filename = `original-${photo.id}.${photo.format === 'jpeg' ? 'jpg' : photo.format}`;
+      return { id: photo.id, name: photo.name, mime: photo.mime, width: photo.width, height: photo.height, hash: photo.hash, quality: photo.quality, bytes: photo.bytes.length,
+        filename, key: scopedKey(userId, task.id, `originals/${filename}`), expiresAt: task.uploadExpiresAt };
+    });
+    return protectMediaGroup(sourceImages.map(source => source.key), async () => {
+      await store.patchTask(userId, task.id, { pendingUpload: { startIndex: body.startIndex, fingerprint: fp, sourceImages } });
+      for (const [index, source] of sourceImages.entries()) await media.put(userId, task.id, source.key, inspected[index].bytes);
+      return await store.patchTask(userId, task.id, { sourceImages: [...task.sourceImages, ...sourceImages], uploadedBytes: (task.uploadedBytes ?? 0) + batchBytes,
+        uploadBatches: [...(task.uploadBatches ?? []), { startIndex: body.startIndex, count: inspected.length, fingerprint: fp }], pendingUpload: null });
+    });
+  }
+  async function startAnalysis(userId, task) {
+    if (task.uploadProtocol !== 'batches') throw new RestaurantError('该任务使用原有上传流程。', 409, 'TASK_STATE');
+    if (task.status !== 'uploading') return task;
+    if (task.uploadExpiresAt <= now()) throw new RestaurantError('上传素材已过期，请重新上传。', 410, 'FILES_EXPIRED');
+    if (task.pendingUpload || task.sourceImages.length !== task.imageCount) throw new RestaurantError('照片尚未全部上传，请继续上传后再分析。', 409, 'UPLOAD_INCOMPLETE');
+    if (model.enabled === false) throw new RestaurantError('内容分析接口尚未配置。', 503, 'MODEL_NOT_CONFIGURED');
+    await loadSources(userId, task);
+    const claimed = await store.claimTask(userId, task.id, ['uploading'], { status: 'analysing', progress: { stage: 'analysis', current: 0, total: task.imageCount } });
+    if (claimed) launch(userId, task.id, () => analyseTask(userId, task.id));
+    return claimed ?? await taskFor(userId, task.id);
+  }
+  async function cancelUpload(userId, task) {
+    if (task.uploadProtocol !== 'batches') throw new RestaurantError('该任务不是分批上传草稿。', 409, 'TASK_STATE');
+    if (task.code === 'UPLOAD_CANCELLED') return task;
+    if (task.status !== 'uploading') throw new RestaurantError('任务已开始分析，不能取消上传草稿。', 409, 'TASK_STATE');
+    const expire = file => ({ ...file, expiresAt: now() });
+    return await store.claimTask(userId, task.id, ['uploading'], { status: 'failed', code: 'UPLOAD_CANCELLED', retryable: false, error: '已取消上传，可以重新选择素材。',
+      sourceImages: task.sourceImages.map(expire), pendingUpload: task.pendingUpload ? { ...task.pendingUpload, sourceImages: task.pendingUpload.sourceImages.map(expire) } : null }) ?? await taskFor(userId, task.id);
+  }
   async function analyseTask(userId, id) {
     const task = await taskFor(userId, id), sources = await loadSources(userId, task);
-    const analysis = [];
-    for (let start = 0; start < sources.length; start += 3) {
+    const analysis = [...(task.analysis ?? [])];
+    const onBudgetWait = () => store.patchTask(userId, id, { progress: { stage: 'waiting_for_budget', current: analysis.length, total: sources.length, message: '共享请求较多，正在排队等待继续分析。' } });
+    for (let start = analysis.length; start < sources.length; start += 3) {
       const batch = [];
       for (const source of sources.slice(start, start + 3)) {
         const prepared = imageProcessor.prepareAnalysisPhoto ? await imageProcessor.prepareAnalysisPhoto(source.bytes) : { bytes: source.bytes, mime: source.mime };
         batch.push({ ...source, dataUrl: `data:${prepared.mime};base64,${prepared.bytes.toString('base64')}` });
       }
-      analysis.push(...validateAnalysis({ images: await model.analyse(batch, task.profileSnapshot) }, batch.map(item => item.id)));
+      analysis.push(...validateAnalysis({ images: await model.analyse(batch, task.profileSnapshot, { onBudgetWait }) }, batch.map(item => item.id)));
       await store.patchTask(userId, id, { analysis: [...analysis], progress: { stage: 'analysis', current: analysis.length, total: sources.length } });
     }
     const hashes = new Set();
@@ -134,7 +199,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       await store.patchTask(userId, id, { analysis, directions: [], status: 'failed', code: 'NO_USABLE_PHOTOS', retryable: false, error: '这组照片暂时无法组成一篇可发布的小红书内容，请补充更清晰的菜品、环境或消费场景照片。' });
       return;
     }
-    const directions = validateDirections({ directions: await model.recommend(analysis, task.profileSnapshot) }, analysis, task.profileSnapshot);
+    const directions = validateDirections({ directions: await model.recommend(analysis, task.profileSnapshot, { onBudgetWait }) }, analysis, task.profileSnapshot);
     await store.patchTask(userId, id, { analysis, directions, sparsePhotos: usable.length <= 2, status: directions.length ? 'awaiting_selection' : 'failed', progress: null,
       ...(directions.length ? { message: usable.length <= 2 ? '当前可用照片较少，可以生成简版图文；补充菜品、环境或消费场景照片后，内容会更完整。' : '', error: null } : { code: 'NO_RELIABLE_DIRECTION', retryable: false, error: '没有可靠的内容方向，请补充照片或门店资料。' }) });
   }
@@ -159,32 +224,37 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     const zip = await imageProcessor.createPackageZip(copy.imageOrder.map(imageId => ({ ...processed.get(imageId) })), { ...copy, hashtags: copy.tags.map(tag => `#${tag}`), store: task.profileSnapshot.name, risks: review.warnings, review });
     const zipKey = scopedKey(userId, task.id, 'results/package.zip');
     files.push({ key: zipKey, filename: 'package.zip', mime: 'application/zip', role: 'zip', bytes: zip.length, expiresAt });
-    // Record every intended object before upload so interrupted writes remain discoverable by cleanup.
-    await store.patchTask(userId, task.id, { files });
-    try {
-      for (const file of files.filter(item => item.role === 'image')) {
-        await media.put(userId, task.id, file.key, processed.get(file.imageId).bytes); uploaded.push(file.key);
-      }
-      await media.put(userId, task.id, zipKey, zip); uploaded.push(zipKey);
-      return { files, copy, review };
-    } catch (cause) { for (const key of uploaded) await media.remove(userId, task.id, key).catch(() => {}); throw cause; }
+    return protectMediaGroup(files.map(file => file.key), async () => {
+      // Register after protecting every key, including those not yet dispatched to media.
+      await store.patchTask(userId, task.id, { files });
+      try {
+        for (const file of files.filter(item => item.role === 'image')) {
+          await media.put(userId, task.id, file.key, processed.get(file.imageId).bytes); uploaded.push(file.key);
+        }
+        await media.put(userId, task.id, zipKey, zip); uploaded.push(zipKey);
+        return { files, copy, review };
+      } catch (cause) { for (const key of uploaded) await media.remove(userId, task.id, key).catch(() => {}); throw cause; }
+    });
   }
   async function generateTask(userId, id) {
     const task = await taskFor(userId, id), selection = task.selection;
     const sources = await loadSources(userId, task);
-    let selected = task.analysis.filter(item => selection.imageIds.includes(item.imageId));
+    const candidates = [...selection.imageIds, ...(selection.backupImageIds ?? [])].map(imageId => task.analysis.find(item => item.imageId === imageId)).filter(Boolean);
+    let selected = [];
     const processed = new Map();
-    for (const item of selected) {
+    const targetCount = selection.outputCount ?? selection.imageIds.length;
+    for (const item of candidates) {
+      if (processed.size >= targetCount) break;
       const source = sources.find(photo => photo.id === item.imageId);
-      try { processed.set(item.imageId, await process(userId, task, source, item.crop ? { crop: item.crop } : {})); }
+      try { processed.set(item.imageId, await process(userId, task, source, item.crop ? { crop: item.crop } : {})); selected.push(item); }
       catch { /* Failed photos may be removed before copy is written against remaining evidence. */ }
     }
-    selected = selected.filter(item => processed.has(item.imageId));
     if (!selected.length) throw new RestaurantError('可用图片处理失败，未形成完整内容包。', 502, 'IMAGES_FAILED');
+    if (selection.strictOutputCount && selected.length !== targetCount) throw new RestaurantError(`可用照片处理后不足${targetCount}张，同方向备用照片也无法补齐，未扣正式生成额度。`, 502, 'INSUFFICIENT_PROCESSED_IMAGES');
     // A dish/group-buy direction requires its visual evidence; otherwise fail rather than weaken its claim silently.
     const originalCore = task.analysis.filter(item => selection.imageIds.includes(item.imageId) && item.imageType === 'food');
     if (originalCore.length && /菜|餐|面|食|团购/.test(selection.direction.label) && !selected.some(item => item.imageType === 'food')) throw new RestaurantError('核心菜品图片处理失败，请重试或选择其他方向。', 502, 'CORE_IMAGE_FAILED');
-    await store.patchTask(userId, id, { status: 'generating', progress: { stage: 'copy' }, removedImageIds: selection.imageIds.filter(imageId => !processed.has(imageId)) });
+    await store.patchTask(userId, id, { status: 'generating', outputCount: selected.length, progress: { stage: 'copy' }, removedImageIds: selection.imageIds.filter(imageId => !processed.has(imageId)) });
     // Let writing and review see a few actual final photos, with removed edge risks already cropped.
     // The full structured analysis remains available for every selected photo.
     const photos = await Promise.all(selected.slice(0, 3).map(async item => {
@@ -193,19 +263,20 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       return { id: item.imageId, dataUrl: `data:${photo.mime};base64,${photo.bytes.toString('base64')}` };
     }));
     let copy, review, copyQuality;
+    const onBudgetWait = () => store.patchTask(userId, id, { progress: { stage: 'waiting_for_budget', message: '共享请求较多，正在排队等待继续生成。' } });
     for (let revision = 0; revision < 2; revision++) {
       const draft = copy, qualityIssues = review?.errors ?? [];
       if (revision) await store.patchTask(userId, id, { progress: { stage: 'copy_refining' } });
       // Only complete, known drafts can be rewritten. Uncertain provider errors propagate without replay.
       copy = validateCopy(await model.write({ profile: task.profileSnapshot, analysis: selected, direction: selection.direction, facts: selection.facts, photos,
-        ...(draft ? { draft, qualityIssues } : {}) }), selected.map(item => item.imageId));
+        ...(draft ? { draft, qualityIssues } : {}) }, { onBudgetWait }), selected.map(item => item.imageId));
       if (copy.imageOrder.length !== selected.length) throw new RestaurantError('文案返回的图片顺序不完整。', 502, 'MODEL_INVALID_OUTPUT');
       const quality = inspectCopyQuality(copy, { profile: task.profileSnapshot, analysis: selected, direction: selection.direction });
       copyQuality = { ...quality, revisionCount: revision };
       const local = localReview(copy, task.profileSnapshot, selection.facts, selected);
       // Avoid another paid review for an already rejected draft, but never relax factual checks.
       const audit = quality.passed && !local.errors.length
-        ? validateAudit(await model.audit({ copy, profile: task.profileSnapshot, confirmedFacts: selection.facts, direction: selection.direction, images: selected, photos }))
+        ? validateAudit(await model.audit({ copy, profile: task.profileSnapshot, confirmedFacts: selection.facts, direction: selection.direction, images: selected, photos }, { onBudgetWait }))
         : { status: 'passed', errors: [], warnings: [] };
       const errors = [...new Set([...local.errors, ...quality.issues, ...audit.errors])], warnings = [...new Set([...local.warnings, ...audit.warnings])];
       if (audit.status === 'blocked' && !errors.length) errors.push('发布文案检查未通过，请调整消费主题或核对资料。');
@@ -242,7 +313,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (!['completed', 'awaiting_selection', 'awaiting_facts', 'awaiting_confirmation', 'failed'].includes(old.status) || !old.directions?.length) throw new RestaurantError('当前任务尚不能选择新方向，请等待分析完成。', 409, 'TASK_STATE');
     const originals = [], sourceImages = old.sourceImages.map(source => ({ ...source, key: scopedKey(userId, requestId, `originals/${source.filename}`) }));
     let created;
-    try {
+    return protectMediaGroup(sourceImages.map(source => source.key), async () => { try {
       created = await store.createTask(userId, { id: requestId, fingerprint: fp, forkFrom: old.id, profileSnapshot: old.profileSnapshot, sourceImages,
         analysis: old.analysis, directions: old.directions, sparsePhotos: old.sparsePhotos, rightsConfirmed: true, status: 'uploading', files: [] });
       for (const source of old.sourceImages) {
@@ -251,27 +322,38 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
         await media.put(userId, requestId, key, bytes); originals.push(key);
       }
       return await store.patchTask(userId, requestId, { status: 'awaiting_selection' });
-    } catch (cause) { for (const key of originals) await media.remove(userId, requestId, key).catch(() => {}); if (created) await fail(userId, requestId, cause); throw cause; }
+    } catch (cause) { for (const key of originals) await media.remove(userId, requestId, key).catch(() => {}); if (created) await fail(userId, requestId, cause); throw cause; } });
   }
   async function startGenerate(userId, task, body) {
+    if (body.outputCount !== undefined && (!Number.isInteger(body.outputCount) || body.outputCount < 1 || body.outputCount > 15)) throw new RestaurantError('请选择1—15张真实成品图片。', 400, 'INVALID_OUTPUT_COUNT');
+    if (task.selection && (ACTIVE.has(task.status) || task.status === 'awaiting_confirmation') && body.outputCount !== undefined && body.outputCount !== (task.selection.outputCount ?? task.selection.imageIds.length)) throw new RestaurantError('该任务已按其他成品数量开始，请查询原任务。', 409, 'OUTPUT_COUNT_CONFLICT');
     if (ACTIVE.has(task.status) || task.status === 'awaiting_confirmation') return task;
     if (task.status === 'completed') {
       // A repeated exact request returns its charged task, while a new direction is a new task.
-      if (task.selection?.directionId === body.directionId && task.selection?.imageMode === (body.imageMode ?? body.processingMode ?? 'natural') && fingerprint(task.selection?.facts ?? {}) === fingerprint(resolveDirectionFacts(task.selection.direction, task.profileSnapshot, normalizeFacts(body.facts)))) return task;
+      const sameCount = body.outputCount === undefined ? task.selection?.strictOutputCount !== true : task.selection?.strictOutputCount === true && task.selection.outputCount === body.outputCount;
+      if (sameCount && task.selection?.directionId === body.directionId && task.selection?.imageMode === (body.imageMode ?? body.processingMode ?? 'natural') && fingerprint(task.selection?.facts ?? {}) === fingerprint(resolveDirectionFacts(task.selection.direction, task.profileSnapshot, normalizeFacts(body.facts)))) return task;
       task = await cloneTask(userId, task, body.requestId ?? randomUUID());
     }
     if (!['awaiting_selection', 'awaiting_facts'].includes(task.status)) throw new RestaurantError('请先完成照片分析，或返回重新上传照片。', 409, 'TASK_STATE');
     const direction = task.directions.find(item => item.id === body.directionId);
     if (!direction) throw new RestaurantError('请选择有效的内容方向。');
+    const seenHashes = new Set();
+    const availableIds = direction.supportingImageIds.filter(imageId => {
+      const item = task.analysis.find(entry => entry.imageId === imageId), source = task.sourceImages.find(entry => entry.id === imageId);
+      if (!item?.usable || !source || seenHashes.has(source.hash)) return false;
+      seenHashes.add(source.hash); return true;
+    });
+    if (!availableIds.length) throw new RestaurantError('该方向没有可用照片，请更换方向。', 422);
+    const outputCount = body.outputCount ?? Math.min(15, availableIds.length);
+    if (outputCount > availableIds.length || body.outputCount !== undefined && availableIds.length >= 6 && outputCount < 6) throw new RestaurantError(`该方向可用真实照片${availableIds.length}张，请选择${availableIds.length >= 6 ? '6—' : '1—'}${Math.min(15, availableIds.length)}张，不会复制照片凑数。`, 422, 'INSUFFICIENT_DIRECTION_IMAGES');
     const facts = resolveDirectionFacts(direction, task.profileSnapshot, normalizeFacts(body.facts)), missingFacts = pendingFacts(direction, task.profileSnapshot, facts);
     if (missingFacts.length) return await store.patchTask(userId, task.id, { status: 'awaiting_facts', missingFacts, selectedDirectionId: direction.id });
     if (task.sparsePhotos && body.acceptSparse !== true && body.allowFewImages !== true) throw new RestaurantError('可用照片较少，请确认继续生成简版图文。', 422, 'SPARSE_CONFIRMATION_REQUIRED');
     const imageMode = body.imageMode ?? body.processingMode ?? 'natural';
     if (!['natural', 'cover'].includes(imageMode)) throw new RestaurantError('请选择自然美化或封面加字。');
-    const imageIds = direction.supportingImageIds.filter(id => task.analysis.find(item => item.imageId === id)?.usable);
-    if (!imageIds.length) throw new RestaurantError('该方向没有可用照片，请更换方向。', 422);
+    const imageIds = availableIds.slice(0, outputCount), backupImageIds = availableIds.slice(outputCount);
     await store.reservePackage(userId, task.id);
-    const claimed = await store.claimTask(userId, task.id, ['awaiting_selection', 'awaiting_facts'], { status: 'generating', selection: { directionId: direction.id, direction, facts, imageMode, imageIds }, missingFacts: [], error: null, code: null });
+    const claimed = await store.claimTask(userId, task.id, ['awaiting_selection', 'awaiting_facts'], { status: 'generating', outputCount, selection: { directionId: direction.id, direction, facts, imageMode, imageIds, backupImageIds, outputCount, strictOutputCount: body.outputCount !== undefined }, missingFacts: [], error: null, code: null });
     if (!claimed) return await taskFor(userId, task.id);
     launch(userId, task.id, () => generateTask(userId, task.id)); return claimed;
   }
@@ -311,6 +393,15 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
           if (!UUID.test(body.requestId ?? '')) throw new RestaurantError('请求标识无效，请刷新后重试。');
           if (body.rightsConfirmed !== true) throw new RestaurantError('请确认图片使用权和人物授权。', 422, 'RIGHTS_REQUIRED');
           const profile = await store.getProfile(userId); requireProfile(profile);
+          if (body.images === undefined) {
+            if (!Number.isInteger(body.imageCount) || body.imageCount < 1 || body.imageCount > 30) throw new RestaurantError('请选择1—30张素材。', 400, 'INVALID_IMAGE_COUNT');
+            const fp = fingerprint({ uploadProtocol: 'batches', imageCount: body.imageCount, rightsConfirmed: true, profile });
+            const old = await store.getTask(userId, body.requestId);
+            if (old) { if (old.fingerprint !== fp) throw new RestaurantError('该请求标识已用于不同素材数量或门店资料。', 409, 'REQUEST_ID_CONFLICT'); return old; }
+            if ((await store.listTasks(userId)).filter(item => ACTIVE.has(item.status) && !(item.uploadProtocol === 'batches' && item.uploadExpiresAt <= now())).length >= 2) throw new RestaurantError('当前有任务处理中，请完成后再上传。', 429, 'ACTIVE_LIMIT');
+            return await store.createTask(userId, { id: body.requestId, requestId: body.requestId, fingerprint: fp, profileSnapshot: profile, imageCount: body.imageCount,
+              uploadProtocol: 'batches', uploadExpiresAt: now() + FILES_TTL_MS, uploadedBytes: 0, uploadBatches: [], sourceImages: [], analysis: [], directions: [], files: [], rightsConfirmed: true, status: 'uploading' });
+          }
           const decoded = decodeUploads(body.images), inspected = [];
           for (const photo of decoded) {
             const meta = await imageProcessor.inspectPhoto(photo.bytes);
@@ -329,18 +420,18 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
             return { id: photo.id, name: photo.name, mime: photo.mime, width: photo.width, height: photo.height, hash: photo.hash, quality: photo.quality, filename, key, expiresAt: now() + FILES_TTL_MS };
           });
           const uploaded = []; let created;
-          try {
+          return protectMediaGroup(sourceImages.map(source => source.key), async () => { try {
             created = await store.createTask(userId, { id: body.requestId, requestId: body.requestId, fingerprint: fp, profileSnapshot: profile, sourceImages, analysis: [], directions: [], files: [], rightsConfirmed: true, status: 'uploading' });
             for (const source of sourceImages) {
               await media.put(userId, body.requestId, source.key, inspected.find(photo => photo.id === source.id).bytes); uploaded.push(source.key);
             }
             const uploadedTask = await store.patchTask(userId, body.requestId, { status: 'analysing' });
             launch(userId, created.id, () => analyseTask(userId, created.id)); return uploadedTask;
-          } catch (cause) { for (const key of uploaded) await media.remove(userId, body.requestId, key).catch(() => {}); if (created) await fail(userId, body.requestId, cause); throw cause; }
+          } catch (cause) { for (const key of uploaded) await media.remove(userId, body.requestId, key).catch(() => {}); if (created) await fail(userId, body.requestId, cause); throw cause; } });
         });
         reply(res, 202, { task: publicTask(task) }); return true;
       }
-      const match = /^\/api\/restaurant\/tasks\/([^/]+)(?:\/(generate|retry|confirm|fork|files)(?:\/([^/]+))?)?$/.exec(path);
+      const match = /^\/api\/restaurant\/tasks\/([^/]+)(?:\/(generate|retry|confirm|fork|files|photos|analyse|cancel-upload)(?:\/([^/]+))?)?$/.exec(path);
       if (match) {
         const [, id, action, filename] = match;
         if (req.method === 'GET' && !action) { reply(res, 200, { task: publicTask(await taskFor(userId, id)) }); return true; }
@@ -354,10 +445,13 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
           if (!bytes) throw new RestaurantError('文件已过期或不可用。', 410, 'FILES_EXPIRED');
           res.writeHead(200, { 'Content-Type': file.mime, 'Content-Length': bytes.length, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `${original ? 'inline' : 'attachment'}; filename="${file.filename}"` }); res.end(bytes); return true;
         }
-        if (req.method === 'POST' && ['generate', 'retry', 'confirm', 'fork'].includes(action)) {
+        if (req.method === 'POST' && ['generate', 'retry', 'confirm', 'fork', 'photos', 'analyse', 'cancel-upload'].includes(action)) {
           const body = await readJSON(req);
           const result = await exclusive(userId, async () => {
             const task = await taskFor(userId, id);
+            if (action === 'photos') return uploadPhotos(userId, task, body);
+            if (action === 'analyse') return startAnalysis(userId, task);
+            if (action === 'cancel-upload') return cancelUpload(userId, task);
             if (action === 'generate') return startGenerate(userId, task, body);
             if (action === 'fork') return cloneTask(userId, task, body.requestId);
             if (action === 'confirm') {
@@ -387,7 +481,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     }
   };
   handler.ready = ready;
-  handler.shutdown = () => shutdownPromise ||= (async () => { closing = true; clearInterval(cleanupTimer); await ready.catch(() => {}); await Promise.allSettled([...serial.values()]); await Promise.allSettled([...running]); await model.close?.(); await store.close?.(); })();
+  handler.shutdown = () => shutdownPromise ||= (async () => { closing = true; model.stop?.(); clearInterval(cleanupTimer); await ready.catch(() => {}); await Promise.allSettled([...serial.values()]); await Promise.allSettled([...running]); await model.close?.(); await store.close?.(); })();
   handler.store = store;
   return handler;
 }

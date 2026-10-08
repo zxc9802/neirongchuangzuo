@@ -8,6 +8,16 @@ const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 const image = (overrides = {}) => ({ id, status: 'completed', createdAt: new Date(now - 74 * hour).toISOString(), completedAt: new Date(now - hour).toISOString(), images: [{ url: `/api/ai/media/${id}/result-1.png`, filename: 'result-1.png' }], prompt: '设计宣传海报\n主标题：真实工艺，看细节\n要点：打样流程', ...overrides });
 const restaurant = (overrides = {}) => ({ id, status: 'completed', completedAt: now - hour, copy: { titles: ['附近午餐来吃一碗面'] }, files: [{ role: 'image', filename: '01.jpg', url: `/api/restaurant/tasks/${id}/files/01.jpg`, expiresAt: now + 2 * hour }, { role: 'zip', filename: 'package.zip', url: `/api/restaurant/tasks/${id}/files/package.zip`, expiresAt: now + 2 * hour }], sourceImages: [{ filename: 'original-1.jpg', url: `/api/restaurant/tasks/${id}/files/original-1.jpg` }], ...overrides });
 
+test('all fifteen generated pictures enter assets while out-of-range names and originals remain excluded', () => {
+  const images = Array.from({ length: 16 }, (_, index) => ({ url: `/api/ai/media/${id}/result-${index + 1}.png`, filename: `result-${index + 1}.png` }));
+  images.push({ url: `/api/ai/media/${id}/source-01.jpg`, filename: 'source-01.jpg' });
+  assert.equal(collectGeneratedAssets([image({ images })], [], now).length, 15);
+  const files = Array.from({ length: 16 }, (_, index) => { const filename = `${String(index + 1).padStart(2, '0')}.jpg`; return { role: 'image', filename, url: `/api/restaurant/tasks/${id}/files/${filename}`, expiresAt: now + hour }; });
+  const records = collectGeneratedAssets([], [], now, [restaurant({ files })]);
+  assert.equal(records.length, 15); assert.ok(records.some(item => item.filename === '15.jpg'));
+  assert.ok(!records.some(item => item.filename === '16.jpg'));
+});
+
 test('asset retention starts when generation completes and ends exactly at 72 hours', () => {
   assert.ok(generatedAssetWindow(image(), now));
   assert.equal(generatedAssetWindow(image({ completedAt: now - 72 * hour }), now), null);

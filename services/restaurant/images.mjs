@@ -83,7 +83,7 @@ function renderCopy(copy) {
 }
 
 export function createPackageZip(results, copy) {
-  if (!Array.isArray(results) || results.length < 1 || results.length > 9) throw problem('发布包应包含1—9张图片。');
+  if (!Array.isArray(results) || results.length < 1 || results.length > 15) throw problem('发布包应包含1—15张图片。');
   const entries = {};
   let total = 0;
   results.forEach((result, index) => {

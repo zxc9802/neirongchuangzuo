@@ -8,7 +8,7 @@ let favorites = readFavorites();
 function readFavorites(){try{return new Set(JSON.parse(localStorage.getItem(accountStorageKey('store-ai-inspiration-favorites'))||'[]'));}catch{return new Set();}}
 const materialFilters = {};
 function materialFilter(ctx){const base=ctx.configs[ctx.mode].brief?.industry||ctx.materialIndustry||'all';if(materialFilters[ctx.mode]?.base!==base)materialFilters[ctx.mode]={base,value:base};return materialFilters[ctx.mode].value;}
-function mediaItem(asset,ctx){const {esc,icon,button}=ctx;return `<div class="upload-thumb">${asset.type==='image'?`<img src="${asset.url}" alt="${esc(asset.name)}">`:icon(asset.type==='video'?'video':'audio')}<small>${esc(asset.name)}</small>${button('remove-file','×','remove',`aria-label="移除 ${esc(asset.name)}" data-id="${asset.id}"`)}</div>`;}
+function mediaItem(asset,ctx){const {esc,icon,button}=ctx;return `<div class="upload-thumb">${asset.type==='image'?`<img src="${asset.url}" alt="${esc(asset.name)}" loading="lazy" decoding="async">`:icon(asset.type==='video'?'video':'audio')}<small>${esc(asset.name)}</small>${button('remove-file','×','remove',`aria-label="移除 ${esc(asset.name)}" data-id="${asset.id}"`)}</div>`;}
 
 function renderSimpleImageEditor(ctx, media) {
  const {configs,modules,button,icon,esc}=ctx;

@@ -1,20 +1,37 @@
 import { randomUUID } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { createRequestLedger } from '../ai/request-ledger.mjs';
 import { RestaurantError, fingerprint, validateAnalysis, validateDirections, validateCopy, validateAudit } from './rules.mjs';
 import { ANALYSIS_PROMPT, RECOMMEND_PROMPT, COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT } from './prompts.mjs';
 
 /** Separate durable provider-attempt budget. User package charges live in the store. */
-export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, now = Date.now, timeoutMs = 90_000, ledger: injectedLedger } = {}) {
+export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, now = Date.now, timeoutMs = 90_000, ledger: injectedLedger,
+  sleepImpl = sleep, budgetWaitMaxMs = 120_000, budgetWaitStepMs = 5_000 } = {}) {
   const ledger = injectedLedger ?? createRequestLedger({ storageDir, now, limits: config.limits });
   const ready = ledger.ready;
-  async function call(prompt, input, photos = []) {
+  let stopping = false;
+  async function call(prompt, input, photos = [], { onBudgetWait } = {}) {
     if (!config.apiKey) throw new RestaurantError('尚未配置内容分析接口，请联系管理员。', 503, 'MODEL_NOT_CONFIGURED');
     const id = randomUUID();
     const body = { model: config.chatModel, messages: [{ role: 'system', content: prompt }, { role: 'user', content: photos.length ? [{ type: 'text', text: JSON.stringify(input) }, ...photos.map(photo => ({ type: 'image_url', image_url: { url: photo.dataUrl, detail: 'high' } }))] : JSON.stringify(input) }], response_format: { type: 'json_object' }, temperature: 0.3 };
-    await ledger.reserve({ id, kind: 'chat', model: config.chatModel, fingerprint: fingerprint(body) });
+    let waitedMs = 0;
+    async function beforeDispatch(operation) {
+      while (true) {
+        if (stopping) throw new RestaurantError('服务正在关闭，尚未发送新的模型请求。', 503, 'SERVICE_CLOSING');
+        try { return await operation(); }
+        catch (cause) {
+          if (cause.code !== 'RATE_LIMITED' || waitedMs >= budgetWaitMaxMs) throw cause;
+          await onBudgetWait?.({ waitedMs });
+          const delayMs = Math.min(5_000, Math.max(1, budgetWaitStepMs), budgetWaitMaxMs - waitedMs);
+          await sleepImpl(delayMs); waitedMs += delayMs;
+        }
+      }
+    }
+    await beforeDispatch(() => ledger.reserve({ id, kind: 'chat', model: config.chatModel, fingerprint: fingerprint(body) }));
     const controller = new AbortController(); let dispatched = false, responseReceived = false, responseOK = false, bodyComplete = false, timer;
     try {
-      await ledger.markDispatched(id); dispatched = true;
+      if (stopping) throw new RestaurantError('服务正在关闭，尚未发送新的模型请求。', 503, 'SERVICE_CLOSING');
+      await beforeDispatch(() => ledger.markDispatched(id)); dispatched = true;
       timer = setTimeout(() => controller.abort(), timeoutMs); timer.unref?.();
       const response = await fetchImpl(`${config.baseUrl}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
       responseReceived = true;
@@ -42,14 +59,15 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
   return {
     ready,
     enabled: Boolean(config.apiKey),
-    async analyse(photos, profile) { return validateAnalysis(await call(ANALYSIS_PROMPT, { profile, images: photos.map(photo => ({ imageId: photo.id, width: photo.width, height: photo.height })) }, photos), photos.map(photo => photo.id)); },
-    async recommend(analysis, profile) { return validateDirections(await call(RECOMMEND_PROMPT, { profile, images: analysis }), analysis, profile); },
-    async write({ profile, analysis, direction, facts, photos = [], draft, qualityIssues = [] }) {
-      const input = { profile, images: analysis, direction, confirmedFacts: facts, visualImageIds: photos.map(photo => photo.id), ...(draft ? { draft, qualityIssues } : {}) };
-      return validateCopy(await call(draft ? COPY_REWRITE_PROMPT : COPY_PROMPT, input, photos), analysis.map(item => item.imageId));
+    async analyse(photos, profile, options) { return validateAnalysis(await call(ANALYSIS_PROMPT, { profile, images: photos.map(photo => ({ imageId: photo.id, width: photo.width, height: photo.height })) }, photos, options), photos.map(photo => photo.id)); },
+    async recommend(analysis, profile, options) { return validateDirections(await call(RECOMMEND_PROMPT, { profile, images: analysis }, [], options), analysis, profile); },
+    async write({ profile, analysis, direction, facts, photos = [], draft, qualityIssues = [] }, { onBudgetWait } = {}) {
+      const input = { profile, images: analysis, direction, confirmedFacts: facts, outputCount: analysis.length, visualImageIds: photos.map(photo => photo.id), ...(draft ? { draft, qualityIssues } : {}) };
+      return validateCopy(await call(draft ? COPY_REWRITE_PROMPT : COPY_PROMPT, input, photos, { onBudgetWait }), analysis.map(item => item.imageId));
     },
-    async audit({ photos = [], ...input }) { return validateAudit(await call(AUDIT_PROMPT, { ...input, visualImageIds: photos.map(photo => photo.id) }, photos)); },
+    async audit({ photos = [], ...input }, { onBudgetWait } = {}) { return validateAudit(await call(AUDIT_PROMPT, { ...input, visualImageIds: photos.map(photo => photo.id) }, photos, { onBudgetWait })); },
     usage: () => ledger.summary(),
-    close: () => injectedLedger ? Promise.resolve() : ledger.close(),
+    stop: () => { stopping = true; },
+    close: () => { stopping = true; return injectedLedger ? Promise.resolve() : ledger.close(); },
   };
 }
