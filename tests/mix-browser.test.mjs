@@ -599,7 +599,7 @@ test('slow model failures are retried after fresh clips instead of starving the 
   const originalNow = Date.now;
   let now = originalNow();
   let failing = true;
-  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 16,
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 48,
     sampleFrames: async () => ['frame'], api: async (path, options) => {
       if (path.endsWith('/analyze')) {
         const id = JSON.parse(options.body).clip_id;
@@ -840,56 +840,104 @@ test('an unreadable unchanged file retains its old metadata and never starts ana
   } finally { controller.stop(); }
 });
 
-test('metadata scan runs three readers and fills freed slots without waiting for a slow file', async () => {
+test('metadata scan runs five readers and fills freed slots without waiting for a slow file', async () => {
   const readers = new Map();
   let active = 0, peak = 0;
   const controller = new BrowserMaterials({ api: server().api, store: memoryStore(), readDuration: file => {
     active++; peak = Math.max(peak, active);
     return new Promise(resolve => readers.set(file.name, () => { active--; resolve(2); }));
   } });
-  const selecting = controller.selectFiles(Array.from({ length: 5 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+  const selecting = controller.selectFiles(Array.from({ length: 7 }, (_, i) => videoFile(`素材/${i}.mp4`)));
   try {
-    await eventually(() => readers.size === 3);
+    await eventually(() => readers.size === 5);
     readers.get('1.mp4')();
-    await eventually(() => readers.has('3.mp4'));
-    readers.get('2.mp4')(); readers.get('3.mp4')();
-    await eventually(() => readers.has('4.mp4'));
-    readers.get('0.mp4')(); readers.get('4.mp4')();
+    await eventually(() => readers.has('5.mp4'));
+    readers.get('2.mp4')(); readers.get('5.mp4')();
+    await eventually(() => readers.has('6.mp4'));
+    readers.get('0.mp4')(); readers.get('3.mp4')(); readers.get('4.mp4')(); readers.get('6.mp4')();
     await selecting;
-    assert.equal(peak, 3);
-    assert.equal(controller.status.scanned, 5);
+    assert.equal(peak, 5);
+    assert.equal(controller.status.scanned, 7);
   } finally { controller.stop(); for (const finish of readers.values()) finish(); await selecting; }
 });
 
-test('three extraction and analysis workers overlap and refill independently', async () => {
+test('five readers continue extracting while five analysis requests await and bound prepared frames', async () => {
   const backend = server();
   const frames = new Map(), analysis = new Map();
-  let active = 0, peak = 0;
+  let reading = 0, analyzing = 0, peakReaders = 0, peakAnalysis = 0;
   const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
     sampleFrames: file => new Promise(resolve => {
-      active++; peak = Math.max(peak, active);
-      frames.set(file.name, () => resolve(['frame']));
+      reading++; peakReaders = Math.max(peakReaders, reading);
+      let finished = false;
+      frames.set(file.name, () => { if (!finished) { finished = true; reading--; resolve(['frame']); } });
     }), api: async (path, options) => {
       if (path.endsWith('/analyze')) {
         const id = JSON.parse(options.body).clip_id;
-        await new Promise(resolve => analysis.set(id, () => { active--; resolve(); }));
+        analyzing++; peakAnalysis = Math.max(peakAnalysis, analyzing);
+        await new Promise(resolve => {
+          let finished = false;
+          analysis.set(id, () => { if (!finished) { finished = true; analyzing--; resolve(); } });
+        });
       }
       return backend.api(path, options);
     } });
   try {
-    await controller.selectFiles(Array.from({ length: 4 }, (_, i) => videoFile(`素材/${i}.mp4`)));
-    await eventually(() => frames.size === 3);
+    await controller.selectFiles(Array.from({ length: 13 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+    await eventually(() => frames.size === 5);
+    frames.get('0.mp4')();
+    await eventually(() => analysis.size === 1 && frames.has('5.mp4'));
     for (const release of frames.values()) release();
-    await eventually(() => analysis.size === 3);
+    await eventually(() => analysis.size === 5 && frames.size === 10);
+    for (const release of frames.values()) release();
+    await eventually(() => reading === 0);
+    assert.equal(analysis.size, 5, 'prepared frames must wait when all analysis slots are occupied');
+    assert.equal(frames.size, 10, 'do not pre-extract the rest of the directory into memory');
     controller.start(); controller.start();
     const first = [...analysis.values()][0]; first();
-    await eventually(() => frames.has('3.mp4'));
-    assert.equal(peak, 3);
-    frames.get('3.mp4')();
-    await eventually(() => analysis.size === 4);
-    for (const release of [...analysis.values()].slice(1)) release();
-    await eventually(() => controller.status.indexed === 4);
-  } finally { controller.stop(); for (const release of frames.values()) release(); for (const release of analysis.values()) release(); }
+    await eventually(() => analysis.size === 6 && frames.has('10.mp4'));
+    for (let i = 0; i < 30 && controller.status.indexed < 13; i++) {
+      for (const release of frames.values()) release();
+      for (const release of analysis.values()) release();
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(controller.status.indexed, 13);
+    assert.equal(peakReaders, 5);
+    assert.equal(peakAnalysis, 5);
+    assert.equal(analysis.size, 13, 'each clip is submitted only once');
+  } finally {
+    controller.stop();
+    for (const release of frames.values()) release();
+    for (const release of analysis.values()) release();
+    await Promise.all(controller.workers.values());
+  }
+});
+
+test('stopping cancels waiting extraction and analysis work without late requests or status writes', async () => {
+  for (const phase of ['frames', 'analysis']) {
+    const backend = server(), releases = [], statuses = [];
+    let samples = 0, analyses = 0;
+    const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+      onStatus: value => statuses.push(value), sampleFrames: async () => {
+        samples++;
+        if (phase === 'frames') await new Promise(resolve => releases.push(resolve));
+        return ['frame'];
+      }, api: async (path, options) => {
+        if (path.endsWith('/analyze')) { analyses++; await new Promise(resolve => releases.push(resolve)); }
+        return backend.api(path, options);
+      } });
+    try {
+      await controller.selectFiles(Array.from({ length: 10 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+      await eventually(() => phase === 'frames' ? samples === 5 : samples === 10 && analyses === 5);
+      const count = statuses.length;
+      controller.stop();
+      for (const release of releases) release();
+      await Promise.all(controller.workers.values());
+      assert.equal(samples, phase === 'frames' ? 5 : 10);
+      assert.equal(analyses, phase === 'frames' ? 0 : 5);
+      assert.equal(statuses.length, count);
+      assert.equal(controller.workers.size, 0);
+    } finally { controller.stop(); for (const release of releases) release(); }
+  }
 });
 
 test('permanent analysis failures retry at the tail at most once per scan', async () => {

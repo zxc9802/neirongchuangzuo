@@ -6,7 +6,9 @@ const root = globalThis;
   const CHUNK_SIZE = 4 * 1024 * 1024;
   const MAX_SOURCE_SIZE = 512 * 1024 * 1024;
   const CLIP_BODY_LIMIT = 262144;
-  const WORKERS = 3;
+  const FRAME_WORKERS = 5;
+  const ANALYSIS_WORKERS = 5;
+  const PIPELINE_WORKERS = FRAME_WORKERS + ANALYSIS_WORKERS;
   const noop = () => {};
   const isAbort = error => error?.name === 'AbortError';
   const retryable = error => error?.status === 408 || error?.status === 429 || error?.status >= 500 || error?.name === 'TypeError';
@@ -286,6 +288,8 @@ const root = globalThis;
       this.active = true;
       this.abort = new AbortController();
       this.workers = new Map();
+      this.stages = { frames: { active: 0, waiting: [], limit: FRAME_WORKERS },
+        analysis: { active: 0, waiting: [], limit: ANALYSIS_WORKERS } };
       this.lastRequests = 0;
       this.lastHeartbeat = 0;
       this.requests = [];
@@ -516,7 +520,7 @@ const root = globalThis;
           this._error('素材文件夹', error);
         }
         let cursor = 0;
-        await Promise.all(Array.from({ length: Math.min(WORKERS, candidates.length) }, async () => {
+        await Promise.all(Array.from({ length: Math.min(FRAME_WORKERS, candidates.length) }, async () => {
           while (cursor < candidates.length) {
             this._guard(token);
             const index = cursor++, item = candidates[index];
@@ -712,7 +716,7 @@ const root = globalThis;
           let queued = fresh;
           if (!fresh.length && this.processingDeferred) {
             const repair = [...this.repairs.values()].find(item => !item.attempted);
-            if (repair && ![...this.workers.keys()].some(key => key.startsWith('repair:')) && this.workers.size < WORKERS) {
+            if (repair && ![...this.workers.keys()].some(key => key.startsWith('repair:')) && this.workers.size < PIPELINE_WORKERS) {
               repair.attempted = true;
               this._startWork('repair:' + repair.relativePath, () => this._repairFile(repair, token), token);
             }
@@ -720,7 +724,7 @@ const root = globalThis;
               (this.attempts.get(clip.id) < 2 || this.retryAfter.has('clip:' + clip.id)) &&
               (this.retryAfter.get('clip:' + clip.id) || 0) <= Date.now());
           }
-          for (const { item, clip } of queued.slice(0, WORKERS - this.workers.size)) {
+          for (const { item, clip } of queued.slice(0, PIPELINE_WORKERS - this.workers.size)) {
             this.attempts.set(clip.id, (this.attempts.get(clip.id) || 0) + 1);
             this._startWork(clip.id, () => this._analyzeClip(item, clip, token), token);
           }
@@ -747,15 +751,39 @@ const root = globalThis;
       if (!this.repairs.has(relativePath)) this.repairs.set(relativePath, { relativePath, file, attempted: false });
     }
 
+    async _runStage(stage, action, token) {
+      this._guard(token);
+      const pool = this.stages[stage], signal = this.abort.signal;
+      if (pool.active >= pool.limit) {
+        await new Promise((resolve, reject) => {
+          const begin = () => { signal.removeEventListener('abort', cancel); resolve(); };
+          const cancel = () => {
+            pool.waiting.splice(pool.waiting.indexOf(begin), 1);
+            reject(Object.assign(new Error('操作已停止'), { name: 'AbortError' }));
+          };
+          pool.waiting.push(begin);
+          signal.addEventListener('abort', cancel, { once: true });
+        });
+      } else pool.active++;
+      try { this._guard(token); return await action(); }
+      finally {
+        const next = pool.waiting.shift();
+        if (next) next();
+        else pool.active--;
+      }
+    }
+
     async _analyzeClip(item, clip, token) {
       let sampling = true;
       this._report({ text: '并行读取素材画面：' + item.relativePath });
       try {
-        const frames = await this.sampleFrames(this.files.get(item.relativePath), clip.start, clip.end, this.abort.signal);
+        const frames = await this._runStage('frames',
+          () => this.sampleFrames(this.files.get(item.relativePath), clip.start, clip.end, this.abort.signal), token);
         this._guard(token);
         sampling = false;
         this._report({ text: '并行 AI 分析素材：' + item.relativePath });
-        const result = await this._post(this._devicePath('/analyze'), { clip_id: clip.id, frames }, token);
+        const result = await this._runStage('analysis',
+          () => this._post(this._devicePath('/analyze'), { clip_id: clip.id, frames }, token), token);
         this._guard(token);
         if (!result.complete) throw new Error('素材分析仍在处理中，将在队尾重试');
         clip.state = 'indexed';
@@ -821,7 +849,8 @@ const root = globalThis;
       const path = this._devicePath('/requests/' + request.id);
       this._report({ text: '正在传输素材：' + entry.relativePath });
       if (request.kind === 'proxy') {
-        const frames = await this.sampleFrames(file, request.start, request.end, this.abort.signal);
+        const frames = await this._runStage('frames',
+          () => this.sampleFrames(file, request.start, request.end, this.abort.signal), token);
         this._guard(token);
         const result = await this._post(path + '/frames', { frames }, token);
         if (!result.complete) throw new Error('素材预览传输未完成，请重试');
