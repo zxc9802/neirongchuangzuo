@@ -9,6 +9,7 @@ const root = globalThis;
   const FRAME_WORKERS = 5;
   const ANALYSIS_WORKERS = 5;
   const PIPELINE_WORKERS = FRAME_WORKERS + ANALYSIS_WORKERS;
+  const MAX_ATTEMPTS = 4; // First attempt plus three automatic retries.
   const noop = () => {};
   const isAbort = error => error?.name === 'AbortError';
   const retryable = error => error?.status === 408 || error?.status === 429 || error?.status >= 500 || error?.name === 'TypeError';
@@ -300,10 +301,11 @@ const root = globalThis;
       const entries = Object.values(this.record?.manifest || {});
       const clips = entries.flatMap(entry => entry.clips || []);
       const readable = entry => this.files.has(entry.relativePath) && !this.unreadableFiles.has(entry.assetId);
-      const processing = !!this.scanning || !!this.workers.size || [...this.repairs.values()].some(item => !item.attempted) ||
+      const processing = !!this.scanning || !!this.workers.size || [...this.repairs.values()].some(item =>
+        !item.attempted || item.failed && this.attempts.get('repair:' + item.relativePath) < MAX_ATTEMPTS) ||
         entries.some(entry => readable(entry) && entry.clips.some(clip => this.registered.has(clip.id) &&
           (clip.state === 'indexing' || ['pending', 'error'].includes(clip.state) &&
-            ((this.attempts.get(clip.id) || 0) < 2 || this.retryAfter.has('clip:' + clip.id)))));
+            (this.attempts.get(clip.id) || 0) < MAX_ATTEMPTS)));
       this.status = { ...this.status, ...value, connected: this.connected, folderName: this.folderName,
         indexed: clips.filter(clip => clip.state === 'indexed').length, total: clips.length, processing,
         totalFiles: value.scanned ?? (this.status.scanned || entries.length),
@@ -715,14 +717,25 @@ const root = globalThis;
           if (!fresh.length && !this.workers.size) this.processingDeferred = true;
           let queued = fresh;
           if (!fresh.length && this.processingDeferred) {
-            const repair = [...this.repairs.values()].find(item => !item.attempted);
-            if (repair && ![...this.workers.keys()].some(key => key.startsWith('repair:')) && this.workers.size < PIPELINE_WORKERS) {
+            const repairs = [...this.repairs.values()];
+            const repairing = [...this.workers.keys()].some(key => key.startsWith('repair:'));
+            const firstPassBusy = [...this.workers.keys()].some(key => !key.startsWith('repair:') && this.attempts.get(key) === 1) ||
+              Object.values(this.record.manifest).some(item => this.files.has(item.relativePath) && !this.unreadableFiles.has(item.assetId) &&
+                item.clips.some(clip => this.registered.has(clip.id) && clip.state === 'indexing'));
+            const failedRepairs = repairs.filter(item => item.failed && this.attempts.get('repair:' + item.relativePath) < MAX_ATTEMPTS);
+            const repair = repairs.find(item => !item.attempted) || (!firstPassBusy && failedRepairs
+              .filter(item => (this.retryAfter.get('repair:' + item.relativePath) || 0) <= Date.now())
+              .sort((a, b) => this.attempts.get('repair:' + a.relativePath) - this.attempts.get('repair:' + b.relativePath))[0]);
+            if (repair && !repairing && this.workers.size < PIPELINE_WORKERS) {
+              const key = 'repair:' + repair.relativePath;
               repair.attempted = true;
-              this._startWork('repair:' + repair.relativePath, () => this._repairFile(repair, token), token);
+              this.attempts.set(key, (this.attempts.get(key) || 0) + 1);
+              this._startWork(key, () => this._repairFile(repair, token), token);
             }
-            queued = candidates.filter(({ clip }) =>
-              (this.attempts.get(clip.id) < 2 || this.retryAfter.has('clip:' + clip.id)) &&
-              (this.retryAfter.get('clip:' + clip.id) || 0) <= Date.now());
+            queued = !repair && !repairing && !firstPassBusy && !failedRepairs.length ? candidates
+              .filter(({ clip }) => this.attempts.get(clip.id) < MAX_ATTEMPTS &&
+                (this.retryAfter.get('clip:' + clip.id) || 0) <= Date.now())
+              .sort((a, b) => this.attempts.get(a.clip.id) - this.attempts.get(b.clip.id)) : [];
           }
           for (const { item, clip } of queued.slice(0, PIPELINE_WORKERS - this.workers.size)) {
             this.attempts.set(clip.id, (this.attempts.get(clip.id) || 0) + 1);
@@ -748,7 +761,9 @@ const root = globalThis;
     }
 
     _queueRepair(relativePath, file) {
-      if (!this.repairs.has(relativePath)) this.repairs.set(relativePath, { relativePath, file, attempted: false });
+      const repair = this.repairs.get(relativePath);
+      if (!repair) this.repairs.set(relativePath, { relativePath, file, attempted: false });
+      else if (repair.attempted) repair.failed = true;
     }
 
     async _runStage(stage, action, token) {
@@ -797,7 +812,7 @@ const root = globalThis;
           this.unreadableFiles.add(item.assetId);
           this._queueRepair(item.relativePath, this.originalFiles.get(item.relativePath) || this.files.get(item.relativePath));
         }
-        if (!sampling && retryable(error)) {
+        if (!sampling && retryable(error) && this.attempts.get(clip.id) < MAX_ATTEMPTS) {
           const delay = Math.min(60000, 15000 * 2 ** Math.min(2, (this.attempts.get(clip.id) || 1) - 1));
           this.retryAfter.set('clip:' + clip.id, Date.now() + delay);
         } else this.retryAfter.delete('clip:' + clip.id);
@@ -834,10 +849,16 @@ const root = globalThis;
         if (previous && !unchanged) this.record.deferredRevocations.push(previous.assetId);
         await this._register(clips, token);
         for (const clip of clips) { this.attempts.delete(clip.id); this.retryAfter.delete('clip:' + clip.id); }
+        repair.failed = false;
+        this.retryAfter.delete('repair:' + relativePath);
         this.errors.delete(relativePath);
         this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
       } catch (error) {
         this._guard(token);
+        repair.failed = true;
+        const key = 'repair:' + relativePath, attempt = this.attempts.get(key);
+        if (attempt < MAX_ATTEMPTS) this.retryAfter.set(key, Date.now() + 15000 * 2 ** (attempt - 1));
+        else this.retryAfter.delete(key);
         this._error(relativePath, error);
       }
     }

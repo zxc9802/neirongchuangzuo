@@ -166,6 +166,8 @@ test('queued and running video repairs remain in the upload progress until their
     client._report();
     assert.match(f.nodes['#mix-material-status'].innerHTML, /素材正在上传/);
     client.workers.clear();
+    client.repairs.get('bad.mov').failed = true;
+    client.attempts.set('repair:bad.mov', 4);
     client._report({ error: 'bad.mov：视频无法转换' });
     html = f.nodes['#mix-material-status'].innerHTML;
     assert.doesNotMatch(html, /素材上传完成|素材正在上传/);
@@ -182,7 +184,8 @@ test('an exhausted analysis failure exposes a retry action instead of an endless
     clearTimeout(client.timer);
     const clip = Object.values(client.record.manifest)[0].clips[0];
     clip.state = 'error';
-    client.attempts.set(clip.id, 2);
+    client.attempts.set(clip.id, 4);
+    client.retryAfter.set('clip:' + clip.id, Date.now() + 60000);
     client._report({ error: 'video-0.mp4：不支持的视频' });
     const html = f.nodes['#mix-material-status'].innerHTML;
     assert.doesNotMatch(html, /素材正在上传|素材上传完成/);
