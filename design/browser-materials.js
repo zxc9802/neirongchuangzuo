@@ -675,6 +675,7 @@ const root = globalThis;
     }
 
     _startRequests(token) {
+      // Rendering must not hold the indexing scheduler while waiting for local materials.
       if (this.requestWorker || (this.retryAfter.get('connection') || 0) > Date.now() ||
         Date.now() - this.lastRequests < 3000 && Date.now() - this.lastHeartbeat < 15000 &&
         !this.requests.some(item => (this.retryAfter.get('request:' + item.id) || 0) <= Date.now())) return;
