@@ -310,9 +310,10 @@ export function renderMixMaterials() {
   const locked = mixFolderLocked();
   const disabled = locked ? 'disabled title="制作时请保持原素材文件夹连接"' : '';
   const scan = status.connected && !status.needsPermission && !uploading;
+  const retry = status.connected && !status.needsPermission && status.error && !state.client?.scanning;
   const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : folderReadiness();
   const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>继续制作</button>` : '';
-  const actions = `${scan ? `<button data-action="mix-scan" ${disabled}>${status.error ? '重试未完成素材' : '扫描新增 / 修改'}</button><button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
+  const actions = `${scan || retry ? `<button data-action="mix-scan" ${disabled}>${status.error ? '重试未完成素材' : '扫描新增 / 修改'}</button>` : ''}${scan ? `<button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
   return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite">${text ? `<span>${text}</span>` : ''}${progress}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}${actions ? `<div class="mix-folder-actions">${actions}</div>` : ''}</div>`;
 }
 

@@ -158,7 +158,9 @@ test('queued and running video repairs remain in the upload progress until their
     let html = f.nodes['#mix-material-status'].innerHTML;
     assert.match(html, /素材正在上传/);
     assert.match(html, /max="2" value="1"/);
-    assert.doesNotMatch(html, /素材上传完成|data-action="mix-scan"/);
+    assert.doesNotMatch(html, /素材上传完成/);
+    assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+    assert.doesNotMatch(html, /data-action="mix-disconnect"/);
     client.repairs.get('bad.mov').attempted = true;
     client.workers.set('repair:bad.mov', Promise.resolve());
     client._report();
@@ -185,6 +187,44 @@ test('an exhausted analysis failure exposes a retry action instead of an endless
     const html = f.nodes['#mix-material-status'].innerHTML;
     assert.doesNotMatch(html, /素材正在上传|素材上传完成/);
     assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+  } finally { f.restore(); }
+});
+
+test('manual retry is available during automatic retry backoff and reuses completed materials', async () => {
+  const f = await fixture({ files: 2 });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const { client } = f.mod.getMixState();
+    client._schedule = () => {};
+    clearTimeout(client.timer);
+    const clips = Object.values(client.record.manifest).flatMap(entry => entry.clips);
+    const failed = clips[1];
+    failed.state = 'error';
+    client.attempts.set(failed.id, 2);
+    client.retryAfter.set('clip:' + failed.id, Date.now() + 60000);
+    client._report({ error: 'video-1.mp4：接口暂时不可用' });
+    assert.equal(client.status.processing, true);
+    const html = f.nodes['#mix-material-status'].innerHTML;
+    assert.match(html, /素材正在上传/);
+    assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+    assert.doesNotMatch(html, /data-action="mix-disconnect"/);
+    const analyzed = [], originalFetch = globalThis.fetch;
+    client.sampleFrames = async () => ['frame'];
+    globalThis.fetch = async (path, options) => {
+      if (path.endsWith('/clips')) return Response.json({ clips: JSON.parse(options.body).clips.map(clip => ({
+        id: clip.id, state: clip.id === failed.id ? 'pending' : 'indexed',
+      })) });
+      if (path.endsWith('/analyze')) { analyzed.push(JSON.parse(options.body).clip_id); return Response.json({ complete: true }); }
+      return originalFetch(path, options);
+    };
+    f.mod.handleMixMaterialAction('mix-scan', { dataset: {} }, f.ctx);
+    await settle(() => !client.scanning && failed.state === 'pending');
+    assert.equal(client.retryAfter.has('clip:' + failed.id), false);
+    await client._cycle(client.generation);
+    await Promise.all(client.workers.values());
+    assert.deepEqual(analyzed, [failed.id]);
+    assert.equal(client.status.readyFiles, 2);
+    assert.equal(client.status.error, '');
   } finally { f.restore(); }
 });
 
