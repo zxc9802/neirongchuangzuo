@@ -12,13 +12,16 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (busy) return;
     const form = new FormData(event.currentTarget);
     setError("");
+    const inviteCode = register ? String(form.get("inviteCode") ?? "").trim().toUpperCase() : "";
+    if (register && !/^(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{6}$/.test(inviteCode)) { setError("请输入6位邀请码（数字和大写字母）。"); return; }
     setBusy(true);
     try {
       const response = await fetch(`/api/auth/${mode}`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ account: form.get("account"), password: form.get("password") }),
+        body: JSON.stringify({ account: form.get("account"), password: form.get("password"), ...(register ? { inviteCode } : {}) }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "暂时无法登录，请稍后重试");
@@ -51,15 +54,16 @@ export default function AuthForm({ mode }: { mode: "login" | "register" }) {
       <section className="mx-auto w-full max-w-[390px]">
         <div className="mb-12 flex items-center gap-2 text-sm text-zinc-300 lg:hidden"><Video size={20} className="text-blue-400" />数字人制作</div>
         <p className="mb-4 font-mono text-[11px] tracking-[0.22em] text-blue-300">DIGITAL HUMAN STUDIO</p>
-        <h2 className="text-3xl font-semibold tracking-tight">{register ? "创建你的创作账号" : "欢迎回到工作室"}</h2>
-        <p className="mb-8 mt-3 text-sm leading-6 text-zinc-400">{register ? "用一个账号，保存你的形象、声音和作品。" : "登录后，继续你的下一支作品。"}</p>
+        <h2 className="text-3xl font-semibold tracking-tight">{register ? "使用邀请码创建账号" : "欢迎回到工作室"}</h2>
+        <p className="mb-8 mt-3 text-sm leading-6 text-zinc-400">{register ? "邀请码仅可注册一次，请向管理员获取。" : "登录后，继续你的下一支作品。"}</p>
         <form onSubmit={submit} className="space-y-5">
           <label className="block text-xs text-zinc-300">账号<input name="account" type="text" autoComplete="username" autoCapitalize="none" spellCheck={false} required maxLength={254} placeholder="输入账号" className={`${inputClass} mt-2`} disabled={busy} /></label>
           <label className="block text-xs text-zinc-300">密码<span className="relative mt-2 block"><input name="password" type={visible ? "text" : "password"} autoComplete={register ? "new-password" : "current-password"} required minLength={register ? 10 : 1} maxLength={128} placeholder={register ? "至少 10 个字符" : "输入你的密码"} className={`${inputClass} pr-12`} disabled={busy} /><button type="button" aria-label={visible ? "隐藏密码" : "显示密码"} onClick={() => setVisible(!visible)} className="absolute right-4 top-4 text-zinc-500 hover:text-zinc-200">{visible ? <EyeOff size={17} /> : <Eye size={17} />}</button></span></label>
+          {register && <label className="block text-xs text-zinc-300">邀请码<input name="inviteCode" type="text" autoComplete="off" autoCapitalize="none" spellCheck={false} required minLength={6} maxLength={6} pattern="(?=.*[A-Z])(?=.*[0-9])[A-Z0-9]{6}" onInput={event => { event.currentTarget.value = event.currentTarget.value.toUpperCase(); }} placeholder="输入6位邀请码（数字和大写字母）" className={`${inputClass} mt-2`} disabled={busy} /></label>}
           {error && <p role="alert" className="rounded-xl border border-red-400/20 bg-red-400/10 px-4 py-3 text-sm text-red-300">{error}</p>}
-          <button type="submit" disabled={busy} className="flex w-full items-center justify-center gap-3 rounded-xl bg-blue-500 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-wait disabled:opacity-60">{busy ? <><LoaderCircle size={17} className="animate-spin" />正在处理</> : <>{register ? "创建账号并进入工作室" : "登录工作室"}<ArrowRight size={17} /></>}</button>
+          <button type="submit" disabled={busy} className="flex w-full items-center justify-center gap-3 rounded-xl bg-blue-500 px-4 py-3.5 text-sm font-semibold text-white transition hover:bg-blue-400 disabled:cursor-wait disabled:opacity-60">{busy ? <><LoaderCircle size={17} className="animate-spin" />正在处理</> : <>{register ? "邀请码注册并进入工作室" : "登录工作室"}<ArrowRight size={17} /></>}</button>
         </form>
-        <p className="mt-7 text-center text-sm text-zinc-500">{register ? "已经有账号？" : "还没有账号？"}<Link href={register ? "/login" : "/register"} className="ml-2 text-blue-300 hover:text-blue-200">{register ? "前往登录" : "免费注册"}</Link></p>
+        <p className="mt-7 text-center text-sm text-zinc-500">{register ? "已经有账号？" : "还没有账号？"}<Link href={register ? "/login" : "/register"} className="ml-2 text-blue-300 hover:text-blue-200">{register ? "前往登录" : "邀请码注册"}</Link></p>
         <p className="mt-10 border-t border-white/[0.07] pt-5 text-center text-xs leading-6 text-zinc-600">{register ? "请妥善保存密码。当前版本暂不提供密码找回。" : "在这台电脑上保持登录。共用电脑使用后请退出。"}</p>
       </section>
     </div>

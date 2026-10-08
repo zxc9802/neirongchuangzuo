@@ -1,4 +1,5 @@
 import { accountStorageKey } from './account-storage.js';
+import { brandModelText } from './model-labels.js';
 
 const API = '/api/restaurant';
 const ACTIVE = new Set(['uploading', 'analysing', 'generating', 'retrying']);
@@ -12,7 +13,7 @@ const state = { ownerKey: null, ctx: null, profile: {}, profileDraft: {}, profil
 
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 const txt = value => typeof value === 'string' ? value : value?.message || value?.reason || value?.label || '';
-const message = value => String(txt(value) || '服务暂时不可用，请稍后刷新。').replace(/sk-[\w.-]+/gi, '[已隐藏]').slice(0, 300);
+const message = value => brandModelText(String(txt(value) || '服务暂时不可用，请稍后刷新。').replace(/sk-[\w.-]+/gi, '[已隐藏]')).slice(0, 300);
 const icon = name => state.ctx?.icon?.(name) || '';
 const button = (action, label, cls = 'restaurant-secondary', extra = '') => `<button type="button" class="${cls}" data-action="rest-${action}" ${extra}>${label}</button>`;
 const dateLabel = value => { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); };

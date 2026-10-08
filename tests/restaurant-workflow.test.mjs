@@ -13,11 +13,38 @@ import { validateAnalysis, validateDirections, validateCopy, localReview } from 
 import * as processor from '../services/restaurant/images.mjs';
 import { COPY_PROMPT } from '../services/restaurant/prompts.mjs';
 
-const profile = { name: '测试面馆', city: '武汉', address: '测试路一号', category: '面食' };
+const profile = { name: '竹里面馆', city: '武汉', address: '青山建设一路', category: '面食' };
 const config = { apiKey: 'test-only-not-a-secret', baseUrl: 'https://provider.invalid/v1', chatModel: 'test-luna', limits: { chatDaily: 100, imageDaily: 20, perMinute: 10 } };
-function analysis(photos) { return photos.map(photo => ({ imageId: photo.id, imageType: 'food', visibleObjects: ['一碗面食'], possibleScene: ['午餐'], qualityScore: 80, privacyRisk: 'none', usable: true, rejectionReason: '', visibleTexts: [], textRisk: 'none', riskReasons: [] })); }
+function analysis(photos) { return photos.map(photo => ({ imageId: photo.id, imageType: 'food', visibleObjects: ['一碗面食', '圆碗中盛着面条'], possibleScene: ['午餐'], qualityScore: 80, privacyRisk: 'none', usable: true, rejectionReason: '', visibleTexts: [], textRisk: 'none', riskReasons: [] })); }
 function direction(items, extra = {}) { return { id: 'D01', label: '午餐菜品分享', targetCustomer: '附近上班族', consumptionScene: '午餐', contentGoal: '真实菜品介绍', recommendationReason: '可见菜品', expectedAction: '导航到店', supportingImageIds: items.filter(item => item.usable).map(item => item.imageId), missingFacts: [], ...extra }; }
-function copy(items) { return { titles: ['附近上班族午餐看看我们的面馆', '想吃一碗面时看看门店真实样子', '把门店里的午餐画面分享给大家'], body: '我是这家面馆的老板，想把门店里的真实画面分享给附近正在找午餐地方的朋友。照片记录了店里的菜品，也让大家在到店前看看实际样子。\n\n' + '如果你正在附近安排午餐，可以先看看这些照片，结合自己的时间和喜好决定是否到店。我们希望这组真实画面能帮助你了解门店，具体菜品信息可以到店询问，避免单凭图片猜测。'.repeat(3) + '\n\n可以收藏这篇，在需要的时候搜索门店名称并导航到店。', tags: ['武汉面食', '午餐选择', '附近吃饭', '门店日常', '面馆分享'], coverText: '附近午餐看看这碗面', imageOrder: items.map(item => item.imageId), claims: [{ text: '门店菜品', factKeys: ['category'], imageIds: items.map(item => item.imageId) }] }; }
+function copy(items) {
+  const imageIds = items.map(item => item.imageId);
+  return {
+    titles: ['午休想吃面附近上班族看过来', '这一碗面给午餐一个具体选项', '来武汉青山建设一路吃顿面食'],
+    body: '午休想吃面，又不想临时翻半天收藏的附近上班族，可以把竹里面馆放进午餐备选。我们在武汉青山建设一路，主营面食。这篇想留给正在附近安排午饭的人，吃什么和去哪儿，都有一个具体的落点。\n\n' +
+      '圆碗里盛着面条，是这组图最直接的主角。我想把这一碗分享出来，也把店名记在这里：竹里面馆。比起把午餐说得很隆重，我更喜欢从一碗面聊起，让正在找面食的人知道，附近有这样一个选择。\n\n' +
+      '如果今天是自己吃午饭，按自己的胃口挑选就好；如果和同事商量午餐，可以先聊聊这顿是不是想吃面。不用为了凑一桌去决定吃什么，先把想吃的品类定下来，再安排午休的路线，选择也会更明确。\n\n' +
+      '下一次午饭还没拿定主意时，希望这碗面能给你一点灵感。想来就搜索竹里面馆，核对青山建设一路的位置后再出发；也欢迎先收藏，给下次在武汉找面食的自己留个备选。',
+    tags: ['武汉面食', '午餐选择', '附近吃饭', '门店日常', '面馆分享'],
+    coverText: '午休想吃面看这一碗', imageOrder: imageIds,
+    claims: [
+      { text: '竹里面馆', factKeys: ['name'], imageIds: [] },
+      { text: '武汉', factKeys: ['city'], imageIds: [] },
+      { text: '青山建设一路', factKeys: ['address'], imageIds: [] },
+      { text: '主营面食', factKeys: ['category'], imageIds: [] },
+      { text: '圆碗里盛着面条', factKeys: [], imageIds },
+    ],
+  };
+}
+function paddedCopy(items) {
+  return {
+    ...copy(items),
+    titles: ['附近朋友先看照片认清门店入口', '午餐前看看真实照片判断位置', '找面馆时通过图片认清门口'],
+    body: '附近的朋友，先看这组真实照片，再认清门口和招牌。通过照片判断入口位置，结合自己的时间和喜好决定是否到店；需要时收藏外观，在地图里找到我们。'.repeat(5),
+    coverText: '看看照片认清门店入口',
+    claims: [{ text: '面食', factKeys: ['category'], imageIds: [] }],
+  };
+}
 function mockModel(overrides = {}) { const counts = { analyse: 0, recommend: 0, write: 0, audit: 0 }; return { ready: Promise.resolve(), enabled: true, counts,
   async analyse(photos) { counts.analyse++; return analysis(photos); }, async recommend(items) { counts.recommend++; return [direction(items)]; },
   async write(input) { counts.write++; return copy(input.analysis); }, async audit() { counts.audit++; return { status: 'passed', warnings: [], errors: [] }; },
@@ -58,6 +85,113 @@ test('real image processing and ZIP complete one package; duplicate requests cha
   assert.equal((await app.api(`/tasks/${input.requestId}`, undefined, 'other')).status, 404);
   assert.equal((await app.api(`/tasks/${input.requestId}/files/01.jpg`, undefined, 'other')).status, 404);
   assert.equal((await app.api('/profile', undefined, null)).status, 401);
+});
+
+test('one complete weak draft is rewritten with its original facts and photo evidence before delivery', async t => {
+  const writes = [], audited = [];
+  const model = mockModel({
+    async write(input) { writes.push(structuredClone(input)); return writes.length === 1 ? paddedCopy(input.analysis) : copy(input.analysis); },
+    async audit(input) { audited.push(structuredClone(input)); return { status: 'passed', warnings: [], errors: [] }; },
+  });
+  const app = await setup(t, { model }), { id } = await newTask(app);
+  const facts = { dishName: '牛肉面' };
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true, facts });
+  const result = await app.wait(id, ['completed', 'awaiting_confirmation', 'failed']);
+  assert.equal(result.status, 'completed', result.error);
+  assert.equal(writes.length, 2, 'one returned weak draft permits only one additional writing call');
+  assert.deepEqual(writes[1].draft, paddedCopy(writes[0].analysis));
+  assert.ok(Array.isArray(writes[1].qualityIssues) && writes[1].qualityIssues.length, 'rewriter receives the concrete problems with its completed draft');
+  for (const field of ['profile', 'analysis', 'direction', 'facts']) assert.deepEqual(writes[1][field], writes[0][field], `rewrite retains ${field}`);
+  assert.equal(writes[1].profile.name, profile.name);
+  assert.deepEqual(writes[1].facts, facts);
+  assert.deepEqual(writes[1].analysis.map(item => item.imageId), ['photo-1', 'photo-2']);
+  assert.equal(writes[1].direction.targetCustomer, '附近上班族');
+  assert.deepEqual(writes[1].photos, writes[0].photos, 'both writing calls receive the same final processed evidence');
+  for (const input of writes) {
+    assert.equal(input.photos.length, 2);
+    assert.deepEqual(input.photos.map(photo => photo.id), ['photo-1', 'photo-2']);
+    for (const photo of input.photos) {
+      assert.match(photo.dataUrl, /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/);
+      assert.ok(Buffer.from(photo.dataUrl.split(',')[1], 'base64').length > 0);
+    }
+  }
+  assert.equal(result.copy.body, copy(writes[1].analysis).body);
+  assert.equal(audited.length, 1, 'the final improved copy still receives factual publication review');
+  assert.deepEqual(audited[0].copy, result.copy);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 200);
+  const usage = (await app.api('/usage')).body.usage;
+  assert.equal(usage.used, 1); assert.equal(usage.reserved, 0);
+});
+
+test('a model-only factual rejection rewrites the complete draft and reviews the replacement before delivery', async t => {
+  const writes = [], audits = [];
+  const parkingError = '文案出现免费停车位，但门店资料和照片分析均未确认停车信息。';
+  const model = mockModel({
+    async write(input) {
+      writes.push(structuredClone(input));
+      const original = copy(input.analysis);
+      return writes.length === 1 ? { ...original, body: `${original.body}\n\n店门口设有免费停车位，开车过来也方便。` } : original;
+    },
+    async audit(input) {
+      audits.push(structuredClone(input));
+      return audits.length === 1 ? { status: 'blocked', warnings: [], errors: [parkingError] } : { status: 'passed', warnings: [], errors: [] };
+    },
+  });
+  const app = await setup(t, { model }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const result = await app.wait(id, ['completed', 'failed', 'awaiting_confirmation']);
+  assert.equal(result.status, 'completed', result.error);
+  assert.equal(writes.length, 2); assert.equal(audits.length, 2);
+  assert.match(audits[0].copy.body, /免费停车位/);
+  assert.deepEqual(writes[1].draft, audits[0].copy);
+  assert.ok(writes[1].qualityIssues.includes(parkingError), 'the factual audit reason is supplied to the rewriter');
+  for (const field of ['profile', 'analysis', 'direction', 'facts', 'photos']) assert.deepEqual(writes[1][field], writes[0][field]);
+  assert.deepEqual(audits[1].copy, result.copy);
+  assert.doesNotMatch(result.copy.body, /免费停车位/);
+  assert.equal(result.review.status, 'passed');
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 200);
+  const usage = (await app.api('/usage')).body.usage;
+  assert.equal(usage.used, 1); assert.equal(usage.reserved, 0);
+});
+
+test('a second complete padded draft fails quality without creating a deliverable or consuming package quota', async t => {
+  const writes = [];
+  const model = mockModel({ async write(input) { writes.push(structuredClone(input)); return paddedCopy(input.analysis); } });
+  const app = await setup(t, { model }), { id } = await newTask(app);
+  // This is structurally valid and long enough: repeated navigation prose must not pass merely by reaching the character target.
+  assert.doesNotThrow(() => validateCopy(paddedCopy(analysis([{ id: 'photo-1' }])), ['photo-1']));
+  assert.ok([...paddedCopy([]).body].length >= 250 && [...paddedCopy([]).body].length <= 500);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const result = await app.wait(id, ['failed', 'completed', 'awaiting_confirmation']);
+  assert.equal(result.status, 'failed'); assert.equal(result.code, 'COPY_QUALITY_FAILED');
+  assert.equal(writes.length, 2, 'rewriting stops after the second complete response');
+  assert.ok(writes[1].draft && writes[1].qualityIssues.length);
+  assert.equal(result.files.length, 0);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
+  const usage = (await app.api('/usage')).body.usage;
+  assert.equal(usage.used, 0); assert.equal(usage.reserved, 0);
+});
+
+test('uncertain first writes and uncertain rewrites stop without automatic provider replay', async t => {
+  for (const uncertainAt of [1, 2]) await t.test(`uncertain writing call ${uncertainAt}`, async t => {
+    let writes = 0;
+    const model = mockModel({ async write(input) {
+      writes++;
+      if (writes === uncertainAt) throw Object.assign(new Error('模型请求结果未确认'), { code: 'PROVIDER_UNCERTAIN', statusCode: 502 });
+      return paddedCopy(input.analysis);
+    } });
+    const app = await setup(t, { model }), { id } = await newTask(app);
+    await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+    const result = await app.wait(id, ['failed', 'completed', 'awaiting_confirmation']);
+    assert.equal(result.status, 'failed'); assert.equal(result.code, 'PROVIDER_UNCERTAIN');
+    assert.equal(result.retryable, false); assert.equal(writes, uncertainAt);
+    assert.equal(result.files.length, 0);
+    assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
+    const retry = await app.api(`/tasks/${id}/retry`, {});
+    assert.equal(retry.status, 409); assert.equal(retry.body.code, 'PROVIDER_UNCERTAIN'); assert.equal(writes, uncertainAt);
+    const usage = (await app.api('/usage')).body.usage;
+    assert.equal(usage.used, 0); assert.equal(usage.reserved, 0);
+  });
 });
 
 test('core missing fact stops generation while irrelevant store history does not block dishes', async t => {
@@ -113,9 +247,12 @@ test('package cap stops new generation without model calls; explicit fork create
 });
 
 test('publication blocks unsupported claims and privacy; no quota is charged', async t => {
-  const app = await setup(t, { model: mockModel({ async write(input) { return { ...copy(input.analysis), body: `${copy(input.analysis).body} 纯手工现做，天天排队，19元。` }; } }) }), { id } = await newTask(app);
+  let writes = 0;
+  const app = await setup(t, { model: mockModel({ async write(input) { writes++; return { ...copy(input.analysis), body: `${copy(input.analysis).body} 纯手工现做，天天排队，19元。` }; } }) }), { id } = await newTask(app);
   await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true }); const result = await app.wait(id, ['failed', 'completed']);
-  assert.equal(result.status, 'failed'); assert.equal(result.review.status, 'blocked'); assert.equal((await app.api('/usage')).body.usage.used, 0);
+  assert.equal(result.status, 'failed'); assert.equal(result.review.status, 'blocked'); assert.equal(writes, 2);
+  assert.equal(result.files.length, 0); assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
+  assert.equal((await app.api('/usage')).body.usage.used, 0);
   assert.ok(localReview(copy([{ imageId: 'photo-1' }]), profile, {}, [{ imageId: 'photo-1', usable: false, privacyRisk: 'high', textRisk: 'none' }]).errors.length);
 });
 

@@ -5,6 +5,8 @@ import { createRestaurantStore, FILES_TTL_MS } from './store.mjs';
 import { createRestaurantMedia } from './media.mjs';
 import * as images from './images.mjs';
 import { createRestaurantModel } from './model.mjs';
+import { displayModelName } from '../../design/model-labels.js';
+import { inspectCopyQuality } from './copy-quality.mjs';
 import { RestaurantError, UUID, fingerprint, normalizeProfile, requireProfile, normalizeFacts, resolveDirectionFacts, pendingFacts, validateAnalysis, validateDirections, validateCopy, validateAudit, localReview } from './rules.mjs';
 
 const MB = 1024 * 1024;
@@ -75,6 +77,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   function publicTask(task) {
     if (!task) return null;
     const { userId, fingerprint: ignored, ...output } = task;
+    if (Object.hasOwn(output, 'model')) output.model = displayModelName(output.model, 'Plus模型');
     output.files = (task.files ?? []).map(({ key, ...file }) => ({ ...file, expired: file.expired || file.expiresAt <= now(), url: `/api/restaurant/tasks/${task.id}/files/${encodeURIComponent(file.filename)}` }));
     output.sourceImages = (task.sourceImages ?? []).map(({ key, ...photo }) => ({ ...photo, expired: photo.expired || photo.expiresAt <= now(), url: `/api/restaurant/tasks/${task.id}/files/${encodeURIComponent(photo.filename)}` }));
     output.filesExpired = Boolean(output.files.length) && output.files.every(file => file.expired);
@@ -182,10 +185,40 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     const originalCore = task.analysis.filter(item => selection.imageIds.includes(item.imageId) && item.imageType === 'food');
     if (originalCore.length && /菜|餐|面|食|团购/.test(selection.direction.label) && !selected.some(item => item.imageType === 'food')) throw new RestaurantError('核心菜品图片处理失败，请重试或选择其他方向。', 502, 'CORE_IMAGE_FAILED');
     await store.patchTask(userId, id, { status: 'generating', progress: { stage: 'copy' }, removedImageIds: selection.imageIds.filter(imageId => !processed.has(imageId)) });
-    const copy = validateCopy(await model.write({ profile: task.profileSnapshot, analysis: selected, direction: selection.direction, facts: selection.facts }), selected.map(item => item.imageId));
-    if (copy.imageOrder.length !== selected.length) throw new RestaurantError('文案返回的图片顺序不完整。', 502, 'MODEL_INVALID_OUTPUT');
+    // Let writing and review see a few actual final photos, with removed edge risks already cropped.
+    // The full structured analysis remains available for every selected photo.
+    const photos = await Promise.all(selected.slice(0, 3).map(async item => {
+      const result = processed.get(item.imageId);
+      const photo = imageProcessor.prepareAnalysisPhoto ? await imageProcessor.prepareAnalysisPhoto(result.bytes) : { bytes: result.bytes, mime: 'image/jpeg' };
+      return { id: item.imageId, dataUrl: `data:${photo.mime};base64,${photo.bytes.toString('base64')}` };
+    }));
+    let copy, review, copyQuality;
+    for (let revision = 0; revision < 2; revision++) {
+      const draft = copy, qualityIssues = review?.errors ?? [];
+      if (revision) await store.patchTask(userId, id, { progress: { stage: 'copy_refining' } });
+      // Only complete, known drafts can be rewritten. Uncertain provider errors propagate without replay.
+      copy = validateCopy(await model.write({ profile: task.profileSnapshot, analysis: selected, direction: selection.direction, facts: selection.facts, photos,
+        ...(draft ? { draft, qualityIssues } : {}) }), selected.map(item => item.imageId));
+      if (copy.imageOrder.length !== selected.length) throw new RestaurantError('文案返回的图片顺序不完整。', 502, 'MODEL_INVALID_OUTPUT');
+      const quality = inspectCopyQuality(copy, { profile: task.profileSnapshot, analysis: selected, direction: selection.direction });
+      copyQuality = { ...quality, revisionCount: revision };
+      const local = localReview(copy, task.profileSnapshot, selection.facts, selected);
+      // Avoid another paid review for an already rejected draft, but never relax factual checks.
+      const audit = quality.passed && !local.errors.length
+        ? validateAudit(await model.audit({ copy, profile: task.profileSnapshot, confirmedFacts: selection.facts, direction: selection.direction, images: selected, photos }))
+        : { status: 'passed', errors: [], warnings: [] };
+      const errors = [...new Set([...local.errors, ...quality.issues, ...audit.errors])], warnings = [...new Set([...local.warnings, ...audit.warnings])];
+      if (audit.status === 'blocked' && !errors.length) errors.push('发布文案检查未通过，请调整消费主题或核对资料。');
+      review = { status: errors.length ? 'blocked' : warnings.length || audit.status === 'passed_with_warning' ? 'passed_with_warning' : 'passed', errors, warnings };
+      if (review.status !== 'blocked') break;
+      if (revision === 1) {
+        await store.releasePackage(userId, id);
+        await store.patchTask(userId, id, { status: 'failed', copy, review, copyQuality, code: local.errors.length || quality.passed ? 'REVIEW_BLOCKED' : 'COPY_QUALITY_FAILED',
+          error: '文案自动改写后仍未通过检查，请补充真实亮点或更换内容方向。', retryable: false, progress: null }); return;
+      }
+    }
     if (selection.imageMode === 'cover') {
-      // Cover failure can use another successful source, but all order and copy are rechecked below.
+      // A cover can move to another successfully processed, reviewed photo without adding any claims.
       let cover;
       for (const imageId of copy.imageOrder) {
         try { cover = await process(userId, task, sources.find(photo => photo.id === imageId), { coverText: copy.coverText, ...(selected.find(item => item.imageId === imageId)?.crop ? { crop: selected.find(item => item.imageId === imageId).crop } : {}) });
@@ -194,15 +227,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       }
       if (!cover) throw new RestaurantError('封面处理失败，未形成完整内容包。', 502, 'COVER_FAILED');
     }
-    const local = localReview(copy, task.profileSnapshot, selection.facts, selected);
-    const audit = validateAudit(await model.audit({ copy, profile: task.profileSnapshot, confirmedFacts: selection.facts, direction: selection.direction, images: selected }));
-    const errors = [...new Set([...local.errors, ...audit.errors])], warnings = [...new Set([...local.warnings, ...audit.warnings])];
-    const review = { status: errors.length || audit.status === 'blocked' ? 'blocked' : warnings.length || audit.status === 'passed_with_warning' ? 'passed_with_warning' : 'passed', errors, warnings };
-    if (review.status === 'blocked') {
-      await store.releasePackage(userId, id);
-      await store.patchTask(userId, id, { status: 'failed', copy, review, code: 'REVIEW_BLOCKED', error: '发布前检查未通过，请核对事实或换方向。', retryable: false, progress: null }); return;
-    }
-    const result = await buildPackage(userId, task, processed, copy, review);
+    const result = { ...await buildPackage(userId, task, processed, copy, review), copyQuality };
     if (review.status === 'passed_with_warning') {
       // Files remain inaccessible until warnings are explicitly confirmed on this exact result.
       await store.patchTask(userId, id, { ...result, status: 'awaiting_confirmation', progress: null });
@@ -262,7 +287,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
         let origin; try { origin = new URL(req.headers.origin); } catch { throw new RestaurantError('请求来源不正确。', 403); }
         if (origin.host !== req.headers.host) throw new RestaurantError('请求来源不正确。', 403, 'ORIGIN_REJECTED');
       }
-      if (path === '/api/restaurant/status' && req.method === 'GET') { reply(res, 200, { enabled: model.enabled ?? true, packageDailyLimit, retention: { filesDays: 3, tasksDays: 30 }, model: config.chatModel }); return true; }
+      if (path === '/api/restaurant/status' && req.method === 'GET') { reply(res, 200, { enabled: model.enabled ?? true, packageDailyLimit, retention: { filesDays: 3, tasksDays: 30 }, model: displayModelName(config.chatModel, 'Plus模型') }); return true; }
       if (path === '/api/restaurant/usage' && req.method === 'GET') { const usage = await store.usage(userId), raw = await model.usage?.(); reply(res, 200, { usage, budget: raw ? { day: raw.day, limits: raw.limits, used: raw.used, remaining: raw.remaining } : null }); return true; }
       if (path === '/api/restaurant/profile') {
         if (req.method === 'GET') { reply(res, 200, { profile: await store.getProfile(userId) }); return true; }

@@ -44,6 +44,37 @@ test('concurrent reservations atomically respect daily limits; duplicate ids reu
   assert.deepEqual((await ledger.summary()).used, { image: 2, chat: 1 });
 });
 
+test('batch reservations atomically reserve every image or none, and duplicate batches never consume again', async t => {
+  const { create, file } = await fixture(t, { limits: { imageDaily: 4, perMinute: 10 } });
+  const ledger = create();
+  const batch = [input('set'), input('set-2'), input('set-3')];
+  assert.equal((await ledger.reserveBatch(batch)).created, true);
+  assert.equal((await ledger.summary()).used.image, 3);
+  assert.equal((await ledger.reserveBatch(batch)).created, false);
+  await assert.rejects(ledger.reserveBatch([input('other'), input('other-2')]), { code: 'DAILY_QUOTA_EXCEEDED' });
+  assert.equal(await ledger.get('other'), null);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).records.length, 3);
+  await assert.rejects(ledger.reserveBatch([input('set'), input('new-child')]), { code: 'REQUEST_ID_CONFLICT' });
+  await assert.rejects(ledger.reserveBatch([input('set', { fingerprint: 'changed' }), input('set-2'), input('set-3')]), { code: 'REQUEST_ID_CONFLICT' });
+  await ledger.markDispatched('set');
+  await ledger.finish('set', { status: 'completed' });
+  await ledger.finish('set-2', { status: 'cancelled' });
+  await ledger.finish('set-3', { status: 'cancelled' });
+  assert.equal((await ledger.summary()).used.image, 1);
+});
+
+test('concurrent image batches cannot overbook quota and invalid batches leave no reservations', async t => {
+  const { create } = await fixture(t, { limits: { imageDaily: 3, perMinute: 10 } });
+  const ledger = create();
+  for (const bad of [[], null, [input('same'), input('same')], Array.from({ length: 5 }, (_, i) => input(`too-many-${i}`)), [input('valid'), input('bad', { model: 2 })]]) {
+    await assert.rejects(ledger.reserveBatch(bad), { code: 'INVALID_REQUEST_ID' });
+  }
+  const results = await Promise.allSettled([ledger.reserveBatch([input('one'), input('one-2')]), ledger.reserveBatch([input('two'), input('two-2')])]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(results.find(result => result.status === 'rejected').reason.code, 'DAILY_QUOTA_EXCEEDED');
+  assert.equal((await ledger.summary()).used.image, 2);
+});
+
 test('undispatched failures release allowance but dispatched failures and unknown results still count', async t => {
   const { create } = await fixture(t, { limits: { imageDaily: 2, perMinute: 20 } });
   const ledger = create();

@@ -41,10 +41,19 @@ if (!process.env.TEST_DATABASE_URL) {
     [id, `${id}@example.com`, id, hash, audience, status, verified]);
   await internal.query("INSERT INTO users (id,email,nickname,password_hash,billing_audience) VALUES ('short','staff9802','旧账号',$1,'internal')", [await bcrypt.hash("old123", 4)]);
   const auth = await import("../src/lib/server/standalone-auth.ts");
+  const invites = await import("../src/lib/server/registration-invites.mjs");
+  await auth.consumeAuthAttempt("test-fixture-schema", 1);
   const { POST } = await import("../src/app/api/auth/[action]/route.ts");
-  const post = (action, body, token) => POST(new NextRequest(`https://workspace.test/api/auth/${action}`, {
-    method: "POST", headers: { "content-type": "application/json", origin: "https://workspace.test", ...(token ? { cookie: `${auth.AUTH_COOKIE}=${token}` } : {}) }, body: JSON.stringify(body),
-  }), { params: Promise.resolve({ action }) });
+  const post = async (action, body, token) => {
+    if (action === "register" && !Object.hasOwn(body, "inviteCode")) {
+      const inviteCode = invites.generateInviteCode();
+      await site.query("INSERT INTO digital_human_auth.registration_invites(code_hash,created_at) VALUES ($1,$2)", [invites.hashInviteCode(inviteCode), Date.now()]);
+      body = { ...body, inviteCode };
+    }
+    return POST(new NextRequest(`https://workspace.test/api/auth/${action}`, {
+      method: "POST", headers: { "content-type": "application/json", origin: "https://workspace.test", ...(token ? { cookie: `${auth.AUTH_COOKIE}=${token}` } : {}) }, body: JSON.stringify(body),
+    }), { params: Promise.resolve({ action }) });
+  };
   const login = (email = "employee@example.com", value = password) => post("login", { email, password: value });
   const register = email => post("register", { email, nickname: "新用户", password: "new-site-password-123" });
   const tokenOf = response => response.cookies.get(auth.AUTH_COOKIE)?.value;
