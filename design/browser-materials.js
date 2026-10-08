@@ -569,6 +569,7 @@ const root = globalThis;
       finally {
         if (this.active && token === this.generation) {
           this.scanning = false;
+          this._report();
           this._schedule(0, token);
         }
       }

@@ -32,11 +32,11 @@ function mixMaterials(media, ctx) {
   return `<section class="studio-materials" aria-labelledby="mix-material-title">
     <div class="studio-section-head"><h2 id="mix-material-title">实拍素材 <span>${mix.fileCount}</span></h2>${button('mix-choose-folder', icon('plus'), 'studio-square-button', `aria-label="选择素材文件夹" ${locked || 'title="选择素材文件夹"'}`)}</div>
     <div class="studio-section-tab"><span class="active">视频素材</span><small>${mix.fileCount > 30 ? '预览前 30 个' : '包含子文件夹'}</small></div>
-    ${button('mix-choose-folder', icon('folder') + '选择本地素材文件夹', 'studio-add-material', locked)}
+    ${button('mix-choose-folder', icon('folder') + `<span class="mix-folder-label">${mix.status.needsPermission ? '重新连接素材文件夹' : mix.status.connected ? '更换素材文件夹' : '选择本地素材文件夹'}</span>`, 'studio-add-material', locked)}
+    ${renderMixMaterials()}
     ${media.length ? `<div class="studio-media-list">${media.map((asset, index) => `<button class="studio-media-item ${asset.id === activeId ? 'selected' : ''}" data-action="studio-select-clip" data-id="${esc(asset.id)}" aria-pressed="${asset.id === activeId}">
       <span class="studio-media-thumb"><video src="${esc(asset.url)}" muted preload="metadata" tabindex="-1" aria-hidden="true"></video><b>${String(index + 1).padStart(2, '0')}</b></span><span class="studio-media-title"><strong>${esc(asset.name)}</strong><small data-duration-id="${esc(asset.id)}">${Math.round(asset.duration)} 秒 · 本机原片</small></span>${icon('chevron')}
     </button>`).join('')}</div>` : `<div class="studio-material-empty"><p>这些镜头都能派上用场</p><ol><li><span>01</span><div><strong>门店 / 车间环境</strong><small>让客户看见真实经营场所</small></div></li><li><span>02</span><div><strong>产品 / 工艺细节</strong><small>拍清产品特色与加工能力</small></div></li><li><span>03</span><div><strong>服务 / 生产过程</strong><small>用真实过程说明你能做什么</small></div></li></ol></div>`}
-    ${renderMixMaterials(ctx)}
   </section>`;
 }
 
@@ -80,8 +80,8 @@ function mixTimeline(ctx) {
   const { button, icon, esc } = ctx;
   const mix = getMixState();
   return `<section class="studio-timeline" aria-labelledby="mix-timeline-title"><div class="studio-timeline-toolbar"><div><h2 id="mix-timeline-title">制作记录</h2><span>按宣传文案匹配整个素材库</span></div>${mix.job ? button('mix-refresh-job', icon('refresh') + '刷新任务', 'studio-text-button') : ''}</div>
-    <div class="mix-job-history">${mix.jobs.length ? mix.jobs.map(job => button('mix-open-job', `${icon('video')}<strong>${esc(mixJobLabel(job))}</strong><small>${esc(job.id.slice(0, 8))}</small>`, `mix-job-card ${job.id === mix.job?.id ? 'selected' : ''}`, `data-id="${esc(job.id)}"`)).join('') : `<div class="mix-job-empty">${icon('video')}<span>素材索引就绪后，填写宣传文案即可制作第一条视频。</span></div>`}</div>
-    <div class="studio-track-note">${mix.fileCount > 30 ? `目录中 ${mix.fileCount} 个视频均参与匹配，上方展示前 30 个预览。` : '原视频留在电脑；服务器保存素材描述和向量，按需接收命中的素材。'}</div>
+    <div class="mix-job-history">${mix.jobs.length ? mix.jobs.map(job => button('mix-open-job', `${icon('video')}<strong>${esc(mixJobLabel(job))}</strong><small>${esc(job.id.slice(0, 8))}</small>`, `mix-job-card ${job.id === mix.job?.id ? 'selected' : ''}`, `data-id="${esc(job.id)}"`)).join('') : `<div class="mix-job-empty">${icon('video')}<span>素材上传完成后，填写宣传文案即可制作第一条视频。</span></div>`}</div>
+    <div class="studio-track-note">${mix.fileCount > 30 ? `目录中 ${mix.fileCount} 个视频均参与匹配，上方展示前 30 个预览。` : '原视频留在电脑，制作时自动选取匹配的素材。'}</div>
   </section>`;
 }
 

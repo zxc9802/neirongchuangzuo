@@ -103,6 +103,47 @@ test('mix studio keeps its columns and labels the submitted text as promotional 
   } finally { f.restore(); }
 });
 
+test('folder selection stays in the main upload area without an idle footer upload card', async () => {
+  const f = await fixture({ useShared: true, files: 0, health: { configured: false, missing: ['RERANK_API_KEY'] } });
+  try {
+    f.databases.clear();
+    await f.mod.initializeMixMaterials(f.ctx);
+    const html = renderStudio('mix', f.ctx);
+    const materials = html.slice(html.indexOf('<section class="studio-materials"'), html.indexOf('<section class="studio-preview'));
+    assert.match(materials, /studio-add-material[^>]*>.*选择本地素材文件夹/);
+    assert.doesNotMatch(f.mod.renderMixMaterials(f.ctx), /data-action="mix-choose-folder"|本地素材文件夹|RERANK_API_KEY|原视频保留/);
+    assert.ok(materials.indexOf('mix-material-status') < materials.indexOf('studio-material-empty'));
+  } finally { f.restore(); }
+});
+
+test('material preparation shows upload copy and actual progress through scanning, indexing and transfer', async () => {
+  const f = await fixture({ files: 2 });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const state = f.mod.getMixState();
+    const clips = Object.values(state.client.record.manifest).flatMap(entry => entry.clips);
+    clips[1].state = 'pending';
+    state.client.scanning = true;
+    state.client._report({ text: '正在向量化素材' });
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材正在上传/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /<progress aria-label="素材上传进度"><\/progress>/);
+    state.client.scanning = false;
+    state.client._report();
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /max="2" value="1"/);
+    assert.doesNotMatch(f.nodes['#mix-material-status'].innerHTML, /向量化|索引|并行|AI 分析|data-action=/);
+    assert.equal(f.nodes['#studio-generation-hint'].textContent.includes('索引'), false);
+    state.client._report({ uploadTotal: 100, uploadBytes: 25 });
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /max="100" value="25"/);
+    clips[1].state = 'indexed';
+    state.client._report();
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材正在上传/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /max="100" value="25"/);
+    state.client._report({ uploadTotal: 0, uploadBytes: 0 });
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材上传完成/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /max="2" value="2"/);
+  } finally { f.restore(); }
+});
+
 test('voice and music libraries remain in the inspector and escape audio names', async () => {
   const voice = 'd'.repeat(32), music = 'e'.repeat(32);
   const f = await fixture({ useShared: true, fetchAudio: async url => Response.json({ configured: true, missing: [], items: [{
@@ -368,7 +409,7 @@ test('completed render updates preview panels without replacing the copy editor'
   } finally { f.restore(); }
 });
 
-test('recursive restoration indexes every file while displaying a small catalog and footer status', async () => {
+test('recursive restoration indexes every file while displaying a small catalog and upload completion', async () => {
   const f = await fixture({ files: 36 });
   try {
     assert.equal(typeof f.mod.initializeMixMaterials, 'function');
@@ -379,7 +420,7 @@ test('recursive restoration indexes every file while displaying a small catalog 
     assert.equal(state.status.connected, true);
     assert.equal(Object.keys(f.databases.get('workbench-browser-materials:account-a').manifest).length, 36);
     assert.match(f.mod.renderMixMaterials(f.ctx), /mix-material-status/);
-    assert.match(f.nodes['#mix-material-status'].innerHTML, /36/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材上传完成/);
     assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, false);
   } finally { f.restore(); }
 });
@@ -479,7 +520,8 @@ test('lost permission or locally unreadable old vectors never enable generation'
     await state.client.scan();
     f.mod.bindMixMaterials(f.ctx);
     assert.match(f.mod.mixReadiness(f.ctx), /重新连接/);
-    assert.match(f.mod.renderMixMaterials(f.ctx), /mix-choose-folder"[^>]*>重新连接/);
+    assert.match(f.mod.renderMixMaterials(f.ctx), /请点击上方按钮重新连接素材文件夹/);
+    assert.doesNotMatch(f.mod.renderMixMaterials(f.ctx), /data-action="mix-choose-folder"/);
     assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
     state.client.record.handle.values = async function* () {
       yield { name: 'sub', kind: 'directory', async *values() {
@@ -529,7 +571,7 @@ test('metadata rescan blocks generation until its guarded completion updates the
     state.client.readDuration = () => pending;
     f.mod.handleMixMaterialAction('mix-scan', { dataset: {} }, f.ctx);
     await settle(() => state.client.scanning);
-    assert.match(f.mod.mixReadiness(f.ctx), /扫描/);
+    assert.match(f.mod.mixReadiness(f.ctx), /素材正在上传/);
     assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
     release(2);
     await settle(() => !state.client.scanning);
@@ -598,7 +640,8 @@ test('indexing can restore before TTS is configured and BFCache pageshow reconne
     await f.mod.initializeMixMaterials(f.ctx);
     await settle(() => f.mod.getMixState().status.indexed === 1);
     assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
-    assert.match(f.nodes['#mix-material-status'].innerHTML, /MIX_TTS_VOICE_ID/);
+    assert.doesNotMatch(f.nodes['#mix-material-status'].innerHTML, /MIX_TTS_VOICE_ID/);
+    assert.equal(f.nodes['#studio-generation-hint'].textContent, '生成服务尚未配置完成');
     f.events.get('pagehide')();
     assert.equal(f.mod.getMixState().status.connected, false);
     f.events.get('pageshow')({ persisted: true });

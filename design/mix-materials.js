@@ -131,8 +131,8 @@ function folderReadiness() {
   if (!state.health?.configured) return '生成服务尚未配置完成';
   if (state.status.needsPermission) return '请重新连接素材文件夹';
   if (!state.status.connected) return '先选择素材文件夹';
-  if (state.client?.scanning) return '正在扫描素材文件夹，请稍候';
-  if (!state.status.indexed) return '正在建立素材索引，请稍候';
+  if (state.client?.scanning) return '素材正在上传，请稍候';
+  if (!state.status.indexed) return '素材正在上传，请稍候';
   const readable = Object.values(state.client?.record?.manifest || {}).some(entry =>
     state.client.files.has(entry.relativePath) && entry.clips?.some(clip => clip.state === 'indexed'));
   return readable ? '' : '请重新扫描可读取的素材';
@@ -290,19 +290,18 @@ async function deleteAudio(kind, id) {
   }
 }
 
-export function renderMixMaterials(ctx = state.ctx) {
+export function renderMixMaterials() {
   const status = state.status;
-  const icon = ctx?.icon?.('folder') || '';
-  const missing = state.health && !state.health.configured ? `生成服务待配置${state.health.missing?.length ? '：' + state.health.missing.join('、') : ''}` : '';
-  const indexed = status.total ? `<span>已扫描 ${status.scanned} 个视频 · 已索引 ${status.indexed}/${status.total} 个片段</span>` : '';
-  const progress = status.uploadTotal ? `<progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="临时素材上传进度"></progress>` : status.total ? `<progress max="${status.total}" value="${status.indexed}" aria-label="素材索引进度"></progress>` : '';
-  const jobState = state.job ? `<span>${escape(mixJobLabel(state.job))}</span>` : '';
+  const uploading = !status.needsPermission && (state.client?.scanning || status.uploadTotal || status.connected && status.indexed < status.total);
+  const text = status.needsPermission ? '请点击上方按钮重新连接素材文件夹' : uploading ? '素材正在上传' : status.connected && !status.error ? status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
+  const progress = status.uploadTotal ? `<progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="素材上传进度"></progress>` : state.client?.scanning ? '<progress aria-label="素材上传进度"></progress>' : status.total && !status.needsPermission ? `<progress max="${status.total}" value="${status.indexed}" aria-label="素材上传进度"></progress>` : '';
   const locked = mixFolderLocked();
   const disabled = locked ? 'disabled title="制作时请保持原素材文件夹连接"' : '';
-  const scan = status.connected && !status.needsPermission;
+  const scan = status.connected && !status.needsPermission && !uploading;
   const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : folderReadiness();
   const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>继续制作</button>` : '';
-  return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite"><div class="mix-status-label">${icon}<strong>${escape(status.folderName || '本地素材文件夹')}</strong></div><span>${escape(status.text)}</span>${indexed}${progress}${jobState}${missing ? `<small>${escape(missing)}</small>` : ''}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}<small>原视频保留在本机，制作时临时传输命中的素材。网页关闭后会暂停读取。</small><div class="mix-folder-actions"><button data-action="mix-${scan ? 'scan' : 'choose-folder'}" ${scan ? disabled : ''}>${status.needsPermission ? '重新连接' : scan ? '扫描新增 / 修改' : '选择文件夹'}</button>${status.connected ? `<button data-action="mix-choose-folder" ${status.needsPermission ? '' : disabled}>更换</button><button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}</div></div>`;
+  const actions = `${scan ? `<button data-action="mix-scan" ${disabled}>扫描新增 / 修改</button><button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
+  return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite">${text ? `<span>${text}</span>` : ''}${progress}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}${actions ? `<div class="mix-folder-actions">${actions}</div>` : ''}</div>`;
 }
 
 export function mixJobLabel(job = state.job) {
@@ -316,6 +315,8 @@ function updateStatus() {
   if (!root) return;
   const footer = root.querySelector('#mix-material-status');
   if (footer) footer.innerHTML = renderMixMaterials().replace(/^<div[^>]*>|<\/div>$/g, '');
+  const folderLabel = root.querySelector('.studio-add-material .mix-folder-label');
+  if (folderLabel) folderLabel.textContent = state.status.needsPermission ? '重新连接素材文件夹' : state.status.connected ? '更换素材文件夹' : '选择本地素材文件夹';
   const hint = mixReadiness();
   const generate = root.querySelector('[data-action="studio-generate"]');
   if (generate) { generate.disabled = !!hint; generate.title = hint; }
