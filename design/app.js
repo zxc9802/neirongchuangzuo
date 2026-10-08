@@ -1,3 +1,4 @@
+import {renderVideoReplica,bindVideoReplica,disposeVideoReplica} from './video-replica.js';
 import {renderHomeView,bindHomeView,handleHomeAction} from './home.js';
 import {accountStorageKey} from './account-storage.js';
 import {validatePhotoSelection} from './image-upload.js';
@@ -69,7 +70,7 @@ function openModal(title,subtitle,content,wide=false){$('#modal-title').textCont
 $('#close-modal').onclick=()=>modal.close(); modal.addEventListener('click',e=>{if(e.target===modal){const r=modal.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)modal.close();}});
 $('#guide-button').onclick=guide;
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.dataset.icon));
-function guide(){openModal('使用帮助','',`<div class="prose"><dl><dt>餐饮小红书</dt><dd>上传实拍、选择方向、下载图文。</dd><dt>通用图片</dt><dd>上传原图、选择风格，可生成单张或套图。</dd><dt>AI 混剪</dt><dd>选择素材文件夹，填写宣传文案。</dd><dt>数字人</dt><dd>选择形象和声音，填写口播稿。</dd><dt>AI 视频</dt><dd>生成服务待接入，可先保存草稿。</dd></dl><p>成品保留 3 天，请及时下载。积分规则可在「我的账号」查看。</p></div>`);}
+function guide(){openModal('使用帮助','',`<div class="prose"><dl><dt>餐饮小红书</dt><dd>上传实拍、选择方向、下载图文。</dd><dt>通用图片</dt><dd>上传原图、选择风格，可生成单张或套图。</dd><dt>AI 混剪</dt><dd>选择素材文件夹，填写宣传文案。</dd><dt>数字人</dt><dd>选择形象和声音，填写口播稿。</dd><dt>AI 视频</dt><dd>上传单个人物视频与一张目标人物照片，查看费用后开始复刻。</dd></dl><p>成品保留 3 天，请及时下载。积分规则可在「我的账号」查看。</p></div>`);}
 function context(){return {mode,configs,modules,assets,storeInfo,icon,button,esc,queueOpen,previewTab,setPreviewTab:value=>{previewTab=value;},selectedDraft,drafts,navigate,beginCreation,openModal,toast,picker,saveDraft,generate,settings,personModal,scriptModal,refresh:render,businessProfileVersion,materialIndustry,setMaterialIndustry:industry=>{if(industry==='all'||INDUSTRIES.some(item=>item.id===industry))materialIndustry=industry;},selectImagePreset:(id,options)=>{imageMode='generic';return selectImagePreset(context(),id,options);},setImageMode:value=>{if(!['restaurant','generic'].includes(value))return;imageMode=value;render();},openBusinessFlow:options=>openBusinessFlow(context(),options),renderBusinessEntry:target=>renderBusinessEntry(context(),target),renderContentPlanPreview:target=>renderContentPlanPreview(context(),target),getBusinessBrief:()=>getBusinessBrief(storeInfo),importBusinessAssets,media:{owner:'/media/owner-reference.png'}};}
 function importBusinessAssets(files,target,selectedCount=0){
  const module=modules[target],ids=[];if(!module)return ids;
@@ -87,6 +88,7 @@ function beginCreation(next){if(next==='image')imageMode='generic';if(mode===nex
 function navigate(next){if(!validPage(next))return;modal.close();pickerContext=null;if(modules[mode])selectedDrafts[mode]=selectedDraft;mode=next;selectedDraft=selectedDrafts[next]||null;previewTab=configs[next]?.contentPlan?'宣传方案':'参考示例';location.hash=next;render();}
 window.addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(validPage(next)&&next!==mode)navigate(next);});
 function render(){
+ if(mode!=='video')disposeVideoReplica();
  if(mode!=='image'||imageMode!=='restaurant')disposeRestaurant();
  if(mode!=='avatar')disposeDigitalHuman();
  if(mode!=='image'||imageMode==='restaurant')disposeImageGeneration();
@@ -94,13 +96,14 @@ function render(){
  document.body.dataset.page=mode;
  $('#nav').innerHTML=[['home','首页'],['agent','Agent 对话'],...Object.entries(modules).map(([k,v])=>[k,v.title])].map(([k,title])=>`<a href="#${k}" class="navitem ${mode===k?'active':''}" ${mode===k?'aria-current="page"':''}>${icon(k)}<small>${title}</small></a>`).join('')+`<a href="#assets" class="navitem ${mode==='assets'?'active':''}" ${mode==='assets'?'aria-current="page"':''}>${icon('folder')}<small>资产</small></a>`+button('store',icon('store')+'<small>商家资料</small>','navitem');
  const ctx=context(),main=$('#main');
- $('#workbar').innerHTML=`<div class="workbar-breadcrumb"><span>创作工作台</span>${icon('chevron')}<strong>${modules[mode]?.title||(mode==='assets'?'资产':mode==='agent'?'Agent 对话':'首页')}</strong></div>${mode==='image'?`<div class="image-mode-switch" role="tablist" aria-label="图片创作模式">${['restaurant','generic'].map(value=>button('image-mode',value==='restaurant'?'餐饮小红书':'通用图片',imageMode===value?'active':'',`data-value="${value}" role="tab" aria-selected="${imageMode===value}"`)).join('')}</div>`:''}<div>${mode==='image'&&imageMode==='restaurant'?'':button('prompts',icon('list')+'我的草稿','textbutton')}${button('store',icon('store')+(mode==='image'&&imageMode==='restaurant'?'门店资料':esc(storeInfo.name||'我的商家')),'textbutton')}</div>`;
+ $('#workbar').innerHTML=`<div class="workbar-breadcrumb"><span>创作工作台</span>${icon('chevron')}<strong>${modules[mode]?.title||(mode==='assets'?'资产':mode==='agent'?'Agent 对话':'首页')}</strong></div>${mode==='image'?`<div class="image-mode-switch" role="tablist" aria-label="图片创作模式">${['restaurant','generic'].map(value=>button('image-mode',value==='restaurant'?'餐饮小红书':'通用图片',imageMode===value?'active':'',`data-value="${value}" role="tab" aria-selected="${imageMode===value}"`)).join('')}</div>`:''}<div>${mode==='video'||mode==='image'&&imageMode==='restaurant'?'':button('prompts',icon('list')+'我的草稿','textbutton')}${button('store',icon('store')+(mode==='image'&&imageMode==='restaurant'?'门店资料':esc(storeInfo.name||'我的商家')),'textbutton')}</div>`;
  if(mode==='assets'){main.className='generated-assets-workspace';main.innerHTML=renderGeneratedAssets(ctx);bindGeneratedAssets(ctx);return;}
  if(mode==='home'){main.className='home';main.innerHTML=renderHomeView(ctx);bindHomeView(ctx);return;}
  if(mode==='agent'){main.className='agent-workspace';main.innerHTML=renderAgentChat(ctx);bindAgentChat(ctx);return;}
  if(mode==='image'&&imageMode==='restaurant'){main.className='restaurant-shell';main.innerHTML=renderRestaurant(ctx);bindRestaurant(ctx);return;}
  if(mode==='avatar'){main.className='special-workspace avatar-studio';main.innerHTML=renderDigitalHuman(ctx);bindDigitalHuman(ctx);return;}
  if(mode==='mix'){main.className='special-workspace mix-studio';main.innerHTML=renderStudio(mode,ctx);bindStudio(mode,ctx);return;}
+ if(mode==='video'){main.className='video-replica-workspace';main.innerHTML=renderVideoReplica(ctx);bindVideoReplica(ctx);return;}
  main.className=`workspace ${queueOpen?'queue-expanded':'queue-hidden'}`;
  main.innerHTML=renderWorkbench(ctx);bindWorkbench(ctx);
 }

@@ -22,8 +22,15 @@ function localUrl(value, pattern) {
 }
 
 // Only successful generated outputs enter the library; uploads and example images never do.
-export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = Date.now(), restaurantTasks = []) {
+export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = Date.now(), restaurantTasks = [], videoTasks = []) {
   const records = [];
+  for (const task of videoTasks) {
+    const window = generatedAssetWindow(task, now);
+    if (!window || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(task.id || '') || task.billing && task.billing.status !== 'settled') continue;
+    const url = `/api/video-replica/tasks/${task.id}/result`;
+    if (task.resultUrl !== url) continue;
+    records.push({ key: `video:${task.id}`, type: 'video', source: '人物复刻', title: '人物 1:1 复刻', url, download: url + '?download=1', filename: 'person-replica.mp4', ...window });
+  }
   for (const task of imageTasks) {
     const window = generatedAssetWindow(task, now);
     if (!window || typeof task.id !== 'string') continue;
@@ -129,13 +136,13 @@ async function load() {
   const controller = new AbortController(); state.controller = controller;
   const timer = setTimeout(() => controller.abort(), 15000);
   state.loading = true; paint();
-  const sources = ['图片', '数字人', '餐饮图文'];
-  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', controller.signal, sources[0]), fetchTasks('/api/tasks?completed=true', controller.signal, sources[1]), fetchRestaurantTasks(controller.signal)]);
+  const sources = ['图片', '数字人', '餐饮图文', '人物复刻'];
+  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', controller.signal, sources[0]), fetchTasks('/api/tasks?completed=true', controller.signal, sources[1]), fetchRestaurantTasks(controller.signal), fetchTasks('/api/video-replica/tasks?completed=true', controller.signal, sources[3])]);
   clearTimeout(timer);
   if (revision !== state.revision || !active()) return;
   state.errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${sources[index]}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${sources[index]}作品暂时无法读取。`] : []);
-  const [images, avatars, restaurant] = results.map(result => result.status === 'fulfilled' ? result.value : []);
-  state.records = collectGeneratedAssets(images, avatars, Date.now(), restaurant);
+  const [images, avatars, restaurant, videos] = results.map(result => result.status === 'fulfilled' ? result.value : []);
+  state.records = collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos);
   state.loading = false; state.controller = null; paint(); scheduleExpiry();
 }
 export function bindGeneratedAssets(ctx) { state.ctx = ctx; void load(); }
