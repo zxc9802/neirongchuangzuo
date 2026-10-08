@@ -290,7 +290,10 @@ test('transfer stops after an asynchronous read when its run has been cancelled'
 });
 
 function memoryStore(record = null) {
-  return { value: record, async get() { return this.value; }, async put(value) { this.value = value; },
+  const repairs = new Map();
+  return { value: record, repairs, async get() { return this.value; }, async put(value) { this.value = value; },
+    async getRepair(id) { return repairs.get(id); }, async putRepair(id, file) { repairs.set(id, file); },
+    async deleteRepair(id) { repairs.delete(id); }, async clearRepairs() { repairs.clear(); },
     async clear() { this.value = null; } };
 }
 
@@ -557,6 +560,68 @@ test('oversize sources surface a file error during scanning before indexing', as
   } finally { controller.stop(); }
 });
 
+test('a video that times out does not repeatedly block the remaining files and can be retried on rescan', async () => {
+  const backend = server();
+  const attempts = [];
+  const originalNow = Date.now;
+  let now = originalNow();
+  let broken = true;
+  const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(), readDuration: async () => 16,
+    repairVideo: async () => { throw new Error('读取视频超时'); },
+    sampleFrames: async file => {
+      attempts.push(file.name);
+      if (broken && file.name === 'bad.mov') {
+        now += 30000;
+        throw new Error('读取视频超时，请检查文件或转换为 MP4（H.264）');
+      }
+      return ['frame'];
+    } });
+  controller._schedule = () => {};
+  const files = [videoFile('素材/bad.mov'), videoFile('素材/good.mp4')];
+  try {
+    Date.now = () => now;
+    await controller.selectFiles(files);
+    for (let i = 0; i < 5; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
+    assert.deepEqual(attempts, ['bad.mov', 'bad.mov', 'good.mp4', 'good.mp4']);
+    assert.equal(controller.status.indexed, 2);
+    assert.match(controller.status.error, /bad.mov.*读取视频超时/);
+    broken = false;
+    await controller.selectFiles(files);
+    for (let i = 0; i < 2; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
+    assert.equal(controller.status.indexed, 4);
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); Date.now = originalNow; }
+});
+
+test('slow model failures are retried after fresh clips instead of starving the queue', async () => {
+  const backend = server();
+  const attempts = [];
+  const originalNow = Date.now;
+  let now = originalNow();
+  let failing = true;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 16,
+    sampleFrames: async () => ['frame'], api: async (path, options) => {
+      if (path.endsWith('/analyze')) {
+        const id = JSON.parse(options.body).clip_id;
+        attempts.push(id);
+        if (failing) { now += 30000; throw new Error('HTTP 503'); }
+      }
+      return backend.api(path, options);
+    } });
+  controller._schedule = () => {};
+  try {
+    Date.now = () => now;
+    await controller.selectFiles([videoFile('素材/first.mp4'), videoFile('素材/second.mp4')]);
+    const clips = Object.values(controller.record.manifest).flatMap(item => item.clips);
+    for (let i = 0; i < 2; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
+    assert.deepEqual(attempts, clips.map(clip => clip.id));
+    failing = false;
+    now += 30000;
+    for (let i = 0; i < 2; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
+    assert.equal(controller.status.indexed, clips.length);
+  } finally { controller.stop(); Date.now = originalNow; }
+});
+
 test('default video sampling produces one JPEG per second at no more than 640 pixels', async () => {
   const previousDocument = globalThis.document;
   const seeks = [];
@@ -668,6 +733,41 @@ test('source requests persist their upload ID and resume in a new controller via
   } finally { controller?.stop(); }
 });
 
+test('background indexing completion preserves an ongoing source upload progress', async () => {
+  const backend = server();
+  const file = videoFile('素材/a.mp4', 1, Buffer.alloc(helpers.CHUNK_SIZE + 7));
+  let releaseAnalysis, releaseUpload, serving, lastChunk = false;
+  const analysis = new Promise(resolve => { releaseAnalysis = resolve; });
+  const uploading = new Promise(resolve => { releaseUpload = resolve; });
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: async () => ['frame'], api: async (path, options = {}) => {
+      if (path.endsWith('/analyze')) { await analysis; return { complete: true }; }
+      if (path.endsWith('/file')) return { id: '3'.repeat(32), offset: 0 };
+      if (options.method === 'PATCH') {
+        const offset = Number(options.headers['Upload-Offset']);
+        if (offset) { lastChunk = true; await uploading; }
+        return { offset: offset + options.body.byteLength };
+      }
+      if (path.endsWith('/complete')) return { complete: true };
+      return backend.api(path, options);
+    } });
+  controller._schedule = () => {};
+  try {
+    await controller.selectFiles([file]);
+    await controller._cycle(controller.generation);
+    serving = controller._serve({ id: '2'.repeat(32), kind: 'source',
+      asset_id: controller.record.manifest['a.mp4'].assetId }, controller.generation);
+    await eventually(() => lastChunk);
+    releaseAnalysis();
+    await Promise.all(controller.workers.values());
+    assert.equal(controller.status.uploadBytes, helpers.CHUNK_SIZE);
+    assert.equal(controller.status.uploadTotal, file.size);
+    releaseUpload();
+    await serving;
+    assert.equal(controller.status.uploadTotal, 0);
+  } finally { releaseAnalysis(); releaseUpload(); await serving?.catch(() => {}); controller.stop(); }
+});
+
 test('an indexing lease is refreshed to the server state without duplicate model requests', async () => {
   const backend = server();
   const originalNow = Date.now;
@@ -738,4 +838,124 @@ test('an unreadable unchanged file retains its old metadata and never starts ana
     assert.match(controller.status.error, /a.mp4.*cannot be read/);
     assert.equal(backend.calls.some(call => call.method === 'DELETE' || call.path.endsWith('/analyze')), false);
   } finally { controller.stop(); }
+});
+
+test('metadata scan runs three readers and fills freed slots without waiting for a slow file', async () => {
+  const readers = new Map();
+  let active = 0, peak = 0;
+  const controller = new BrowserMaterials({ api: server().api, store: memoryStore(), readDuration: file => {
+    active++; peak = Math.max(peak, active);
+    return new Promise(resolve => readers.set(file.name, () => { active--; resolve(2); }));
+  } });
+  const selecting = controller.selectFiles(Array.from({ length: 5 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+  try {
+    await eventually(() => readers.size === 3);
+    readers.get('1.mp4')();
+    await eventually(() => readers.has('3.mp4'));
+    readers.get('2.mp4')(); readers.get('3.mp4')();
+    await eventually(() => readers.has('4.mp4'));
+    readers.get('0.mp4')(); readers.get('4.mp4')();
+    await selecting;
+    assert.equal(peak, 3);
+    assert.equal(controller.status.scanned, 5);
+  } finally { controller.stop(); for (const finish of readers.values()) finish(); await selecting; }
+});
+
+test('three extraction and analysis workers overlap and refill independently', async () => {
+  const backend = server();
+  const frames = new Map(), analysis = new Map();
+  let active = 0, peak = 0;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: file => new Promise(resolve => {
+      active++; peak = Math.max(peak, active);
+      frames.set(file.name, () => resolve(['frame']));
+    }), api: async (path, options) => {
+      if (path.endsWith('/analyze')) {
+        const id = JSON.parse(options.body).clip_id;
+        await new Promise(resolve => analysis.set(id, () => { active--; resolve(); }));
+      }
+      return backend.api(path, options);
+    } });
+  try {
+    await controller.selectFiles(Array.from({ length: 4 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+    await eventually(() => frames.size === 3);
+    for (const release of frames.values()) release();
+    await eventually(() => analysis.size === 3);
+    controller.start(); controller.start();
+    const first = [...analysis.values()][0]; first();
+    await eventually(() => frames.has('3.mp4'));
+    assert.equal(peak, 3);
+    frames.get('3.mp4')();
+    await eventually(() => analysis.size === 4);
+    for (const release of [...analysis.values()].slice(1)) release();
+    await eventually(() => controller.status.indexed === 4);
+  } finally { controller.stop(); for (const release of frames.values()) release(); for (const release of analysis.values()) release(); }
+});
+
+test('failed model work retries at the tail immediately and at most once per scan', async () => {
+  const backend = server(), attempts = [];
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: async () => ['frame'], api: async (path, options) => {
+      if (path.endsWith('/analyze')) { attempts.push(JSON.parse(options.body).clip_id); throw new Error('HTTP 503'); }
+      return backend.api(path, options);
+    } });
+  try {
+    await controller.selectFiles(Array.from({ length: 5 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+    const ids = Object.values(controller.record.manifest).flatMap(entry => entry.clips.map(clip => clip.id));
+    await eventually(() => attempts.length === 10);
+    assert.deepEqual(new Set(attempts.slice(0, 5)), new Set(ids));
+    for (let i = 0; i < 4; i++) await controller._cycle(controller.generation);
+    assert.equal(attempts.length, 10);
+    assert.equal(controller.status.indexed, 0);
+  } finally { controller.stop(); }
+});
+
+test('oversize and unreadable MOV repair waits for normal indexing and reuses cached MP4 copies', async () => {
+  const backend = server(), events = [];
+  const store = memoryStore();
+  const big = { name: 'big.mov', webkitRelativePath: '素材/big.mov', size: 600 * 1024 * 1024, lastModified: 7,
+    slice: () => new Blob(['x']) };
+  const bad = videoFile('素材/bad.mov');
+  const good = videoFile('素材/good.mp4');
+  const options = { store, readDuration: async file => {
+    if (file.name === 'bad.mov') throw Object.assign(new Error('MOV decode failed'), { code: 'MEDIA_DECODE' });
+    return 2;
+  }, sampleFrames: async file => { events.push('frames:' + file.name); return ['frame']; },
+  repairVideo: async file => { events.push('repair:' + file.name); return videoFile(file.name.replace(/\.mov$/, '.mp4')); },
+  api: async (path, options) => { if (path.endsWith('/analyze')) events.push('indexed'); return backend.api(path, options); } };
+  let controller = new BrowserMaterials(options);
+  try {
+    await controller.selectFiles([big, bad, good]);
+    await eventually(() => controller.status.indexed === 3);
+    assert.ok(events.indexOf('indexed') < events.indexOf('repair:big.mov'));
+    assert.ok(events.indexOf('indexed') < events.indexOf('repair:bad.mov'));
+    assert.equal(controller.record.manifest['big.mov'].assetId, await helpers.assetId('big.mov', big.size, 7));
+    assert.equal(controller.files.get('big.mov').name, 'big.mp4');
+    assert.equal(controller.status.error, '');
+    controller.stop();
+    controller = new BrowserMaterials(options);
+    await controller.selectFiles([big, bad, good]);
+    assert.equal(controller.status.indexed, 3);
+    assert.equal(controller.files.get('big.mov').name, 'big.mp4');
+    assert.equal(controller.status.error, '');
+    assert.equal(events.filter(event => event.startsWith('repair:')).length, 2);
+    assert.equal(events.filter(event => event === 'indexed').length, 3);
+    await controller.disconnect();
+    assert.equal(store.repairs.size, 0);
+  } finally { controller.stop(); }
+});
+
+test('stopping during repair cannot save a converted copy or register stale clips', async () => {
+  const backend = server(), store = memoryStore();
+  let release, started = false;
+  const controller = new BrowserMaterials({ api: backend.api, store, readDuration: async () => 2,
+    repairVideo: () => { started = true; return new Promise(resolve => { release = resolve; }); } });
+  try {
+    await controller.selectFiles([{ name: 'big.mov', webkitRelativePath: '素材/big.mov', size: 600 * 1024 * 1024, lastModified: 1 }]);
+    await eventually(() => started);
+    controller.stop(); release(videoFile('big.mp4'));
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(store.repairs.size, 0);
+    assert.equal(backend.calls.some(call => call.path.endsWith('/clips')), false);
+  } finally { controller.stop(); release?.(videoFile('big.mp4')); }
 });

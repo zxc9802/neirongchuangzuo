@@ -3,6 +3,7 @@ import importlib
 import json
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -182,6 +183,116 @@ class MaterialBrokerTests(unittest.TestCase):
             self.broker.complete_upload(self.device, result['id'])
         self.assertEqual(model.embed.call_count, 1)
         self.assertEqual(model.json.call_count, 1)
+
+    def test_vector_and_description_overlap_with_independent_model_sessions(self):
+        result = self.upload(kind='proxy', complete=False)
+        together = threading.Barrier(2)
+        sessions, threads = [], []
+
+        def post(model, url, key_name, payload):
+            sessions.append(model.session)
+            threads.append(threading.get_ident())
+            try:
+                together.wait(3)
+            except threading.BrokenBarrierError:
+                self.fail('Vector and description requests must overlap')
+            if url == model.embed_url:
+                return {'embedding': {'values': [3, 4]}}
+            return {'candidates': [{'content': {'parts': [{'text': '{"description":"游泳池"}'}]}}]}
+
+        with patch('api.Models.post', new=post), patch('media.duration', return_value=8):
+            self.assertTrue(self.broker.complete_upload(self.device, result['id'])['complete'])
+        self.assertEqual(len(sessions), 2)
+        self.assertIsNot(sessions[0], sessions[1])
+        self.assertNotEqual(threads[0], threads[1])
+        clip = self.broker.indexed_clips(self.device)[0]
+        self.assertEqual(clip['description'], '游泳池')
+        self.assertAlmostEqual(clip['vector'][0], .6)
+        self.assertAlmostEqual(clip['vector'][1], .8)
+
+    def test_invalid_vectors_keep_successful_description_but_never_index(self):
+        for index, vector in enumerate(([], [0, 0], [float('nan'), 1], [[1, 0]])):
+            with self.subTest(vector=vector):
+                self.clip = {**self.clip, 'id': f'{index + 1:064x}'}
+                self.broker.register_clips(self.device, [self.clip])
+                result = self.upload(kind='proxy', complete=False)
+                model = Mock()
+                model.embed.return_value = vector
+                model.json.return_value = {'description': '游泳池'}
+                with patch('api.Models', return_value=model), patch('media.duration', return_value=8):
+                    with self.assertRaises(ValueError):
+                        self.broker.complete_upload(self.device, result['id'])
+                with self.broker.connect() as db:
+                    clip = db.execute('SELECT * FROM clips WHERE id=?', (self.clip['id'],)).fetchone()
+                self.assertEqual(clip['state'], 'error')
+                self.assertIsNone(clip['vector'])
+                self.assertEqual(clip['description'], '游泳池')
+        self.assertEqual(self.broker.indexed_clips(self.device), [])
+
+    def test_vector_dimension_failure_retains_description_for_retry(self):
+        self.indexed()
+        self.clip = {**self.clip, 'id': 'e' * 64}
+        self.broker.register_clips(self.device, [self.clip])
+        result = self.upload(kind='proxy', complete=False)
+        model = Mock()
+        model.embed.side_effect = [[1, 0, 0], [3, 4]]
+        model.json.return_value = {'description': '游泳池'}
+        with patch('api.Models', return_value=model), patch('media.duration', return_value=8):
+            with self.assertRaises(HTTPException) as error:
+                self.broker.complete_upload(self.device, result['id'])
+            self.assertEqual(error.exception.status_code, 409)
+            with self.broker.connect() as db:
+                clip = db.execute('SELECT * FROM clips WHERE id=?', (self.clip['id'],)).fetchone()
+            self.assertEqual(clip['state'], 'error')
+            self.assertIsNone(clip['vector'])
+            self.assertEqual(clip['description'], '游泳池')
+            retry = self.upload(kind='proxy', complete=False)
+            self.assertTrue(self.broker.complete_upload(self.device, retry['id'])['complete'])
+        self.assertEqual(model.embed.call_count, 2)
+        self.assertEqual(model.json.call_count, 1)
+
+    def test_parallel_analysis_does_not_save_results_after_asset_revocation(self):
+        ready = threading.Barrier(3)
+        release = threading.Event()
+        errors = []
+        model = Mock()
+
+        def complete(value):
+            ready.wait(3)
+            self.assertTrue(release.wait(5))
+            return value
+
+        model.embed.side_effect = lambda **kwargs: complete([1, 0])
+        model.json.side_effect = lambda *args: complete({'description': '游泳池'})
+
+        def analyze():
+            try:
+                self.broker._analyze(self.device, self.clip['id'], self.root / 'proxy.mp4')
+            except BaseException as error:
+                errors.append(error)
+
+        with patch('api.Models', return_value=model):
+            worker = threading.Thread(target=analyze)
+            worker.start()
+            try:
+                try:
+                    ready.wait(3)
+                except threading.BrokenBarrierError:
+                    self.fail('Both model requests must start before revocation')
+                self.broker.remove_asset(self.device, self.clip['asset_id'])
+            finally:
+                release.set()
+                worker.join(5)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], HTTPException)
+        self.assertEqual(errors[0].status_code, 410)
+        with self.broker.connect() as db:
+            clip = db.execute('SELECT * FROM clips WHERE id=?', (self.clip['id'],)).fetchone()
+        self.assertEqual(clip['revoked'], 1)
+        self.assertIsNone(clip['vector'])
+        self.assertIsNone(clip['description'])
+        self.assertNotEqual(clip['state'], 'indexed')
 
     def test_one_fps_proxy_accepts_fractional_tail_without_source_timing_drift(self):
         import media

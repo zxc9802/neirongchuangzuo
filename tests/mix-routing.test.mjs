@@ -45,6 +45,23 @@ test('mix and browser catalog routes require verified accounts before launching 
   assert.equal(received.length, 0);
 });
 
+test('browser video repair serves pinned same-origin worker assets without exposing node_modules', async t => {
+  const { base } = await fixture(t);
+  for (const file of ['index.js', 'classes.js', 'worker.js', 'const.js', 'errors.js', 'utils.js', 'types.js', 'ffmpeg-core.js']) {
+    const response = await fetch(base + '/vendor/ffmpeg/' + file);
+    assert.equal(response.status, 200, file);
+    assert.match(response.headers.get('content-type'), /javascript/);
+    assert.ok((await response.text()).length > 0);
+  }
+  const wasm = await fetch(base + '/vendor/ffmpeg/ffmpeg-core.wasm');
+  assert.equal(wasm.status, 200);
+  assert.equal(wasm.headers.get('content-type'), 'application/wasm');
+  assert.deepEqual(new Uint8Array(await wasm.arrayBuffer()).slice(0, 4), new Uint8Array([0, 97, 115, 109]));
+  for (const path of ['/vendor/ffmpeg/package.json', '/node_modules/@ffmpeg/core/package.json', '/vendor/ffmpeg/unknown.js']) {
+    assert.equal((await fetch(base + path)).status, 404);
+  }
+});
+
 test('audio library routes preserve raw uploads and query names while using the verified owner', async t => {
   const { base, received } = await fixture(t);
   const query = new URLSearchParams({ kind: 'voice', name: '我的音色.wav' });

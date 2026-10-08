@@ -1,0 +1,13 @@
+# Parallel material indexing and deferred repair
+
+The user approved three parallel clips, including frame extraction, concurrent vector/description requests, and automatic compression or MP4 conversion for failing sources after ordinary work. No description deferral or model replacement is included.
+
+- Scan metadata with three workers. Decode with a short bounded timeout; an explicit decoder error fails immediately. Keep successful files even when another file fails.
+- Run three independent clip workers. Do not wait for the slowest member of a fixed batch before filling a free slot. Keep the heartbeat and material-request loop responsive. Reserve each clip before async work; cancellation and account changes invalidate all workers.
+- Persist successful model results independently. Vector and description run concurrently using independent model sessions. A retry reuses whichever result already succeeded.
+- Exhaust fresh work before retry/repair work. Remove the fixed thirty-second retry cooldown. Allow one automatic retry per clip per scan, then retain the error until a user rescan to prevent an infinite paid retry loop.
+- Queue oversized sources and decoding failures for browser-local FFmpeg repair only after fresh clips settle. Generate H.264/AAC MP4 copies, keep source files untouched, retain source version IDs, and cache repaired blobs in a separate account-scoped IndexedDB store. Retry a failed repair once per scan only.
+- Use a lazy-loaded, same-origin, pinned ffmpeg.wasm worker. Mount input as read-only WORKERFS to avoid copying the full source into the wasm heap. Bound repair to one large transcode at a time to limit memory; its extraction and analysis join the parallel workers. Target at most 480 MiB (below the existing 512 MiB upload cap), at most 1080p, with complete duration and audio retained. Browser wasm cannot accept inputs of 2 GiB or more; show a specific error for this boundary instead of repeatedly retrying.
+- Existing completed indexes remain reusable; repaired sources supply both preview frames and requested source uploads. Clear cached copies on folder/account reset and discard results from stale generations.
+
+Verification: deterministic delayed-worker tests for scan/extract/API overlap, max concurrency, fresh-before-retry ordering, immediate retry and bounded attempts, stop/account isolation, oversize and MOV recovery; real FFmpeg worker smoke test for MP4 codecs/duration/audio and source checksum; Python concurrency/cache recovery tests; relevant existing JavaScript/Python suites. Do not publish the dirty worktree or unrelated audio-library changes.

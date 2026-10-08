@@ -195,18 +195,74 @@ class BrowserMaterialBackendTests(unittest.TestCase):
         self.assertEqual(list(self.broker.folder.rglob('*.jpg')), [])
 
     def test_failed_description_retry_keeps_saved_vector_and_cleans_frames(self):
+        together = threading.Barrier(2)
         model = Mock()
-        model.embed.return_value = [1, 0]
-        model.json.side_effect = [RuntimeError('provider interrupted'), {'description': '蓝色'}]
+
+        def embed(*, video):
+            together.wait(3)
+            return [1, 0]
+
+        def describe(*args):
+            if model.json.call_count == 1:
+                together.wait(3)
+                raise RuntimeError('provider interrupted')
+            return {'description': '蓝色'}
+
+        model.embed.side_effect = embed
+        model.json.side_effect = describe
         with patch('api.Models', return_value=model):
             first = self.client.post(self.base + '/analyze', headers=self.headers,
                 json={'clip_id': self.clip['id'], 'frames': self.frames()})
             self.assertEqual(first.status_code, 503)
+            with self.broker.connect() as db:
+                clip = db.execute('SELECT * FROM clips WHERE id=?', (self.clip['id'],)).fetchone()
+                self.assertEqual(db.execute('SELECT count(*) FROM browser_analysis').fetchone()[0], 0)
+            self.assertEqual(clip['state'], 'error')
+            self.assertIsNotNone(clip['vector'])
+            self.assertEqual(json.loads(clip['vector']), [1, 0])
+            self.assertIsNone(clip['description'])
+            self.assertEqual(self.broker.indexed_clips(self.device), [])
+            self.assertEqual(list(self.broker.folder.rglob('*.mp4')), [])
             second = self.client.post(self.base + '/analyze', headers=self.headers,
                 json={'clip_id': self.clip['id'], 'frames': self.frames()})
         self.assertEqual(second.status_code, 200, second.text)
         self.assertEqual(model.embed.call_count, 1)
         self.assertEqual(model.json.call_count, 2)
+        self.assertEqual(list(self.broker.folder.rglob('*.mp4')), [])
+
+    def test_failed_vector_retry_keeps_saved_description_and_cleans_frames(self):
+        together = threading.Barrier(2)
+        model = Mock()
+
+        def embed(*, video):
+            if model.embed.call_count == 1:
+                together.wait(3)
+                raise RuntimeError('provider interrupted')
+            return [1, 0]
+
+        def describe(*args):
+            together.wait(3)
+            return {'description': '蓝色'}
+
+        model.embed.side_effect = embed
+        model.json.side_effect = describe
+        with patch('api.Models', return_value=model):
+            first = self.client.post(self.base + '/analyze', headers=self.headers,
+                json={'clip_id': self.clip['id'], 'frames': self.frames()})
+            self.assertEqual(first.status_code, 503)
+            with self.broker.connect() as db:
+                clip = db.execute('SELECT * FROM clips WHERE id=?', (self.clip['id'],)).fetchone()
+                self.assertEqual(db.execute('SELECT count(*) FROM browser_analysis').fetchone()[0], 0)
+            self.assertEqual(clip['state'], 'error')
+            self.assertIsNone(clip['vector'])
+            self.assertEqual(clip['description'], '蓝色')
+            self.assertEqual(self.broker.indexed_clips(self.device), [])
+            self.assertEqual(list(self.broker.folder.rglob('*.mp4')), [])
+            second = self.client.post(self.base + '/analyze', headers=self.headers,
+                json={'clip_id': self.clip['id'], 'frames': self.frames()})
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(model.embed.call_count, 2)
+        self.assertEqual(model.json.call_count, 1)
         self.assertEqual(list(self.broker.folder.rglob('*.mp4')), [])
 
     def test_concurrent_analysis_has_one_atomic_lease(self):

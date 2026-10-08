@@ -6,8 +6,11 @@ const root = globalThis;
   const CHUNK_SIZE = 4 * 1024 * 1024;
   const MAX_SOURCE_SIZE = 512 * 1024 * 1024;
   const CLIP_BODY_LIMIT = 262144;
+  const WORKERS = 3;
   const noop = () => {};
   const isAbort = error => error?.name === 'AbortError';
+  const mediaError = message => Object.assign(new Error(message), { code: 'MEDIA_DECODE' });
+  const repairVideo = async (...args) => (await import('./material-repair.js')).repairVideo(...args);
 
   async function sha256(value) {
     if (!root.crypto?.subtle) throw new Error('请通过 HTTPS 或本机 localhost 打开网页后连接素材文件夹');
@@ -35,7 +38,7 @@ const root = globalThis;
 
   async function inspectFile(relativePath, file, previous, readDuration, guard = noop) {
     guard();
-    if (file.size > MAX_SOURCE_SIZE) throw new Error('原视频超过 512 MiB，请先拆分或压缩后重新扫描');
+    if (file.size > MAX_SOURCE_SIZE) throw Object.assign(new Error('原视频超过 512 MiB，已排到队尾自动压缩'), { code: 'MEDIA_SIZE' });
     await file.slice(0, 1).arrayBuffer();
     guard();
     if (previous && previous.size === file.size && previous.lastModified === file.lastModified) return previous;
@@ -130,26 +133,34 @@ const root = globalThis;
     function open() {
       if (!database) database = new Promise((resolve, reject) => {
         if (!root.indexedDB) return reject(new Error('此浏览器无法保存素材目录，请使用支持 IndexedDB 的浏览器'));
-        const request = root.indexedDB.open(namespace, 1);
-        request.onupgradeneeded = () => request.result.createObjectStore('folder');
+        const request = root.indexedDB.open(namespace, 2);
+        request.onupgradeneeded = () => {
+          for (const name of ['folder', 'repairs']) {
+            if (!request.result.objectStoreNames.contains(name)) request.result.createObjectStore(name);
+          }
+        };
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(new Error('无法保存素材目录，请检查浏览器的隐私或存储设置'));
         request.onblocked = () => reject(new Error('素材目录存储被其他页面占用，请关闭其他页面后重试'));
       });
       return database;
     }
-    async function transaction(mode, action) {
+    async function transaction(mode, action, name = 'folder') {
       const db = await open();
       return new Promise((resolve, reject) => {
-        const tx = db.transaction('folder', mode);
-        const request = action(tx.objectStore('folder'));
+        const tx = db.transaction(name, mode);
+        const request = action(tx.objectStore(name));
         tx.oncomplete = () => resolve(request.result);
         tx.onerror = tx.onabort = () => reject(tx.error || new Error('素材目录保存失败，请重试'));
       });
     }
     return { get: () => transaction('readonly', store => store.get('current')),
       put: value => transaction('readwrite', store => store.put(value, 'current')),
-      clear: () => transaction('readwrite', store => store.delete('current')) };
+      clear: () => transaction('readwrite', store => store.delete('current')),
+      getRepair: id => transaction('readonly', store => store.get(id), 'repairs'),
+      putRepair: (id, file) => transaction('readwrite', store => store.put(file, id), 'repairs'),
+      deleteRepair: id => transaction('readwrite', store => store.delete(id), 'repairs'),
+      clearRepairs: () => transaction('readwrite', store => store.clear(), 'repairs') };
   }
 
   function mediaEvent(video, event, signal) {
@@ -161,9 +172,9 @@ const root = globalThis;
         signal?.removeEventListener('abort', aborted);
       };
       const ready = () => { cleanup(); resolve(); };
-      const failed = () => { cleanup(); reject(new Error('浏览器无法解码视频，请转换为 MP4（H.264）后重试')); };
+      const failed = () => { cleanup(); reject(mediaError('浏览器无法解码视频，已排到队尾转换为 MP4')); };
       const aborted = () => { cleanup(); reject(Object.assign(new Error('操作已停止'), { name: 'AbortError' })); };
-      const timer = setTimeout(() => { cleanup(); reject(new Error('读取视频超时，请检查文件或转换为 MP4（H.264）')); }, 30000);
+      const timer = setTimeout(() => { cleanup(); reject(mediaError('读取视频超时，已排到队尾检查并转换为 MP4')); }, 5000);
       video.addEventListener(event, ready, { once: true });
       video.addEventListener('error', failed, { once: true });
       signal?.addEventListener('abort', aborted, { once: true });
@@ -182,7 +193,7 @@ const root = globalThis;
       video.src = url;
       video.load();
       await metadata;
-      if (!Number.isFinite(video.duration) || video.duration <= 0) throw new Error('无法读取视频时长，请转换为 MP4（H.264）');
+      if (!Number.isFinite(video.duration) || video.duration <= 0) throw mediaError('无法读取视频时长，已排到队尾转换为 MP4');
       return await action(video);
     } finally {
       video.pause();
@@ -200,7 +211,7 @@ const root = globalThis;
     return withVideo(file, signal, async video => {
       const canvas = root.document.createElement('canvas');
       const context = canvas.getContext('2d');
-      if (!context || !video.videoWidth || !video.videoHeight) throw new Error('浏览器无法读取视频画面，请转换为 MP4（H.264）');
+      if (!context || !video.videoWidth || !video.videoHeight) throw mediaError('浏览器无法读取视频画面，已排到队尾转换为 MP4');
       const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
       canvas.width = Math.max(1, Math.floor(video.videoWidth * scale));
       canvas.height = Math.max(1, Math.floor(video.videoHeight * scale));
@@ -233,7 +244,7 @@ const root = globalThis;
 
   export default class BrowserMaterials {
     constructor({ api, onStatus = noop, onConnected = noop, store, readDuration: durationReader,
-      sampleFrames: frameSampler, fetch: fetcher } = {}) {
+      sampleFrames: frameSampler, repairVideo: videoRepairer, fetch: fetcher } = {}) {
       this.api = api;
       this.ownerKey = accountStorageKey('workbench-browser-materials');
       this.onStatus = onStatus;
@@ -241,12 +252,18 @@ const root = globalThis;
       this.store = store || createFolderStore();
       this.readDuration = durationReader || readDuration;
       this.sampleFrames = frameSampler || sampleFrames;
+      this.repairVideo = videoRepairer || repairVideo;
       this.fetch = fetcher || root.fetch?.bind(root);
       this.record = null;
       this.files = new Map();
+      this.originalFiles = new Map();
       this.selectedFiles = [];
       this.errors = new Map();
       this.retryAfter = new Map();
+      this.unreadableFiles = new Set();
+      this.repairs = new Map();
+      this.attempts = new Map();
+      this.workers = new Map();
       this.registered = new Set();
       this.requests = [];
       this.generation = 0;
@@ -267,6 +284,7 @@ const root = globalThis;
     _activate() {
       this.active = true;
       this.abort = new AbortController();
+      this.workers = new Map();
       this.lastRequests = 0;
       this.lastHeartbeat = 0;
       this.requests = [];
@@ -282,8 +300,10 @@ const root = globalThis;
 
     _ready() {
       const clips = Object.values(this.record?.manifest || {}).flatMap(entry => entry.clips || []);
+      const repairs = [...this.repairs.values()].filter(item => !item.attempted).length;
       this._report({ text: this.folderName + ' · 已扫描 ' + this.status.scanned + ' 个视频 · 已索引 ' +
-        clips.filter(clip => clip.state === 'indexed').length + '/' + clips.length + ' 个片段', uploadBytes: 0, uploadTotal: 0 });
+        clips.filter(clip => clip.state === 'indexed').length + '/' + clips.length + ' 个片段' +
+        (this.workers.size ? ' · ' + this.workers.size + ' 项处理中' : '') + (repairs ? ' · ' + repairs + ' 个视频待修复' : '') });
     }
 
     _error(path, error) {
@@ -435,7 +455,11 @@ const root = globalThis;
       this.files.clear();
       this.errors.clear();
       this.retryAfter.clear();
-      this._report({ error: '', scanned: 0, needsPermission: false });
+      if (!previous) {
+        await this.store.clearRepairs?.();
+        this._guard(token);
+      }
+      this._report({ error: '', scanned: 0, needsPermission: false, uploadBytes: 0, uploadTotal: 0 });
       await this._save(token);
       await this._connect(token);
       this._guard(token);
@@ -455,11 +479,16 @@ const root = globalThis;
       clearTimeout(this.timer);
       this.scanning = true;
       this.registered.clear();
+      this.unreadableFiles.clear();
+      this.repairs.clear();
+      this.attempts.clear();
+      this.processingDeferred = false;
       this.errors.clear();
       this._report({ text: '正在扫描素材文件夹：' + this.folderName, error: '', scanned: 0, needsPermission: false });
       const candidates = [];
       const observations = [];
       const files = new Map();
+      const originals = new Map();
       let complete = true;
       try {
         try {
@@ -476,30 +505,50 @@ const root = globalThis;
           complete = false;
           this._error('素材文件夹', error);
         }
-        for (const item of candidates) {
-          this._guard(token);
-          try {
-            const file = item.file || await item.handle.getFile();
+        let cursor = 0;
+        await Promise.all(Array.from({ length: Math.min(WORKERS, candidates.length) }, async () => {
+          while (cursor < candidates.length) {
             this._guard(token);
-            const entry = await inspectFile(item.relativePath, file, this.record.manifest[item.relativePath],
-              current => this.readDuration(current, this.abort.signal), () => this._guard(token));
-            this._guard(token);
-            observations.push({ relativePath: item.relativePath, entry });
-            files.set(item.relativePath, file);
-          } catch (error) {
-            this._guard(token);
-            complete = false;
-            observations.push({ relativePath: item.relativePath, error: error.message });
-            this._error(item.relativePath, error);
+            const index = cursor++, item = candidates[index];
+            let file;
+            try {
+              file = item.file || await item.handle.getFile();
+              this._guard(token);
+              originals.set(item.relativePath, file);
+              const previous = this.record.manifest[item.relativePath];
+              let entry, readable = file;
+              if (previous?.repaired && previous.size === file.size && previous.lastModified === file.lastModified) {
+                readable = await this.store.getRepair?.(previous.assetId);
+                this._guard(token);
+                if (!readable) throw mediaError('压缩副本缓存已失效，已排到队尾重新生成');
+                // Check that the selected original still exists before reusing its cached copy.
+                await file.slice(0, 1).arrayBuffer();
+                this._guard(token);
+                entry = previous;
+              } else {
+                entry = await inspectFile(item.relativePath, file, previous,
+                  current => this.readDuration(current, this.abort.signal), () => this._guard(token));
+              }
+              this._guard(token);
+              observations[index] = { relativePath: item.relativePath, entry };
+              files.set(item.relativePath, readable);
+            } catch (error) {
+              this._guard(token);
+              complete = false;
+              observations[index] = { relativePath: item.relativePath, error: error.message };
+              if (file && (file.size > MAX_SOURCE_SIZE || error.code === 'MEDIA_DECODE')) this._queueRepair(item.relativePath, file);
+              this._error(item.relativePath, error);
+            }
+            this._report({ text: '并行扫描 ' + this.folderName + '：' + (this.status.scanned + 1) + '/' + candidates.length + ' 个视频',
+              scanned: this.status.scanned + 1 });
           }
-          this._report({ text: '扫描 ' + this.folderName + '：' + (this.status.scanned + 1) + '/' + candidates.length + ' 个视频',
-            scanned: this.status.scanned + 1 });
-        }
+        }));
         this._guard(token);
         const result = reconcileManifest(this.record.manifest, observations, complete, this.record.deferredRevocations || []);
         this.record.manifest = result.manifest;
         this.record.deferredRevocations = [...new Set([...result.deferredRevocations, ...result.revocations])];
         this.files = files;
+        this.originalFiles = originals;
         await this._save(token);
         const clips = observations.flatMap(item => item.entry?.clips || []);
         await this._register(clips, token);
@@ -510,6 +559,8 @@ const root = globalThis;
             await this._api(this._devicePath('/assets/' + id), { method: 'DELETE' }, token);
             this._guard(token);
             this.record.deferredRevocations = this.record.deferredRevocations.filter(value => value !== id);
+            await this.store.deleteRepair?.(id);
+            this._guard(token);
             await this._save(token);
           }
         }
@@ -586,12 +637,15 @@ const root = globalThis;
       this._guard(token);
       await this.store.clear();
       this._guard(token);
+      await this.store.clearRepairs?.();
+      this._guard(token);
       this.stop();
       this.record = null;
       this.files.clear();
       this.selectedFiles = [];
+      this.originalFiles.clear();
       this.errors.clear();
-      this._report({ text: '选择素材文件夹', error: '', scanned: 0, needsPermission: false });
+      this._report({ text: '选择素材文件夹', error: '', scanned: 0, needsPermission: false, uploadBytes: 0, uploadTotal: 0 });
       this.onConnected('');
     }
 
@@ -632,44 +686,113 @@ const root = globalThis;
         } else {
           if (Date.now() - this.lastStateCheck >= 30000) {
             const busy = Object.values(this.record.manifest).filter(entry => this.files.has(entry.relativePath))
-              .flatMap(entry => entry.clips.filter(clip => this.registered.has(clip.id) && clip.state === 'indexing'));
+              .flatMap(entry => entry.clips.filter(clip => this.registered.has(clip.id) && clip.state === 'indexing' && !this.workers.has(clip.id)));
             await this._register(busy, token);
             this._guard(token);
             this.lastStateCheck = Date.now();
             this._ready();
           }
-          const item = Object.values(this.record.manifest).find(entry => this.files.has(entry.relativePath) &&
-            entry.clips.some(clip => this.registered.has(clip.id) && ['pending', 'error'].includes(clip.state) &&
-              (this.retryAfter.get(clip.id) || 0) <= Date.now()));
-          if (item) {
-            const clip = item.clips.find(value => this.registered.has(value.id) && ['pending', 'error'].includes(value.state) &&
-              (this.retryAfter.get(value.id) || 0) <= Date.now());
-            this._report({ text: '正在建立素材索引：' + item.relativePath });
-            try {
-              const frames = await this.sampleFrames(this.files.get(item.relativePath), clip.start, clip.end, this.abort.signal);
-              this._guard(token);
-              const result = await this._post(this._devicePath('/analyze'), { clip_id: clip.id, frames }, token);
-              this._guard(token);
-              if (!result.complete) throw new Error('素材分析仍在处理中，将自动重试');
-              clip.state = 'indexed';
-              this.retryAfter.delete(clip.id);
-              this.errors.delete(item.relativePath);
-              this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
-            } catch (error) {
-              this._guard(token);
-              clip.state = 'error';
-              this.retryAfter.set(clip.id, Date.now() + 30000);
-              this._error(item.relativePath, error);
+          const candidates = Object.values(this.record.manifest)
+            .filter(item => this.files.has(item.relativePath) && !this.unreadableFiles.has(item.assetId))
+            .flatMap(item => item.clips.filter(clip => this.registered.has(clip.id) && !this.workers.has(clip.id) &&
+              ['pending', 'error'].includes(clip.state)).map(clip => ({ item, clip })));
+          const fresh = candidates.filter(({ clip }) => !this.attempts.has(clip.id));
+          if (!fresh.length && !this.workers.size) this.processingDeferred = true;
+          let queued = fresh;
+          if (!fresh.length && this.processingDeferred) {
+            const repair = [...this.repairs.values()].find(item => !item.attempted);
+            if (repair && ![...this.workers.keys()].some(key => key.startsWith('repair:')) && this.workers.size < WORKERS) {
+              repair.attempted = true;
+              this._startWork('repair:' + repair.relativePath, () => this._repairFile(repair, token), token);
             }
-            await this._save(token);
-            this._ready();
-            delay = 0;
+            queued = candidates.filter(({ clip }) => this.attempts.get(clip.id) < 2);
+          }
+          for (const { item, clip } of queued.slice(0, WORKERS - this.workers.size)) {
+            this.attempts.set(clip.id, (this.attempts.get(clip.id) || 0) + 1);
+            this._startWork(clip.id, () => this._analyzeClip(item, clip, token), token);
           }
         }
       } catch (error) { if (this.active && token === this.generation && !isAbort(error)) this._error('素材连接', error); }
       finally {
         if (this.cycleToken === token) this.cycleToken = null;
         this._schedule(delay, token);
+      }
+    }
+
+    _startWork(key, action, token) {
+      const workers = this.workers;
+      const work = Promise.resolve().then(() => { this._guard(token); return action(); })
+        .catch(error => { if (this.active && token === this.generation && !isAbort(error)) this._error('素材连接', error); })
+        .finally(() => {
+          workers.delete(key);
+          if (this.active && token === this.generation) { this._ready(); this._schedule(0, token); }
+        });
+      workers.set(key, work);
+    }
+
+    _queueRepair(relativePath, file) {
+      if (!this.repairs.has(relativePath)) this.repairs.set(relativePath, { relativePath, file, attempted: false });
+    }
+
+    async _analyzeClip(item, clip, token) {
+      let sampling = true;
+      this._report({ text: '并行读取素材画面：' + item.relativePath });
+      try {
+        const frames = await this.sampleFrames(this.files.get(item.relativePath), clip.start, clip.end, this.abort.signal);
+        this._guard(token);
+        sampling = false;
+        this._report({ text: '并行 AI 分析素材：' + item.relativePath });
+        const result = await this._post(this._devicePath('/analyze'), { clip_id: clip.id, frames }, token);
+        this._guard(token);
+        if (!result.complete) throw new Error('素材分析仍在处理中，将在队尾重试');
+        clip.state = 'indexed';
+        if (item.clips.every(value => value.state !== 'error')) this.errors.delete(item.relativePath);
+        this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
+      } catch (error) {
+        this._guard(token);
+        clip.state = error.status === 409 ? 'indexing' : 'error';
+        if (sampling) {
+          this.unreadableFiles.add(item.assetId);
+          this._queueRepair(item.relativePath, this.originalFiles.get(item.relativePath) || this.files.get(item.relativePath));
+        }
+        this._error(item.relativePath, error);
+      }
+      await this._save(token);
+    }
+
+    async _repairFile(repair, token) {
+      const { relativePath, file } = repair;
+      try {
+        const previous = this.record.manifest[relativePath];
+        const id = await assetId(relativePath, file.size, file.lastModified);
+        this._guard(token);
+        const copy = await this.repairVideo(file, { signal: this.abort.signal, maxSize: MAX_SOURCE_SIZE,
+          onProgress: ({ progress = 0 } = {}) => {
+            if (this.active && token === this.generation) this._report({ text: '正在压缩 / 转换 MP4：' + relativePath +
+              (progress > 0 ? ' · ' + Math.min(100, Math.round(progress * 100)) + '%' : '') });
+          } });
+        this._guard(token);
+        if (!copy || copy.size > MAX_SOURCE_SIZE) throw new Error('压缩后的文件仍超过 512 MiB，请缩短视频后重新扫描');
+        const duration = await this.readDuration(copy, this.abort.signal);
+        this._guard(token);
+        const unchanged = previous?.assetId === id;
+        const clips = unchanged ? previous.clips : await makeClips(id, relativePath, duration, () => this._guard(token));
+        this._guard(token);
+        // Cache separately from the small manifest so every clip save does not copy video data.
+        await this.store.putRepair?.(id, copy);
+        this._guard(token);
+        this.record.manifest[relativePath] = { relativePath, assetId: id, size: file.size,
+          lastModified: file.lastModified, duration: unchanged ? previous.duration : duration, clips, repaired: true };
+        this.files.set(relativePath, copy);
+        this.unreadableFiles.delete(id);
+        if (previous && !unchanged) this.record.deferredRevocations.push(previous.assetId);
+        await this._register(clips, token);
+        for (const clip of clips) this.attempts.delete(clip.id);
+        this.errors.delete(relativePath);
+        this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
+      } catch (error) {
+        this._guard(token);
+        this._error(relativePath, error);
       }
     }
 
@@ -712,7 +835,7 @@ const root = globalThis;
       } else throw new Error('未知的素材请求，请重新连接素材文件夹');
       this._guard(token);
       this.errors.delete('素材传输');
-      this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
+      this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n'), uploadBytes: 0, uploadTotal: 0 });
       this._ready();
     }
 

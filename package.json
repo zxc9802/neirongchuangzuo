@@ -16,12 +16,14 @@
     "test:digital-human": "npm --prefix services/digital-human test",
     "build:digital-human": "npm --prefix services/digital-human run build",
     "test:restaurant": "node --test tests/restaurant-*.test.mjs",
-    "check:mix": "node --check design/browser-materials.js && node --check design/mix-materials.js && node --check services/mix/server.mjs"
+    "check:mix": "node --check design/browser-materials.js && node --check design/material-repair.js && node --check design/mix-materials.js && node --check services/mix/server.mjs"
   },
   "engines": {
     "node": ">=20.19.0"
   },
   "dependencies": {
+    "@ffmpeg/core": "0.12.10",
+    "@ffmpeg/ffmpeg": "0.12.15",
     "cos-nodejs-sdk-v5": "^3.0.0",
     "fflate": "^0.8.3",
     "pg": "^8.23.1",
