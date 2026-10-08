@@ -277,20 +277,24 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
     usage(userId) { return run(() => stateFor(userId, summary, false)); },
     sweep() {
       return run(async () => {
-        const expiredTaskIds = [], expiredFiles = [];
+        const expiredTaskIds = [], expiredFiles = [], pendingCredits = [];
         for (const userId of await users()) {
           await stateFor(userId, state => {
             state.garbage ||= [];
+            state.pendingCreditCleanup ||= {};
             for (const task of Object.values(state.tasks)) {
               const expiredTask = task.textExpiresAt <= now();
               if (task.status === 'uploading' && task.uploadProtocol === 'batches' && task.uploadExpiresAt <= now()) {
                 task.status = 'failed'; task.code = 'FILES_EXPIRED'; task.retryable = false; task.updatedAt = now(); task.error = '上传素材已过3天保留期，请创建新任务。';
               }
-              if (task.status === 'awaiting_confirmation' && task.files?.some(file => file.expired || file.expiresAt <= now())) {
+              const unsettledCredits = task.billing?.source === 'workspace' && !['settled', 'released'].includes(task.billing.status);
+              if ((task.status === 'awaiting_confirmation' || unsettledCredits && task.billing.status === 'settle_pending') && task.files?.some(file => file.expired || file.expiresAt <= now())) {
                 task.status = 'failed'; task.code = 'FILES_EXPIRED'; task.retryable = false; task.updatedAt = now();
-                task.error = '图片和下载包已过期，未扣正式生成额度。请重新上传照片并创建新的任务。';
+                task.error = '图片和下载包已过期，请重新上传照片并创建新的任务。';
                 if (state.ledger[task.id]?.status === 'reserved') state.ledger[task.id].status = 'released';
               }
+              // Keep only the financial reference until cleanup is confirmed, even after the 30-day task record is removed.
+              if (unsettledCredits && (expiredTask || task.status === 'failed')) state.pendingCreditCleanup[task.billing.taskId] = { userId, taskId: task.id, creditId: task.billing.taskId };
               for (const item of [...(task.files || []), ...(task.sourceImages || []), ...(task.pendingUpload?.sourceImages || [])]) {
                 if (item.expired || (!expiredTask && item.expiresAt > now())) continue;
                 if (validMediaKey(item.key) && !state.garbage.some(file => file.key === item.key)) state.garbage.push({ userId, taskId: task.id, key: item.key });
@@ -306,11 +310,21 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
               if (entry.status === 'reserved' && reservationExpires(state, entry) <= now()) entry.status = 'released';
             }
             expiredFiles.push(...state.garbage);
+            pendingCredits.push(...Object.values(state.pendingCreditCleanup));
           });
         }
         // Duplicate references to the same source object need just one deletion.
-        return { expiredTaskIds, expiredFiles: [...new Map(expiredFiles.map(file => [file.key, file])).values()] };
+        return { expiredTaskIds, expiredFiles: [...new Map(expiredFiles.map(file => [file.key, file])).values()], pendingCredits };
       });
+    },
+    acknowledgeCredits(userId, taskId, creditId, record) {
+      taskKey(taskId); taskKey(creditId);
+      return run(() => stateFor(userId, state => {
+        if (state.pendingCreditCleanup?.[creditId]?.taskId !== taskId) return;
+        const task = state.tasks[taskId];
+        if (task?.billing?.taskId === creditId) task.billing = { ...task.billing, status: record?.status === 'settled' ? 'settled' : 'released', chargedPoints: record?.chargedPoints ?? 0 };
+        delete state.pendingCreditCleanup[creditId];
+      }));
     },
     acknowledgeFiles(userId, keys) {
       return run(() => stateFor(userId, state => { state.garbage = (state.garbage || []).filter(file => !keys.includes(file.key)); }));

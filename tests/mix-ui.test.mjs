@@ -645,7 +645,7 @@ test('lost permission or locally unreadable old vectors never enable generation'
     await state.client.scan();
     f.mod.bindMixMaterials(f.ctx);
     assert.match(f.mod.mixReadiness(f.ctx), /重新连接/);
-    assert.match(f.mod.renderMixMaterials(f.ctx), /请点击上方按钮重新连接素材文件夹/);
+    assert.match(f.mod.renderMixMaterials(f.ctx), /请重新连接素材文件夹/);
     assert.doesNotMatch(f.mod.renderMixMaterials(f.ctx), /data-action="mix-choose-folder"/);
     assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
     state.client.record.handle.values = async function* () {

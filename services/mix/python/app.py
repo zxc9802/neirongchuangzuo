@@ -6,6 +6,7 @@ verified video-material-match engine. This adapter exposes no NAS/helper APIs.
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
@@ -24,6 +25,8 @@ from api import clean_error
 from audio_library import AudioLibrary, attach_audio_library
 from browser_materials import attach_browser_materials
 from local_materials import MaterialBroker, MaterialsPending, valid_id
+from credits import CreditError, configured_credits, estimate_seconds
+from media import duration as media_duration
 
 OUTPUT_TTL = 72 * 3600
 RECORD_TTL = 30 * 86400
@@ -50,6 +53,21 @@ def file_digest(path):
         for chunk in iter(lambda: file.read(4 * 1024 * 1024), b''):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def provider_pending(folder):
+    """Preserve the reservation when an existing paid TTS task still needs querying or download."""
+    for path in (Path(folder) / 'voice-cache').glob('*.json'):
+        try:
+            record = json.loads(path.read_text(encoding='utf-8'))
+        except (ValueError, OSError):
+            return True
+        if record.get('submission') == 'uncertain':
+            return True
+        if record.get('task_id') and record.get('state') not in ('FAILURE', 'FAILED', 'ERROR', 'REVOKED'):
+            if record.get('state') != 'SUCCESS' or not path.with_suffix('.wav').is_file():
+                return True
+    return False
 
 
 def generate(spec, folder, log, audio_library=None):
@@ -104,11 +122,15 @@ def generate(spec, folder, log, audio_library=None):
                                 speaker_cache_key='library:' + spec['voice_id'] + ':' + spec['voice_sha256'])
         synthesize_plan(plan, folder, log=log, **voice_config)
     music_file = library.download(spec['owner'], spec['music_id'], folder) if spec.get('music_id') else None
+    if spec.get('_credit_gate'):
+        spec['_credit_gate'](max(float(scene.get('end', 0)) for scene in plan['scenes']))
     return deliver(plan, folder, spec['width'], spec['height'], catalog=catalog, music_file=music_file, log=log)
 
 
 class Jobs:
-    def __init__(self, root):
+    def __init__(self, root, credits=None):
+        self.credits = credits if credits is not None else configured_credits()
+        self.credit_lock = threading.RLock()
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / 'jobs.sqlite3'
@@ -117,6 +139,7 @@ class Jobs:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY, request_key TEXT UNIQUE, owner TEXT NOT NULL, spec TEXT,
                 state TEXT, created REAL, updated REAL, logs TEXT, result TEXT, error TEXT)''')
+            db.execute('CREATE TABLE IF NOT EXISTS job_billing (job_id TEXT PRIMARY KEY, data TEXT NOT NULL)')
             db.execute("UPDATE jobs SET state='interrupted',error=?,updated=? WHERE state='running'",
                        ('服务重启中断任务；保留输出和服务商任务记录，核对后再恢复。', time.time()))
 
@@ -130,6 +153,99 @@ class Jobs:
         finally:
             db.close()
 
+    def _billing(self, job_id):
+        with self.connect() as db:
+            row = db.execute('SELECT data FROM job_billing WHERE job_id=?', (job_id,)).fetchone()
+        return json.loads(row['data']) if row else None
+
+    def _save_billing(self, job_id, data):
+        with self.connect() as db:
+            db.execute('INSERT INTO job_billing(job_id,data) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET data=excluded.data',
+                       (job_id, json.dumps(data, ensure_ascii=False)))
+
+    def _reservation(self, job_id, spec):
+        if not self.credits:
+            return None
+        with self.credit_lock:
+            data = self._billing(job_id)
+            if not data or data.get('status') == 'released':
+                seconds = estimate_seconds(spec['text'])
+                wallet = self.credits.snapshot(spec['owner'])
+                price = wallet['pricing']
+                available = wallet['available']
+                if math.ceil(seconds * price['videoPoints'] / price['videoSeconds']) > available:
+                    raise CreditError('积分余额不足，请缩短宣传文案后重试。', 402, 'INSUFFICIENT_POINTS')
+                maximum = available * price['videoSeconds'] / price['videoPoints']
+                reserve_seconds = min(seconds * 1.25 + 2, maximum)
+                # Floating-point boundaries must not reserve one point more than the wallet.
+                reserve_seconds = math.floor(reserve_seconds * 1000) / 1000
+                reserve_seconds = max(seconds, reserve_seconds)
+                attempt = (data or {}).get('attempt', 0) + 1
+                data = {'source': 'workspace', 'attempt': attempt, 'creditId': f'mix:{job_id}:{attempt}',
+                        'estimatedSeconds': seconds, 'initialUnits': reserve_seconds, 'reservedPoints': 0,
+                        'chargedPoints': 0, 'status': 'reserve_pending'}
+                self._save_billing(job_id, data)
+            record = self.credits.read(spec['owner'], data['creditId'])
+            if record is None:
+                record = self.credits.reserve(spec['owner'], data['creditId'], data['initialUnits'])
+            if record['status'] == 'released':
+                data['status'] = 'released'; self._save_billing(job_id, data)
+                return self._reservation(job_id, spec)
+            data.update(status=record['status'], reservedPoints=record['reservedPoints'],
+                        chargedPoints=record.get('chargedPoints', 0))
+            self._save_billing(job_id, data)
+            return data
+
+    def _release(self, job_id, owner):
+        if not self.credits:
+            return
+        with self.credit_lock:
+            data = self._billing(job_id)
+            if not data or data.get('status') in ('released', 'settled'):
+                return
+            record = self.credits.read(owner, data['creditId'])
+            if record and record['status'] == 'reserved':
+                record = self.credits.release(owner, data['creditId'])
+            data.update(status=record['status'] if record else 'released',
+                        chargedPoints=(record or {}).get('chargedPoints', 0))
+            self._save_billing(job_id, data)
+
+    def _settle(self, job_id, spec, result):
+        if not self.credits:
+            return
+        seconds = media_duration(result)
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ValueError('实际成片时长无效，不能交付')
+        with self.credit_lock:
+            data = self._billing(job_id)
+            data.update(status='settle_pending', actualSeconds=seconds)
+            self._save_billing(job_id, data)
+            record = self.credits.settle(spec['owner'], data['creditId'], seconds)
+            if not record or record.get('status') != 'settled':
+                raise CreditError('成片已保存，积分结算暂未确认，请稍后继续。', uncertain=True)
+            data.update(status='settled', chargedPoints=record['chargedPoints'], reservedPoints=record['reservedPoints'])
+            self._save_billing(job_id, data)
+
+    def _extend(self, job_id, spec, seconds):
+        if not self.credits:
+            return
+        with self.credit_lock:
+            data = self._billing(job_id)
+            record = self.credits.extend(spec['owner'], data['creditId'], seconds)
+            data.update(reservedPoints=record['reservedPoints'], status=record['status'])
+            self._save_billing(job_id, data)
+
+    def _credit_submission_error(self, job_id, owner, error):
+        uncertain = error.uncertain
+        if not uncertain:
+            try:
+                self._release(job_id, owner)
+            except CreditError:
+                uncertain = True
+        with self.connect() as db:
+            db.execute('UPDATE jobs SET state=?,error=?,updated=? WHERE id=?',
+                       ('credit_pending' if uncertain else 'failed', str(error), time.time(), job_id))
+
     def submit(self, key, spec):
         encoded = json.dumps(spec, sort_keys=True, ensure_ascii=False)
         key = hashlib.sha256((spec['owner'] + ':' + key).encode()).hexdigest()
@@ -139,18 +255,28 @@ class Jobs:
             if row:
                 if row['spec'] != encoded:
                     previous = json.loads(row['spec'])
-                    # Jobs saved before audio choices existed used these same defaults.
                     for field, default in (('voice_mode', 'synthesized'), ('voice_id', None), ('music_id', None)):
                         previous.setdefault(field, default)
                     if json.dumps(previous, sort_keys=True, ensure_ascii=False) != encoded:
                         raise HTTPException(409, '同一 Idempotency-Key 不能提交不同文案或参数')
-                return row['id']
-            if db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0] >= 20:
-                raise HTTPException(429, '任务队列已满，请稍后再试')
-            job_id, now = uuid.uuid4().hex, time.time()
-            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)',
-                       (job_id, key, spec['owner'], encoded, 'queued', now, now, '[]', None, None))
-            return job_id
+                job_id, retry_reserve = row['id'], row['state'] == 'credit_pending'
+            else:
+                if db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running','credit_pending')").fetchone()[0] >= 20:
+                    raise HTTPException(429, '任务队列已满，请稍后再试')
+                job_id, now, retry_reserve = uuid.uuid4().hex, time.time(), bool(self.credits)
+                db.execute('INSERT INTO jobs(id,request_key,owner,spec,state,created,updated,logs,result,error) VALUES(?,?,?,?,?,?,?,?,?,?)',
+                           (job_id, key, spec['owner'], encoded, 'credit_pending' if self.credits else 'queued', now, now, '[]', None, None))
+        if retry_reserve:
+            try:
+                self._reservation(job_id, spec)
+                with self.connect() as db:
+                    db.execute("UPDATE jobs SET state='queued',error=NULL,updated=? WHERE id=? AND state='credit_pending'", (time.time(), job_id))
+            except CreditError as exc:
+                self._credit_submission_error(job_id, spec['owner'], exc)
+                if exc.uncertain:
+                    return job_id  # Saved task is accepted; payment confirmation is still pending, so no worker can run it.
+                raise HTTPException(exc.status, str(exc)) from None
+        return job_id
 
     def get(self, job_id, owner=None):
         if not re.fullmatch(r'[a-f0-9]{32}', job_id):
@@ -160,7 +286,7 @@ class Jobs:
         if not row or owner is not None and row['owner'] != owner:
             raise HTTPException(404, '任务不存在')
         return {key: row[key] for key in ('id', 'state', 'created', 'updated', 'result', 'error')} | {
-            'logs': json.loads(row['logs'])}
+            'logs': json.loads(row['logs'])} | ({'billing': self._billing(job_id)} if self.credits else {})
 
     def list(self, owner):
         with self.connect() as db:
@@ -171,7 +297,7 @@ class Jobs:
     def audio_in_use(self, owner, ident):
         with self.connect() as db:
             rows = db.execute("SELECT spec FROM jobs WHERE owner=? AND state IN "
-                              "('queued','running','waiting_materials','interrupted','failed')", (owner,))
+                              "('queued','running','waiting_materials','interrupted','failed','credit_pending')", (owner,))
             return any(ident in (spec.get('voice_id'), spec.get('music_id'))
                        for spec in (json.loads(row['spec']) for row in rows))
 
@@ -179,10 +305,18 @@ class Jobs:
         self.get(job_id, owner)
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
-            row = db.execute('SELECT state FROM jobs WHERE id=? AND owner=?', (job_id, owner)).fetchone()
-            if row['state'] not in ('failed', 'interrupted', 'waiting_materials'):
+            row = db.execute('SELECT state,spec FROM jobs WHERE id=? AND owner=?', (job_id, owner)).fetchone()
+            if row['state'] not in ('failed', 'interrupted', 'waiting_materials', 'credit_pending'):
                 raise HTTPException(409, '仅失败、中断或等待素材的任务可以继续')
-            db.execute("UPDATE jobs SET state='queued',error=NULL,updated=? WHERE id=?", (time.time(), job_id))
+            db.execute("UPDATE jobs SET state=?,error=NULL,updated=? WHERE id=?", ('credit_pending' if self.credits else 'queued', time.time(), job_id))
+        if self.credits:
+            try:
+                self._reservation(job_id, json.loads(row['spec']))
+                with self.connect() as db:
+                    db.execute("UPDATE jobs SET state='queued',updated=? WHERE id=? AND state='credit_pending'", (time.time(), job_id))
+            except CreditError as exc:
+                self._credit_submission_error(job_id, owner, exc)
+                raise HTTPException(exc.status, str(exc)) from None
         self.log(job_id, '从已保存的匹配、配音和导出状态继续制作')
         return self.get(job_id, owner)
 
@@ -206,6 +340,9 @@ class Jobs:
         folder.mkdir(parents=True, exist_ok=True)
         try:
             spec = json.loads(row['spec'])
+            self._reservation(job_id, spec)
+            if self.credits:
+                spec['_credit_gate'] = lambda seconds: self._extend(job_id, spec, seconds)
             self.materials.device(spec['device_id'], spec['owner'])
             saved = folder / row['result'] if row['result'] else None
             result = (saved if saved and saved.is_file() and (folder / 'quality-report.json').is_file()
@@ -215,6 +352,10 @@ class Jobs:
             report = json.loads((folder / 'quality-report.json').read_text(encoding='utf-8'))
             if not report.get('passed') or report.get('sha256') != file_digest(result):
                 raise ValueError('实际成片尚未通过检查或检查报告与成片不一致')
+            if self.credits:
+                with self.connect() as db:
+                    db.execute('UPDATE jobs SET result=?,updated=? WHERE id=?', (result.name, time.time(), job_id))
+                self._settle(job_id, spec, result)
             with self.connect() as db:
                 db.execute("UPDATE jobs SET state='done',result=?,error=NULL,updated=? WHERE id=?",
                            (result.name, time.time(), job_id))
@@ -229,21 +370,37 @@ class Jobs:
             self.log(job_id, '等待网页连接并上传所需素材，已完成的步骤会保留')
         except Exception as exc:
             error = clean_error(exc)
-            self.log(job_id, '失败：' + error)
+            data = self._billing(job_id) if self.credits else None
+            uncertain = (bool(data and data.get('status') == 'settle_pending')
+                         or isinstance(exc, CreditError) and exc.uncertain or provider_pending(folder))
+            if not uncertain:
+                try:
+                    self._release(job_id, row['owner'])
+                except CreditError:
+                    uncertain = True
+                    error += '；积分释放暂未确认，请稍后继续。'
+            self.log(job_id, '中断：' + error if uncertain else '失败：' + error)
             with self.connect() as db:
-                db.execute("UPDATE jobs SET state='failed',error=?,updated=? WHERE id=?", (error, time.time(), job_id))
+                db.execute('UPDATE jobs SET state=?,error=?,updated=? WHERE id=?', ('interrupted' if uncertain else 'failed', error, time.time(), job_id))
         return True
 
     def cleanup(self):
         now = time.time()
         with self.connect() as db:
-            rows = db.execute("SELECT id FROM jobs WHERE state IN ('done','failed','interrupted','expired') AND updated<?",
+            rows = db.execute("SELECT id,owner FROM jobs WHERE state IN ('done','failed','interrupted','expired','waiting_materials','credit_pending','queued') AND updated<?",
                               (now - OUTPUT_TTL,)).fetchall()
-            for row in rows:
-                folder = self.root / 'outputs' / row['id']
-                if folder.resolve().parent == (self.root / 'outputs').resolve() and folder.exists():
-                    shutil.rmtree(folder)
+        for row in rows:
+            try:
+                self._release(row['id'], row['owner'])
+            except CreditError:
+                continue  # Unconfirmed release must retain the durable task and be retried later.
+            folder = self.root / 'outputs' / row['id']
+            if folder.resolve().parent == (self.root / 'outputs').resolve() and folder.exists():
+                shutil.rmtree(folder)
+            with self.connect() as db:
                 db.execute("UPDATE jobs SET state='expired',result=NULL WHERE id=?", (row['id'],))
+        with self.connect() as db:
+            db.execute("DELETE FROM job_billing WHERE job_id IN (SELECT id FROM jobs WHERE state='expired' AND updated<?)", (now - RECORD_TTL,))
             db.execute("DELETE FROM jobs WHERE state='expired' AND updated<?", (now - RECORD_TTL,))
 
 
@@ -288,11 +445,11 @@ def normalize(body, owner):
                              'emotion_file': os.environ.get('INDEXTTS_EMOTION_AUDIO_PATH') or None})}
 
 
-def create_app(root=None, token=None, start_worker=True, runner=generate, audio_library=None):
+def create_app(root=None, token=None, start_worker=True, runner=generate, audio_library=None, credits=None):
     token = token or os.environ.get('MIXER_API_TOKEN', '')
     if len(token) < 32 or not token.isascii():
         raise ValueError('MIXER_API_TOKEN 必须是至少 32 字符的随机 ASCII 密钥')
-    jobs = Jobs(root or os.environ.get('DATA_DIR', 'data/mix'))
+    jobs = Jobs(root or os.environ.get('DATA_DIR', 'data/mix'), credits=credits)
     library = audio_library if audio_library is not None else AudioLibrary(jobs.root)
     job_runner = ((lambda spec, folder, log: generate(spec, folder, log, audio_library=library))
                   if runner is generate else runner)

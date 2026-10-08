@@ -60,6 +60,7 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
         update: (_id, update) => {task = {...task, ...update, results: {...task.results, ...update.results}}; return task;}};
       const deps = {
         path, fs, crypto, "../server/safe-log": safeLog, "./task-execution": taskExecution,
+        "../server/task-worker": {startTaskHeartbeat: () => () => {}, withTaskBillingGuard: async (_id, action) => action()},
         "../store/task-store": {TaskStore},
         "../config": {getAppConfig: () => ({storageDir: path.join(tmp, "jobs"), publicBaseUrl: "https://media.example.test", indexttsSpeakerAudioUrl: speaker})},
         "./indextts": {generateIndexTTS: async (_text, options) => {

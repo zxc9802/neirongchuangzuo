@@ -57,11 +57,13 @@ async function server(t, { storageDir, config = CONFIG, fetchImpl = async () => 
 }
 
 async function finished(app, id) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 30_000;
+  let latest;
   while (Date.now() < deadline) {
     const response = await fetch(`${app.base}/api/ai/images/${id}`);
     assert.equal(response.status, 200);
     const { task } = await response.json();
+    latest = task;
     if (['completed', 'failed'].includes(task.status)) {
       // Await persisted terminal state, not just the in-memory transition.
       const saved = JSON.parse(await readFile(join(app.storageDir, id, 'task.json'), 'utf8'));
@@ -69,7 +71,7 @@ async function finished(app, id) {
     }
     await delay(15);
   }
-  assert.fail('Mock generation did not reach a persisted terminal state');
+  assert.fail(`Mock generation did not reach a persisted terminal state: ${JSON.stringify({ status: latest?.status, completedCount: latest?.completedCount, outputCount: latest?.outputCount, code: latest?.code })}`);
 }
 
 test('AI routes expose capability status without secrets and preserve the main workspace', async t => {

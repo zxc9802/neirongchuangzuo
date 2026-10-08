@@ -9,12 +9,13 @@ import { loadAIConfig } from './services/ai/server.mjs';
 import { workspaceDataRoot } from './services/runtime-paths.mjs';
 import { loadWorkspaceSettings } from './services/runtime-settings.mjs';
 import { getWorkspaceUser, workspaceAuthRequired } from './services/auth/workspace.mjs';
+import { createCreditsLedger } from './services/credits/store.mjs';
 const files = new Map([
   ['/', ['design/index.html', 'text/html; charset=utf-8']],
   ['/login', ['design/auth.html', 'text/html; charset=utf-8']],
   ['/register', ['design/auth.html', 'text/html; charset=utf-8']],
   ['/auth.css', ['design/auth.css', 'text/css; charset=utf-8']],
-  ...['auth', 'workspace-account', 'account-storage'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ...['auth', 'workspace-account', 'workspace-credits', 'account-storage'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/app.js', ['design/app.js', 'text/javascript; charset=utf-8']],
   ...['browser-materials', 'mix-materials', 'material-repair'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ...['index', 'classes', 'worker', 'const', 'errors', 'utils', 'types'].map(name => [`/vendor/ffmpeg/${name}.js`,
@@ -69,22 +70,25 @@ function safeError(res, status, code, message, close = false) {
   res.end(JSON.stringify({ error: message, code }));
 }
 
-export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, aiOptions, restaurantOptions, mixOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
+export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, aiOptions, restaurantOptions, mixOptions, credits: injectedCredits, creditsOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
  const backend = new URL(backendUrl);
  const externalOrigin = publicOrigin ? new URL(publicOrigin) : undefined;
  if (backend.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(backend.hostname)) throw new Error('The development backend must use loopback HTTP.');
  const runtimeSettings = loadWorkspaceSettings();
  const dataRoot = workspaceDataRoot(runtimeSettings);
- const handleAI = createAI({ storageDir: join(dataRoot, 'ai'), ...aiOptions });
+ const credits = injectedCredits ?? (authRequired || creditsOptions ? createCreditsLedger({
+   databaseUrl: authRequired ? runtimeSettings.AUTH_DATABASE_URL || process.env.AUTH_DATABASE_URL : undefined,
+   storageDir: join(dataRoot, 'credits'), ...creditsOptions }) : null);
+ const handleAI = createAI({ storageDir: join(dataRoot, 'ai'), credits, ...aiOptions });
  let handleRestaurant;
  let handleMix;
  const mix = () => handleMix ||= createMix({ dataDir: join(dataRoot, 'mix'), publicOrigin: externalOrigin?.origin,
-   requireOrigin: authRequired, env: { ...runtimeSettings, OPENLUX_API_KEY: loadAIConfig(runtimeSettings).apiKey }, ...mixOptions });
+   requireOrigin: authRequired, credits, env: { ...runtimeSettings, OPENLUX_API_KEY: loadAIConfig(runtimeSettings).apiKey }, ...mixOptions });
  const restaurant = () => handleRestaurant ||= createRestaurant({ dataDir: join(dataRoot, 'restaurant'),
    databaseUrl: runtimeSettings.RESTAURANT_DATABASE_URL || process.env.AUTH_DATABASE_URL,
    packageDailyLimit: Number(runtimeSettings.RESTAURANT_PACKAGE_DAILY_LIMIT || 20),
-   mediaEnv: runtimeSettings, providerLedger: handleAI.callLedger, ...restaurantOptions });
- const ready = Promise.all([Promise.resolve(handleAI.ready), ...(restaurantOptions?.initialize ? [restaurant().ready] : [])]);
+   mediaEnv: runtimeSettings, providerLedger: handleAI.callLedger, credits, ...restaurantOptions });
+ const ready = Promise.all([Promise.resolve(handleAI.ready), ...(credits ? [credits.ready] : []), ...(restaurantOptions?.initialize ? [restaurant().ready] : [])]);
  ready.catch(() => {});
  let closing = false;
  let shutdownPromise;
@@ -103,7 +107,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
   }
   const restaurantPath = path === '/api/restaurant' || path.startsWith('/api/restaurant/');
   const mixPath = path === '/api/mix' || path.startsWith('/api/mix/') || path === '/api/browser-materials' || path.startsWith('/api/browser-materials/');
-  if (path === '/api/workspace/session' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/') || restaurantPath || mixPath)) {
+  if (path === '/api/workspace/session' || path === '/api/workspace/credits' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/') || restaurantPath || mixPath)) {
     let user = null;
     try { if (authRequired) user = await getWorkspaceUser(req, backend); }
     catch { safeError(res, 503, 'AUTH_UNAVAILABLE', '账号服务暂时不可用，请稍后重试。'); return; }
@@ -113,6 +117,20 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       return;
     }
     req.authenticatedUserId = user?.id;
+    if (path === '/api/workspace/credits') {
+      if (req.method !== 'GET') { safeError(res, 405, 'METHOD_NOT_ALLOWED', '此接口仅允许查看积分。'); return; }
+      if (!authRequired && !['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress)) {
+        safeError(res, 403, 'HOST_REJECTED', '本地积分仅供本机预览。'); return;
+      }
+      if (!credits) { safeError(res, 503, 'CREDITS_NOT_CONFIGURED', '积分服务尚未启用。'); return; }
+      try {
+        await credits.ready;
+        const wallet = await credits.snapshot(user?.id || 'local-dev');
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' });
+        res.end(JSON.stringify(wallet));
+      } catch { safeError(res, 503, 'CREDITS_UNAVAILABLE', '积分服务暂时不可用，请稍后重试。'); }
+      return;
+    }
     if (path === '/api/workspace/session') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(JSON.stringify({ required: authRequired, user })); return;
@@ -204,6 +222,9 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
        if (handleAI.shutdown) await handleAI.shutdown();
        else await handleAI.dispose?.();
      } catch (error) { failure = error; report('AI_SHUTDOWN_FAILED'); }
+     if (credits && !injectedCredits) {
+       try { await credits.close(); } catch (error) { failure = error; report('CREDITS_SHUTDOWN_FAILED'); }
+     }
      await new Promise((resolve, reject) => closeHTTP(error => error && error.code !== 'ERR_SERVER_NOT_RUNNING' ? reject(error) : resolve()));
      if (failure) throw failure;
    })();

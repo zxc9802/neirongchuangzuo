@@ -155,7 +155,7 @@ async function downloadResult(url, hops, signal) {
   });
 }
 
-export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROOT, '.data', 'ai'), fetchImpl = fetch, downloadImpl = downloadImage, now = Date.now, cleanupIntervalMs = 60_000, bodyTimeoutMs = 30_000, logger = console, retentionOptions = {}, rateLimitWait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROOT, '.data', 'ai'), credits, fetchImpl = fetch, downloadImpl = downloadImage, now = Date.now, cleanupIntervalMs = 60_000, bodyTimeoutMs = 30_000, logger = console, retentionOptions = {}, rateLimitWait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
   let jobs = new Map(); let busy = false; let chatCount = 0; let closing = false;
   let retention, uploads; let unhealthy = false; let shutdownPromise;
   const posts = new Set(); const running = new Set();
@@ -171,7 +171,8 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       await ledger.ready;
       uploads = createImageUploads({ storageDir, now, cleanupIntervalMs, logger });
       await uploads.ready; await uploads.start();
-      retention = createImageRetention({ ...retentionOptions, storageDir, now, cleanupIntervalMs, logger });
+      retention = createImageRetention({ ...retentionOptions, storageDir, now, cleanupIntervalMs, logger,
+        onTaskExpired: task => reconcileCredits(task) });
       await retention.ready;
       jobs = await retention.loadTasks();
       for (const task of jobs.values()) {
@@ -191,6 +192,9 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
           await retention.save(task);
         }
       }
+      for (const task of jobs.values()) {
+        if (task.billing?.source === 'workspace' && ['completed', 'failed', 'expired'].includes(task.status)) await reconcileCredits(task).catch(() => {});
+      }
       await retention.start(jobs);
     } catch (error) {
       unhealthy = true;
@@ -206,11 +210,15 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     const output = { ...retention.publicTask(task), model: displayModelName(task.model, task.kind === 'chat' ? 'Plus模型' : 'Max模型') };
     if (task.kind !== 'chat') Object.assign(output, { generationMode: task.generationMode || 'single', outputCount: task.outputCount || Math.max(1, task.images?.length || 0), completedCount: task.completedCount ?? task.images?.length ?? 0, inputCount: task.inputCount || 0, partial: task.partial === true,
       images: (output.images ?? []).map((image, index) => ({ index: index + 1, label: '单图', style: '单图', ...image })) });
+    if (task.billing?.source === 'workspace' && task.status === 'completed' && !retention.isExpired(task) && task.billing.status !== 'settled') {
+      Object.assign(output, { status: 'running', images: [], completedCount: 0, code: 'CREDITS_SETTLEMENT_PENDING', error: '成品已保存，正在确认积分结算，请稍后查询原任务。' });
+    }
     return output;
   };
   const publicUsage = usage => ({ ...usage, recent: (usage.recent ?? []).map(record => ({ ...record, model: displayModelName(record.model, record.kind === 'chat' ? 'Plus模型' : 'Max模型') })) });
   const safeError = error => {
     if (error instanceof ApiError) return error;
+    if (error?.status && (String(error.code || '').startsWith('CREDITS_') || ['INSUFFICIENT_POINTS', 'INSUFFICIENT_CREDITS'].includes(error.code))) return error;
     if (typeof error?.code === 'string' && error.code.startsWith('UPLOAD_')) return error;
     if (['AI_INSTANCE_LOCKED', 'AI_LEDGER_UNAVAILABLE', 'DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED', 'REQUEST_ID_CONFLICT'].includes(error?.code)) return error;
     return new ApiError('服务暂时不可用，请稍后查询任务记录。', 503, 'SERVICE_ERROR');
@@ -223,6 +231,31 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
   async function persist(task) {
     try { await retention.save(task); }
     catch (cause) { failStorage(cause); throw new ApiError('任务无法保存，已暂停新的模型调用，请检查存储空间。', 503, 'STORAGE_FAILED'); }
+  }
+  async function reconcileCredits(task) {
+    if (!credits || task.billing?.source !== 'workspace' || ['settled', 'released'].includes(task.billing.status)) return;
+    const input = { userId: task.billing.userId, taskId: task.billing.taskId };
+    try {
+      const saved = await credits.reservation(input.userId, input.taskId);
+      if (!saved) {
+        if (task.status !== 'failed' && !retention.isExpired(task)) return;
+        task.billing = { ...task.billing, status: 'released', chargedPoints: 0 };
+        await persist(task); return;
+      }
+      // The authoritative ledger may already have committed despite a lost reply.
+      // An expired deliverable cannot be newly charged, and an existing charge
+      // must never be refunded just because the downloadable file has expired.
+      const record = ['settled', 'released'].includes(saved.status) ? saved
+        : retention.isExpired(task) || task.status === 'failed' ? await credits.release(input)
+        : task.status === 'completed' ? await credits.settle({ ...input, units: task.images.length }) : null;
+      if (!record) return;
+      task.billing = { ...task.billing, status: record.status, chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints };
+      await persist(task);
+    } catch (error) {
+      task.billing.status = task.status === 'completed' && !retention.isExpired(task) ? 'settle_pending' : 'release_pending';
+      await persist(task).catch(() => {});
+      throw error;
+    }
   }
   async function provider(path, body, timeout) {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), timeout);
@@ -249,6 +282,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     try {
       await ledger.finish(task.id, { status: task.status === 'completed' ? 'completed' : task.code === 'UPSTREAM_UNCERTAIN' ? 'uncertain' : 'failed', code: task.code, usage: info.data?.usage, providerRequestId: info.providerRequestId });
     } catch { failStorage(); }
+    await reconcileCredits(task).catch(() => {});
     if (task.status === 'failed') await retention.sweep(jobs);
   }
   function failed(task, error) {
@@ -289,7 +323,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       await dispatch(task.id);
       info = await provider('/images/edits', form, 10 * 60_000);
       const data = info.data;
-      if (!Array.isArray(data.data) || !data.data.length || data.data.length > 4) throw new ApiError('模型没有返回可用图片，请保留任务记录并检查供应商记录。', 502, 'EMPTY_RESULT');
+      if (!Array.isArray(data.data) || !data.data.length || data.data.length > 4 || credits && data.data.length !== 1) throw new ApiError('模型没有返回完整的单张图片，请保留任务记录并检查供应商记录。', 502, 'EMPTY_RESULT');
       const output = [];
       for (const [index, image] of data.data.entries()) {
         const bytes = image.b64_json ? Buffer.from(image.b64_json, 'base64') : typeof image.url === 'string' ? await downloadImpl(image.url) : null;
@@ -368,6 +402,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       } else failed(task, lastError || new ApiError('未生成可用图片。', 502, 'EMPTY_RESULT'));
       try {
         try { await persist(task); } catch { /* Preserve persisted progress for recovery; do not dispatch again. */ }
+        await reconcileCredits(task).catch(() => {});
         if (task.status === 'failed') await retention.sweep(jobs);
       } finally { busy = false; }
     }
@@ -432,6 +467,12 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       if (media && ['GET', 'HEAD'].includes(req.method)) {
         const task = findTask(media[1].toLowerCase());
         if (!ownsTask(task)) throw new ApiError('未找到这张作品。', 404);
+        if (retention.isExpired(task)) {
+          await reconcileCredits(task).catch(() => {});
+          throw new ApiError('这份素材已超过 3 天保留期，无法继续下载。', 410, 'RESULT_EXPIRED');
+        }
+        await reconcileCredits(task);
+        if (task.billing?.source === 'workspace' && task.billing.status !== 'settled') throw new ApiError('积分结算尚未完成，请稍后查询原任务。', 503, 'CREDITS_SETTLEMENT_PENDING');
         if (task && retention.isExpired(task)) throw new ApiError('这份素材已超过 3 天保留期，无法继续下载。', 410, 'RESULT_EXPIRED');
         if (!task || task.kind === 'chat' || task.status !== 'completed' || !task.images.some(image => image.filename === media[2])) throw new ApiError('未找到这张作品。', 404);
         const bytes = await readFile(await retention.resultPath(task.id, media[2]));
@@ -450,6 +491,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       if (taskMatch && req.method === 'GET') {
         const task = findTask(taskMatch[2].toLowerCase());
         if (!ownsTask(task) || (task.kind === 'chat') !== (taskMatch[1] === 'chat')) throw new ApiError('未找到任务；请先确认上次是否提交成功。', 404, 'TASK_NOT_FOUND');
+        await reconcileCredits(task).catch(() => {});
         if (taskMatch[1] === 'chat') chatResult(res, task);
         else json(res, 200, { task: publicTask(task) });
         return true;
@@ -491,18 +533,31 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       }
       if (kind === 'image' && busy || kind === 'chat' && chatCount >= 3) throw new ApiError('正在处理其他任务，请稍后发送。', 429, 'BUSY');
       if (kind === 'image') busy = true; else chatCount++;
-      let task; let reservation;
+      let task; let reservation; let pointsReservation;
       try {
         reservation = kind === 'image' && outputCount > 1
           ? await ledger.reserveBatch(Array.from({ length: outputCount }, (_, index) => ({ id: imageRequestId(body.requestId, index + 1), kind, fingerprint, model })))
           : await ledger.reserve({ id: body.requestId, kind, fingerprint, model });
         if (!reservation.created) throw new ApiError('此任务已有调用记录，无法重复提交；请核对原记录。', 409, 'REQUEST_ALREADY_RECORDED');
-        task = { id: body.requestId, userId, kind, status: 'queued', model, createdAt: new Date(now()).toISOString(), images: [], fingerprint, ...(kind === 'image' ? { prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, size: SIZES[body.ratio], generationMode, outputCount, completedCount: 0, inputCount: images.length } : {}) };
+        task = { id: body.requestId, userId, kind, status: 'queued', model, createdAt: new Date(now()).toISOString(), images: [], fingerprint,
+          ...(kind === 'image' && credits ? { billing: { source: 'workspace', userId: userId || 'local-dev', taskId: body.requestId, status: 'reserving', requestedUnits: outputCount, reservedPoints: 0, chargedPoints: 0 } } : {}),
+          ...(kind === 'image' ? { prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, size: SIZES[body.ratio], generationMode, outputCount, completedCount: 0, inputCount: images.length } : {}) };
         await persist(task);
         jobs.set(task.id, task);
+        if (kind === 'image' && credits) {
+          pointsReservation = await credits.reserve({ userId: userId || 'local-dev', taskId: body.requestId, kind: 'image', units: outputCount });
+          if (pointsReservation.status !== 'reserved') throw new ApiError('此任务的积分记录已结束，请重新开始创作。', 409, 'CREDITS_TASK_ENDED');
+          task.billing = { ...task.billing, status: 'reserved', reservedPoints: pointsReservation.reservedPoints };
+          await persist(task);
+        }
       } catch (error) {
         if (kind === 'image') busy = false; else chatCount--;
         if (reservation?.created) for (const record of reservation.records || [reservation.record]) await ledger.finish(record.id, { status: 'cancelled', code: 'STORAGE_FAILED' }).catch(failStorage);
+        if (task) {
+          failed(task, error);
+          await persist(task).catch(() => {});
+          await reconcileCredits(task).catch(() => {});
+        }
         if (error?.code === 'AI_LEDGER_UNAVAILABLE') failStorage();
         throw error;
       }

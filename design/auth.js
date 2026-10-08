@@ -8,8 +8,8 @@ const destination = () => {
 };
 if (register) {
   document.title = '邀请码注册 · 起芽内容创作';
-  document.querySelector('#auth-title').textContent = '使用邀请码创建账号';
-  document.querySelector('#auth-description').textContent = '邀请码仅可注册一次，请向管理员获取。';
+  document.querySelector('#auth-title').textContent = '邀请码注册';
+  document.querySelector('#auth-description').textContent = '每个邀请码仅可注册一次。';
   document.querySelector('#invite-code-field').hidden = false;
   form.elements.inviteCode.disabled = false;
   form.elements.inviteCode.required = true;
@@ -17,11 +17,11 @@ if (register) {
   form.elements.password.minLength = 10;
   form.elements.password.autocomplete = 'new-password';
   form.elements.password.placeholder = '设置密码，至少 10 个字符';
-  submit.textContent = '邀请码注册并进入工作台 →';
+  submit.textContent = '注册';
   document.querySelector('#switch-description').textContent = '已经有账号？';
   document.querySelector('#switch-link').textContent = '前往登录';
   document.querySelector('#switch-link').href = '/login';
-  document.querySelector('#auth-note').textContent = '已有内部账号可直接登录，无需再次注册。请妥善保存密码，当前暂不提供密码找回。';
+  document.querySelector('#auth-note').textContent = '请保存密码，暂不支持找回。';
 }
 document.querySelector('#switch-link').href += location.search;
 document.querySelector('#toggle-password').addEventListener('click', event => {

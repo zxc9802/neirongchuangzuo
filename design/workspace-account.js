@@ -1,4 +1,18 @@
+import { refreshWorkspaceCredits, subscribeWorkspaceCredits } from './workspace-credits.js';
 function login() { location.replace('/login?next=' + encodeURIComponent(location.pathname + location.search + location.hash)); }
+function paintCredits(current) {
+  const button = document.querySelector('#workspace-credits');
+  if (!button) return;
+  button.hidden = false;
+  button.querySelector('strong').textContent = current.snapshot ? String(current.snapshot.available) : '—';
+  button.querySelector('small').textContent = current.stale ? '积分待刷新' : '可用积分';
+  button.title = current.stale ? current.error || '正在读取积分' : `可用 ${current.snapshot.available} 积分，冻结 ${current.snapshot.held} 积分`;
+  const summary = document.querySelector('#account-credit-summary');
+  summary.textContent = current.snapshot ? `可用 ${current.snapshot.available} 积分 · 冻结 ${current.snapshot.held} 积分${current.stale ? '（上次余额，待刷新）' : ''}` : current.error || '正在读取积分…';
+  const pricing = current.snapshot?.pricing;
+  document.querySelector('#account-credit-rules').textContent = pricing ? `图片 ${pricing.imagePerUnit} 积分/张；视频 ${pricing.videoPoints} 积分/${pricing.videoSeconds} 秒，按实际时长。` : '积分规则暂时无法读取。';
+  document.querySelector('#account-credit-error').textContent = current.error;
+}
 try {
   const response = await fetch('/api/workspace/session');
   if (response.status === 401) login();
@@ -11,12 +25,18 @@ try {
       account.hidden = false;
       account.querySelector('span').textContent = user.nickname || user.account;
       account.title = user.account;
-      account.addEventListener('click', () => {
+      const showAccount = () => {
         document.querySelector('#account-name').textContent = user.nickname || user.account;
         document.querySelector('#account-email').textContent = user.account;
         document.querySelector('#account-source').textContent = user.authSource === 'internal' ? '内部账号 · 密码请在原系统修改' : '本站注册账号';
         document.querySelector('#account-dialog').showModal();
-      });
+        void refreshWorkspaceCredits();
+      };
+      account.addEventListener('click', showAccount);
+      document.querySelector('#workspace-credits').addEventListener('click', showAccount);
+      document.querySelector('#account-credit-refresh').onclick = () => { void refreshWorkspaceCredits(); };
+      subscribeWorkspaceCredits(paintCredits);
+      void refreshWorkspaceCredits();
       document.querySelector('#account-close').onclick = () => document.querySelector('#account-dialog').close();
       document.querySelector('#account-logout').onclick = async event => {
         const button = event.currentTarget;
@@ -33,6 +53,7 @@ try {
           const current = await fetch('/api/workspace/session');
           if (current.status === 401) { login(); return; }
           if (current.ok && (await current.json()).user?.id !== user.id) location.reload();
+          else if (current.ok) void refreshWorkspaceCredits();
         } catch { /* A later authenticated request still checks the server-side session. */ }
       });
     }

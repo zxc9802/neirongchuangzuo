@@ -17,14 +17,17 @@ export interface PublicLogEntry {
 }
 
 export interface PublicTaskBilling {
+  source?: "workspace" | "main-app" | "internal";
   isExternalUser: boolean;
   estimatedDuration?: number;
   estimatedPoints?: number;
+  reservedPoints?: number;
   actualDuration?: number;
   chargedPoints?: number;
   costCny?: number;
   status:
     | "not_applicable"
+    | "reserving"
     | "reserved"
     | "provider_committed"
     | "settle_pending"

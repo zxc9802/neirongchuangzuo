@@ -1,3 +1,4 @@
+import { imageTaskTitle } from './image-presets.js';
 const RETENTION_MS = 72 * 60 * 60 * 1000;
 const TYPES = { all: '全部', image: '图片', video: '视频', audio: '音频' };
 const state = { ctx: null, type: 'all', limit: 24, records: [], errors: [], loading: false, controller: null, timer: null, revision: 0 };
@@ -20,12 +21,6 @@ function localUrl(value, pattern) {
   return pattern.test(value) ? value : '';
 }
 
-function imageTitle(prompt) {
-  const text = String(prompt || '图片作品');
-  const title = /(?:^|\n)主标题[：:]\s*([^\n]+)/.exec(text)?.[1];
-  return (title || '图片作品').slice(0, 64);
-}
-
 // Only successful generated outputs enter the library; uploads and example images never do.
 export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = Date.now(), restaurantTasks = []) {
   const records = [];
@@ -35,7 +30,7 @@ export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = 
     for (const [index, image] of (Array.isArray(task.images) ? task.images : []).entries()) {
       const url = localUrl(image?.url, /^\/api\/ai\/media\/[a-f\d-]+\/result-(?:[1-9]|1[0-5])\.(?:png|jpg|webp)$/i);
       if (!url || !url.startsWith(`/api/ai/media/${task.id}/`)) continue;
-      records.push({ key: `image:${task.id}:${index}`, type: 'image', source: 'AI 图片', title: imageTitle(task.prompt), url, download: url + '?download=1', filename: image.filename || 'generated-image.png', ...window });
+      records.push({ key: `image:${task.id}:${index}`, type: 'image', source: 'AI 图片', title: imageTaskTitle(task), url, download: url + '?download=1', filename: image.filename || 'generated-image.png', ...window });
     }
   }
   for (const task of avatarTasks) {
@@ -81,13 +76,13 @@ function renderResults(ctx) {
   const filtered = records.filter(record => state.type === 'all' || record.type === state.type);
   const filters = `<div class="generated-assets-filters" role="group" aria-label="成品类型">${Object.entries(TYPES).map(([type, label]) => button('generated-assets-filter', `${label}<span>${type === 'all' ? records.length : records.filter(item => item.type === type).length}</span>`, type === state.type ? 'selected' : '', `data-type="${type}" aria-pressed="${type === state.type}"`)).join('')}</div>`;
   const errors = state.errors.length ? `<div class="generated-assets-errors" role="status">${state.errors.map(error => `<p>${esc(error)}</p>`).join('')}${button('generated-assets-refresh', '重新加载', 'textbutton')}</div>` : '';
-  if (state.loading && !records.length) return filters + `<div class="generated-assets-empty" role="status">${icon('clock')}<h2>正在读取生成的作品</h2><p>图片、视频和配音会集中显示在这里。</p></div>`;
-  if (!filtered.length) return filters + errors + `<div class="generated-assets-empty">${icon('folder')}<h2>${records.length ? `近 3 天还没有${TYPES[state.type]}成品` : state.errors.length ? '暂时没有可展示的成品' : '近 3 天还没有生成作品'}</h2><p>生成成功的作品会自动进入资产，请在到期前下载保存。</p>${button('generated-assets-create', '去生成图片 ' + icon('arrow'), 'primary')}</div>`;
+  if (state.loading && !records.length) return filters + `<div class="generated-assets-empty" role="status">${icon('clock')}<h2>正在读取生成的作品</h2></div>`;
+  if (!filtered.length) return filters + errors + `<div class="generated-assets-empty">${icon('folder')}<h2>${records.length ? `近 3 天还没有${TYPES[state.type]}成品` : state.errors.length ? '暂时没有可展示的成品' : '近 3 天还没有生成作品'}</h2>${button('generated-assets-create', '去生成图片 ' + icon('arrow'), 'primary')}</div>`;
   return filters + errors + `<div class="generated-assets-grid">${filtered.slice(0, state.limit).map(record => `<article class="generated-asset-card"><button class="generated-asset-cover ${record.type}" data-action="generated-asset-preview" data-key="${esc(record.key)}" aria-label="${record.type === 'image' ? '查看图片' : record.type === 'video' ? '播放视频' : '试听配音'}：${esc(record.title)}">${record.type === 'image' ? `<img src="${esc(record.url)}" alt="${esc(record.title)}" loading="lazy">` : record.type === 'video' ? `<video src="${esc(record.url)}" preload="metadata" muted playsinline aria-hidden="true"></video><span class="generated-asset-play">${icon('play')}</span>` : `<span class="generated-asset-audio">${icon('audio')}<small>生成配音</small></span>`}<span class="generated-asset-kind">${esc(record.source)} · ${TYPES[record.type]}</span></button><div class="generated-asset-copy"><h2 title="${esc(record.title)}">${esc(record.title)}</h2><time datetime="${new Date(record.completed).toISOString()}">${dateLabel(record.completed)} 生成</time><div class="generated-asset-footer"><span class="generated-asset-expiry ${record.expires - Date.now() <= 24 * 3600000 ? 'soon' : ''}" title="${dateLabel(record.expires)} 到期">${remainingLabel(record.expires)}</span><a href="${esc(record.download)}" download="${esc(record.filename)}" class="generated-asset-download" aria-label="下载${TYPES[record.type]}：${esc(record.title)}">${icon('save')}下载</a></div><small class="generated-asset-deadline">${dateLabel(record.expires)} 到期清理</small></div></article>`).join('')}</div>${filtered.length > state.limit ? `<div class="generated-assets-more">${button('generated-assets-more', '加载更多作品', 'secondary')}</div>` : ''}`;
 }
 
 export function renderGeneratedAssets(ctx) {
-  return `<section class="generated-assets-heading"><div><span class="generated-assets-eyebrow">我的创作</span><h1>生成资产 <span>近 3 天</span></h1><p>网站生成的图片、视频与配音，集中在这里。</p></div>${ctx.button('generated-assets-refresh', ctx.icon('refresh') + '刷新作品', 'secondary')}</section><div class="generated-assets-policy">${ctx.icon('clock')}<p>每份成品自生成成功起保留 <strong>72 小时</strong>，到期自动清理，请及时下载。</p></div><section id="generated-assets-results" aria-label="已生成素材">${renderResults(ctx)}</section>`;
+  return `<section class="generated-assets-heading"><div><span class="generated-assets-eyebrow">我的创作</span><h1>生成资产 <span>近 3 天</span></h1></div>${ctx.button('generated-assets-refresh', ctx.icon('refresh') + '刷新作品', 'secondary')}</section><div class="generated-assets-policy">${ctx.icon('clock')}<p>成品保留 <strong>3 天</strong>，请及时下载。</p></div><section id="generated-assets-results" aria-label="已生成素材">${renderResults(ctx)}</section>`;
 }
 
 function paint() {

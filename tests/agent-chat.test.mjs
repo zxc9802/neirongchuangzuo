@@ -160,7 +160,7 @@ test('old attachment names cannot be represented as sent images; text-only retry
   assert.equal(h.requests.length, 1);
   assert.deepEqual(h.requests[0].messages, [{ role: 'user', content: '参考这张图片' }, { role: 'user', content: '继续整理' }]);
   await h.respond(0, { text: '目前只能依据你的文字整理。' });
-  assert.match(h.html(), /本轮仅发送了文字/);
+  assert.match(h.html(), /本轮仅发送文字/);
 });
 
 test('closing a pending session aborts its response without resurrecting deleted history', async t => {

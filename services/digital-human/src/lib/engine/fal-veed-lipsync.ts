@@ -26,6 +26,7 @@ export interface FalVeedLipsyncOptions {
   objectKeyPrefix?: string;
   onLog?: (msg: string) => void;
   onProviderAccepted?: () => void;
+  onProviderSubmitting?: () => void | Promise<void>;
   onJobCreated?: (info: FalVeedJobProgress) => void;
   onResultReady?: (info: FalVeedJobProgress) => void;
   onChunkProgress?: (chunk: NonNullable<TaskItem["results"]["lipsyncChunks"]>[number]) => void;
@@ -140,6 +141,7 @@ export class FalVeedLipsyncAdapter {
           init,
           { ...providerUrlPolicy("fal"), sensitiveHeaders: Boolean(new Headers(init.headers).get("Authorization")) },
         );
+        if (attempts === 1) return resp;
         if (resp.status >= 500 || resp.status === 429) {
           lastError = new Error(`HTTP ${resp.status}`);
           await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
@@ -272,6 +274,7 @@ export class FalVeedLipsyncAdapter {
     });
 
     onLog(`[VEED] 正在提交 ${model} 对口型任务...`);
+    await options.onProviderSubmitting?.();
     const submitResp = await this.fetchWithRetry(queueBase, {
       method: "POST",
       headers: this.headers(apiKey, { "Content-Type": "application/json" }),
@@ -279,7 +282,10 @@ export class FalVeedLipsyncAdapter {
         video_url: videoUrl,
         audio_url: audioUrl,
       }),
-    });
+    }, options.onProviderSubmitting ? 1 : 4);
+    if (submitResp.status >= 400 && submitResp.status < 500) {
+      throw Object.assign(new Error(`创建 VEED 对口型任务被拒绝 (${submitResp.status})`), { code: "LIPSYNC_GENERATION_FAILED" });
+    }
     const submitted = await this.parseJson<FalQueueSubmit>(submitResp);
     if (!submitResp.ok || !submitted.request_id) {
       throw new Error(
@@ -330,9 +336,9 @@ export class FalVeedLipsyncAdapter {
           break;
         }
         if (status === "FAILED" || status === "ERROR" || status === "CANCELLED") {
-          throw new Error(
+          throw Object.assign(new Error(
             `[VEED] 对口型生成失败: ${formatFalError(polled.error || polled.detail, status)}`
-          );
+          ), { code: "LIPSYNC_GENERATION_FAILED" });
         }
         if (pollCount % 3 === 0) {
           const remainMin = Math.max(1, Math.round((pollDeadline - Date.now()) / 60000));
@@ -494,6 +500,7 @@ export class FalVeedLipsyncAdapter {
           outputPath: chunkOut,
           onLog,
           onProviderAccepted: options.onProviderAccepted,
+          onProviderSubmitting: options.onProviderSubmitting,
           onJobCreated: info => {
             options.onJobCreated?.(info);
             options.onChunkProgress?.({ index: chunk.index, lipsyncId: info.lipsyncId, status: "created" });

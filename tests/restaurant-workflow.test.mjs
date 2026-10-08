@@ -12,6 +12,7 @@ import { createRestaurantModel } from '../services/restaurant/model.mjs';
 import { validateAnalysis, validateDirections, validateCopy, localReview } from '../services/restaurant/rules.mjs';
 import * as processor from '../services/restaurant/images.mjs';
 import { COPY_PROMPT } from '../services/restaurant/prompts.mjs';
+import { createCreditsLedger } from '../services/credits/store.mjs';
 
 const profile = { name: '竹里面馆', city: '武汉', address: '青山建设一路', category: '面食' };
 const config = { apiKey: 'test-only-not-a-secret', baseUrl: 'https://provider.invalid/v1', chatModel: 'test-luna', limits: { chatDaily: 100, imageDaily: 20, perMinute: 10 } };
@@ -53,7 +54,8 @@ async function photos(count = 2) { return Promise.all(Array.from({ length: count
 async function setup(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'restaurant-flow-'));
   const model = options.model ?? mockModel();
-  const handler = createRestaurantHandler({ dataDir: root, databaseUrl: '', config, model, requireAuth: true, cleanupIntervalMs: 0, logger: { warn() {} }, ...options });
+  const credits = options.credits ?? (options.withCredits ? createCreditsLedger({ storageDir: join(root, 'points'), databaseUrl: null }) : undefined);
+  const handler = createRestaurantHandler({ dataDir: root, databaseUrl: '', config, model, credits, requireAuth: true, cleanupIntervalMs: 0, logger: { warn() {} }, ...options });
   await handler.ready;
   const server = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-user']; handler(req, res); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -69,8 +71,8 @@ async function setup(t, options = {}) {
     } while (performance.now() < deadline);
     throw new Error(`task did not reach ${states.join('/')} within 15s; last status: ${last?.status}, stage: ${last?.progress?.stage}, code: ${last?.code}, error: ${last?.error}`);
   }
-  t.after(async () => { await handler.shutdown(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
-  return { api, wait, model, handler, root };
+  t.after(async () => { await handler.shutdown(); await new Promise(resolve => server.close(resolve)); await credits?.close(); assert.equal(join(tmpdir(), root.split(/[\\/]/).at(-1)), root); await rm(root, { recursive: true, force: true }); });
+  return { api, wait, model, handler, root, credits };
 }
 async function newTask(app, input = {}) { await app.api('/profile', { profile }); const id = randomUUID(); const result = await app.api('/tasks', { requestId: id, images: await photos(), rightsConfirmed: true, ...input }); assert.equal(result.status, 202); return { id, task: await app.wait(id, ['awaiting_selection', 'failed']) }; }
 async function uploadPool(app, count) {
@@ -82,6 +84,171 @@ async function uploadPool(app, count) {
   assert.equal((await app.api(`/tasks/${id}/analyse`, {})).status, 202);
   return { id, task: await app.wait(id, ['awaiting_selection', 'failed']), inputs };
 }
+
+test('restaurant points: upload and analysis are free, cover replaces first photo, and repeated completion charges once', async t => {
+  const app = await setup(t, { withCredits: true }), { id } = await newTask(app);
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  const body = { directionId: 'D01', acceptSparse: true, imageMode: 'cover' };
+  assert.equal((await app.api(`/tasks/${id}/generate`, body)).status, 202);
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  assert.equal(task.files.filter(file => /^image\//.test(file.mime)).length, 2);
+  assert.equal(task.billing.chargedPoints, 100);
+  assert.equal(task.billing.status, 'settled');
+  assert.equal((await app.api(`/tasks/${id}/generate`, body)).body.task.id, id);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.equal((await app.credits.snapshot('another-owner')).balance, 1000);
+});
+
+test('restaurant points: failed noncore photo refunds the difference and only the actual package photos are charged', async t => {
+  const imageProcessor = { ...processor, async processPhoto(bytes, options) {
+    if ((await sharp(bytes).stats()).channels[0].mean < 90) throw new Error('unavailable photo');
+    return processor.processPhoto(bytes, options);
+  } };
+  const app = await setup(t, { withCredits: true, imageProcessor }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  assert.equal(task.billing.chargedPoints, 50);
+  assert.equal((await app.credits.snapshot('owner')).balance, 950);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('restaurant points: risk confirmation keeps a reservation, then confirms and settles only once', async t => {
+  const model = mockModel({ async audit() { return { status: 'passed_with_warning', warnings: ['请核对真实照片后发布'], errors: [] }; } });
+  const app = await setup(t, { withCredits: true, model }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const task = await app.wait(id, ['awaiting_confirmation', 'failed']);
+  assert.equal(task.status, 'awaiting_confirmation', task.error);
+  const wallet = await app.credits.snapshot('owner');
+  assert.equal(wallet.balance, 900); assert.equal(wallet.held, 100); assert.equal(wallet.total, 1000);
+  assert.equal((await app.api(`/tasks/${id}/confirm`, { confirmWarnings: true })).body.task.status, 'completed');
+  await app.api(`/tasks/${id}/confirm`, { confirmWarnings: true });
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('restaurant points: insufficient balance stops writing and does not reserve provider or image points', async t => {
+  const app = await setup(t, { withCredits: true }), { id } = await newTask(app);
+  await app.credits.reserve({ userId: 'owner', taskId: 'previous-images', kind: 'image', units: 19 });
+  await app.credits.settle({ userId: 'owner', taskId: 'previous-images', units: 19 });
+  const result = await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  assert.equal(result.status, 402); assert.equal(result.body.code, 'INSUFFICIENT_POINTS');
+  assert.equal(app.model.counts.write, 0); assert.equal(app.model.counts.audit, 0);
+  assert.equal((await app.credits.snapshot('owner')).balance, 50);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('restaurant points: explicit failed generation refunds and manual retry uses a fresh reservation', async t => {
+  let attempts = 0;
+  const model = mockModel({ async write(input) { if (!attempts++) throw new Error('temporary failed response'); return copy(input.analysis); } });
+  const app = await setup(t, { withCredits: true, model }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const failed = await app.wait(id, ['failed']);
+  assert.equal(failed.billing.status, 'released');
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  await app.api(`/tasks/${id}/retry`, {});
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  assert.notEqual(task.billing.taskId, failed.billing.taskId);
+  assert.equal(task.billing.chargedPoints, 100);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+});
+
+test('restaurant points: pending settlement blocks package download and restores without repeating model calls', async t => {
+  const app = await setup(t, { withCredits: true }), { id } = await newTask(app);
+  const settle = app.credits.settle; let offline = true;
+  app.credits.settle = async input => {
+    if (offline) throw Object.assign(new Error('credits temporarily unavailable'), { code: 'CREDITS_STORAGE_UNAVAILABLE', status: 503 });
+    return settle(input);
+  };
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  let task;
+  const deadline = performance.now() + 5000;
+  do {
+    task = (await app.api(`/tasks/${id}`)).body.task;
+    if (task?.billing?.status === 'settle_pending') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  } while (performance.now() < deadline);
+  assert.equal(task.billing.status, 'settle_pending');
+  assert.equal(task.status, 'generating');
+  assert.notEqual((await app.api(`/tasks/${id}/files/${task.files[0].filename}`)).status, 200);
+  const counts = { ...app.model.counts };
+  assert.equal((await app.credits.snapshot('owner')).held, 100);
+  offline = false;
+  const restored = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(restored.status, 'completed', restored.error);
+  assert.equal(restored.code, null);
+  assert.equal(restored.billing.chargedPoints, 100);
+  assert.deepEqual(app.model.counts, counts);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('restaurant points: expiring an unconfirmed package releases its image reservation', async t => {
+  let clock = Date.now();
+  const model = mockModel({ async audit() { return { status: 'passed_with_warning', warnings: ['请核对照片'], errors: [] }; } });
+  const app = await setup(t, { withCredits: true, model, now: () => clock }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  assert.equal((await app.wait(id, ['awaiting_confirmation', 'failed'])).status, 'awaiting_confirmation');
+  assert.equal((await app.credits.snapshot('owner')).held, 100);
+  clock += 3 * 24 * 60 * 60 * 1000 + 1000;
+  await app.api(`/tasks/${id}`);
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+for (const committed of [false, true]) test(`restaurant points: expiry reconciles pending settlement with committed=${committed}`, async t => {
+  let clock = Date.now();
+  const app = await setup(t, { withCredits: true, now: () => clock }), { id } = await newTask(app);
+  const settle = app.credits.settle;
+  app.credits.settle = async input => {
+    if (committed) await settle(input);
+    throw Object.assign(new Error('lost settlement response'), { code: 'CREDITS_STORAGE_UNAVAILABLE', status: 503 });
+  };
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const deadline = performance.now() + 5000;
+  let pending;
+  do {
+    pending = (await app.api(`/tasks/${id}`)).body.task;
+    if (pending?.billing?.status === 'settle_pending') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  } while (performance.now() < deadline);
+  assert.equal(pending.billing.status, 'settle_pending');
+  const counts = { ...app.model.counts };
+  clock += 3 * 24 * 60 * 60 * 1000 + 1000;
+  const expired = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(expired.status, 'failed'); assert.equal(expired.code, 'FILES_EXPIRED');
+  assert.equal(expired.billing.status, committed ? 'settled' : 'released');
+  assert.equal(expired.billing.chargedPoints, committed ? 100 : 0);
+  await app.api(`/tasks/${id}`);
+  assert.equal((await app.credits.snapshot('owner')).balance, committed ? 900 : 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.deepEqual(app.model.counts, counts);
+});
+
+test('restaurant points: task deletion keeps a durable cleanup reference until an offline wallet recovers', async t => {
+  let clock = Date.now();
+  const model = mockModel({ async audit() { return { status: 'passed_with_warning', warnings: ['请核对照片'], errors: [] }; } });
+  const app = await setup(t, { withCredits: true, model, now: () => clock }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const task = await app.wait(id, ['awaiting_confirmation']);
+  const reservation = app.credits.reservation; let offline = true;
+  app.credits.reservation = async (...args) => { if (offline) throw new Error('database offline'); return reservation(...args); };
+  clock += 31 * 24 * 60 * 60 * 1000;
+  assert.equal((await app.api(`/tasks/${id}`)).status, 404);
+  assert.equal((await app.credits.snapshot('owner')).held, 100);
+  const swept = await app.handler.store.sweep();
+  assert.deepEqual(swept.pendingCredits, [{ userId: 'owner', taskId: id, creditId: task.billing.taskId }]);
+  assert.equal(await app.handler.store.getTask('owner', id), null);
+  offline = false;
+  assert.equal((await app.api(`/tasks/${id}`)).status, 404);
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.equal((await app.handler.store.sweep()).pendingCredits.length, 0);
+});
 
 test('30-photo draft accepts contiguous resumable batches, detects changed deliveries, and analyse starts only once', async t => {
   const app = await setup(t); await app.api('/profile', { profile });

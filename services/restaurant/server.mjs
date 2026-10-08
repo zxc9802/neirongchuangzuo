@@ -41,7 +41,7 @@ function decodeUploads(value, max = 9, startIndex = 0) {
 }
 
 export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'), databaseUrl = process.env.RESTAURANT_DATABASE_URL || process.env.AUTH_DATABASE_URL, config = loadAIConfig(), fetchImpl = fetch, now = Date.now,
-  store: injectedStore, media: injectedMedia, model: injectedModel, providerLedger, mediaEnv = process.env, imageProcessor = images, packageDailyLimit = Number(process.env.RESTAURANT_PACKAGE_DAILY_LIMIT || 20), cleanupIntervalMs = 60_000,
+  store: injectedStore, media: injectedMedia, model: injectedModel, providerLedger, credits, mediaEnv = process.env, imageProcessor = images, packageDailyLimit = Number(process.env.RESTAURANT_PACKAGE_DAILY_LIMIT || 20), cleanupIntervalMs = 60_000,
   requireAuth = process.env.NODE_ENV === 'production', logger = console } = {}) {
   const store = injectedStore ?? createRestaurantStore({ dataDir, databaseUrl, now, packageDailyLimit });
   const rawMedia = injectedMedia ?? createRestaurantMedia({ dataDir, now, env: mediaEnv });
@@ -61,6 +61,15 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   }
   async function sweep() {
     const result = await store.sweep();
+    if (credits) {
+      for (const { userId, taskId, creditId } of result.pendingCredits ?? []) {
+        try {
+          const saved = await credits.reservation(userId, creditId);
+          const record = saved?.status === 'reserved' ? await credits.release({ userId, taskId: creditId }) : saved;
+          await store.acknowledgeCredits(userId, taskId, creditId, record);
+        } catch { report('CREDITS_RELEASE_PENDING'); }
+      }
+    }
     for (const file of result.expiredFiles ?? []) {
       // The whole registered batch stays queued until every possible late write ends.
       if (serial.has(file.userId) || mediaWriteGroups.has(file.key)) continue;
@@ -103,7 +112,48 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (!task) throw new RestaurantError('任务不存在或已过期。', 404, 'TASK_NOT_FOUND');
     return task;
   }
+  async function reserveTaskCredits(userId, task, units) {
+    if (!credits) return task;
+    if (task.billing?.source === 'workspace' && !['released', 'settled'].includes(task.billing.status)) await releaseTaskCredits(userId, task);
+    const attempt = (task.generationAttempt || 0) + 1;
+    const taskId = `${task.id}-generation-${attempt}`;
+    await store.patchTask(userId, task.id, { generationAttempt: attempt, billing: { source: 'workspace', taskId, status: 'reserving', requestedUnits: units, reservedPoints: 0, chargedPoints: 0 } });
+    let reservation;
+    try {
+      reservation = await credits.reserve({ userId, taskId, kind: 'restaurant', units });
+      if (reservation.status !== 'reserved') throw new RestaurantError('此任务积分记录已结束，请重新生成。', 409, 'CREDITS_TASK_ENDED');
+      return await store.patchTask(userId, task.id, { billing: { source: 'workspace', taskId, status: 'reserved', requestedUnits: units, reservedPoints: reservation.reservedPoints, chargedPoints: 0 } });
+    } catch (error) {
+      if (reservation?.status === 'reserved') await credits.release({ userId, taskId }).catch(() => report('CREDITS_RELEASE_PENDING'));
+      await store.patchTask(userId, task.id, { billing: { source: 'workspace', taskId, status: 'release_pending', requestedUnits: units, chargedPoints: 0 } }).catch(() => {});
+      throw error;
+    }
+  }
+  async function releaseTaskCredits(userId, task) {
+    if (!credits || task.billing?.source !== 'workspace' || ['settled', 'released'].includes(task.billing.status)) return;
+    const saved = await credits.reservation(userId, task.billing.taskId);
+    if (saved?.status === 'settled') { await store.patchTask(userId, task.id, { billing: { ...task.billing, status: 'settled', chargedPoints: saved.chargedPoints } }); return; }
+    if (saved) await credits.release({ userId, taskId: task.billing.taskId });
+    await store.patchTask(userId, task.id, { billing: { ...task.billing, status: 'released', chargedPoints: 0 } });
+  }
+  async function completeWithCredits(userId, id, patch = {}) {
+    const task = await taskFor(userId, id);
+    if (!credits || task.billing?.source !== 'workspace') return store.completeTask(userId, id, patch);
+    if (task.status === 'completed') return task;
+    const files = patch.files ?? task.files ?? [];
+    const units = files.filter(file => /^image\//.test(file.mime)).length;
+    if (!units || files.some(file => file.expired || file.expiresAt <= now())) throw new RestaurantError('成品已过期，无法结算，请重新生成。', 410, 'FILES_EXPIRED');
+    const pending = await store.patchTask(userId, id, { ...patch, status: 'generating', progress: { stage: 'credits_settlement' }, billing: { ...task.billing, status: 'settle_pending', deliveredUnits: units } });
+    const record = await credits.settle({ userId, taskId: task.billing.taskId, units });
+    return store.completeTask(userId, id, { billing: { ...pending.billing, status: 'settled', chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints }, progress: null, error: null, code: null, completedAt: now() });
+  }
   async function fail(userId, id, cause) {
+    const current = await store.getTask(userId, id);
+    if (current?.billing?.status === 'settle_pending' && current.files?.length) {
+      await store.patchTask(userId, id, { status: 'generating', progress: { stage: 'credits_settlement', message: '成品已保存，正在确认积分结算。' }, error: '积分结算暂未确认，请稍后查询原任务。', code: 'CREDITS_SETTLEMENT_PENDING' });
+      report('CREDITS_SETTLEMENT_PENDING'); return;
+    }
+    if (current) await releaseTaskCredits(userId, current).catch(() => report('CREDITS_RELEASE_PENDING'));
     await store.releasePackage(userId, id);
     await store.patchTask(userId, id, { status: 'failed', error: cause instanceof RestaurantError || cause.status || cause.statusCode ? cause.message : '任务处理失败，请稍后重试。', code: cause.code ?? 'PROCESSING_FAILED', retryable: cause.code !== 'PROVIDER_UNCERTAIN' });
     report(cause.code ?? 'PROCESSING_FAILED');
@@ -301,6 +351,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       if (review.status !== 'blocked') break;
       if (revision === 1) {
         await store.releasePackage(userId, id);
+        await releaseTaskCredits(userId, await taskFor(userId, id));
         await store.patchTask(userId, id, { status: 'failed', copy, review, copyQuality, code: local.errors.length || quality.passed ? 'REVIEW_BLOCKED' : 'COPY_QUALITY_FAILED',
           error: '文案自动改写后仍未通过检查，请补充真实亮点或更换内容方向。', retryable: false, progress: null }); return;
       }
@@ -319,7 +370,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (review.status === 'passed_with_warning') {
       // Files remain inaccessible until warnings are explicitly confirmed on this exact result.
       await store.patchTask(userId, id, { ...result, status: 'awaiting_confirmation', progress: null });
-    } else await store.completeTask(userId, id, { ...result, progress: null, completedAt: now() });
+    } else await completeWithCredits(userId, id, { ...result, progress: null, completedAt: now() });
   }
   async function cloneTask(userId, old, requestId = randomUUID()) {
     if (!UUID.test(requestId)) throw new RestaurantError('请求标识无效。');
@@ -373,7 +424,9 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (!['natural', 'cover'].includes(imageMode)) throw new RestaurantError('请选择自然美化或封面加字。');
     const orderedIds = [...coreImageIds, ...availableIds.filter(imageId => !coreImageIds.includes(imageId))];
     const imageIds = orderedIds.slice(0, outputCount), backupImageIds = orderedIds.slice(outputCount);
-    await store.reservePackage(userId, task.id);
+    task = await reserveTaskCredits(userId, task, imageIds.length);
+    try { await store.reservePackage(userId, task.id); }
+    catch (error) { await releaseTaskCredits(userId, task).catch(() => {}); throw error; }
     const claimed = await store.claimTask(userId, task.id, ['awaiting_selection', 'awaiting_facts'], { status: 'generating', outputCount, selection: { directionId: direction.id, direction, facts, imageMode, imageIds, coreImageIds, backupImageIds, outputCount, strictOutputCount: body.outputCount !== undefined }, missingFacts: [], error: null, code: null });
     if (!claimed) return await taskFor(userId, task.id);
     launch(userId, task.id, () => generateTask(userId, task.id)); return claimed;
@@ -455,7 +508,24 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       const match = /^\/api\/restaurant\/tasks\/([^/]+)(?:\/(generate|retry|confirm|fork|files|photos|analyse|recommend|cancel-upload)(?:\/([^/]+))?)?$/.exec(path);
       if (match) {
         const [, id, action, filename] = match;
-        if (req.method === 'GET' && !action) { reply(res, 200, { task: publicTask(await taskFor(userId, id)) }); return true; }
+        if (req.method === 'GET' && !action) {
+          // Reconcile expiry on reads as well as the timer, so pending credits recover promptly after an outage.
+          if (!UUID.test(id)) throw new RestaurantError('任务地址无效。', 400);
+          let task = await store.getTask(userId, id);
+          if (!task || task.billing?.source === 'workspace' && !['settled', 'released'].includes(task.billing.status)
+            && (task.status === 'failed' || task.files?.some(file => file.expired || file.expiresAt <= now()))) {
+            await sweep();
+            task = await taskFor(userId, id);
+          }
+          if (task.billing?.source === 'workspace') {
+            await exclusive(userId, async () => {
+              if (task.status === 'failed' || task.billing.status === 'release_pending') await releaseTaskCredits(userId, task).catch(() => report('CREDITS_RELEASE_PENDING'));
+              else if (task.billing.status === 'settle_pending' && task.files?.length) await completeWithCredits(userId, id).catch(() => report('CREDITS_SETTLEMENT_PENDING'));
+            });
+            task = await taskFor(userId, id);
+          }
+          reply(res, 200, { task: publicTask(task) }); return true;
+        }
         if (req.method === 'GET' && action === 'files' && filename) {
           const task = await taskFor(userId, id);
           const name = decodeURIComponent(filename), original = task.sourceImages.find(item => item.filename === name);
@@ -481,12 +551,14 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
               if (task.code === 'FILES_EXPIRED' || task.files?.some(file => file.expired || file.expiresAt <= now())) throw new RestaurantError('结果文件已过期，请重新上传。', 410, 'FILES_EXPIRED');
               if (task.status !== 'awaiting_confirmation' || body.confirmWarnings !== true) throw new RestaurantError('请确认本次结果的全部风险提示。', 422, 'WARNING_CONFIRMATION_REQUIRED');
               if (!task.files?.length || task.files.some(file => file.expiresAt <= now())) throw new RestaurantError('结果文件已过期，请重新上传。', 410, 'FILES_EXPIRED');
-              return store.completeTask(userId, id, { warningsConfirmedAt: now(), completedAt: now() });
+              return completeWithCredits(userId, id, { warningsConfirmedAt: now(), completedAt: now() });
             }
             if (task.status !== 'failed' || task.retryable === false) throw new RestaurantError('该任务不能直接重试，请核对提示或重新上传。', 409, task.code === 'PROVIDER_UNCERTAIN' ? 'PROVIDER_UNCERTAIN' : 'TASK_STATE');
             await loadSources(userId, task);
             if (task.selection) {
-              await store.reservePackage(userId, id);
+              const reserved = await reserveTaskCredits(userId, task, task.selection.imageIds.length);
+              try { await store.reservePackage(userId, id); }
+              catch (error) { await releaseTaskCredits(userId, reserved).catch(() => {}); throw error; }
               const claimed = await store.claimTask(userId, id, ['failed'], { status: 'generating', error: null, code: null });
               if (claimed) launch(userId, id, () => generateTask(userId, id)); return claimed ?? task;
             }

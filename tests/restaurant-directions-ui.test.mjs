@@ -71,14 +71,14 @@ async function renderTask(t, analysis, directions, { taskOverrides = {}, waitFor
   return { module, ctx, task, calls, listeners, factInput, saved, settle, html: () => markup, cards: () => [...markup.matchAll(/<button type="button" role="radio"[\s\S]*?<\/button>/g)].map(match => match[0]) };
 }
 
-test('direction cards show two core photos and all twelve related photos with the real output range', async t => {
+test('direction cards show all twelve usable photos and the real output range', async t => {
   const analysis = photos(12);
   const current = { ...direction(analysis.map(item => item.imageId), ['photo-1', 'photo-2']), imageRoles: [{ imageId: 'photo-1', role: 'cover', reason: '呈现真实菜品' }, { imageId: 'photo-12', role: 'context', reason: '补充门店氛围' }] };
   const app = await renderTask(t, analysis, [current]);
-  assert.match(app.cards()[0], /核心依据 2 张 · 相关素材 12 张 · 可生成 6—12 张/);
+  assert.match(app.cards()[0], /12 张可用素材 · 可生成 6—12 张/);
   assert.match(app.cards()[0], /相关素材：照片 1、照片 2、照片 3/);
   assert.match(app.cards()[0], /照片 12/);
-  assert.match(app.html(), /根据当前可用照片推荐，可生成张数以该方向相关素材为准/);
+  assert.doesNotMatch(app.html(), /根据当前可用照片推荐，可生成张数以该方向相关素材为准/);
   assert.ok(!app.html().includes('无需再做筛选'));
   assert.match(app.html(), /<option value="9" selected>9 张<\/option>/);
   assert.match(app.html(), /<option value="12" >12 张<\/option>/);
@@ -90,8 +90,8 @@ test('shared supporting photos count independently when switching between direct
   const first = direction(analysis.map(item => item.imageId), ['photo-1', 'photo-2']);
   const second = { ...direction(analysis.slice(0, 8).map(item => item.imageId), ['photo-1']), id: 'lunch', label: '附近上班族午餐' };
   const app = await renderTask(t, analysis, [first, second]);
-  assert.match(app.cards()[0], /核心依据 2 张 · 相关素材 12 张 · 可生成 6—12 张/);
-  assert.match(app.cards()[1], /核心依据 1 张 · 相关素材 8 张 · 可生成 6—8 张/);
+  assert.match(app.cards()[0], /12 张可用素材 · 可生成 6—12 张/);
+  assert.match(app.cards()[1], /8 张可用素材 · 可生成 6—8 张/);
   assert.match(app.cards()[0], /相关素材：照片 1、/);
   assert.match(app.cards()[1], /相关素材：照片 1、/);
   app.module.handleRestaurantAction('rest-select', { dataset: { id: first.id } }, app.ctx);
@@ -103,7 +103,7 @@ test('shared supporting photos count independently when switching between direct
 
 test('legacy directions show related material without an invented core label', async t => {
   const app = await renderTask(t, photos(1), [direction(['photo-1'])]);
-  assert.match(app.cards()[0], /相关素材 1 张 · 可生成 1 张/);
+  assert.match(app.cards()[0], /1 张可用素材 · 可生成 1 张/);
   assert.ok(!app.cards()[0].includes('核心依据'));
   assert.match(app.cards()[0], /相关素材：照片 1/);
   assert.match(app.html(), /简版图文 · 1 张真实照片/);
@@ -115,7 +115,7 @@ test('direction counts exclude unusable sources and all descriptive HTML remains
   const current = { ...direction(analysis.map(item => item.imageId), ['photo-1', 'photo-2']), id: 'daily" onmouseover="alert(1)', label: '<img src=x onerror=alert(1)>', targetCustomer: '<script>顾客</script>', consumptionScene: '<b>消费场景</b>', recommendationReason: '<svg onload=alert(1)>', expectedAction: '<a href=javascript:alert(1)>到店</a>' };
   const app = await renderTask(t, analysis, [current]);
   const card = app.cards()[0];
-  assert.match(card, /核心依据 2 张 · 相关素材 11 张 · 可生成 6—11 张/);
+  assert.match(card, /11 张可用素材 · 可生成 6—11 张/);
   assert.match(card, /照片 12/);
   assert.match(card, /data-id="daily&quot; onmouseover=&quot;alert\(1\)"/);
   assert.match(card, /&lt;img src=x onerror=alert\(1\)&gt;/);

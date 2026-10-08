@@ -330,6 +330,8 @@ test("toPublicTask keeps only user-facing billing fields", () => {
     "estimatedDuration",
     "estimatedPoints",
     "isExternalUser",
+    "reservedPoints",
+    "source",
     "status",
   ]);
   assert.equal(toPublicTask(makeTask({ billing: undefined })).billing, undefined);

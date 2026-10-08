@@ -13,7 +13,7 @@ const problem = (message, status = 400, code = 'UPLOAD_INVALID') => Object.assig
 export function createImageUploads({ storageDir, now = Date.now, cleanupIntervalMs = 60_000, logger = console } = {}) {
   const root = resolve(storageDir, '.image-uploads');
   const operations = new Map();
-  let canonicalRoot, timer, disposed = false;
+  let canonicalRoot, timer, sweepPromise, disposed = false;
   const ready = (async () => {
     await mkdir(root, { recursive: true });
     const stat = await lstat(root);
@@ -158,7 +158,7 @@ export function createImageUploads({ storageDir, now = Date.now, cleanupInterval
       return output;
     });
   }
-  async function sweep() {
+  async function sweepNow() {
     await ready;
     if (disposed) return;
     for (const id of await readdir(root)) {
@@ -186,10 +186,18 @@ export function createImageUploads({ storageDir, now = Date.now, cleanupInterval
       }).catch(() => { try { logger.warn?.({ event: 'ai_upload_cleanup_pending' }); } catch {} });
     }
   }
+  function sweep() {
+    if (disposed) return Promise.resolve();
+    if (sweepPromise) return sweepPromise;
+    const work = sweepNow();
+    sweepPromise = work.finally(() => { sweepPromise = undefined; });
+    return sweepPromise;
+  }
   async function start() {
     await sweep();
-    timer = setInterval(() => { void sweep().catch(() => {}); }, Math.max(1, cleanupIntervalMs)); timer.unref?.();
+    if (disposed || timer || cleanupIntervalMs <= 0) return;
+    timer = setInterval(() => { void sweep().catch(() => {}); }, cleanupIntervalMs); timer.unref?.();
   }
-  async function dispose() { clearInterval(timer); await Promise.allSettled([...operations.values()]); disposed = true; }
+  async function dispose() { clearInterval(timer); disposed = true; await sweepPromise?.catch(() => {}); await Promise.allSettled([...operations.values()]); }
   return { ready, init, get, append, images, sweep, start, dispose };
 }

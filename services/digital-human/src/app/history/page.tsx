@@ -133,8 +133,9 @@ export default function HistoryPage() {
                           <Coins className="h-3 w-3 text-amber-400" />
                           <span>
                             {isDone && typeof (task.results?.chargedPoints ?? task.billing.chargedPoints) === "number"
-                              ? `已扣 ${(task.results?.chargedPoints ?? task.billing.chargedPoints ?? 0).toLocaleString()} 积分 (¥${(task.results?.costCny ?? task.billing.costCny ?? 0).toFixed(2)})`
-                              : `预留 ${(task.billing.estimatedPoints ?? 0).toLocaleString()} 积分`}
+                              ? `已扣 ${(task.results?.chargedPoints ?? task.billing.chargedPoints ?? 0).toLocaleString()} 积分${task.billing.source === "workspace" ? "" : ` (¥${(task.results?.costCny ?? task.billing.costCny ?? 0).toFixed(2)})`}`
+                              : task.billing.status === "released" ? "预留积分已退回"
+                                : `预留 ${(task.billing.reservedPoints ?? task.billing.estimatedPoints ?? 0).toLocaleString()} 积分`}
                           </span>
                         </span>
                       )}

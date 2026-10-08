@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -23,6 +23,9 @@ from matcher import write_json
 class Models:
     embed_url = 'test-embedding'
     llm_url = 'test-vision'
+
+    def __init__(self):
+        self.session = Mock()
 
     def embed(self, **kwargs):
         return [1., 0.]

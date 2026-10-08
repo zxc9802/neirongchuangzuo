@@ -7,7 +7,19 @@ import {
   getPresetDefaults,
   validatePresetFields,
   buildPresetPrompt,
+  imageTaskTitle,
 } from '../design/image-presets.js';
+
+test('work titles extract bounded business headings and fall back to output mode instead of production instructions', () => {
+  const prompt = buildPresetPrompt('factory-poster', getPresetDefaults('factory-poster'));
+  assert.equal(imageTaskTitle({ prompt }), '好工艺，看细节');
+  assert.equal(imageTaskTitle({ prompt: '设计3:4竖版工厂宣传海报。深海军蓝、金属灰。', generationMode: 'series' }), '统一风格套图');
+  assert.equal(imageTaskTitle({ prompt: '主标题：\n【制作约束】保留设备', generationMode: 'variations' }), '同主题多风格');
+  assert.equal(imageTaskTitle({ prompt: '主标题：   \r\n副标题：不是主标题' }), '图片作品');
+  assert.equal(imageTaskTitle({ generationMode: 'constructor' }), '图片作品');
+  assert.equal(imageTaskTitle(null), '图片作品');
+  assert.equal(imageTaskTitle({ prompt: '主标题：' + '🌱'.repeat(40) }), '🌱'.repeat(32));
+});
 
 test('preset defaults are isolated and preserve their recommended ratio and quality', () => {
   assert.equal(IMAGE_PRESETS.length, 2);

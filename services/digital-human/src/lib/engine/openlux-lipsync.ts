@@ -31,6 +31,7 @@ export interface OpenLuxLipsyncOptions {
   existingChunks?: OpenLuxChunkProgress[];
   onLog?: (msg: string) => void;
   onProviderAccepted?: () => void;
+  onProviderSubmitting?: () => void | Promise<void>;
   onJobCreated?: (info: OpenLuxJobProgress) => void;
   onResultReady?: (info: OpenLuxJobProgress) => void;
   onChunkProgress?: (chunk: OpenLuxChunkProgress) => void;
@@ -155,6 +156,7 @@ export class OpenLuxLipsyncAdapter {
           signal: controller.signal,
           redirect: "error",
         });
+        if (attempts === 1) return resp;
         if (resp.status >= 500 || resp.status === 429) {
           lastError = new Error(`HTTP ${resp.status}`);
           await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
@@ -209,6 +211,7 @@ export class OpenLuxLipsyncAdapter {
       });
 
       onLog(`[PixVerse] 正在提交 pixverse-lipsync 对口型任务...`);
+      await options.onProviderSubmitting?.();
       const createResp = await this.fetchWithRetry(`${baseUrl}/openapi/v2/video/lip_sync/generate`, {
         method: "POST",
         headers: this.headers(apiKey, { "Content-Type": "application/json" }),
@@ -217,8 +220,15 @@ export class OpenLuxLipsyncAdapter {
           video_media_id: videoMediaId,
           audio_media_id: audioMediaId,
         }),
-      });
-      const created = this.assertOk(await this.parseJson(createResp), "创建对口型任务");
+      }, options.onProviderSubmitting ? 1 : 4);
+      if (createResp.status >= 400 && createResp.status < 500) {
+        throw Object.assign(new Error(`创建 PixVerse 对口型任务被拒绝 (${createResp.status})`), { code: "LIPSYNC_GENERATION_FAILED" });
+      }
+      const parsed = await this.parseJson(createResp);
+      if (typeof parsed.ErrCode === "number" && parsed.ErrCode !== 0) {
+        throw Object.assign(new Error("创建 PixVerse 对口型任务被拒绝"), { code: "LIPSYNC_GENERATION_FAILED" });
+      }
+      const created = this.assertOk(parsed, "创建对口型任务");
       options.onProviderAccepted?.();
       lipsyncId = String(created.video_id || "");
       if (!lipsyncId) {
@@ -263,10 +273,10 @@ export class OpenLuxLipsyncAdapter {
           break;
         }
         if (status === 7) {
-          throw new Error("[PixVerse] 内容审核未通过");
+          throw Object.assign(new Error("[PixVerse] 内容审核未通过"), { code: "LIPSYNC_GENERATION_FAILED" });
         }
         if (status === 8) {
-          throw new Error(`[PixVerse] 对口型生成失败${polled.ErrMsg ? `: ${polled.ErrMsg}` : ""}`);
+          throw Object.assign(new Error(`[PixVerse] 对口型生成失败${polled.ErrMsg ? `: ${polled.ErrMsg}` : ""}`), { code: "LIPSYNC_GENERATION_FAILED" });
         }
         const remainMin = Math.max(1, Math.round((pollDeadline - Date.now()) / 60000));
         onLog(`[PixVerse] 正在渲染中 (轮询第 ${pollCount} 次，最长还等 ${remainMin} 分钟)...`);
@@ -434,6 +444,7 @@ export class OpenLuxLipsyncAdapter {
           resumeJobId: savedChunk?.lipsyncId,
           onLog,
           onProviderAccepted: options.onProviderAccepted,
+          onProviderSubmitting: options.onProviderSubmitting,
           onJobCreated: (info) => {
             options.onJobCreated?.(info);
             options.onChunkProgress?.({

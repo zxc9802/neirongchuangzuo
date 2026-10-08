@@ -59,7 +59,7 @@ async function restaurantPage(t, { count = 30, interruptBatch = false } = {}) {
   const files = originals(count);
   const select = () => { listeners.get('restaurant-file-input:change')({ target: { files, value: '' } }); listeners.get('restaurant-rights:change')({ target: { checked: true } }); };
   t.after(() => { module.disposeRestaurant(); URL.createObjectURL = originalCreate; URL.revokeObjectURL = originalRevoke; for (const [key, value] of Object.entries(originalGlobals)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value; });
-  module.renderRestaurant(ctx); module.bindRestaurant(ctx); await settle(() => markup.includes('今日剩余'));
+  module.renderRestaurant(ctx); module.bindRestaurant(ctx); await settle(() => markup.includes('竹里面馆 · 武汉'));
   return { module, ctx, calls, tasks, saved, files, listeners, select, settle, markup: () => markup };
 }
 

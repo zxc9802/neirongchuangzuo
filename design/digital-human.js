@@ -1,6 +1,9 @@
 import { digitalHumanApi as api } from './digital-human-api.js';
 import { accountStorageKey } from './account-storage.js';
 
+import { videoPoints, estimatedSpeechSeconds, videoCreditEstimateText, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask, billingPointsText } from './workspace-credits.js';
+let unsubscribeCredits = null;
+const speechEstimate = () => estimatedSpeechSeconds(state.script, state.toneProfile === 'high' ? 1.2 : 1);
 const STORAGE_KEY = accountStorageKey('store-studio:digital-human:v1');
 const state = {
   hydrated: false, loaded: false, loading: false, status: null, session: null,
@@ -88,7 +91,7 @@ function statusMarkup(ctx) {
 
 function materialsMarkup(ctx) {
   const avatar = currentAvatar(), cover = safeUrl(avatar?.coverUrl);
-  return `<div class="dh-field-heading"><label>出镜形象</label><span>01</span></div>${avatar ? `<div class="dh-selected-avatar"><button class="dh-selected-avatar-cover" data-action="dh-preview-media" data-kind="avatar" data-id="${ctx.esc(avatar.id)}" aria-label="预览形象：${ctx.esc(avatar.name)}">${cover ? `<img src="${ctx.esc(cover)}" alt="" loading="lazy">` : ctx.icon('avatar')}<span class="dh-cover-play">${ctx.icon('play')}</span></button><div class="dh-selected-avatar-copy"><strong>${ctx.esc(avatar.name)}</strong><small>${duration(avatar.durationSeconds)} · 已选中</small>${ctx.button('dh-browse-avatars', '更换形象', 'dh-link-button')}</div></div><div class="dh-avatar-bottom">${uploadControl(ctx, 'avatar', 'dh-small-upload', '上传新形象')}<span>保留原视频人物与背景</span></div>` : `${uploadControl(ctx, 'avatar', 'dh-avatar-upload', '上传口播视频')}<div class="dh-avatar-guidance"><strong>让你的形象，说新的内容</strong><p>上传正面清晰的口播视频<br>保留人物形象与真实背景</p></div>${ctx.button('dh-browse-avatars', ctx.icon('folder') + '从素材库选择', 'dh-browse-button')}`}<p class="dh-upload-note">MP4 / MOV 等视频，最大 500 MB</p><div id="dh-upload-progress">${uploadProgress(ctx, 'avatar')}</div>`;
+  return `<div class="dh-field-heading"><label>出镜形象</label></div>${avatar ? `<div class="dh-selected-avatar"><button class="dh-selected-avatar-cover" data-action="dh-preview-media" data-kind="avatar" data-id="${ctx.esc(avatar.id)}" aria-label="预览形象：${ctx.esc(avatar.name)}">${cover ? `<img src="${ctx.esc(cover)}" alt="" loading="lazy">` : ctx.icon('avatar')}<span class="dh-cover-play">${ctx.icon('play')}</span></button><div class="dh-selected-avatar-copy"><strong>${ctx.esc(avatar.name)}</strong><small>${duration(avatar.durationSeconds)} · 已选中</small>${ctx.button('dh-browse-avatars', '更换形象', 'dh-link-button')}</div></div><div class="dh-avatar-bottom">${uploadControl(ctx, 'avatar', 'dh-small-upload', '上传新形象')}</div>` : `${uploadControl(ctx, 'avatar', 'dh-avatar-upload', '上传口播视频')}<div class="dh-avatar-guidance"><p>正面清晰的口播视频</p></div>${ctx.button('dh-browse-avatars', ctx.icon('folder') + '从素材库选择', 'dh-browse-button')}`}<p class="dh-upload-note">MP4 / MOV 等视频，最大 500 MB</p><div id="dh-upload-progress">${uploadProgress(ctx, 'avatar')}</div>`;
 }
 
 function libraryTabsMarkup(ctx) {
@@ -118,8 +121,8 @@ function libraryStateMarkup(ctx) {
   if (library.error) return `<div class="dh-library-message is-error" role="alert"><p>${ctx.esc(library.error)}</p>${ctx.button('dh-library-more', '重新加载', 'dh-outline-button')}</div>`;
   if (library.loading || !library.loaded) return `<div class="dh-library-message" role="status"><span class="dh-loading-dot"></span>${library.items.length ? '正在加载更多…' : '正在读取素材和作品…'}</div>`;
   if (!library.items.length) {
-    const text = library.kind === 'tasks' ? ['还没有生成作品', '在上方准备形象、声音和文案，第一条口播就从这里开始。'] : ['把你的形象，留在这里', '上传一段口播视频，就能重复使用这个形象制作新的宣传内容。'];
-    return `<div class="dh-library-empty">${ctx.icon(library.kind === 'tasks' ? 'video' : 'folder')}<strong>${text[0]}</strong><p>${text[1]}</p>${library.kind !== 'tasks' ? uploadControl(ctx, 'avatar', 'dh-outline-button', '上传第一个视频形象') : ctx.button('dh-scroll-generator', '开始准备口播', 'dh-outline-button')}</div>`;
+    const text = library.kind === 'tasks' ? ['还没有生成作品', ''] : ['暂无视频形象', ''];
+    return `<div class="dh-library-empty">${ctx.icon(library.kind === 'tasks' ? 'video' : 'folder')}<strong>${text[0]}</strong>${library.kind !== 'tasks' ? uploadControl(ctx, 'avatar', 'dh-outline-button', '上传第一个视频形象') : ctx.button('dh-scroll-generator', '开始准备口播', 'dh-outline-button')}</div>`;
   }
   return library.hasMore ? `<div class="dh-library-message">${ctx.button('dh-library-more', '加载更多', 'dh-outline-button')}</div>` : '<div class="dh-library-message dh-library-end">已经看到全部内容了</div>';
 }
@@ -157,16 +160,16 @@ function engineMarkup(ctx) {
 function generateHint() {
   if (state.errors.session || state.errors.status) return '服务连接异常，请先重试';
   if (!state.status) return '正在连接生成服务';
-  if (!state.status.ready) return '生成服务待配置，仍可上传素材和编辑文案';
+  if (!state.status.ready) return '生成服务待配置';
   if (state.submitting) return '正在提交，请稍候';
   if (hasRunningTask()) return '当前视频正在制作，请等待完成';
   if (state.upload) return '请等待素材上传完成';
   if (!currentAvatar()) return '先添加并选择一个视频形象';
   if (!safeUrl(currentVoice()?.audioUrl)) return '请选择可用的口播声音';
-  if (!state.script.trim()) return '写几句话，让形象开口表达';
+  if (!state.script.trim()) return '请填写口播文案';
   if (state.script.length > 5000) return '口播稿请控制在 5000 字以内';
   if (!state.status.engines?.some(item => item.id === state.engine && item.available)) return '请选择可用的生成方案';
-  return '';
+  return creditInsufficiency(videoPoints(speechEstimate()));
 }
 
 
@@ -174,15 +177,15 @@ export function renderDigitalHuman(ctx) {
   hydrate(ctx);
   const { icon, esc, button, storeInfo } = ctx;
   const hint = generateHint();
-  return `<header class="studio-header"><div class="studio-heading"><span class="studio-mode-icon">${icon('avatar')}</span><div><h1>数字人口播</h1><p>用你的形象，讲清产品、服务与合作</p></div></div><div class="studio-header-actions">${button('store', icon('store') + `<span>${esc(storeInfo.name || '商家资料')}</span>`, 'studio-text-button')}${button('prompts', icon('list') + '<span>我的草稿</span>', 'studio-quiet-button')}${button('dh-save-draft', icon('save') + '<span>保存草稿</span>', 'studio-quiet-button')}</div></header>
+  return `<header class="studio-header"><div class="studio-heading"><span class="studio-mode-icon">${icon('avatar')}</span><div><h1>数字人口播</h1></div></div><div class="studio-header-actions">${button('store', icon('store') + `<span>${esc(storeInfo.name || '商家资料')}</span>`, 'studio-text-button')}${button('prompts', icon('list') + '<span>我的草稿</span>', 'studio-quiet-button')}${button('dh-save-draft', icon('save') + '<span>保存草稿</span>', 'studio-quiet-button')}</div></header>
   <div class="dh-workspace">
     <section class="dh-generator" id="dh-generator" aria-labelledby="dh-generator-title">
       <div class="dh-generator-heading"><div><h2 id="dh-generator-title">制作口播视频</h2></div><span class="dh-generator-type">${icon('avatar')}视频数字人</span></div>
-      <div class="dh-composer"><div class="dh-avatar-setting" id="dh-materials">${materialsMarkup(ctx)}</div><div class="dh-composer-main">${ctx.renderBusinessEntry?.('avatar') || ''}<div class="dh-field-heading"><label for="dh-script">口播文案</label><span>02 · 想对客户说些什么</span></div><div class="dh-script-box"><textarea id="dh-script" maxlength="5000" placeholder="先整理宣传信息，或直接写口播稿。&#10;介绍真实产品、服务或加工业务，并说明到店或询价方式。">${esc(state.script)}</textarea><div><span id="dh-script-duration">${state.script.trim() ? `约 ${Math.max(1, Math.round(state.script.replace(/\s/g, '').length / 4))} 秒口播` : '一次讲清一个主题，让表达更自然'}</span><small id="dh-script-count">${state.script.length} / 5000</small></div></div><div class="dh-script-ideas"><span>宣传方案</span>${button('dh-template', '使用方案口播稿', '', 'data-template="brief"')}${button('business-open', '重新整理宣传信息', '', 'data-mode="avatar"')}</div><section id="dh-voice" class="dh-voice-section" aria-label="口播声音">${voiceMarkup(ctx)}</section></div></div>
-      <details class="dh-advanced"><summary>${icon('settings')}高级设置<span>语速 · 画面适配 · 表达强度</span>${icon('chevron')}</summary><div class="dh-advanced-body"><label class="studio-field">生成方案<select id="dh-engine" data-dh-option="engine">${engineMarkup(ctx)}</select></label><label class="studio-field">语速<select data-dh-option="toneProfile"><option value="low" ${state.toneProfile === 'low' ? 'selected' : ''}>自然（1.0×）</option><option value="high" ${state.toneProfile === 'high' ? 'selected' : ''}>提速（1.2×）</option></select></label><label class="studio-field">视频适配<select data-dh-option="videoFit"><option value="smart" ${state.videoFit === 'smart' ? 'selected' : ''}>智能适配</option><option value="preserve" ${state.videoFit === 'preserve' ? 'selected' : ''}>保留原视频</option></select></label><div class="dh-emotion-field"><label class="dh-emotion-label" for="dh-emotion">表达强度<output id="dh-emotion-value">${Math.round(state.emotionIntensity * 100)}%</output></label><input id="dh-emotion" data-dh-option="emotionIntensity" type="range" min="0" max="1" step="0.05" value="${state.emotionIntensity}" aria-label="表达强度"><div class="dh-range-labels"><span>平稳</span><span>鲜明</span></div></div></div></details>
-      <footer class="dh-generate-footer"><div class="dh-generation-note"><div id="dh-service-status">${statusMarkup(ctx)}</div><p id="dh-generate-hint">${esc(hint || '形象、声音和文案已准备好')}</p></div>${button('dh-generate', icon('star') + '<span>生成口播视频</span>', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}</footer><div id="dh-task-status">${taskMarkup(ctx)}</div>
+      <div class="dh-composer"><div class="dh-avatar-setting" id="dh-materials">${materialsMarkup(ctx)}</div><div class="dh-composer-main">${ctx.renderBusinessEntry?.('avatar') || ''}<div class="dh-field-heading"><label for="dh-script">口播文案</label></div><div class="dh-script-box"><textarea id="dh-script" maxlength="5000" placeholder="填写口播文案">${esc(state.script)}</textarea><div><span id="dh-script-duration">${state.script.trim() ? `约 ${Math.max(1, Math.round(state.script.replace(/\s/g, '').length / 4))} 秒口播` : ''}</span><small id="dh-script-count">${state.script.length} / 5000</small></div></div><div class="dh-script-ideas"><span>宣传方案</span>${button('dh-template', '使用方案口播稿', '', 'data-template="brief"')}${button('business-open', '重新整理宣传信息', '', 'data-mode="avatar"')}</div><section id="dh-voice" class="dh-voice-section" aria-label="口播声音">${voiceMarkup(ctx)}</section></div></div>
+      <details class="dh-advanced"><summary>${icon('settings')}高级设置${icon('chevron')}</summary><div class="dh-advanced-body"><label class="studio-field">生成方案<select id="dh-engine" data-dh-option="engine">${engineMarkup(ctx)}</select></label><label class="studio-field">语速<select data-dh-option="toneProfile"><option value="low" ${state.toneProfile === 'low' ? 'selected' : ''}>自然（1.0×）</option><option value="high" ${state.toneProfile === 'high' ? 'selected' : ''}>提速（1.2×）</option></select></label><label class="studio-field">视频适配<select data-dh-option="videoFit"><option value="smart" ${state.videoFit === 'smart' ? 'selected' : ''}>智能适配</option><option value="preserve" ${state.videoFit === 'preserve' ? 'selected' : ''}>保留原视频</option></select></label><div class="dh-emotion-field"><label class="dh-emotion-label" for="dh-emotion">表达强度<output id="dh-emotion-value">${Math.round(state.emotionIntensity * 100)}%</output></label><input id="dh-emotion" data-dh-option="emotionIntensity" type="range" min="0" max="1" step="0.05" value="${state.emotionIntensity}" aria-label="表达强度"><div class="dh-range-labels"><span>平稳</span><span>鲜明</span></div></div></div></details>
+      <footer class="dh-generate-footer"><div class="dh-generation-note"><div id="dh-service-status">${statusMarkup(ctx)}</div><p id="dh-credit-estimate" class="credit-estimate">${esc(videoCreditEstimateText(speechEstimate()))}</p><p id="dh-generate-hint">${esc(hint || '')}</p></div>${button('dh-generate', icon('star') + '<span>生成口播视频</span>', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}</footer><div id="dh-task-status">${taskMarkup(ctx)}</div>
     </section>
-    <section class="dh-library" id="dh-library" aria-labelledby="dh-library-title"><div class="dh-library-heading"><div><h2 id="dh-library-title">我的创作</h2><p>形象素材与每一条口播，都在这里</p></div><div class="dh-library-tools">${uploadControl(ctx, 'avatar', 'dh-outline-button', '上传视频')}${button('dh-library-refresh', refreshIcon, 'dh-refresh-button', 'aria-label="刷新素材和作品" title="刷新素材和作品"')}</div></div><div class="dh-library-tabs" id="dh-library-tabs" role="tablist" aria-label="素材与作品分类">${libraryTabsMarkup(ctx)}</div><div class="dh-library-grid" id="dh-library-grid" role="tabpanel" aria-labelledby="dh-tab-${state.library.kind}">${state.library.items.map(item => libraryItemMarkup(item, ctx)).join('')}</div><div id="dh-library-state">${libraryStateMarkup(ctx)}</div><div class="dh-library-sentinel" id="dh-library-sentinel" aria-hidden="true"></div></section>
+    <section class="dh-library" id="dh-library" aria-labelledby="dh-library-title"><div class="dh-library-heading"><div><h2 id="dh-library-title">我的创作</h2><p>成品保留 3 天，请及时下载</p></div><div class="dh-library-tools">${uploadControl(ctx, 'avatar', 'dh-outline-button', '上传视频')}${button('dh-library-refresh', refreshIcon, 'dh-refresh-button', 'aria-label="刷新素材和作品" title="刷新素材和作品"')}</div></div><div class="dh-library-tabs" id="dh-library-tabs" role="tablist" aria-label="素材与作品分类">${libraryTabsMarkup(ctx)}</div><div class="dh-library-grid" id="dh-library-grid" role="tabpanel" aria-labelledby="dh-tab-${state.library.kind}">${state.library.items.map(item => libraryItemMarkup(item, ctx)).join('')}</div><div id="dh-library-state">${libraryStateMarkup(ctx)}</div><div class="dh-library-sentinel" id="dh-library-sentinel" aria-hidden="true"></div></section>
   </div>`;
 }
 
@@ -200,7 +203,9 @@ function patchGenerate() {
     button.querySelector('span').textContent = state.submitting ? '正在提交…' : '生成口播视频';
   }
   const note = root.querySelector('#dh-generate-hint');
-  if (note) note.textContent = hint || '形象、声音和文案已准备好';
+  if (note) note.textContent = hint || '';
+  const estimate = root.querySelector('#dh-credit-estimate');
+  if (estimate) estimate.textContent = videoCreditEstimateText(speechEstimate());
   setRegion('dh-service-status', statusMarkup(context));
 }
 
@@ -258,6 +263,7 @@ function normalizeSelections(libraryOnly = false) {
 
 function mergeItem(collection, item) {
   if (!item?.id) return;
+  if (collection === 'tasks') observeCreditTask(item);
   const index = state[collection].findIndex(value => value.id === item.id);
   if (index === -1) state[collection].push(item); else state[collection][index] = item;
 }
@@ -392,7 +398,7 @@ function updateScript(value, ctx = context) {
   const textarea = root.querySelector('#dh-script');
   if (textarea && textarea.value !== state.script) textarea.value = state.script;
   root.querySelector('#dh-script-count').textContent = `${state.script.length} / 5000`;
-  root.querySelector('#dh-script-duration').textContent = state.script.trim() ? `约 ${Math.max(1, Math.round(state.script.replace(/\s/g, '').length / 4))} 秒口播` : '一次讲清一个主题，让表达更自然';
+  root.querySelector('#dh-script-duration').textContent = state.script.trim() ? `约 ${Math.max(1, Math.round(state.script.replace(/\s/g, '').length / 4))} 秒口播` : '';
   patchGenerate();
 }
 
@@ -441,6 +447,7 @@ export function bindDigitalHuman(ctx) {
   viewVersion += 1;
   cardMarkupCache.clear();
   context = ctx;
+  unsubscribeCredits?.(); unsubscribeCredits = subscribeWorkspaceCredits(patchGenerate);
   root = document.querySelector('.avatar-studio');
   if (!root) return;
   root.addEventListener('input', event => {
@@ -470,6 +477,7 @@ export function bindDigitalHuman(ctx) {
 }
 
 export function disposeDigitalHuman() {
+  unsubscribeCredits?.(); unsubscribeCredits = null;
   viewVersion += 1; libraryVersion += 1;
   libraryObserver?.disconnect(); libraryObserver = null;
   state.loading = false; state.library.loading = false; polling = false;
@@ -520,7 +528,7 @@ function showTemplate(kind, ctx) {
 }
 
 function showVoices(ctx) {
-  ctx.openModal('我的声音', '选择参考声音，用熟悉的声音介绍你的生意。', `<div class="dh-voice-library">${state.voices.length ? state.voices.map(voice => `<div class="dh-library-voice"><div><strong>${ctx.esc(voice.name)}</strong><span>${voice.isDefault ? '默认声音' : '我的参考声音'}</span></div>${safeUrl(voice.audioUrl) ? `<audio controls preload="none" src="${ctx.esc(safeUrl(voice.audioUrl))}" aria-label="试听${ctx.esc(voice.name)}"></audio>` : '<p class="muted">此声音尚未配置</p>'}<div class="dh-library-voice-actions">${ctx.button('dh-select-voice', voice.id === state.voiceId ? '已选中' : '使用这个声音', 'secondary', `data-id="${ctx.esc(voice.id)}" ${safeUrl(voice.audioUrl) ? '' : 'disabled'}`)}${voice.canManage !== false && !voice.isDefault ? ctx.button('dh-delete-voice', '删除', 'dh-link-button dh-delete-link', `data-id="${ctx.esc(voice.id)}"`) : ''}</div></div>`).join('') : '<p class="muted">还没有参考声音，请在口播内容中上传一段音频。</p>'}</div><footer class="modal-actions">${ctx.button('cancel', '完成', 'primary')}</footer>`);
+  ctx.openModal('我的声音', '', `<div class="dh-voice-library">${state.voices.length ? state.voices.map(voice => `<div class="dh-library-voice"><div><strong>${ctx.esc(voice.name)}</strong><span>${voice.isDefault ? '默认声音' : '我的参考声音'}</span></div>${safeUrl(voice.audioUrl) ? `<audio controls preload="none" src="${ctx.esc(safeUrl(voice.audioUrl))}" aria-label="试听${ctx.esc(voice.name)}"></audio>` : '<p class="muted">此声音尚未配置</p>'}<div class="dh-library-voice-actions">${ctx.button('dh-select-voice', voice.id === state.voiceId ? '已选中' : '使用这个声音', 'secondary', `data-id="${ctx.esc(voice.id)}" ${safeUrl(voice.audioUrl) ? '' : 'disabled'}`)}${voice.canManage !== false && !voice.isDefault ? ctx.button('dh-delete-voice', '删除', 'dh-link-button dh-delete-link', `data-id="${ctx.esc(voice.id)}"`) : ''}</div></div>`).join('') : '<p class="muted">还没有参考声音，请在口播内容中上传一段音频。</p>'}</div><footer class="modal-actions">${ctx.button('cancel', '完成', 'primary')}</footer>`);
 }
 
 function confirmDelete(kind, id, ctx) {
@@ -555,7 +563,7 @@ function renameAvatar(id, ctx) {
   const avatar = state.avatars.find(item => item.id === id);
   if (!avatar) return;
   const version = viewVersion;
-  ctx.openModal('重命名视频形象', '用容易辨认的名字，方便下次继续使用。', `<form id="dh-rename-form"><label class="field">形象名称<input name="name" required maxlength="80" value="${ctx.esc(avatar.name)}" autocomplete="off"></label><p id="dh-rename-error" class="dh-form-error" role="alert"></p><footer class="modal-actions">${ctx.button('cancel', '取消', 'secondary', 'type="button"')}<button class="primary" type="submit">保存名称</button></footer></form>`);
+  ctx.openModal('重命名视频形象', '', `<form id="dh-rename-form"><label class="field">形象名称<input name="name" required maxlength="80" value="${ctx.esc(avatar.name)}" autocomplete="off"></label><p id="dh-rename-error" class="dh-form-error" role="alert"></p><footer class="modal-actions">${ctx.button('cancel', '取消', 'secondary', 'type="button"')}<button class="primary" type="submit">保存名称</button></footer></form>`);
   document.querySelector('#dh-rename-form').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.target;
@@ -586,7 +594,7 @@ function showTaskDetails(id, ctx) {
   const completed = task.status === 'completed';
   const video = completed && safeUrl(task.results?.finalVideoUrl);
   const audio = completed && safeUrl(task.results?.exactAudioUrl);
-  ctx.openModal('口播任务详情', `${shortDate(task.createdAt)} · ${taskLabel(task)}`, `<div class="dh-task-detail">${audio ? `<h3>口播配音</h3><audio controls preload="none" src="${ctx.esc(audio)}" aria-label="试听生成的口播配音"></audio>` : ''}<h3>口播文案</h3><p>${ctx.esc(task.inputs?.scriptText || '').replace(/\n/g, '<br>')}</p>${task.error ? `<div class="dh-inline-error">${ctx.esc(task.error)}</div>` : ''}<h3>处理记录</h3><ol>${(task.logs || []).slice(-12).map(log => `<li><time>${new Date(log.timestamp).toLocaleTimeString('zh-CN')}</time><span>${ctx.esc(log.message)}</span></li>`).join('') || '<li>任务已登记，暂时没有处理记录。</li>'}</ol></div><footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${audio ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'audio'))}" download>下载配音</a>` : ''}${video ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'video'))}" download>下载视频</a>` : ''}${task.status === 'failed' && task.recoverable ? ctx.button('dh-recover-task', '继续获取成片', 'secondary', `data-id="${ctx.esc(id)}" ${state.busy.has(id) ? 'disabled' : ''}`) : ''}${ctx.button('dh-reuse-task', '复用这份文案', 'primary', `data-id="${ctx.esc(id)}"`)}</footer>`, true);
+  ctx.openModal('口播任务详情', `${shortDate(task.createdAt)} · ${taskLabel(task)}`, `<div class="dh-task-detail">${billingPointsText(task) ? `<p class="credit-estimate">${ctx.esc(billingPointsText(task))}</p>` : ''}${audio ? `<h3>口播配音</h3><audio controls preload="none" src="${ctx.esc(audio)}" aria-label="试听生成的口播配音"></audio>` : ''}<h3>口播文案</h3><p>${ctx.esc(task.inputs?.scriptText || '').replace(/\n/g, '<br>')}</p>${task.error ? `<div class="dh-inline-error">${ctx.esc(task.error)}</div>` : ''}<h3>处理记录</h3><ol>${(task.logs || []).slice(-12).map(log => `<li><time>${new Date(log.timestamp).toLocaleTimeString('zh-CN')}</time><span>${ctx.esc(log.message)}</span></li>`).join('') || '<li>任务已登记，暂时没有处理记录。</li>'}</ol></div><footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${audio ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'audio'))}" download>下载配音</a>` : ''}${video ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'video'))}" download>下载视频</a>` : ''}${task.status === 'failed' && task.recoverable ? ctx.button('dh-recover-task', '继续获取成片', 'secondary', `data-id="${ctx.esc(id)}" ${state.busy.has(id) ? 'disabled' : ''}`) : ''}${ctx.button('dh-reuse-task', '复用这份文案', 'primary', `data-id="${ctx.esc(id)}"`)}</footer>`, true);
   const dialog = document.querySelector('dialog[open]'), player = dialog?.querySelector('audio');
   dialog?.addEventListener('close', () => { if (player) { player.pause(); player.removeAttribute('src'); player.load(); } }, { once: true });
 }
@@ -608,6 +616,7 @@ async function generateTask(ctx) {
     state.library.kind = 'tasks'; await loadLibrary(true);
     schedulePoll(1500);
   } finally {
+    void refreshWorkspaceCredits({ afterCurrent: true });
     state.submitting = false;
     if (isCurrentView(version)) patchTask();
   }
@@ -617,7 +626,7 @@ async function actionAsync(action, el, ctx) {
   const id = el.dataset.id;
   const version = viewVersion;
   if (action === 'dh-generate') await generateTask(ctx);
-  else if (action === 'dh-reload') await loadData();
+  else if (action === 'dh-reload') { void refreshWorkspaceCredits(); await loadData(); }
   else if (action === 'dh-library-more') await loadLibrary(!state.library.loaded);
   else if (action === 'dh-library-refresh') await loadLibrary(true);
   else if (action === 'dh-library-tab') {

@@ -44,7 +44,9 @@ test('production launcher binds PORT publicly, starts a private production backe
   await mkdir(join(service, 'node_modules/next/dist/bin'), { recursive: true });
   await mkdir(join(service, '.next'), { recursive: true });
   await writeFile(join(root, 'scripts/start.mjs'), await readFile(new URL('../scripts/start.mjs', import.meta.url)));
-  await writeFile(join(root, 'preview.mjs'), `export { createPreviewServer } from ${JSON.stringify(new URL('../preview.mjs', import.meta.url).href)};`);
+  await writeFile(join(root, 'preview.mjs'), `import { createPreviewServer as createRealServer } from ${JSON.stringify(new URL('../preview.mjs', import.meta.url).href)};
+    export function createPreviewServer(options) { return createRealServer({ ...options,
+      credits: { ready: Promise.resolve(), close: async () => {} } }); }`);
   await writeFile(join(service, '.next/BUILD_ID'), 'test-build');
   await writeFile(join(service, 'node_modules/next/dist/bin/next'), `
     const http = require('node:http');
@@ -82,6 +84,7 @@ test('production launcher binds PORT publicly, starts a private production backe
   assert.match(output, new RegExp('0\\.0\\.0\\.0:' + port));
   assert.equal((await fetch(base + '/', { redirect: 'manual' })).status, 302);
   assert.equal((await fetch(base + '/api/ai/images')).status, 401);
+  assert.equal((await fetch(base + '/api/workspace/credits')).status, 401);
   assert.deepEqual(await (await fetch(base + '/api/probe')).json(), {mode:'start',host:'127.0.0.1',port:backendPort,nodeEnv:'production'});
   await fetch(base + '/api/crash');
   assert.equal((await exited)[0], 1);

@@ -5,6 +5,7 @@ import {
   readStandaloneSession, registerAccount, revokeSession, standaloneCookieOptions,
 } from "@/lib/server/standalone-auth";
 import { logServerError } from "@/lib/server/safe-log";
+import { workspaceCreditsSnapshot } from "@/lib/server/workspace-credits";
 
 export const runtime = "nodejs";
 const json = (body: unknown, status = 200) => NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
@@ -65,7 +66,13 @@ export async function POST(request: NextRequest, context: Context) {
         ? await registerAccount(account, body.nickname, body.password, body.inviteCode)
         : await loginAccount(account, body.password);
     }
-    const response = json({ success: true });
+    let credits;
+    try {
+      const identity = await readStandaloneSession(session.token);
+      if (identity?.user.id) credits = await workspaceCreditsSnapshot(identity.user.id);
+    }
+    catch (error) { logServerError("auth.credits_unavailable", error); }
+    const response = json({ success: true, credits });
     response.cookies.set(AUTH_COOKIE, session.token, standaloneCookieOptions(session.expiresAt));
     return response;
   } catch (error) {

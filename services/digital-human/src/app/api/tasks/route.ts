@@ -1,6 +1,6 @@
 import { logServerError } from "@/lib/server/safe-log";
 import { NextRequest, NextResponse } from "next/server";
-import { TaskStore } from "@/lib/store/task-store";
+import { TaskStore, type TaskItem } from "@/lib/store/task-store";
 import { runDigitalHumanPipeline } from "@/lib/engine/pipeline";
 import { AvatarStore } from "@/lib/store/avatar-store";
 import { VoiceStore } from "@/lib/store/voice-store";
@@ -9,6 +9,8 @@ import type { MainAppUser } from "@/lib/main-app-sso";
 import {
   isExternallyBilledUser,
   reserveMainAppCredits,
+  releaseMainAppCredits,
+  estimateScriptDuration,
   MainAppBillingError,
   POINTS_PER_SECOND,
   CNY_PER_SECOND,
@@ -22,6 +24,8 @@ import {
 } from "@/lib/access-control";
 import { isOwnedUploadSource } from "@/lib/server/upload-policy";
 import { isTrustedStoredMediaSource } from "@/lib/server/media-response";
+import { currentTaskWorker } from "@/lib/server/task-worker";
+import { reconcileWorkspaceTask } from "@/lib/server/workspace-task-recovery";
 
 export async function GET(req: NextRequest) {
   const access = await resolveAccessContext(req);
@@ -34,13 +38,16 @@ export async function GET(req: NextRequest) {
     ? tasks.filter((task) => task.userId === access.userId)
     : tasks;
   const completedOnly = req.nextUrl.searchParams.get("completed") === "true";
-  const publicTasks = visibleTasks.map(toPublicTask).filter(task => !task.outputExpired &&
+  const recoveredTasks = await Promise.all(visibleTasks.map(task => reconcileWorkspaceTask(task).catch(() => task)));
+  const publicTasks = recoveredTasks.map(toPublicTask).filter(task => !task.outputExpired &&
     (!completedOnly || Boolean(task.status === "completed" && task.results.downloadUrl)));
   return NextResponse.json({ tasks: publicTasks }, { headers: { "Cache-Control": "private, no-store" } });
 }
 
 export async function POST(req: NextRequest) {
   let releaseSlot: (() => void) | undefined;
+  let creationReservation: { userId: string; requestId: string; source: "workspace" | "main-app" | "internal"; sessionToken?: string } | undefined;
+  let workspaceTask: TaskItem | undefined;
   try {
     const body = await req.json();
     const {
@@ -116,29 +123,26 @@ export async function POST(req: NextRequest) {
     // Bound paid attempts independently of whether the task later refunds or is deleted.
     if (isExternallyBilledUser(user) || user.billingAudience === "standalone") releaseSlot = acquireGenerationSlot(user.id!);
     const estimatedDuration = estimateReservationDuration(scriptText);
-    const reservation = await reserveMainAppCredits({
-      user,
-      sessionToken: session?.token,
-      estimatedDuration,
-    });
-
-    const task = TaskStore.create({
+    const createTask = (reservation: Awaited<ReturnType<typeof reserveMainAppCredits>>, reserving = false) => TaskStore.create({
+      id: reservation.requestId,
+      executionOwner: reservation.source === "workspace" ? currentTaskWorker() : undefined,
       userId: user.id,
       userAccount: user.account,
       status: "pending",
       step: "idle",
       progress: 0,
       billing: {
+        source: reservation.source,
         isExternalUser: reservation.chargeRequired,
-        ratePerSecond: POINTS_PER_SECOND,
-        costCnyPerSecond: CNY_PER_SECOND,
+        ratePerSecond: reservation.source === "workspace" ? 333 / 30 : POINTS_PER_SECOND,
+        costCnyPerSecond: reservation.source === "workspace" ? 0 : CNY_PER_SECOND,
         requestId: reservation.requestId,
         estimatedDuration,
         estimatedPoints: reservation.requiredPoints,
         reservedPoints: reservation.reservedPoints,
         costCny: reservation.costCny,
         pointsBalanceBefore: reservation.pointsBalance,
-        status: reservation.chargeRequired ? "reserved" : "not_applicable",
+        status: reserving ? "reserving" : reservation.chargeRequired ? "reserved" : "not_applicable",
       },
       inputs: {
         outputType: avatar ? "video" : "audio",
@@ -156,6 +160,22 @@ export async function POST(req: NextRequest) {
       },
       results: {},
     });
+    const reservation = await reserveMainAppCredits({
+      user, sessionToken: session?.token, estimatedDuration,
+      minimumDuration: estimateScriptDuration(scriptText),
+      beforeReserve: pending => {
+        workspaceTask = createTask(pending, true);
+        creationReservation = { userId: user.id!, requestId: pending.requestId, source: "workspace" };
+      },
+    });
+    if (reservation.chargeRequired) creationReservation = { userId: user.id!, requestId: reservation.requestId,
+      source: reservation.source, sessionToken: session?.token };
+    const task = workspaceTask
+      ? TaskStore.update(workspaceTask.id, { billing: { ...workspaceTask.billing!, status: "reserved",
+        reservedPoints: reservation.reservedPoints, pointsBalanceBefore: reservation.pointsBalance } })
+      : createTask(reservation);
+    if (!task) throw new Error("任务保存失败");
+    creationReservation = undefined;
 
     // Run pipeline asynchronously in background
     const releaseRunningSlot = releaseSlot;
@@ -166,6 +186,12 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ success: true, task: toPublicTask(task) });
   } catch (err: any) {
+    if (workspaceTask) {
+      try { TaskStore.update(workspaceTask.id, { status: "failed", step: "error",
+        errorCode: err instanceof MainAppBillingError ? err.code : "BILLING_RESERVE_FAILED",
+        error: "任务创建未完成，正在核对预留积分，请稍后刷新。" }); }
+      catch (error) { logServerError("tasks.creation_failure_persist_failed", error); }
+    }
     if (err instanceof GenerationLimitError) {
       return NextResponse.json({ error: err.message, code: "GENERATION_LIMIT" }, {
         status: err.status, headers: { "Retry-After": "60" },
@@ -182,6 +208,14 @@ export async function POST(req: NextRequest) {
       { status: 500 }
     );
   } finally {
+    if (creationReservation) {
+      try {
+        await releaseMainAppCredits(creationReservation);
+        if (workspaceTask) TaskStore.update(workspaceTask.id, { status: "failed", step: "error",
+          billing: { ...workspaceTask.billing!, status: "released" } });
+      }
+      catch (error) { logServerError("billing.creation_release_failed", error); }
+    }
     releaseSlot?.();
   }
 }

@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { CosService } from "../cos";
 import { LipsyncProvider } from "../lipsync-provider";
+import type { TaskWorker } from "../server/task-worker";
 import {
   generatedTaskObjectKeys, isTaskOutputExpired, purgeLocalTaskOutputs, taskCompletedAt,
 } from "../task-output-retention";
@@ -27,6 +28,7 @@ export interface LogEntry {
 }
 
 export interface TaskBillingInfo {
+  source?: "workspace" | "main-app" | "internal";
   isExternalUser: boolean;
   ratePerSecond: number;
   costCnyPerSecond: number;
@@ -41,6 +43,7 @@ export interface TaskBillingInfo {
   pointsBalanceAfter?: number;
   status:
     | "not_applicable"
+    | "reserving"
     | "reserved"
     | "provider_committed"
     | "settle_pending"
@@ -50,6 +53,7 @@ export interface TaskBillingInfo {
 }
 
 export interface TaskItem {
+  executionOwner?: TaskWorker;
   id: string;
   userId?: string;
   userAccount?: string;
@@ -167,7 +171,7 @@ function reloadFromDisk() {
 
 reloadFromDisk();
 
-function persistStore() {
+function persistStore(strict = false) {
   try {
     const arr = Array.from(memoryTasks.values()).sort(
       (a, b) => b.createdAt - a.createdAt
@@ -188,6 +192,7 @@ function persistStore() {
       });
     }
   } catch (e) {
+    if (strict) throw e;
     logServerError("tasks.persist_failed", e);
   }
 }
@@ -297,9 +302,10 @@ export const TaskStore = {
     return all.length > 0 ? all[0] : undefined;
   },
 
-  create(data: Omit<TaskItem, "id" | "createdAt" | "updatedAt" | "logs">): TaskItem {
+  create(data: Omit<TaskItem, "id" | "createdAt" | "updatedAt" | "logs"> & { id?: string }): TaskItem {
     reloadFromDisk();
-    const id = "task_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
+    const id = data.id || "task_" + Date.now() + "_" + Math.random().toString(36).substring(2, 7);
+    if (memoryTasks.has(id)) throw new Error("任务编号已存在");
     deletedTaskIds.delete(id);
     const now = Date.now();
     const task: TaskItem = {
@@ -317,7 +323,7 @@ export const TaskStore = {
       ],
     };
     memoryTasks.set(id, task);
-    persistStore();
+    try { persistStore(true); } catch (error) { memoryTasks.delete(id); throw error; }
     this.notify(task);
     return task;
   },
@@ -340,7 +346,8 @@ export const TaskStore = {
       updatedAt: Date.now(),
     };
     memoryTasks.set(id, updated);
-    persistStore();
+    try { persistStore(updated.billing?.source === "workspace"); }
+    catch (error) { memoryTasks.set(id, existing); throw error; }
     this.notify(updated);
     return updated;
   },

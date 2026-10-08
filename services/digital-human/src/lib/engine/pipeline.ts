@@ -3,6 +3,7 @@ import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { withTaskExecution } from "./task-execution";
+import { startTaskHeartbeat, withTaskBillingGuard } from "../server/task-worker";
 import { TaskStore, TaskItem, TaskStep } from "../store/task-store";
 import { getAppConfig } from "../config";
 import { generateIndexTTS } from "./indextts";
@@ -27,6 +28,8 @@ import {
 import {
   calculateRequiredPoints,
   assertTaskCreditCoverage,
+  extendTaskCreditCoverage,
+  assertWorkspaceReservationActive,
   calculateCostCny,
   settleMainAppCredits,
   releaseMainAppCredits,
@@ -86,6 +89,15 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       });
     }
   };
+  const markProviderSubmitting = async () => withTaskBillingGuard(taskId, async () => {
+    const current = TaskStore.get(taskId);
+    if (!current?.userId || !current.billing?.requestId ||
+      !["reserved", "provider_committed"].includes(current.billing.status) || current.status !== "processing") {
+      throw new Error("任务已停止，不能继续提交生成");
+    }
+    await assertWorkspaceReservationActive(current.userId, current.billing.requestId);
+    markProviderCommitted();
+  });
   const recordChunk = (chunk: NonNullable<TaskItem["results"]["lipsyncChunks"]>[number]) => {
     const chunks = [...(TaskStore.get(taskId)?.results.lipsyncChunks || [])];
     const index = chunks.findIndex(item => item.index === chunk.index);
@@ -96,8 +108,10 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
   };
 
   let currentStep: TaskStep = "tts";
+  let stopHeartbeat: (() => void) | undefined;
 
   try {
+    if (task.billing?.source === "workspace") stopHeartbeat = startTaskHeartbeat(taskId);
     fs.mkdirSync(providerRoot, { recursive: true });
     for (const entry of fs.readdirSync(providerRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^[a-f0-9]{48}$/.test(entry.name)) continue;
@@ -124,7 +138,9 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
     if (task.billing?.isExternalUser) {
       log(
-        `💳 外部用户计费：费率 ${POINTS_PER_SECOND}积分/秒 (0.20元/秒)，已预留 ${task.billing.estimatedPoints} 积分 (预估 ${task.billing.estimatedDuration}s)`,
+        task.billing.source === "workspace"
+          ? `💳 共用积分：30秒333积分，按实际时长向上取整；已预留 ${task.billing.reservedPoints} 积分`
+          : `💳 外部用户计费：费率 ${POINTS_PER_SECOND}积分/秒 (0.20元/秒)，已预留 ${task.billing.estimatedPoints} 积分 (预估 ${task.billing.estimatedDuration}s)`,
         "info"
       );
     } else {
@@ -167,7 +183,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         )}s | 帧率 ${originalProbe.fps}fps | 含音频轨: ${originalProbe.hasAudio ? "是" : "否"}`
       );
     }
-    assertTaskCreditCoverage(task.billing, task.billing?.estimatedDuration || 0);
+    if (task.billing?.source !== "workspace") assertTaskCreditCoverage(task.billing, task.billing?.estimatedDuration || 0);
 
     // 2. Step: Speech Synthesis
     log("🗣️ 第一步: 正在合成定制原声配音 (根据字数可能需要 1~3 分钟)...");
@@ -220,9 +236,14 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       const mp3Hash = await sha256File(mp3Path);
       ensureTaskActive();
 
-      const currentTaskData = TaskStore.get(taskId) || task;
+      let currentTaskData = TaskStore.get(taskId) || task;
       const actualDuration = audioProbe.durationSeconds;
-      assertTaskCreditCoverage(currentTaskData.billing, actualDuration);
+      const reservedPoints = await extendTaskCreditCoverage({ userId: currentTaskData.userId,
+        billing: currentTaskData.billing, durationSeconds: actualDuration });
+      if (currentTaskData.billing?.source === "workspace") {
+        TaskStore.update(taskId, { billing: { ...currentTaskData.billing, reservedPoints } });
+        currentTaskData = TaskStore.get(taskId) || currentTaskData;
+      }
       let chargedPoints: number | undefined;
       let costCny: number | undefined;
       let pointsBalanceAfter: number | undefined;
@@ -230,12 +251,15 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         if (!currentTaskData.billing.requestId || !currentTaskData.userId) {
           throw new Error("外部用户任务缺少主站积分结算标识");
         }
-        chargedPoints = calculateRequiredPoints(actualDuration);
-        costCny = calculateCostCny(actualDuration);
+        chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source);
+        costCny = calculateCostCny(actualDuration, currentTaskData.billing.source);
+        // Save the actual MP3 before settlement so recovery never needs another paid TTS call.
+        TaskStore.update(taskId, { results: { exactAudioUrl: mp3Path, audioFormat: "mp3", audioDuration: actualDuration,
+          sha256Audio: mp3Hash, billingDuration: actualDuration } });
         TaskStore.update(taskId, { billing: { ...currentTaskData.billing, status: "settle_pending" } });
         const settlement = await settleMainAppCredits({
           userId: currentTaskData.userId, requestId: currentTaskData.billing.requestId,
-          actualDuration, chargedPoints, sessionToken,
+          actualDuration, chargedPoints, sessionToken, source: currentTaskData.billing.source,
         });
         pointsBalanceAfter = settlement.pointsBalance;
       }
@@ -295,10 +319,15 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     // Check the confirmed hold before any lip-sync engine can spend credits.
     // One second covers frame/container rounding in the final mux.
     ensureTaskActive();
-    assertTaskCreditCoverage(
-      TaskStore.get(taskId)?.billing || task.billing,
-      Math.ceil(Math.max(ttsResult.selectedDuration, prepResult.duration)) + 1,
-    );
+    const coverageTask = TaskStore.get(taskId) || task;
+    const coverageDuration = Math.max(ttsResult.selectedDuration, prepResult.duration);
+    const reservedPoints = await extendTaskCreditCoverage({
+      userId: coverageTask.userId, billing: coverageTask.billing,
+      durationSeconds: coverageTask.billing?.source === "workspace" ? coverageDuration : Math.ceil(coverageDuration) + 1,
+    });
+    if (coverageTask.billing?.source === "workspace") {
+      TaskStore.update(taskId, { billing: { ...coverageTask.billing, reservedPoints } });
+    }
 
     // 4. Step: Lip-sync submission (HeyGen / PixVerse / VEED)
     const lipsyncProvider = resolveLipsyncProvider(
@@ -374,6 +403,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           existingChunks: TaskStore.get(taskId)?.results.lipsyncChunks,
           onLog: logProvider,
           onProviderAccepted: markProviderCommitted,
+          onProviderSubmitting: task.billing?.source === "workspace" ? markProviderSubmitting : undefined,
           onJobCreated: ({ lipsyncId, creditsUsed }) => {
             markProviderCommitted();
             TaskStore.update(taskId, {
@@ -422,6 +452,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           onLog: logProvider,
           onChunkProgress: recordChunk,
           onProviderAccepted: markProviderCommitted,
+          onProviderSubmitting: task.billing?.source === "workspace" ? markProviderSubmitting : undefined,
           onJobCreated: ({ lipsyncId }) => {
             markProviderCommitted();
             TaskStore.update(taskId, {
@@ -460,6 +491,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           submissionTitle,
           onLog: logProvider,
           onProviderAccepted: markProviderCommitted,
+          onProviderSubmitting: task.billing?.source === "workspace" ? markProviderSubmitting : undefined,
           onJobCreated: ({ lipsyncId }) => {
             markProviderCommitted();
             TaskStore.update(taskId, {
@@ -553,10 +585,12 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         throw new Error("外部用户任务缺少主站积分结算标识");
       }
       const actualDuration = finalProbe.durationSeconds;
-      chargedPoints = calculateRequiredPoints(actualDuration);
-      costCny = calculateCostCny(actualDuration);
+      chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source);
+      costCny = calculateCostCny(actualDuration, currentTaskData.billing.source);
       log(
-        `💳 正在结算主站积分消耗: 实际时长 ${actualDuration.toFixed(1)}s × ${POINTS_PER_SECOND}积分/秒 = ${chargedPoints} 积分 (¥${costCny})...`,
+        currentTaskData.billing.source === "workspace"
+          ? `💳 正在结算共用积分：实际时长 ${actualDuration.toFixed(1)}秒，扣除 ${chargedPoints} 积分`
+          : `💳 正在结算主站积分消耗: 实际时长 ${actualDuration.toFixed(1)}s × ${POINTS_PER_SECOND}积分/秒 = ${chargedPoints} 积分 (¥${costCny})...`,
         "info"
       );
       TaskStore.update(taskId, {
@@ -568,10 +602,11 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         actualDuration,
         chargedPoints,
         sessionToken,
+        source: currentTaskData.billing.source,
       });
       pointsBalanceAfter = settleResult.pointsBalance;
       log(
-        `✅ 主站积分结算成功：扣除 ${chargedPoints} 积分 (¥${costCny})，当前账户剩余: ${
+        `${currentTaskData.billing.source === "workspace" ? "✅ 积分结算成功" : "✅ 主站积分结算成功"}：扣除 ${chargedPoints} 积分${currentTaskData.billing.source === "workspace" ? "" : ` (¥${costCny})`}，当前账户剩余: ${
           pointsBalanceAfter !== undefined ? `${pointsBalanceAfter} 积分` : "正常"
         }`,
         "success"
@@ -650,13 +685,15 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     if (
       currentTaskData.billing?.isExternalUser &&
       currentTaskData.billing.requestId &&
-      currentTaskData.billing.status === "reserved"
+      (currentTaskData.billing.status === "reserved" ||
+        (currentTaskData.billing.source === "workspace" && currentTaskData.billing.status === "provider_committed" && err.code === "LIPSYNC_GENERATION_FAILED"))
     ) {
       try {
         await releaseMainAppCredits({
           userId: currentTaskData.userId || "",
           requestId: currentTaskData.billing.requestId,
           sessionToken,
+          source: currentTaskData.billing.source,
         });
         TaskStore.update(taskId, {
           billing: {
@@ -678,6 +715,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       errorCode: typeof err.code === "string" ? err.code : undefined,
     });
   } finally {
+    stopHeartbeat?.();
     try {
       fs.rmSync(providerInputDir, { recursive: true, force: true });
     } catch {}

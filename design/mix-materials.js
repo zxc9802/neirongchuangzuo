@@ -1,10 +1,12 @@
 import BrowserMaterials from './browser-materials.js';
 import { accountStorageKey } from './account-storage.js';
 
+import { videoPoints, estimatedSpeechSeconds, videoCreditEstimateText, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask } from './workspace-credits.js';
+let unsubscribeCredits = null;
 const JOB_ID = /^[a-f0-9]{32}$/;
 const complete = job => ['done', 'completed'].includes(job?.state);
 const terminal = job => complete(job) || ['failed', 'cancelled', 'error', 'interrupted', 'expired'].includes(job?.state);
-const resumable = job => ['failed', 'interrupted'].includes(job?.state);
+const resumable = job => ['failed', 'interrupted', 'credit_pending'].includes(job?.state);
 const emptyStatus = () => ({ text: '选择素材文件夹', error: '', scanned: 0, indexed: 0, total: 0, connected: false, needsPermission: false });
 const emptyAudio = () => ({ voice: [], music: [], configured: null, missing: [], busy: false, loading: false, error: '', progress: null });
 const audioBindings = new WeakSet();
@@ -37,6 +39,7 @@ function guard(revision = state.revision, ownerKey = state.ownerKey) {
 }
 
 export function stopMixMaterials() {
+  unsubscribeCredits?.(); unsubscribeCredits = null;
   state.revision++;
   state.started = false;
   state.client?.stop();
@@ -153,6 +156,7 @@ function folderReadiness() {
 export function mixFolderLocked() { return state.busy || state.audio.busy || !!(state.job && !terminal(state.job)) || !!(state.pending && !state.pending.id); }
 
 export function mixReadiness(ctx = state.ctx) {
+  if (state.job?.state === 'credit_pending') return '积分确认中，请重试确认';
   const folderHint = folderReadiness();
   if (folderHint) return folderHint;
   if (!ctx?.configs?.mix?.prompt?.trim()) return '填写宣传文案后即可开始';
@@ -165,7 +169,7 @@ export function mixReadiness(ctx = state.ctx) {
     if (c.voice_id ? !state.audio.voice.some(item => item.id === c.voice_id) : state.health?.default_voice_configured === false) return '上传并选择一个音色后即可合成人声';
   }
   if (c.music_id && !state.audio.music.some(item => item.id === c.music_id)) return '请重新选择背景音乐';
-  return '';
+  return creditInsufficiency(videoPoints(estimatedSpeechSeconds(c.prompt)));
 }
 
 export function renderMixAudio(ctx = state.ctx) {
@@ -179,7 +183,7 @@ export function renderMixAudio(ctx = state.ctx) {
     return `<div class="mix-audio-library"><label class="studio-field">${voice ? '音色库' : '背景音乐库'}<select data-mix-audio-field="${kind}_id" ${disabled} ${voice && mode === 'original' ? 'disabled' : ''}><option value="">${voice ? state.health?.default_voice_configured ? '使用默认音色' : '请选择音色' : '不加背景音乐'}</option>${state.audio[kind].map(item => `<option value="${item.id}" ${item.id === selected ? 'selected' : ''}>${escape(item.name)}</option>`).join('')}</select></label><div class="mix-audio-actions"><label class="mix-audio-upload">上传${voice ? '人声' : '音乐'}<input type="file" accept=".mp3,.wav,.m4a" data-mix-audio-upload="${kind}" ${disabled || (state.audio.configured !== true ? 'disabled' : '')}></label>${item ? `<button data-action="mix-audio-delete" data-kind="${kind}" data-id="${item.id}" ${disabled}>删除</button>` : ''}</div>${item ? `<audio controls preload="none" src="${escape(safeMixAudioUrl(item.url))}" aria-label="试听${escape(item.name)}"></audio>` : ''}<small>${voice ? 'MP3 / WAV / M4A，最多 32 MiB，取前 15 秒作参考' : 'MP3 / WAV / M4A，最多 128 MiB'}</small></div>`;
   };
   const progress = state.audio.progress;
-  return `<label class="studio-field">视频声音<select data-mix-audio-field="voice_mode" ${disabled}><option value="synthesized" ${mode === 'synthesized' ? 'selected' : ''}>合成人声</option><option value="original" ${mode === 'original' ? 'selected' : ''}>保留素材原声（不配音）</option></select></label><small>${mode === 'original' ? '保留视频原声音，画面与字幕时长按文案估算' : '按照文案合成配音，替换素材原声'}</small>${section('voice')}${section('music')}<div role="status" aria-live="polite">${state.audio.busy ? `<small>${progress && progress.loaded < progress.total ? '正在上传音频' : '正在处理音频'}</small>` : ''}${progress ? `<progress max="${progress.total || 1}" value="${progress.loaded}" aria-label="音频上传进度"></progress>` : ''}${state.audio.configured === false ? '<small>音频库待管理员配置</small>' : ''}${state.audio.error ? `<small class="mix-status-error">${escape(state.audio.error)}</small>` : ''}</div><div class="mix-audio-actions"><button data-action="mix-audio-refresh" ${disabled}>${state.audio.loading ? '正在加载音频库' : '刷新音频库'}</button></div>`;
+  return `<label class="studio-field">视频声音<select data-mix-audio-field="voice_mode" ${disabled}><option value="synthesized" ${mode === 'synthesized' ? 'selected' : ''}>合成人声</option><option value="original" ${mode === 'original' ? 'selected' : ''}>保留素材原声（不配音）</option></select></label>${section('voice')}${section('music')}<div role="status" aria-live="polite">${state.audio.busy ? `<small>${progress && progress.loaded < progress.total ? '正在上传音频' : '正在处理音频'}</small>` : ''}${progress ? `<progress max="${progress.total || 1}" value="${progress.loaded}" aria-label="音频上传进度"></progress>` : ''}${state.audio.configured === false ? '<small>音频库待管理员配置</small>' : ''}${state.audio.error ? `<small class="mix-status-error">${escape(state.audio.error)}</small>` : ''}</div><div class="mix-audio-actions"><button data-action="mix-audio-refresh" ${disabled}>${state.audio.loading ? '正在加载音频库' : '刷新音频库'}</button></div>`;
 }
 
 function bindAudioControls(root) {
@@ -305,20 +309,20 @@ async function deleteAudio(kind, id) {
 export function renderMixMaterials() {
   const status = state.status;
   const uploading = !status.needsPermission && (state.client?.scanning || status.uploadTotal || status.connected && status.processing);
-  const text = status.needsPermission ? '请点击上方按钮重新连接素材文件夹' : uploading ? '素材正在上传' : status.connected ? status.error ? '部分素材上传失败，请重试' : status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
+  const text = status.needsPermission ? '请重新连接素材文件夹' : uploading ? '素材正在上传' : status.connected ? status.error ? '部分素材上传失败，请重试' : status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
   const progress = status.uploadTotal ? `<progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="素材上传进度"></progress>` : state.client?.scanning ? '<progress aria-label="素材上传进度"></progress>' : status.totalFiles && !status.needsPermission ? `<progress max="${status.totalFiles}" value="${status.readyFiles}" aria-label="素材上传进度"></progress>` : '';
   const locked = mixFolderLocked();
   const disabled = locked ? 'disabled title="制作时请保持原素材文件夹连接"' : '';
   const scan = status.connected && !status.needsPermission && !uploading;
   const retry = status.connected && !status.needsPermission && status.error && !state.client?.scanning;
-  const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : folderReadiness();
-  const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>继续制作</button>` : '';
+  const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : state.job?.state === 'credit_pending' ? '' : folderReadiness();
+  const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>${state.job?.state === 'credit_pending' ? '重试确认积分' : '继续制作'}</button>` : '';
   const actions = `${scan || retry ? `<button data-action="mix-scan" ${disabled}>${status.error ? '重试未完成素材' : '扫描新增 / 修改'}</button>` : ''}${scan ? `<button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
   return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite">${text ? `<span>${text}</span>` : ''}${progress}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}${actions ? `<div class="mix-folder-actions">${actions}</div>` : ''}</div>`;
 }
 
 export function mixJobLabel(job = state.job) {
-  const labels = { queued: '任务已提交', matching: '正在匹配素材', waiting_materials: '正在等待本机素材', running: '正在制作视频', rendering: '正在合成视频', done: '成片已完成', completed: '成片已完成', failed: '制作失败', error: '制作失败', cancelled: '任务已取消', interrupted: '制作已中断', expired: '任务已过期' };
+  const labels = { credit_pending: '积分确认中', queued: '任务已提交', matching: '正在匹配素材', waiting_materials: '正在等待本机素材', running: '正在制作视频', rendering: '正在合成视频', done: '成片已完成', completed: '成片已完成', failed: '制作失败', error: '制作失败', cancelled: '任务已取消', interrupted: '制作已中断', expired: '任务已过期' };
   return labels[job?.state] || '正在制作视频';
 }
 
@@ -335,6 +339,8 @@ function updateStatus() {
   if (generate) { generate.disabled = !!hint; generate.title = hint; }
   const hintNode = root.querySelector('#studio-generation-hint');
   if (hintNode) hintNode.textContent = hint || `${state.status.indexed} 个片段可供匹配`;
+  const estimate = root.querySelector('#mix-credit-estimate');
+  if (estimate) estimate.textContent = videoCreditEstimateText(estimatedSpeechSeconds(state.ctx?.configs?.mix?.prompt));
   const timingNode = root.querySelector('#mix-timing-hint');
   if (timingNode) timingNode.textContent = state.ctx?.configs?.mix?.voice_mode === 'original' ? '按文案阅读速度估算' : '文案与配音自动确定';
   const jobNode = root.querySelector('#mix-job-progress');
@@ -356,7 +362,7 @@ function acceptJob(job, revision) {
   guard(revision);
   if (!JOB_ID.test(job?.id || '')) throw new Error('服务器未返回有效任务，请重试这次提交。');
   const previous = state.job;
-  state.job = job;
+  state.job = job; observeCreditTask(job);
   state.jobs = [job, ...state.jobs.filter(item => item.id !== job.id)].slice(0, 20);
   state.pending = { id: job.id };
   try { remember(state.pending); } catch { state.error = '浏览器无法保存任务编号，重新打开时可在制作记录中查看。'; }
@@ -415,13 +421,14 @@ async function submit(pending) {
     }
     state.ctx?.toast?.(state.error);
   } finally {
+    void refreshWorkspaceCredits({ afterCurrent: true });
     if (revision === state.revision) { state.busy = false; updateStatus(); }
   }
 }
 
 async function resumeJob() {
   if (state.busy || state.audio.busy || !resumable(state.job)) return;
-  const hint = folderReadiness();
+  const hint = state.job?.state === 'credit_pending' ? '' : folderReadiness();
   if (hint) { state.ctx?.toast?.(hint); return; }
   const revision = state.revision;
   const id = state.job.id;
@@ -440,7 +447,8 @@ async function resumeJob() {
     state.error = message(error);
     state.ctx?.toast?.(state.error);
   } finally {
-    if (revision === state.revision) { state.busy = false; updateStatus(); }
+    void refreshWorkspaceCredits({ afterCurrent: true });
+    if (revision === state.revision) { state.busy = false; updateStatus(); if (state.job?.state === 'credit_pending') void pollJob(revision); }
   }
 }
 
@@ -460,6 +468,7 @@ export function initializeMixMaterials(ctx) {
   }
   if (state.started) { updateStatus(); return state.loading || Promise.resolve(); }
   state.started = true;
+  unsubscribeCredits?.(); unsubscribeCredits = subscribeWorkspaceCredits(updateStatus);
   state.ownerKey = storageKey();
   const revision = state.revision;
   state.pending = remembered();

@@ -18,6 +18,9 @@ import { isTaskOutputExpired, taskCompletedAt, taskOutputExpiresAt } from "@/lib
 export { sanitizePublicText } from "@/lib/server/public-sanitizer";
 
 const PUBLIC_ERRORS: Record<string, string> = {
+  INSUFFICIENT_POINTS: "积分余额不足，请缩短文案或联系管理员补充积分",
+  TASK_RESTARTED_BEFORE_SUBMISSION: "服务重启中断了任务，预留积分已退回，请重新创建任务",
+  TASK_RESTARTED_AFTER_SUBMISSION: "任务被重启中断，积分仍在核对，请恢复原任务或联系管理员",
   BILLING_RESERVATION_TOO_SMALL: "实际配音超出预留额度，请缩短文案后重试",
   BILLING_SETTLEMENT_FAILED: "结果已生成，积分结算暂未完成，请稍后恢复任务",
   MEDIA_FIT_MISMATCH: "素材视频长于配音，请选择智能适配后重试",
@@ -67,6 +70,7 @@ export function toPublicTask(task: TaskItem): PublicTaskItem {
       !isTaskOutputExpired(task) &&
       task.billing?.status !== "released" &&
       (task.results.finalVideoUrl ||
+        (task.inputs.outputType === "audio" && task.results.exactAudioUrl && task.results.audioFormat === "mp3") ||
         task.results.heygenLipsyncId ||
         task.results.pixverseResultUrl ||
         task.results.veedResultUrl ||
@@ -91,9 +95,11 @@ export function toPublicTask(task: TaskItem): PublicTaskItem {
     })),
     billing: task.billing
       ? {
+          source: task.billing.source,
           isExternalUser: task.billing.isExternalUser,
           estimatedDuration: task.billing.estimatedDuration,
           estimatedPoints: task.billing.estimatedPoints,
+          reservedPoints: task.billing.reservedPoints,
           actualDuration: task.billing.actualDuration,
           chargedPoints: task.billing.chargedPoints,
           costCny: task.billing.costCny,

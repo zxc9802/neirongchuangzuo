@@ -1,6 +1,9 @@
 import { accountStorageKey } from './account-storage.js';
 import { displayModelName, brandModelText } from './model-labels.js';
 import { validatePhotoSelection, preparePhotoBatches } from './image-upload.js';
+import { imageTaskTitle } from './image-presets.js';
+import { imagePoints, creditEstimateText, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask, billingPointsText } from './workspace-credits.js';
+let unsubscribeCredits = null;
 const API = '/api/ai';
 const PENDING_KEY = accountStorageKey('store-ai-pending-image-request');
 const UPLOAD_KEY = accountStorageKey('store-ai-image-upload-draft');
@@ -38,7 +41,7 @@ export function renderImageGenerationOptions(ctx) {
   const { esc, button } = ctx;
   const locked = state.submitting || !!state.pendingId || state.tasks.some(task => ACTIVE.has(task.status));
   const counts = [...(outputCount < 6 ? [outputCount] : []), ...Array.from({ length: 10 }, (_, index) => index + 6)];
-  return `<section class="image-generation-options" aria-label="生成方式与图片数量"><fieldset class="image-mode-options"><legend>生成方式</legend><div>${Object.entries(GENERATION_MODES).map(([mode, item]) => button('image-generation-mode', esc(item.label), `image-mode-option${generationMode === mode ? ' selected' : ''}`, `data-value="${mode}" aria-pressed="${generationMode === mode}" ${locked ? 'disabled' : ''}`)).join('')}</div></fieldset><div class="image-output-settings"><label class="image-count-options">图片数量 ${generationMode === 'single' ? '<span class="image-single-count">1 张</span>' : `<select id="image-output-count" aria-label="生成图片数量" ${locked ? 'disabled' : ''}>${counts.map(count => `<option value="${count}" ${outputCount === count ? 'selected' : ''}>${count} 张</option>`).join('')}</select>`}</label><span class="image-quota-estimate">预计使用${outputCount}次图片额度</span></div><p class="image-mode-description">${esc(GENERATION_MODES[generationMode].hint)}</p></section>`;
+  return `<section class="image-generation-options" aria-label="生成方式与图片数量"><fieldset class="image-mode-options"><legend>生成方式</legend><div>${Object.entries(GENERATION_MODES).map(([mode, item]) => button('image-generation-mode', esc(item.label), `image-mode-option${generationMode === mode ? ' selected' : ''}`, `data-value="${mode}" aria-pressed="${generationMode === mode}" ${locked ? 'disabled' : ''}`)).join('')}</div></fieldset><div class="image-output-settings"><label class="image-count-options">图片数量 ${generationMode === 'single' ? '<span class="image-single-count">1 张</span>' : `<select id="image-output-count" aria-label="生成图片数量" ${locked ? 'disabled' : ''}>${counts.map(count => `<option value="${count}" ${outputCount === count ? 'selected' : ''}>${count} 张</option>`).join('')}</select>`}</label><span class="image-quota-estimate">${esc(creditEstimateText(imagePoints(outputCount)))}</span></div></section>`;
 }
 export function validateImageRequest(prompt, images, maxLength = 1000) {
   if (!prompt.trim()) return '填写想要生成的画面或修改要求。';
@@ -65,7 +68,7 @@ function statusLabel(task) {
   if (task.partial) return '部分完成';
   return ({ completed: '已完成', failed: '生成失败' })[task.status] || '状态待确认';
 }
-function mergeTask(task) { if (!task?.id) return; state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)); }
+function mergeTask(task) { if (!task?.id) return; observeCreditTask(task); state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)); }
 async function request(path, options = {}) {
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -76,7 +79,7 @@ async function request(path, options = {}) {
     const response = await fetch(API + path, { ...options, signal: controller.signal, cache: 'no-store', credentials: 'same-origin' });
     let body;
     try { body = await response.json(); } catch { throw new Error('服务暂时没有返回有效结果，请刷新任务状态。'); }
-    if (!response.ok) { const error = new Error(shortError(body.error?.message || body.error || body.message)); error.status = response.status; error.code = body.error?.code || body.code; throw error; }
+    if (!response.ok) { if (response.status === 402) void refreshWorkspaceCredits({ afterCurrent: true }); const error = new Error(shortError(body.error?.message || body.error || body.message)); error.status = response.status; error.code = body.error?.code || body.code; throw error; }
     return body;
   } catch (error) { if (error.name === 'AbortError') throw new Error('连接超时，请刷新任务状态。'); throw error; }
   finally { clearTimeout(timer); options.signal?.removeEventListener('abort', abort); }
@@ -98,7 +101,7 @@ async function loadTasks({ status = false } = {}) {
     else if (availability.status === 'rejected') state.statusError = '暂时无法连接图片服务，请刷新状态。';
     if (history.status === 'rejected') throw history.reason;
     if (!Array.isArray(history.value.tasks)) throw new Error('任务记录暂时无法读取，请稍后刷新。');
-    state.tasks = history.value.tasks; state.loaded = true; state.error = ''; state.lastRead = Date.now();
+    state.tasks = history.value.tasks; state.tasks.forEach(observeCreditTask); state.loaded = true; state.error = ''; state.lastRead = Date.now();
     if (state.pendingId) {
       const found = state.tasks.find(task => task.id === state.pendingId);
       if (found) { rememberPending(null); rememberUpload(null); }
@@ -127,17 +130,19 @@ async function loadTasks({ status = false } = {}) {
 function controlState(ctx) {
   const { outputCount } = imageGenerationSettings(ctx.configs.image);
   const label = imageGenerationLabel(ctx.configs.image);
-  if (state.submitting) return { label: state.uploadProgress?.phase === 'preparing' ? `正在压缩 ${state.uploadProgress.current} / ${state.uploadProgress.total}` : '正在保存素材…', disabled: true, hint: `素材自动压缩并分批保存 ${state.uploadDraft?.uploadedCount || 0} / ${state.uploadDraft?.imageCount || 0} 张，请稍候。` };
-  if (state.pendingId) return { label: '提交状态待确认', disabled: true, hint: '连接中断，正在查询已提交任务，避免重复生成。' };
+  if (state.submitting) return { label: state.uploadProgress?.phase === 'preparing' ? `正在压缩 ${state.uploadProgress.current} / ${state.uploadProgress.total}` : '正在保存素材…', disabled: true, hint: `正在上传 ${state.uploadDraft?.uploadedCount || 0} / ${state.uploadDraft?.imageCount || 0} 张` };
+  if (state.pendingId) return { label: '提交状态待确认', disabled: true, hint: '正在查询原任务' };
   const running = state.tasks.find(task => ACTIVE.has(task.status));
-  if (running) { const { completed, total } = taskCounts(running); return { label: `图片生成中 ${completed} / ${total}`, disabled: true, hint: '任务已保存在服务端，可在「我的作品」查看结果。' }; }
+  if (running) { const { completed, total } = taskCounts(running); return { label: `图片生成中 ${completed} / ${total}`, disabled: true, hint: '' }; }
   if (!state.status) return { label, disabled: true, hint: state.statusError || (state.loading ? '正在连接图片服务…' : '图片服务状态待确认，请刷新状态。') };
   if (!state.status.configured) return { label, disabled: true, hint: '图片服务尚未配置，请联系管理员。' };
-  if (state.status.remaining === 0) return { label: '今日额度已用完', disabled: true, hint: '全站今日图片额度已用完，北京时间次日重置。' };
-  if (Number.isFinite(state.status.remaining) && state.status.remaining < outputCount) return { label, disabled: true, hint: `本次需要${outputCount}次图片额度，今日仅剩${state.status.remaining}次。请改为单张或减少张数。` };
+  if (state.status.remaining === 0) return { label: '今日生成服务已达上限', disabled: true, hint: '请明日再试，未使用的积分保留。' };
+  if (Number.isFinite(state.status.remaining) && state.status.remaining < outputCount) return { label, disabled: true, hint: `本次张数超出今日服务限额，请减少张数。` };
+  const creditsError = creditInsufficiency(imagePoints(outputCount));
+  if (creditsError) return { label: '积分不足', disabled: true, hint: creditsError };
   const prompt = ctx.configs.image.prompt, maxLength = ctx.modules.image.max || 1000;
   const error = completeUpload(ctx) ? !prompt.trim() ? '填写创作要求后继续。' : prompt.length > maxLength ? `创作要求最多 ${maxLength} 字，请缩短后继续。` : '' : validateImageRequest(prompt, selectedImages(ctx), maxLength);
-  return { label, disabled: !!error, hint: !ctx.configs.image.prompt.trim() ? '上传原图，选择一个风格即可生成。' : error || `基于真实素材生成 ${outputCount} 张图片 · 最多 30 张原图，自动压缩上传` };
+  return { label, disabled: !!error, hint: !ctx.configs.image.prompt.trim() ? '选择风格或填写创作要求' : error || '' };
 }
 export function updateImageGenerationControls(ctx) {
   if (!pageIsActive()) return;
@@ -160,27 +165,28 @@ export function updateImageGenerationControls(ctx) {
 export function renderImageGenerationNotice(ctx) {
   const { esc, button, icon } = ctx;
   const draft = state.uploadDraft;
-  const upload = draft ? `<div class="image-upload-progress" role="status"><span>素材已保存 ${draft.uploadedCount || 0} / ${draft.imageCount} 张${state.uploadProgress?.phase === 'preparing' ? ` · 正在压缩 ${state.uploadProgress.current} / ${state.uploadProgress.total}` : ''}</span>${!state.submitting && !state.pendingId ? button('image-resume-upload', '继续原任务', 'textbutton') : ''}${!state.submitting && !state.pendingId ? '<small>未上传完时，请重新选择同一组原图继续；选择不同照片会建立新任务。</small>' : ''}</div>` : '';
-  return `<div id="image-generation-notice"><div class="image-service-note"><span>${icon('image')} ${esc(state.status?.configured ? `${displayModelName(state.status.model, 'Max模型')} · 图片创作` : '图片生成服务')}${Number.isInteger(state.status?.remaining) ? ` · 今日剩余 ${state.status.remaining}/${state.status.dailyLimit}` : ''}</span>${button('image-refresh', '刷新状态', 'textbutton', state.loading ? 'disabled' : '')}</div>${upload}${state.submissionError || state.error ? `<p class="image-generation-error" role="alert">${esc(state.submissionError || state.error)}</p>` : ''}</div>`;
+  const upload = draft ? `<div class="image-upload-progress" role="status"><span>素材已保存 ${draft.uploadedCount || 0} / ${draft.imageCount} 张${state.uploadProgress?.phase === 'preparing' ? ` · 正在压缩 ${state.uploadProgress.current} / ${state.uploadProgress.total}` : ''}</span>${!state.submitting && !state.pendingId ? button('image-resume-upload', '继续原任务', 'textbutton') : ''}${!state.submitting && !state.pendingId ? '<small>请重新选择原照片继续上传。</small>' : ''}</div>` : '';
+  return `<div id="image-generation-notice"><div class="image-service-note"><span>${icon('image')} ${esc(state.status?.configured ? `${displayModelName(state.status.model, 'Max模型')} · 图片创作` : '图片生成服务')}</span>${button('image-refresh', '刷新状态', 'textbutton', state.loading ? 'disabled' : '')}</div>${upload}${state.submissionError || state.error ? `<p class="image-generation-error" role="alert">${esc(state.submissionError || state.error)}</p>` : ''}</div>`;
 }
 export function renderImageTaskQueue(ctx) {
   const { esc, icon, button } = ctx;
-  return `<div id="image-task-queue">${visibleTasks().length ? `<p class="image-queue-heading">生成任务 · ${visibleTasks().length}</p>${visibleTasks().slice(0, 12).map(task => button('image-show-task', `<span class="draft-icon">${icon(ACTIVE.has(task.status) ? 'clock' : 'image')}</span><strong>${esc(task.prompt.slice(0, 26) || '图片创作')}</strong><small>${esc(dateLabel(task.createdAt))}</small><span class="image-task-state ${esc(task.status)}">${statusLabel(task)}</span>`, 'draft image-task-row', `data-id="${esc(task.id)}"`)).join('')}` : ''}</div>`;
+  return `<div id="image-task-queue">${visibleTasks().length ? `<p class="image-queue-heading">生成任务 · ${visibleTasks().length}</p>${visibleTasks().slice(0, 12).map(task => button('image-show-task', `<span class="draft-icon">${icon(ACTIVE.has(task.status) ? 'clock' : 'image')}</span><strong>${esc(imageTaskTitle(task))}</strong><small>${esc(dateLabel(task.createdAt))}</small><span class="image-task-state ${esc(task.status)}">${statusLabel(task)}</span>`, 'draft image-task-row', `data-id="${esc(task.id)}"`)).join('')}` : ''}</div>`;
 }
 export function renderImageResults(ctx) {
   const { esc, button, icon } = ctx;
   const content = visibleTasks().length ? `<div class="image-results-list">${visibleTasks().map(task => {
+    const title = imageTaskTitle(task);
     const images = (task.images || []).map(item => ({ ...item, url: safeImageResultUrl(item.url) })).filter(item => item.url);
     const { total, completed } = taskCounts(task);
     const modeLabel = GENERATION_MODES[task.generationMode]?.label || GENERATION_MODES.single.label;
-    const partial = task.partial ? `<div class="image-partial-notice" role="status"><strong>已生成 ${completed} 张，剩余 ${Math.max(0, total - completed)} 张未完成。</strong><p>${esc(task.warning ? shortError(task.warning) : '已完成的图片可以正常下载。不会自动重新提交未完成的图片。')}</p></div>` : '';
+    const partial = task.partial ? `<div class="image-partial-notice" role="status"><strong>已生成 ${completed} 张，剩余 ${Math.max(0, total - completed)} 张未完成。</strong><p>${esc(task.warning ? shortError(task.warning) : '已完成的图片可下载。')}</p></div>` : '';
     const gallery = task.status === 'completed' && images.length ? `<div class="generated-image-grid">${images.map((item, index) => {
       const label = item.label || `生成作品 ${Number.isInteger(item.index) ? item.index : index + 1}`;
-      return `<figure><button class="generated-image-open" data-action="image-open-result" data-id="${esc(task.id)}" data-index="${index}" aria-label="放大查看${esc(label)}"><img src="${esc(item.url)}" alt="${esc(label)}：${esc(task.prompt.slice(0, 100))}" loading="lazy"></button><figcaption><span>${esc(label)}${item.style && item.style !== label ? `<small>${esc(item.style)}</small>` : ''}</span><a class="secondary" href="${esc(item.url)}" download="${esc(item.filename || 'generated-image.png')}">${icon('save')} 下载图片</a></figcaption></figure>`;
-    }).join('')}</div>` : task.status === 'failed' ? `<div class="image-task-message failed" role="status">${icon('help')}<div><strong>这次没有生成成功</strong><p>${esc(shortError(task.error?.message || task.error || '生成服务未完成任务，请调整要求或稍后再试。'))}</p><small>不会自动重新提交。核对要求后，可手动发起新创作。</small></div></div>` : `<div class="image-task-message" role="status">${icon(task.status === 'completed' ? 'help' : 'clock')}<div><strong>${task.status === 'completed' ? '结果文件暂时无法显示' : task.status === 'queued' ? '任务已提交，等待生成' : '正在制作你的图片'}</strong><p>${task.status === 'completed' ? '请刷新记录后再查看。' : `已生成 ${completed} / ${total} 张。生成需要一些时间，可以稍后回来查看。`}</p></div></div>`;
-    return `<article class="image-result-card" id="image-task-${esc(task.id)}"><header><div><strong>${esc(task.prompt.slice(0, 48) || '图片创作')}</strong><small>${esc(dateLabel(task.createdAt))}${task.ratio ? ' · ' + esc(task.ratio) : ''} · ${esc(imageQualityName(task.quality))}</small><span class="image-result-mode">${esc(modeLabel)} · ${completed} / ${total} 张</span></div><span class="image-task-state ${esc(task.status)}${task.partial ? ' partial' : ''}">${statusLabel(task)}</span></header>${partial}${gallery}<details class="image-result-prompt"><summary>查看创作要求</summary><p>${esc(task.prompt)}</p></details></article>`;
-  }).join('')}</div>` : `<div class="empty-preview image-results-empty">${icon('image')}<h2>${state.loading ? '正在读取作品记录' : '第一张宣传图，从你的原图开始'}</h2><p>${state.loading ? '稍等片刻，作品会在这里显示。' : '上传实拍图，选择风格，生成的作品会保存在这里。'}</p>${state.error ? `<p class="image-generation-error" role="alert">${esc(state.error)}</p>` : ''}</div>`;
-  return `<div id="image-generated-results"><div class="image-results-heading"><div><strong>我的图片作品</strong><small>成品自生成成功起保留 3 天，请及时下载</small></div>${button('image-refresh', icon('refresh') + '刷新记录', 'textbutton', state.loading ? 'disabled' : '')}</div>${content}</div>`;
+      return `<figure><button class="generated-image-open" data-action="image-open-result" data-id="${esc(task.id)}" data-index="${index}" aria-label="放大查看${esc(label)}"><img src="${esc(item.url)}" alt="${esc(title)} · ${esc(label)}" loading="lazy"></button><figcaption><span>${esc(label)}${item.style && item.style !== label ? `<small>${esc(item.style)}</small>` : ''}</span><a class="secondary" href="${esc(item.url)}" download="${esc(item.filename || 'generated-image.png')}">${icon('save')} 下载图片</a></figcaption></figure>`;
+    }).join('')}</div>` : task.status === 'failed' ? `<div class="image-task-message failed" role="status">${icon('help')}<div><strong>这次没有生成成功</strong><p>${esc(shortError(task.error?.message || task.error || '生成服务未完成任务，请调整要求或稍后再试。'))}</p></div></div>` : `<div class="image-task-message" role="status">${icon(task.status === 'completed' ? 'help' : 'clock')}<div><strong>${task.status === 'completed' ? '结果文件暂时无法显示' : task.status === 'queued' ? '任务已提交，等待生成' : '正在制作你的图片'}</strong><p>${task.status === 'completed' ? '请刷新记录后再查看。' : `已生成 ${completed} / ${total} 张`}</p></div></div>`;
+    return `<article class="image-result-card" id="image-task-${esc(task.id)}"><header><div><strong>${esc(title)}</strong><small>${esc(dateLabel(task.createdAt))}${task.ratio ? ' · ' + esc(task.ratio) : ''} · ${esc(imageQualityName(task.quality))}</small><span class="image-result-mode">${esc(modeLabel)} · ${completed} / ${total} 张${billingPointsText(task) ? ` · ${esc(billingPointsText(task))}` : ''}</span></div><span class="image-task-state ${esc(task.status)}${task.partial ? ' partial' : ''}">${statusLabel(task)}</span></header>${partial}${gallery}<details class="image-result-prompt"><summary>查看创作要求</summary><p>${esc(task.prompt)}</p></details></article>`;
+  }).join('')}</div>` : `<div class="empty-preview image-results-empty">${icon('image')}<h2>${state.loading ? '正在读取作品' : '暂无作品'}</h2>${state.error ? `<p class="image-generation-error" role="alert">${esc(state.error)}</p>` : ''}</div>`;
+  return `<div id="image-generated-results"><div class="image-results-heading"><div><strong>我的图片作品</strong><small>成品保留 3 天，请及时下载</small></div>${button('image-refresh', icon('refresh') + '刷新记录', 'textbutton', state.loading ? 'disabled' : '')}</div>${content}</div>`;
 }
 function paint() {
   const ctx = state.ctx;
@@ -198,13 +204,15 @@ async function readUploadProgress() {
   let data;
   try { data = await request('/image-uploads/' + encodeURIComponent(draft.id)); }
   catch (error) {
+    if (state.uploadDraft?.id !== draft.id) return null;
     if (error.status === 410) {
-      if (state.uploadDraft?.id === draft.id) rememberUpload(null);
+      rememberUpload(null);
       error.message = '原素材已超过3天保留期，已清除过期上传进度。请重新选择原图后点击生成。';
       state.submissionError = error.message;
     }
     throw error;
   }
+  if (state.uploadDraft?.id !== draft.id) return null;
   if (!data.upload) throw new Error('素材保存状态暂时无法读取，请刷新状态。');
   const upload = data.upload;
   rememberUpload({ ...draft, uploadedCount: Math.max(0, Math.min(draft.imageCount, Number(upload.uploadedCount) || 0)), expiresAt: upload.expiresAt, stage: upload.complete ? 'ready' : 'uploading' });
@@ -223,15 +231,15 @@ async function submit(ctx) {
   if (state.uploadDraft && !completeUpload(ctx) && !sameUploadFiles(files)) {
     if (!files.length) { state.submissionError = '请重新选择原来的整组照片，继续尚未完成的上传。'; paint(); return; }
   }
+  if (!state.uploadDraft || files.length && !sameUploadFiles(files)) {
+    const requestId = crypto.randomUUID();
+    rememberUpload({ id: requestId, imageCount: files.length, uploadedCount: 0, fingerprints: fingerprints(files), stage: 'creating', config: { prompt, ratio, quality, generationMode, count: String(outputCount) } });
+  }
   state.submitting = true; state.error = ''; state.submissionError = ''; paint();
   state.uploadController = new AbortController();
   const signal = state.uploadController.signal;
   let sent = false;
   try {
-    if (!state.uploadDraft || files.length && !sameUploadFiles(files)) {
-      const requestId = crypto.randomUUID();
-      rememberUpload({ id: requestId, imageCount: files.length, uploadedCount: 0, fingerprints: fingerprints(files), stage: 'creating', config: { prompt, ratio, quality, generationMode, count: String(outputCount) } });
-    }
     let draft = state.uploadDraft;
     const requestId = draft.id;
     let upload;
@@ -280,13 +288,29 @@ async function submit(ctx) {
 export function bindImageGeneration(ctx) {
   if (ctx.mode !== 'image') return;
   state.ctx = ctx;
+  unsubscribeCredits?.(); unsubscribeCredits = subscribeWorkspaceCredits(paint);
   if (state.uploadDraft?.config && !ctx.configs.image.prompt.trim()) Object.assign(ctx.configs.image, state.uploadDraft.config);
   updateImageGenerationControls(ctx);
   if (!state.loaded || Date.now() - state.lastRead > 10000) void loadTasks(); else schedulePoll();
 }
-export function disposeImageGeneration() { clearTimeout(state.timer); clearTimeout(state.expiryTimer); state.uploadController?.abort(); state.ctx = null; }
+export function disposeImageGeneration() { unsubscribeCredits?.(); unsubscribeCredits = null; clearTimeout(state.timer); clearTimeout(state.expiryTimer); state.uploadController?.abort(); state.ctx = null; }
+function creationBlockReason() {
+  if (state.submitting) return '正在提交素材，请完成后再新建。';
+  if (state.pendingId) return '提交状态待确认，请先查询原任务。';
+  if (state.tasks.some(task => ACTIVE.has(task.status))) return '图片正在生成，请完成后再新建。';
+  if (!state.loaded) return '正在查询任务，请稍后新建。';
+  return '';
+}
+export function resetImageCreation(ctx) {
+  const blocked = creationBlockReason();
+  if (blocked) { ctx.toast?.(blocked); return false; }
+  rememberUpload(null);
+  state.uploadProgress = null; state.submissionError = ''; state.error = '';
+  return true;
+}
 export function handleImageGenerationAction(action, el, ctx) {
   if (ctx.mode !== 'image') return false;
+  if (action === 'new' && creationBlockReason()) { ctx.toast?.(creationBlockReason()); return true; }
   if (action === 'image-generation-mode' || action === 'image-output-count') {
     if (state.submitting || state.pendingId || state.tasks.some(task => ACTIVE.has(task.status))) return true;
     const c = ctx.configs.image;
@@ -299,13 +323,13 @@ export function handleImageGenerationAction(action, el, ctx) {
     return true;
   }
   if (action === 'generate' || action === 'image-resume-upload') { void submit(ctx); return true; }
-  if (action === 'image-refresh') { state.submissionError = ''; void loadTasks({ status: true }); return true; }
+  if (action === 'image-refresh') { void refreshWorkspaceCredits(); state.submissionError = ''; void loadTasks({ status: true }); return true; }
   if (action === 'image-show-task') { ctx.setPreviewTab?.('我的作品'); ctx.refresh(); document.getElementById('image-task-' + el.dataset.id)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return true; }
   if (action === 'image-open-result') {
     const task = visibleTasks().find(item => item.id === el.dataset.id);
     const images = (task?.images || []).filter(item => safeImageResultUrl(item.url));
     const image = images[Number(el.dataset.index)];
-    if (image) ctx.openModal('生成图片', dateLabel(task.createdAt) + ' · ' + imageQualityName(task.quality), `<div class="image-result-lightbox" ${task.expiresAt?`data-expires="${Date.parse(task.expiresAt)}"`:''}><img src="${ctx.esc(safeImageResultUrl(image.url))}" alt="${ctx.esc(task.prompt.slice(0, 150))}"><a class="primary" href="${ctx.esc(safeImageResultUrl(image.url))}" download="${ctx.esc(image.filename || 'generated-image.png')}">${ctx.icon('save')} 下载图片</a></div>`, true);
+    if (image) ctx.openModal(imageTaskTitle(task), dateLabel(task.createdAt) + ' · ' + imageQualityName(task.quality), `<div class="image-result-lightbox" ${task.expiresAt?`data-expires="${Date.parse(task.expiresAt)}"`:''}><img src="${ctx.esc(safeImageResultUrl(image.url))}" alt="${ctx.esc(imageTaskTitle(task))}"><a class="primary" href="${ctx.esc(safeImageResultUrl(image.url))}" download="${ctx.esc(image.filename || 'generated-image.png')}">${ctx.icon('save')} 下载图片</a></div>`, true);
     return true;
   }
   return false;
