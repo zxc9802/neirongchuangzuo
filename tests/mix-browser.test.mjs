@@ -892,11 +892,11 @@ test('three extraction and analysis workers overlap and refill independently', a
   } finally { controller.stop(); for (const release of frames.values()) release(); for (const release of analysis.values()) release(); }
 });
 
-test('failed model work retries at the tail immediately and at most once per scan', async () => {
+test('permanent analysis failures retry at the tail at most once per scan', async () => {
   const backend = server(), attempts = [];
   const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
     sampleFrames: async () => ['frame'], api: async (path, options) => {
-      if (path.endsWith('/analyze')) { attempts.push(JSON.parse(options.body).clip_id); throw new Error('HTTP 503'); }
+      if (path.endsWith('/analyze')) { attempts.push(JSON.parse(options.body).clip_id); throw Object.assign(new Error('unsupported material'), { status: 422 }); }
       return backend.api(path, options);
     } });
   try {
@@ -908,6 +908,43 @@ test('failed model work retries at the tail immediately and at most once per sca
     assert.equal(attempts.length, 10);
     assert.equal(controller.status.indexed, 0);
   } finally { controller.stop(); }
+});
+
+test('temporary analysis failures recover after two attempts without rescanning or hammering the server', async () => {
+  const backend = server(), attempts = new Map(), order = [];
+  const originalNow = Date.now;
+  let now = originalNow();
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: async () => ['frame'], api: async (path, options) => {
+      if (path.endsWith('/analyze')) {
+        const id = JSON.parse(options.body).clip_id;
+        attempts.set(id, (attempts.get(id) || 0) + 1);
+        order.push(id);
+        if (attempts.get(id) < 3) throw Object.assign(new Error('gateway temporarily unavailable'), { status: 502 });
+      }
+      return backend.api(path, options);
+    } });
+  controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
+  try {
+    Date.now = () => now;
+    await controller.selectFiles(Array.from({ length: 5 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+    await cycle(); await cycle();
+    assert.equal(order.length, 5, 'fresh clips should run before any retries');
+    await cycle();
+    assert.equal(order.length, 5, 'temporary errors should wait before retrying');
+    assert.equal(controller.status.processing, true, 'waiting for retries is still an active upload');
+    now += 15000;
+    await cycle(); await cycle();
+    assert.equal(order.length, 10);
+    await cycle();
+    assert.equal(order.length, 10);
+    now += 30000;
+    await cycle(); await cycle();
+    assert.equal(controller.status.indexed, 5, 'a third successful attempt must finish automatically');
+    assert.equal(controller.status.processing, false);
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); Date.now = originalNow; }
 });
 
 test('oversize and unreadable MOV repair waits for normal indexing and reuses cached MP4 copies', async () => {

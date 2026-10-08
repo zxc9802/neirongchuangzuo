@@ -144,6 +144,88 @@ test('material preparation shows upload copy and actual progress through scannin
   } finally { f.restore(); }
 });
 
+test('queued and running video repairs remain in the upload progress until their files are ready', async () => {
+  const f = await fixture();
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const { client } = f.mod.getMixState();
+    client._schedule = () => {};
+    clearTimeout(client.timer);
+    const file = new Blob(['broken video']);
+    Object.defineProperties(file, { name: { value: 'bad.mov' }, lastModified: { value: 1 } });
+    client._queueRepair('bad.mov', file);
+    client._report({ scanned: 2, error: 'bad.mov：等待处理' });
+    let html = f.nodes['#mix-material-status'].innerHTML;
+    assert.match(html, /素材正在上传/);
+    assert.match(html, /max="2" value="1"/);
+    assert.doesNotMatch(html, /素材上传完成|data-action="mix-scan"/);
+    client.repairs.get('bad.mov').attempted = true;
+    client.workers.set('repair:bad.mov', Promise.resolve());
+    client._report();
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材正在上传/);
+    client.workers.clear();
+    client._report({ error: 'bad.mov：视频无法转换' });
+    html = f.nodes['#mix-material-status'].innerHTML;
+    assert.doesNotMatch(html, /素材上传完成|素材正在上传/);
+    assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+  } finally { f.restore(); }
+});
+
+test('an exhausted analysis failure exposes a retry action instead of an endless upload', async () => {
+  const f = await fixture();
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const { client } = f.mod.getMixState();
+    client._schedule = () => {};
+    clearTimeout(client.timer);
+    const clip = Object.values(client.record.manifest)[0].clips[0];
+    clip.state = 'error';
+    client.attempts.set(clip.id, 2);
+    client._report({ error: 'video-0.mp4：不支持的视频' });
+    const html = f.nodes['#mix-material-status'].innerHTML;
+    assert.doesNotMatch(html, /素材正在上传|素材上传完成/);
+    assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+  } finally { f.restore(); }
+});
+
+test('HTML gateway failures preserve their HTTP status for automatic material retries', async () => {
+  const f = await fixture();
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const { client } = f.mod.getMixState();
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (path, options) => path.endsWith('/analyze') ?
+      new Response('<!DOCTYPE html><html>Bad gateway</html>', { status: 502, headers: { 'Content-Type': 'text/html' } }) : originalFetch(path, options);
+    await assert.rejects(client._post(client._devicePath('/analyze'), {}, client.generation), error => {
+      assert.equal(error.status, 502);
+      assert.doesNotMatch(error.message, /Unexpected token|DOCTYPE/);
+      return true;
+    });
+  } finally { f.restore(); }
+});
+
+test('an analysis request timeout remains retryable while the material connection is active', async () => {
+  const f = await fixture();
+  const originalTimeout = globalThis.setTimeout;
+  let expire;
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const { client } = f.mod.getMixState();
+    globalThis.setTimeout = (callback, delay, ...args) => {
+      if (delay === 600000) { expire = callback; return originalTimeout(() => {}, delay); }
+      return originalTimeout(callback, delay, ...args);
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (path, options) => path.endsWith('/analyze') ? new Promise((_, reject) => {
+      options.signal.addEventListener('abort', () => reject(new DOMException('request timed out', 'AbortError')), { once: true });
+    }) : originalFetch(path, options);
+    const uploading = client._post(client._devicePath('/analyze'), {}, client.generation);
+    expire();
+    await assert.rejects(uploading, error => { assert.equal(error.status, 408); return true; });
+    assert.equal(client.active, true);
+  } finally { globalThis.setTimeout = originalTimeout; f.restore(); }
+});
+
 test('voice and music libraries remain in the inspector and escape audio names', async () => {
   const voice = 'd'.repeat(32), music = 'e'.repeat(32);
   const f = await fixture({ useShared: true, fetchAudio: async url => Response.json({ configured: true, missing: [], items: [{

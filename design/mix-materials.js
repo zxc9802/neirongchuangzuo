@@ -82,7 +82,8 @@ async function request(path, options = {}, raw = false) {
   options.signal?.addEventListener('abort', abort, { once: true });
   if (options.signal?.aborted) abort();
   state.controllers.add(controller);
-  const timer = setTimeout(abort, /\/(analyze|frames|complete)$/.test(path) ? 600000 : 45000);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; abort(); }, /\/(analyze|frames|complete)$/.test(path) ? 600000 : 45000);
   try {
     const response = await fetch(path, { ...options, credentials: 'same-origin', cache: 'no-store',
       headers: { 'Content-Type': 'application/json', 'X-Workbench-Request': '1', ...options.headers }, signal: controller.signal });
@@ -94,10 +95,21 @@ async function request(path, options = {}, raw = false) {
       throw Object.assign(new Error('登录已失效，请重新登录后连接素材。'), { status: 401 });
     }
     if (raw) return response;
-    const body = await response.json();
+    let body;
+    try { body = await response.json(); }
+    catch {
+      guard(revision, ownerKey);
+      throw Object.assign(new Error('服务暂时不可用，请稍后重试'), { status: response.ok ? 502 : response.status });
+    }
     guard(revision, ownerKey);
     if (!response.ok) throw Object.assign(new Error(message(body.error || body.message || (typeof body.detail === 'string' ? body.detail : ''))), { status: response.status });
     return body;
+  } catch (error) {
+    if (timedOut) {
+      guard(revision, ownerKey);
+      throw Object.assign(new Error('请求超时，请稍后重试'), { status: 408 });
+    }
+    throw error;
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', abort);
@@ -292,15 +304,15 @@ async function deleteAudio(kind, id) {
 
 export function renderMixMaterials() {
   const status = state.status;
-  const uploading = !status.needsPermission && (state.client?.scanning || status.uploadTotal || status.connected && status.indexed < status.total);
-  const text = status.needsPermission ? '请点击上方按钮重新连接素材文件夹' : uploading ? '素材正在上传' : status.connected && !status.error ? status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
-  const progress = status.uploadTotal ? `<progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="素材上传进度"></progress>` : state.client?.scanning ? '<progress aria-label="素材上传进度"></progress>' : status.total && !status.needsPermission ? `<progress max="${status.total}" value="${status.indexed}" aria-label="素材上传进度"></progress>` : '';
+  const uploading = !status.needsPermission && (state.client?.scanning || status.uploadTotal || status.connected && status.processing);
+  const text = status.needsPermission ? '请点击上方按钮重新连接素材文件夹' : uploading ? '素材正在上传' : status.connected ? status.error ? '部分素材上传失败，请重试' : status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
+  const progress = status.uploadTotal ? `<progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="素材上传进度"></progress>` : state.client?.scanning ? '<progress aria-label="素材上传进度"></progress>' : status.totalFiles && !status.needsPermission ? `<progress max="${status.totalFiles}" value="${status.readyFiles}" aria-label="素材上传进度"></progress>` : '';
   const locked = mixFolderLocked();
   const disabled = locked ? 'disabled title="制作时请保持原素材文件夹连接"' : '';
   const scan = status.connected && !status.needsPermission && !uploading;
   const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : folderReadiness();
   const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>继续制作</button>` : '';
-  const actions = `${scan ? `<button data-action="mix-scan" ${disabled}>扫描新增 / 修改</button><button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
+  const actions = `${scan ? `<button data-action="mix-scan" ${disabled}>${status.error ? '重试未完成素材' : '扫描新增 / 修改'}</button><button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
   return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite">${text ? `<span>${text}</span>` : ''}${progress}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}${actions ? `<div class="mix-folder-actions">${actions}</div>` : ''}</div>`;
 }
 

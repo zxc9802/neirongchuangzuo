@@ -9,6 +9,7 @@ const root = globalThis;
   const WORKERS = 3;
   const noop = () => {};
   const isAbort = error => error?.name === 'AbortError';
+  const retryable = error => error?.status === 408 || error?.status === 429 || error?.status >= 500 || error?.name === 'TypeError';
   const mediaError = message => Object.assign(new Error(message), { code: 'MEDIA_DECODE' });
   const repairVideo = async (...args) => (await import('./material-repair.js')).repairVideo(...args);
 
@@ -292,9 +293,17 @@ const root = globalThis;
     }
 
     _report(value = {}) {
-      const clips = Object.values(this.record?.manifest || {}).flatMap(entry => entry.clips || []);
+      const entries = Object.values(this.record?.manifest || {});
+      const clips = entries.flatMap(entry => entry.clips || []);
+      const readable = entry => this.files.has(entry.relativePath) && !this.unreadableFiles.has(entry.assetId);
+      const processing = !!this.scanning || !!this.workers.size || [...this.repairs.values()].some(item => !item.attempted) ||
+        entries.some(entry => readable(entry) && entry.clips.some(clip => this.registered.has(clip.id) &&
+          (clip.state === 'indexing' || ['pending', 'error'].includes(clip.state) &&
+            ((this.attempts.get(clip.id) || 0) < 2 || this.retryAfter.has('clip:' + clip.id)))));
       this.status = { ...this.status, ...value, connected: this.connected, folderName: this.folderName,
-        indexed: clips.filter(clip => clip.state === 'indexed').length, total: clips.length };
+        indexed: clips.filter(clip => clip.state === 'indexed').length, total: clips.length, processing,
+        totalFiles: value.scanned ?? (this.status.scanned || entries.length),
+        readyFiles: entries.filter(entry => readable(entry) && entry.clips.length && entry.clips.every(clip => clip.state === 'indexed')).length };
       this.onStatus(this.status);
     }
 
@@ -482,6 +491,7 @@ const root = globalThis;
       this.unreadableFiles.clear();
       this.repairs.clear();
       this.attempts.clear();
+      this.retryAfter.clear();
       this.processingDeferred = false;
       this.errors.clear();
       this._report({ text: '正在扫描素材文件夹：' + this.folderName, error: '', scanned: 0, needsPermission: false });
@@ -706,7 +716,9 @@ const root = globalThis;
               repair.attempted = true;
               this._startWork('repair:' + repair.relativePath, () => this._repairFile(repair, token), token);
             }
-            queued = candidates.filter(({ clip }) => this.attempts.get(clip.id) < 2);
+            queued = candidates.filter(({ clip }) =>
+              (this.attempts.get(clip.id) < 2 || this.retryAfter.has('clip:' + clip.id)) &&
+              (this.retryAfter.get('clip:' + clip.id) || 0) <= Date.now());
           }
           for (const { item, clip } of queued.slice(0, WORKERS - this.workers.size)) {
             this.attempts.set(clip.id, (this.attempts.get(clip.id) || 0) + 1);
@@ -747,6 +759,7 @@ const root = globalThis;
         this._guard(token);
         if (!result.complete) throw new Error('素材分析仍在处理中，将在队尾重试');
         clip.state = 'indexed';
+        this.retryAfter.delete('clip:' + clip.id);
         if (item.clips.every(value => value.state !== 'error')) this.errors.delete(item.relativePath);
         this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
       } catch (error) {
@@ -756,6 +769,10 @@ const root = globalThis;
           this.unreadableFiles.add(item.assetId);
           this._queueRepair(item.relativePath, this.originalFiles.get(item.relativePath) || this.files.get(item.relativePath));
         }
+        if (!sampling && retryable(error)) {
+          const delay = Math.min(60000, 15000 * 2 ** Math.min(2, (this.attempts.get(clip.id) || 1) - 1));
+          this.retryAfter.set('clip:' + clip.id, Date.now() + delay);
+        } else this.retryAfter.delete('clip:' + clip.id);
         this._error(item.relativePath, error);
       }
       await this._save(token);
@@ -788,7 +805,7 @@ const root = globalThis;
         this.unreadableFiles.delete(id);
         if (previous && !unchanged) this.record.deferredRevocations.push(previous.assetId);
         await this._register(clips, token);
-        for (const clip of clips) this.attempts.delete(clip.id);
+        for (const clip of clips) { this.attempts.delete(clip.id); this.retryAfter.delete('clip:' + clip.id); }
         this.errors.delete(relativePath);
         this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
       } catch (error) {
