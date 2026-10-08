@@ -93,12 +93,23 @@ export function validateDirections(value, analysis, profile) {
   if (!Array.isArray(value?.directions) || value.directions.length > 4) bad('模型推荐方向数量不正确。');
   const usable = new Set(analysis.filter(item => item.usable).map(item => item.imageId));
   const ids = new Set();
-  return value.directions.map((item, index) => {
+  const directions = value.directions.map((item, index) => {
     if (!item || !['id', 'label', 'targetCustomer', 'consumptionScene', 'contentGoal', 'recommendationReason', 'expectedAction'].every(key => text(item[key], 600) && item[key].trim())
       || !/^[A-Za-z0-9_-]{1,40}$/.test(item.id) || ids.has(item.id)
       || !strings(item.supportingImageIds, 30) || !item.supportingImageIds.length || item.supportingImageIds.some(id => !usable.has(id))
       || new Set(item.supportingImageIds).size !== item.supportingImageIds.length) bad('模型推荐引用了不可用照片或缺少必要字段。');
     ids.add(item.id);
+    const coreImageIds = item.coreImageIds === undefined ? [] : item.coreImageIds;
+    if (!strings(coreImageIds, 3) || new Set(coreImageIds).size !== coreImageIds.length || coreImageIds.some(id => !item.supportingImageIds.includes(id))) bad('模型方向的核心图片必须唯一且属于该方向的可用候选。');
+    const imageRoles = item.imageRoles === undefined ? [] : item.imageRoles;
+    const roleIds = new Set();
+    if (!Array.isArray(imageRoles) || imageRoles.length > 30) bad('模型方向的配图角色格式不正确。');
+    const roles = imageRoles.map(entry => {
+      if (!entry || !item.supportingImageIds.includes(entry.imageId) || roleIds.has(entry.imageId)
+        || !['cover', 'core', 'detail', 'context'].includes(entry.role) || !text(entry.reason, 600) || !entry.reason.trim()) bad('模型方向的配图角色缺少合法图片、角色或具体理由。');
+      roleIds.add(entry.imageId);
+      return { imageId: entry.imageId, role: entry.role, reason: entry.reason.trim() };
+    });
     const facts = missing(item.missingFacts);
     // Historical lettering is not a required fact for an ordinary dish or store scene.
     const historyDirection = /历史|老店|年头|传承|老字号/.test(`${item.label}${item.contentGoal}`);
@@ -115,8 +126,17 @@ export function validateDirections(value, analysis, profile) {
     }
     const alreadyKnown = { ...profile, ...resolveDirectionFacts(item, profile) };
     return { ...Object.fromEntries(['id', 'label', 'targetCustomer', 'consumptionScene', 'contentGoal', 'recommendationReason', 'expectedAction'].map(key => [key, item[key].trim()])), supportingImageIds: item.supportingImageIds,
+      coreImageIds, imageRoles: roles,
       missingFacts: facts.filter(entry => !alreadyKnown[entry.field]?.trim()), index };
   });
+  const unusedImages = value.unusedImages === undefined ? [] : value.unusedImages;
+  if (!Array.isArray(unusedImages) || unusedImages.length > 30) bad('模型未使用图片的说明格式不正确。');
+  const covered = new Set(directions.flatMap(item => item.supportingImageIds)), unused = new Set();
+  for (const item of unusedImages) {
+    if (!item || !usable.has(item.imageId) || covered.has(item.imageId) || unused.has(item.imageId) || !text(item.reason, 600) || !item.reason.trim()) bad('模型未使用图片的说明必须对应未采用的可用照片且有具体理由。');
+    unused.add(item.imageId);
+  }
+  return directions;
 }
 export function pendingFacts(direction, profile, supplied) {
   const facts = { ...profile, ...resolveDirectionFacts(direction, profile, supplied) };

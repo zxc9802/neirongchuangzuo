@@ -175,6 +175,22 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     return await store.claimTask(userId, task.id, ['uploading'], { status: 'failed', code: 'UPLOAD_CANCELLED', retryable: false, error: '已取消上传，可以重新选择素材。',
       sourceImages: task.sourceImages.map(expire), pendingUpload: task.pendingUpload ? { ...task.pendingUpload, sourceImages: task.pendingUpload.sourceImages.map(expire) } : null }) ?? await taskFor(userId, task.id);
   }
+  async function refreshRecommendations(userId, task, body) {
+    if (!UUID.test(body.requestId ?? '')) throw new RestaurantError('推荐请求标识无效，请刷新后重试。');
+    if (task.recommendationRequestId === body.requestId) return task;
+    if (!['awaiting_selection', 'awaiting_facts'].includes(task.status)) throw new RestaurantError('请等待当前任务完成后再重新推荐。', 409, 'TASK_STATE');
+    if (!task.sourceImages?.length || task.analysis?.length !== task.sourceImages.length) throw new RestaurantError('照片分析尚未完成，请先完成原任务。', 409, 'ANALYSIS_INCOMPLETE');
+    if (model.enabled === false) throw new RestaurantError('内容分析接口尚未配置。', 503, 'MODEL_NOT_CONFIGURED');
+    if ((await store.listTasks(userId)).filter(item => ACTIVE.has(item.status)).length >= 2) throw new RestaurantError('当前有任务处理中，请完成后再重新推荐。', 429, 'ACTIVE_LIMIT');
+    await loadSources(userId, task);
+    const claimed = await store.claimTask(userId, task.id, ['awaiting_selection', 'awaiting_facts'], {
+      status: 'analysing', recommendationRequestId: body.requestId,
+      directions: [], selection: null, selectedDirectionId: null, facts: {}, missingFacts: [], outputCount: null,
+      progress: { stage: 'recommendation', current: task.analysis.length, total: task.sourceImages.length }, error: null, code: null,
+    });
+    if (claimed) launch(userId, task.id, () => analyseTask(userId, task.id));
+    return claimed ?? await taskFor(userId, task.id);
+  }
   async function analyseTask(userId, id) {
     const task = await taskFor(userId, id), sources = await loadSources(userId, task);
     const analysis = [...(task.analysis ?? [])];
@@ -251,6 +267,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     }
     if (!selected.length) throw new RestaurantError('可用图片处理失败，未形成完整内容包。', 502, 'IMAGES_FAILED');
     if (selection.strictOutputCount && selected.length !== targetCount) throw new RestaurantError(`可用照片处理后不足${targetCount}张，同方向备用照片也无法补齐，未扣正式生成额度。`, 502, 'INSUFFICIENT_PROCESSED_IMAGES');
+    if ((selection.coreImageIds ?? []).some(imageId => !processed.has(imageId))) throw new RestaurantError('该方向的核心证据照片处理失败，无法用场景配图替代，未扣正式生成额度。', 502, 'CORE_IMAGE_FAILED');
     // A dish/group-buy direction requires its visual evidence; otherwise fail rather than weaken its claim silently.
     const originalCore = task.analysis.filter(item => selection.imageIds.includes(item.imageId) && item.imageType === 'food');
     if (originalCore.length && /菜|餐|面|食|团购/.test(selection.direction.label) && !selected.some(item => item.imageType === 'food')) throw new RestaurantError('核心菜品图片处理失败，请重试或选择其他方向。', 502, 'CORE_IMAGE_FAILED');
@@ -344,16 +361,20 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       seenHashes.add(source.hash); return true;
     });
     if (!availableIds.length) throw new RestaurantError('该方向没有可用照片，请更换方向。', 422);
+    const coreImageIds = direction.coreImageIds ?? [];
+    if (coreImageIds.some(imageId => !availableIds.includes(imageId))) throw new RestaurantError('该方向的核心证据照片不可用，请重新分析或更换方向。', 422, 'CORE_IMAGES_UNAVAILABLE');
     const outputCount = body.outputCount ?? Math.min(15, availableIds.length);
     if (outputCount > availableIds.length || body.outputCount !== undefined && availableIds.length >= 6 && outputCount < 6) throw new RestaurantError(`该方向可用真实照片${availableIds.length}张，请选择${availableIds.length >= 6 ? '6—' : '1—'}${Math.min(15, availableIds.length)}张，不会复制照片凑数。`, 422, 'INSUFFICIENT_DIRECTION_IMAGES');
+    if (outputCount < coreImageIds.length) throw new RestaurantError(`该方向需要保留${coreImageIds.length}张核心证据照片，请增加成品张数。`, 422, 'CORE_IMAGES_REQUIRED');
     const facts = resolveDirectionFacts(direction, task.profileSnapshot, normalizeFacts(body.facts)), missingFacts = pendingFacts(direction, task.profileSnapshot, facts);
     if (missingFacts.length) return await store.patchTask(userId, task.id, { status: 'awaiting_facts', missingFacts, selectedDirectionId: direction.id });
     if (task.sparsePhotos && body.acceptSparse !== true && body.allowFewImages !== true) throw new RestaurantError('可用照片较少，请确认继续生成简版图文。', 422, 'SPARSE_CONFIRMATION_REQUIRED');
     const imageMode = body.imageMode ?? body.processingMode ?? 'natural';
     if (!['natural', 'cover'].includes(imageMode)) throw new RestaurantError('请选择自然美化或封面加字。');
-    const imageIds = availableIds.slice(0, outputCount), backupImageIds = availableIds.slice(outputCount);
+    const orderedIds = [...coreImageIds, ...availableIds.filter(imageId => !coreImageIds.includes(imageId))];
+    const imageIds = orderedIds.slice(0, outputCount), backupImageIds = orderedIds.slice(outputCount);
     await store.reservePackage(userId, task.id);
-    const claimed = await store.claimTask(userId, task.id, ['awaiting_selection', 'awaiting_facts'], { status: 'generating', outputCount, selection: { directionId: direction.id, direction, facts, imageMode, imageIds, backupImageIds, outputCount, strictOutputCount: body.outputCount !== undefined }, missingFacts: [], error: null, code: null });
+    const claimed = await store.claimTask(userId, task.id, ['awaiting_selection', 'awaiting_facts'], { status: 'generating', outputCount, selection: { directionId: direction.id, direction, facts, imageMode, imageIds, coreImageIds, backupImageIds, outputCount, strictOutputCount: body.outputCount !== undefined }, missingFacts: [], error: null, code: null });
     if (!claimed) return await taskFor(userId, task.id);
     launch(userId, task.id, () => generateTask(userId, task.id)); return claimed;
   }
@@ -431,7 +452,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
         });
         reply(res, 202, { task: publicTask(task) }); return true;
       }
-      const match = /^\/api\/restaurant\/tasks\/([^/]+)(?:\/(generate|retry|confirm|fork|files|photos|analyse|cancel-upload)(?:\/([^/]+))?)?$/.exec(path);
+      const match = /^\/api\/restaurant\/tasks\/([^/]+)(?:\/(generate|retry|confirm|fork|files|photos|analyse|recommend|cancel-upload)(?:\/([^/]+))?)?$/.exec(path);
       if (match) {
         const [, id, action, filename] = match;
         if (req.method === 'GET' && !action) { reply(res, 200, { task: publicTask(await taskFor(userId, id)) }); return true; }
@@ -445,12 +466,13 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
           if (!bytes) throw new RestaurantError('文件已过期或不可用。', 410, 'FILES_EXPIRED');
           res.writeHead(200, { 'Content-Type': file.mime, 'Content-Length': bytes.length, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `${original ? 'inline' : 'attachment'}; filename="${file.filename}"` }); res.end(bytes); return true;
         }
-        if (req.method === 'POST' && ['generate', 'retry', 'confirm', 'fork', 'photos', 'analyse', 'cancel-upload'].includes(action)) {
+        if (req.method === 'POST' && ['generate', 'retry', 'confirm', 'fork', 'photos', 'analyse', 'recommend', 'cancel-upload'].includes(action)) {
           const body = await readJSON(req);
           const result = await exclusive(userId, async () => {
             const task = await taskFor(userId, id);
             if (action === 'photos') return uploadPhotos(userId, task, body);
             if (action === 'analyse') return startAnalysis(userId, task);
+            if (action === 'recommend') return refreshRecommendations(userId, task, body);
             if (action === 'cancel-upload') return cancelUpload(userId, task);
             if (action === 'generate') return startGenerate(userId, task, body);
             if (action === 'fork') return cloneTask(userId, task, body.requestId);

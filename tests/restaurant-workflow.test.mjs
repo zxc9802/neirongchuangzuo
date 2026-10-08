@@ -290,6 +290,82 @@ test('explicit counts reject insufficient direction evidence and permit small pa
   const task = await app.wait(sparse.id, ['completed', 'failed']); assert.equal(task.status, 'completed', task.error); assert.equal(task.outputCount, 2);
 });
 
+test('direction candidates retain core evidence even when its IDs appear after the output cutoff', async t => {
+  const model = mockModel({ async recommend(items) { return [direction(items, { coreImageIds: items.slice(-2).map(item => item.imageId) })]; } });
+  const app = await setup(t, { model }), { id, task } = await uploadPool(app, 14);
+  assert.equal(task.directions[0].supportingImageIds.length, 14);
+  assert.deepEqual(task.directions[0].coreImageIds, ['photo-13', 'photo-14']);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', outputCount: 6 });
+  const result = await app.wait(id, ['completed', 'failed']);
+  assert.equal(result.status, 'completed', result.error);
+  assert.equal(result.copy.imageOrder.length, 6);
+  assert.ok(result.copy.imageOrder.includes('photo-13')); assert.ok(result.copy.imageOrder.includes('photo-14'));
+  assert.deepEqual(result.selection.coreImageIds, ['photo-13', 'photo-14']);
+  assert.equal((await app.api('/usage')).body.usage.used, 1);
+  const small = await uploadPool(app, 3);
+  assert.equal((await app.api(`/tasks/${small.id}/generate`, { directionId: 'D01', outputCount: 1, acceptSparse: true })).body.code, 'CORE_IMAGES_REQUIRED');
+  assert.equal(model.counts.write, 1, 'insufficient output counts must not invoke generation');
+});
+
+test('refreshing directions reuses saved analysis, coalesces identical requests and never charges a package', async t => {
+  let calls = 0, finish;
+  const model = mockModel({ async recommend(items) {
+    calls++;
+    if (calls === 1) return [direction(items, { supportingImageIds: [items[0].imageId] })];
+    await new Promise(resolve => { finish = resolve; });
+    return [direction(items), direction(items, { id: 'D02', label: '店内午餐日常分享', targetCustomer: '附近居民', consumptionScene: '工作日午餐', contentGoal: '店内日常介绍' })];
+  } });
+  const app = await setup(t, { model }), { id, task } = await uploadPool(app, 6);
+  assert.equal(task.directions[0].supportingImageIds.length, 1);
+  const original = structuredClone(task.analysis), originalCalls = model.counts.analyse, requestId = randomUUID();
+  assert.equal((await app.api(`/tasks/${id}/recommend`, { requestId: 'invalid' })).status, 400);
+  assert.equal((await app.api(`/tasks/${id}/recommend`, { requestId }, 'other-owner')).status, 404);
+  const refreshed = await app.api(`/tasks/${id}/recommend`, { requestId });
+  assert.equal(refreshed.status, 202); assert.equal(refreshed.body.task.progress.stage, 'recommendation');
+  const duplicate = await app.api(`/tasks/${id}/recommend`, { requestId });
+  assert.equal(duplicate.status, 202);
+  assert.equal((await app.api(`/tasks/${id}/recommend`, { requestId: randomUUID() })).status, 409);
+  const recommendationDeadline = performance.now() + 10_000;
+  while (!finish && performance.now() < recommendationDeadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(typeof finish, 'function'); finish();
+  const result = await app.wait(id, ['awaiting_selection', 'failed']);
+  assert.equal(result.status, 'awaiting_selection', result.error);
+  assert.equal(result.directions.length, 2); assert.equal(result.directions[0].supportingImageIds.length, 6);
+  assert.deepEqual(result.analysis, original); assert.deepEqual(result.profileSnapshot, task.profileSnapshot);
+  assert.equal(model.counts.analyse, originalCalls); assert.equal(calls, 2);
+  assert.equal((await app.api(`/tasks/${id}/recommend`, { requestId })).status, 200);
+  assert.equal(calls, 2); assert.equal((await app.api('/usage')).body.usage.used, 0);
+});
+
+test('expired originals and completed packages cannot trigger a fresh recommendation call', async t => {
+  let clock = Date.now(), recommends = 0;
+  const model = mockModel({ async recommend(items) { recommends++; return [direction(items)]; } });
+  const app = await setup(t, { model, now: () => clock }), { id } = await uploadPool(app, 6);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', outputCount: 6 });
+  assert.equal((await app.wait(id, ['completed', 'failed'])).status, 'completed');
+  assert.equal((await app.api(`/tasks/${id}/recommend`, { requestId: randomUUID() })).status, 409);
+  const old = await uploadPool(app, 6);
+  assert.equal((await app.api('/usage')).body.usage.used, 1);
+  clock += 4 * 24 * 3600000;
+  assert.equal((await app.api(`/tasks/${old.id}/recommend`, { requestId: randomUUID() })).body.code, 'FILES_EXPIRED');
+  assert.equal(recommends, 2); assert.equal((await app.api('/usage')).body.usage.used, 0);
+});
+
+test('scene backups cannot replace failed indispensable evidence or consume a package charge', async t => {
+  const model = mockModel({ async recommend(items) { return [direction(items, { coreImageIds: [items[0].imageId] })]; } });
+  const imageProcessor = { ...processor, async processPhoto(bytes, options) {
+    const meta = await sharp(bytes).metadata(), pixel = await sharp(bytes).raw().toBuffer();
+    if (pixel[0] === 80 && meta.width === 300) throw new Error('core evidence failed');
+    return processor.processPhoto(bytes, options);
+  } };
+  const app = await setup(t, { model, imageProcessor }), { id } = await uploadPool(app, 7);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', outputCount: 6 });
+  const result = await app.wait(id, ['failed', 'completed']);
+  assert.equal(result.status, 'failed'); assert.equal(result.code, 'CORE_IMAGE_FAILED');
+  assert.equal(model.counts.write, 0); assert.equal(result.files.length, 0);
+  assert.equal((await app.api('/usage')).body.usage.used, 0); assert.equal((await app.api('/usage')).body.usage.reserved, 0);
+});
+
 test('strict image counts replace failed photos with real same-direction backups or fail without consuming package quota', async t => {
   const imageProcessor = { ...processor, async processPhoto(bytes, options) {
     const meta = await sharp(bytes).metadata(), pixel = await sharp(bytes).raw().toBuffer();
