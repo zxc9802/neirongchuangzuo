@@ -50,9 +50,10 @@ def rebuild(plan, output, width, height):
     expected = plan['scenes'][-1]['end']
     if abs(media.duration(output / 'preview.mp4') - expected) > 1 / plan['fps'] + .001:
         raise ValueError('修正字幕后的画面时长与原时间轴不一致')
-    if not plan.get('narration'):
+    audio = plan.get('original_audio') if plan.get('voice_mode') == 'original' else plan.get('narration')
+    if not audio:
         return output / 'preview.mp4'
     media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-i', 'preview.mp4',
-               '-i', plan['narration'], '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy',
+               '-i', audio, '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy',
                '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', 'video.mp4'], cwd=output)
     return output / 'video.mp4'

@@ -16,9 +16,11 @@ async function fixture(t) {
   const engine = createServer(async (req, res) => {
     const chunks = []; for await (const chunk of req) chunks.push(chunk);
     received.push({ path: req.url, headers: req.headers, body: Buffer.concat(chunks) });
-    res.setHeader('Content-Type', req.url.endsWith('/video') ? 'video/mp4' : 'application/json');
+    const audio = req.url.endsWith('/stream');
+    res.setHeader('Content-Type', audio ? 'audio/wav' : req.url.endsWith('/video') ? 'video/mp4' : 'application/json');
     res.setHeader('Upload-Offset', '12');
-    res.end(req.url.endsWith('/video') ? Buffer.from([0, 1, 2, 255]) : JSON.stringify({ ok: true }));
+    if (audio && req.headers.range) { res.statusCode = 206; res.setHeader('Content-Range', 'bytes 0-3/4'); }
+    res.end(audio || req.url.endsWith('/video') ? Buffer.from([0, 1, 2, 255]) : JSON.stringify({ ok: true }));
   });
   const backend = createServer((req, res) => {
     const user = { 'session=a': 'alice', 'session=b': 'bob' }[req.headers.cookie];
@@ -37,10 +39,48 @@ async function fixture(t) {
 
 test('mix and browser catalog routes require verified accounts before launching the engine', async t => {
   const { base, received } = await fixture(t);
-  for (const path of ['/api/mix/health', '/api/mix/jobs', '/api/browser-materials/devices/' + 'a'.repeat(32) + '/requests']) {
+  for (const path of ['/api/mix/health', '/api/mix/jobs', '/api/mix/audio?kind=voice', '/api/browser-materials/devices/' + 'a'.repeat(32) + '/requests']) {
     assert.equal((await fetch(base + path, { headers: { 'x-material-owner': hash('alice') } })).status, 401);
   }
   assert.equal(received.length, 0);
+});
+
+test('audio library routes preserve raw uploads and query names while using the verified owner', async t => {
+  const { base, received } = await fixture(t);
+  const query = new URLSearchParams({ kind: 'voice', name: '我的音色.wav' });
+  const bytes = Buffer.from([82, 73, 70, 70, 0, 1, 255]);
+  const response = await fetch(base + '/api/mix/audio?' + query, { method: 'POST',
+    headers: { cookie: 'session=a', Origin: 'https://studio.example', 'Content-Type': 'audio/wav',
+      'x-material-owner': hash('forged'), authorization: 'Bearer forged' }, body: bytes });
+  assert.equal(response.status, 200);
+  assert.equal(received[0].path, '/v1/mix/audio?' + query);
+  assert.deepEqual(received[0].body, bytes);
+  assert.equal(received[0].headers['content-type'], 'audio/wav');
+  assert.equal(received[0].headers['x-material-owner'], hash('alice'));
+  assert.equal(received[0].headers.authorization, 'Bearer ' + 'a'.repeat(64));
+  assert.equal(received[0].headers.cookie, undefined);
+  assert.equal((await fetch(base + '/api/mix/audio?kind=music', { headers: { cookie: 'session=b' } })).status, 200);
+  assert.equal(received[1].path, '/v1/mix/audio?kind=music');
+  assert.equal(received[1].headers['x-material-owner'], hash('bob'));
+});
+
+test('audio preview ranges and deletion stay inside authenticated same-origin routes', async t => {
+  const { base, received } = await fixture(t);
+  const path = '/api/mix/audio/' + 'd'.repeat(32);
+  const audio = await fetch(base + path + '/stream', { headers: { cookie: 'session=a', Range: 'bytes=0-3' } });
+  assert.equal(audio.status, 206);
+  assert.equal(audio.headers.get('content-type'), 'audio/wav');
+  assert.equal(audio.headers.get('content-range'), 'bytes 0-3/4');
+  assert.deepEqual(Buffer.from(await audio.arrayBuffer()), Buffer.from([0, 1, 2, 255]));
+  assert.equal(received[0].headers.range, 'bytes=0-3');
+  assert.equal((await fetch(base + path + '/stream', { method: 'HEAD', headers: { cookie: 'session=a' } })).status, 200);
+  assert.equal((await fetch(base + path, { method: 'DELETE', headers: { cookie: 'session=a', Origin: 'https://attacker.example' } })).status, 403);
+  assert.equal(received.length, 2);
+  assert.equal((await fetch(base + path, { method: 'DELETE', headers: { cookie: 'session=a', Origin: 'https://studio.example' } })).status, 200);
+  for (const suffix of ['/download', '/secret', '/stream/extra']) {
+    assert.equal((await fetch(base + path + suffix, { headers: { cookie: 'session=a' } })).status, 404);
+  }
+  assert.equal(received.length, 3);
 });
 
 test('proxy derives account ownership, scopes idempotency and excludes browser credentials', async t => {

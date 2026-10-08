@@ -193,12 +193,12 @@ def synthesize(text, speaker, emotion_url, emotion_hash, alpha, folder, log=prin
 
 
 def synthesize_plan(plan, output, emotion_alpha=.8, emotion_file=DEFAULT_REFERENCE,
-                    speaker_url=None, log=print, speaker_file=None, emotion_url=DEFAULT_REFERENCE):
+                    speaker_url=None, log=print, speaker_file=None, emotion_url=DEFAULT_REFERENCE,
+                    speaker_cache_key=None):
     alpha = validate_emotion(emotion_alpha)
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     speaker_hash = None
-    speaker_cache_key = None
     speaker_url = speaker_url or os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL')
     if speaker_url:
         speaker_url = checked_url(speaker_url)
@@ -206,7 +206,7 @@ def synthesize_plan(plan, output, emotion_alpha=.8, emotion_file=DEFAULT_REFEREN
         speaker_url, speaker_hash = upload_reference(speaker_file, output / 'voice-cache', 'speaker')
         reference = output / 'voice-cache' / f'speaker-{speaker_hash[:16]}.json'
         if reference.exists():
-            speaker_cache_key = json.loads(reference.read_text(encoding='utf-8')).get('cache_url')
+            speaker_cache_key = speaker_cache_key or json.loads(reference.read_text(encoding='utf-8')).get('cache_url')
     else:
         raise ValueError('请设置服务器 INDEXTTS_SPEAKER_AUDIO_URL 通用音色')
     if emotion_url is DEFAULT_REFERENCE:

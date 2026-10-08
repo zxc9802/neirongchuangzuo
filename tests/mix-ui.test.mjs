@@ -9,8 +9,8 @@ const settle = async predicate => {
   assert.ok(predicate(), 'browser UI did not finish expected work');
 };
 
-async function fixture({ files = 1, fetchJob, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [] } } = {}) {
-  const original = Object.fromEntries(['workspaceUser', 'document', 'window', 'location', 'indexedDB', 'localStorage', 'fetch'].map(key => [key, globalThis[key]]));
+async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, xhr, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [], voice_configured: true, default_voice_configured: true } } = {}) {
+  const original = Object.fromEntries(['workspaceUser', 'document', 'window', 'location', 'indexedDB', 'localStorage', 'fetch', 'XMLHttpRequest'].map(key => [key, globalThis[key]]));
   const storage = new Map();
   const databases = new Map();
   const calls = [];
@@ -46,6 +46,7 @@ async function fixture({ files = 1, fetchJob, pending, useShared = false, health
   globalThis.window = { addEventListener(name, fn) { events.set(name, fn); } };
   globalThis.location = { origin: 'https://workspace.example' };
   globalThis.workspaceUser = { id: 'account-a' };
+  if (xhr) globalThis.XMLHttpRequest = xhr;
   globalThis.localStorage = { getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key) };
   globalThis.indexedDB = { open(name) {
     const opening = {};
@@ -62,7 +63,8 @@ async function fixture({ files = 1, fetchJob, pending, useShared = false, health
   } };
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, ...options });
-    if (url === '/api/mix/health') return Response.json(health);
+    if (url === '/api/mix/health') return fetchHealth ? fetchHealth() : Response.json(health);
+    if (url.startsWith('/api/mix/audio')) return fetchAudio ? fetchAudio(url, options, calls) : Response.json({ configured: true, missing: [], items: [] });
     if (url === '/api/browser-materials/connect') return Response.json({ device_id: 'c'.repeat(32) });
     if (url.endsWith('/clips')) return Response.json({ clips: JSON.parse(options.body).clips.map(clip => ({ id: clip.id, state: 'indexed' })) });
     if (url.endsWith('/requests')) return Response.json({ requests: [] });
@@ -98,6 +100,245 @@ test('mix studio keeps its columns and labels the submitted text as promotional 
     assert.match(html, /文案与配音自动确定/);
     assert.doesNotMatch(html, /最多 30 段/);
     assert.doesNotMatch(html, /data-studio-field="count"|data-studio-field="duration"|data-studio-field="music"/);
+  } finally { f.restore(); }
+});
+
+test('voice and music libraries remain in the inspector and escape audio names', async () => {
+  const voice = 'd'.repeat(32), music = 'e'.repeat(32);
+  const f = await fixture({ useShared: true, fetchAudio: async url => Response.json({ configured: true, missing: [], items: [{
+    id: url.includes('kind=voice') ? voice : music, kind: url.includes('kind=voice') ? 'voice' : 'music',
+    name: '<script>alert(1)</script>.mp3', duration: 15, bytes: 100,
+    url: `/api/mix/audio/${url.includes('kind=voice') ? voice : music}/stream`,
+  }] }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    f.ctx.configs.mix.voice_id = voice;
+    f.ctx.configs.mix.music_id = music;
+    const html = renderStudio('mix', f.ctx);
+    assert.match(html, /合成人声/);
+    assert.match(html, /保留素材原声/);
+    assert.match(html, /音色库/);
+    assert.match(html, /背景音乐库/);
+    assert.match(html, new RegExp(`/api/mix/audio/${voice}/stream`));
+    assert.match(html, /&lt;script&gt;/);
+    assert.doesNotMatch(html, /<script>|音乐暂未开放/);
+  } finally { f.restore(); }
+});
+
+test('original audio generation needs neither TTS nor a default voice and sends chosen music ID', async () => {
+  const music = 'e'.repeat(32);
+  const f = await fixture({ health: { configured: true, indexing_configured: true, voice_configured: false, default_voice_configured: false, voice_missing: ['INDEXTTS_302_API_KEY'] },
+    fetchAudio: async url => Response.json({ configured: true, missing: [], items: url.includes('kind=music') ? [{ id: music, kind: 'music', name: '音乐.mp3', url: `/api/mix/audio/${music}/stream` }] : [] }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.match(f.mod.mixReadiness(f.ctx), /配音/);
+    f.ctx.configs.mix.voice_mode = 'original';
+    f.ctx.configs.mix.music_id = music;
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    f.mod.handleMixMaterialAction('studio-generate', { dataset: {} }, f.ctx);
+    await settle(() => f.calls.some(call => call.url === '/api/mix/jobs' && call.method === 'POST'));
+    const body = JSON.parse(f.calls.find(call => call.url === '/api/mix/jobs' && call.method === 'POST').body);
+    assert.equal(body.voice_mode, 'original');
+    assert.equal(body.voice_id, null);
+    assert.equal(body.music_id, music);
+    assert.equal(body.music, true);
+  } finally { f.restore(); }
+});
+
+test('uploaded voice removes the default-reference requirement, stale IDs cannot be submitted', async () => {
+  const voice = 'd'.repeat(32);
+  const f = await fixture({ health: { configured: true, indexing_configured: true, voice_configured: true, default_voice_configured: false },
+    fetchAudio: async url => Response.json({ configured: true, missing: [], items: url.includes('kind=voice') ? [{ id: voice, kind: 'voice', name: '人声.wav', url: `/api/mix/audio/${voice}/stream` }] : [] }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.match(f.mod.mixReadiness(f.ctx), /音色/);
+    f.ctx.configs.mix.voice_id = voice;
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    f.ctx.configs.mix.voice_id = 'f'.repeat(32);
+    assert.match(f.mod.mixReadiness(f.ctx), /音色/);
+    f.ctx.configs.mix.voice_id = voice;
+    globalThis.workspaceUser = { id: 'account-b' };
+    f.mod.getMixState();
+    assert.equal(f.mod.getMixState().audio.voice.length, 0);
+    assert.equal(f.ctx.configs.mix.voice_id, '');
+  } finally { f.restore(); }
+});
+
+test('audio previews accept only own-site opaque-ID stream paths', async () => {
+  const { safeMixAudioUrl = () => '' } = await import('../design/mix-materials.js');
+  const good = `/api/mix/audio/${'d'.repeat(32)}/stream`;
+  assert.equal(safeMixAudioUrl(good, 'https://workspace.example'), good);
+  for (const bad of ['https://evil.example/a.wav', '//evil.example' + good, good + '?token=x', good.replace('/stream', '/%73tream'), 'javascript:alert(1)']) {
+    assert.equal(safeMixAudioUrl(bad, 'https://workspace.example'), '');
+  }
+});
+
+test('audio upload reports byte progress, selects the result and rejects repeated submission', async () => {
+  const uploads = [];
+  class Xhr {
+    upload = {};
+    headers = {};
+    open(method, url) { this.method = method; this.url = url; }
+    setRequestHeader(key, value) { this.headers[key] = value; }
+    send(file) { this.file = file; uploads.push(this); }
+    abort() { this.onabort?.(); }
+  }
+  const f = await fixture({ xhr: Xhr });
+  const file = new Blob(['audio']);
+  Object.defineProperty(file, 'name', { value: '我的音色.wav' });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.equal(typeof f.mod.uploadMixAudio, 'function');
+    const uploading = f.mod.uploadMixAudio('voice', file, f.ctx);
+    await settle(() => uploads.length === 1);
+    await f.mod.uploadMixAudio('voice', file, f.ctx);
+    assert.equal(uploads.length, 1);
+    uploads[0].upload.onprogress({ lengthComputable: true, loaded: 3, total: 5 });
+    assert.deepEqual(f.mod.getMixState().audio.progress, { loaded: 3, total: 5 });
+    assert.match(uploads[0].url, /kind=voice/);
+    assert.equal(uploads[0].file, file);
+    const voice = 'd'.repeat(32);
+    uploads[0].status = 200;
+    uploads[0].responseText = JSON.stringify({ item: { id: voice, kind: 'voice', name: file.name, duration: 15, bytes: 100, url: `/api/mix/audio/${voice}/stream` } });
+    uploads[0].onload();
+    await uploading;
+    assert.equal(f.ctx.configs.mix.voice_id, voice);
+    assert.equal(f.mod.getMixState().audio.busy, false);
+    assert.equal(f.mod.getMixState().audio.voice.length, 1);
+  } finally { f.restore(); }
+});
+
+test('deletion conflicts keep the selected track and account changes abort pending audio uploads', async () => {
+  const music = 'e'.repeat(32);
+  const uploads = [];
+  class Xhr {
+    upload = {};
+    open() {}
+    setRequestHeader() {}
+    send() { uploads.push(this); }
+    abort() { this.aborted = true; this.onabort?.(); }
+  }
+  const f = await fixture({ xhr: Xhr, fetchAudio: async (url, options) => options.method === 'DELETE'
+    ? Response.json({ detail: '音频正被混剪任务使用' }, { status: 409 })
+    : Response.json({ configured: true, missing: [], items: url.includes('kind=music') ? [{ id: music, kind: 'music', name: '音乐.mp3', url: `/api/mix/audio/${music}/stream` }] : [] }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    f.ctx.configs.mix.music_id = music;
+    f.mod.handleMixMaterialAction('mix-audio-delete', { dataset: { id: music, kind: 'music' } }, f.ctx);
+    await settle(() => f.mod.getMixState().audio.error === '音频正被混剪任务使用');
+    assert.equal(f.ctx.configs.mix.music_id, music);
+    assert.equal(f.mod.getMixState().audio.music.length, 1);
+    const file = new Blob(['audio']);
+    Object.defineProperty(file, 'name', { value: '人声.wav' });
+    const uploading = f.mod.uploadMixAudio('voice', file, f.ctx);
+    await settle(() => uploads.length === 1);
+    globalThis.workspaceUser = { id: 'account-b' };
+    f.mod.getMixState();
+    await uploading;
+    assert.equal(uploads[0].aborted, true);
+    assert.equal(f.mod.getMixState().audio.voice.length, 0);
+    assert.equal(f.ctx.configs.mix.music_id, '');
+  } finally { f.restore(); }
+});
+
+test('a failed audio-library load can be retried without refreshing the page', async () => {
+  let failed = true;
+  const f = await fixture({ fetchAudio: async () => {
+    if (failed) throw new Error('音频库连接中断');
+    return Response.json({ configured: true, missing: [], items: [] });
+  } });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.equal(f.mod.getMixState().audio.configured, null);
+    assert.equal(f.mod.getMixState().audio.error, '音频库连接中断');
+    assert.match(f.mod.renderMixAudio(f.ctx), /data-action="mix-audio-refresh"/);
+    failed = false;
+    f.mod.handleMixMaterialAction('mix-audio-refresh', { dataset: {} }, f.ctx);
+    await settle(() => f.mod.getMixState().audio.configured === true);
+    assert.equal(f.mod.getMixState().audio.error, '');
+  } finally { f.restore(); }
+});
+
+test('an audio-library request timeout releases loading and permits a retry', async () => {
+  let timedOut = true;
+  const f = await fixture({ fetchAudio: async () => {
+    if (timedOut) throw new DOMException('request timed out', 'AbortError');
+    return Response.json({ configured: true, missing: [], items: [] });
+  } });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.equal(f.mod.getMixState().audio.loading, false);
+    assert.match(f.mod.getMixState().audio.error, /超时/);
+    timedOut = false;
+    f.mod.handleMixMaterialAction('mix-audio-refresh', { dataset: {} }, f.ctx);
+    await settle(() => f.mod.getMixState().audio.configured === true);
+    assert.equal(f.mod.getMixState().audio.loading, false);
+  } finally { f.restore(); }
+});
+
+test('typing copy only binds new audio controls and keeps the existing player', async () => {
+  const f = await fixture();
+  let replacements = 0, bindings = 0;
+  const input = { dataset: { mixAudioField: 'voice_mode' }, addEventListener() { bindings++; } };
+  const audioRoot = { set innerHTML(value) { replacements++; }, querySelectorAll: selector => selector === '[data-mix-audio-field]' ? [input] : [] };
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    f.nodes['#mix-audio-settings'] = audioRoot;
+    f.mod.bindMixMaterials(f.ctx);
+    f.mod.bindMixMaterials(f.ctx);
+    assert.equal(replacements, 0);
+    assert.equal(bindings, 1);
+  } finally { f.restore(); }
+});
+
+test('an account handoff after request validation cannot publish the old health response', async () => {
+  let nextHealth, newAccountLoading, first = true;
+  const waiting = new Promise(resolve => { nextHealth = resolve; });
+  const f = await fixture({ fetchHealth: () => {
+    if (!first) return waiting;
+    first = false;
+    return { ok: true, status: 200, json: async () => {
+      queueMicrotask(() => queueMicrotask(() => {
+        globalThis.workspaceUser = { id: 'account-b' };
+        f.mod.stopMixMaterials();
+        newAccountLoading = f.mod.initializeMixMaterials(f.ctx);
+      }));
+      return { configured: true, marker: 'old-account-a' };
+    } };
+  } });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    await settle(() => f.mod.getMixState().ownerKey === 'mix-active-job:account-b');
+    assert.equal(f.mod.getMixState().health, null);
+    nextHealth(Response.json({ configured: true, marker: 'new-account-b' }));
+    await newAccountLoading;
+    assert.equal(f.mod.getMixState().health.marker, 'new-account-b');
+  } finally { nextHealth(Response.json({ configured: true })); f.restore(); }
+});
+
+test('audio uploads prevent resuming an interrupted job until upload completion', async () => {
+  const uploads = [];
+  class Xhr {
+    upload = {};
+    open() {}
+    setRequestHeader() {}
+    send() { uploads.push(this); }
+    abort() { this.onabort?.(); }
+  }
+  const f = await fixture({ xhr: Xhr, pending: { id }, fetchJob: async url => Response.json(url === '/api/mix/jobs'
+    ? { jobs: [] } : { id, state: url.endsWith('/resume') ? 'running' : 'interrupted' }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const file = new Blob(['audio']);
+    Object.defineProperty(file, 'name', { value: '人声.wav' });
+    const uploading = f.mod.uploadMixAudio('voice', file, f.ctx);
+    await settle(() => uploads.length === 1);
+    f.mod.handleMixMaterialAction('mix-resume-job', { dataset: {} }, f.ctx);
+    await new Promise(resolve => setTimeout(resolve, 10));
+    assert.equal(f.calls.some(call => call.url.endsWith('/resume')), false);
+    assert.match(f.mod.renderMixMaterials(f.ctx), /disabled title="正在保存音频/);
+    uploads[0].abort();
+    await uploading;
   } finally { f.restore(); }
 });
 

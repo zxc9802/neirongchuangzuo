@@ -53,7 +53,7 @@ for(const module of Object.values(modules))for(const purpose of PURPOSES)if(!mod
 const validPage=page=>page==='home'||page==='agent'||page==='assets'||Object.hasOwn(modules,page);
 let mode = validPage(location.hash.slice(1)) ? location.hash.slice(1) : 'home';
 let imageMode = 'restaurant';
-const configs = Object.fromEntries(Object.keys(modules).map(k=>[k,{skill:modules[k].names[0][0],prompt:'',files:[],ratio:k==='image'?'3:4':'9:16',quality:k==='image'?'auto':'1080p',duration:'30',format:'PNG',generationMode:k==='image'?'series':'single',count:k==='image'?'6':'1',voice:'自然讲述',subtitles:true,music:true,director:false,person:'老板本人',background:'门店实景'}]));
+const configs = Object.fromEntries(Object.keys(modules).map(k=>[k,{skill:modules[k].names[0][0],prompt:'',files:[],ratio:k==='image'?'3:4':'9:16',quality:k==='image'?'auto':'1080p',duration:'30',format:'PNG',generationMode:k==='image'?'series':'single',count:k==='image'?'6':'1',voice:'自然讲述',subtitles:true,music:k!=='mix',...(k==='mix'?{voice_mode:'synthesized',voice_id:'',music_id:''}:{}),director:false,person:'老板本人',background:'门店实景'}]));
 let assets = [], queueOpen = window.innerWidth>1140, previewTab = '参考示例', selectedDraft = null, activeClip = 0;
 let drafts = load('store-ai-design-drafts', []), storeInfo = load('store-ai-design-profile', {name:'',industry:'餐饮',address:'',feature:'',hours:''});
 let skillCategory = '推荐', skillQuery = '', pickerType = 'all', pickerIds = new Set();

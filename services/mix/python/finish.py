@@ -169,7 +169,7 @@ def deliver(plan, output, width=1920, height=1080, catalog='data/catalog', music
     models = Models()
     prepare_shots(plan, catalog, models, log, checkpoint=output/'plan.json')
     write_json(output/'plan.json', plan)
-    if plan.get('narration') and music_file:
+    if music_file:
         plan.setdefault('music_settings', {}).update({'path': str(Path(music_file).resolve()),
                                                      'narration_lufs': music.VOICE_LUFS,
                                                      'music_lufs': music.MUSIC_LUFS, 'ducking': True})
@@ -179,8 +179,10 @@ def deliver(plan, output, width=1920, height=1080, catalog='data/catalog', music
         log('导出画面、配音与字幕…')
         video = (rebuild_captions(plan, output, width, height) if captions_only
                  else media.render(plan, output, width, height, log=log))
-        if plan.get('narration') and music_file:
-            video = music.mix(video, plan['narration'], music_file, output, plan['scenes'][-1]['end'])
+        write_json(output/'plan.json', plan)
+        if music_file:
+            stem = plan.get('original_audio') if plan.get('voice_mode') == 'original' else plan.get('narration')
+            video = music.mix(video, stem, music_file, output, plan['scenes'][-1]['end'])
         if plan.get('presentation', {}).get('confirmed'):
             from presentation import render as render_presentation
             plan['cover_seconds'] = .5

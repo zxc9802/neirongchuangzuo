@@ -320,9 +320,14 @@ class BrowserMaterials:
             with tempfile.TemporaryDirectory(prefix='source-' + PROCESS_ID + '-', dir=self.folder) as temporary:
                 segment = Path(temporary) / 'segment.mp4'
                 # Re-encode after accurate seek; every extracted clip begins at timestamp zero.
+                seconds = request['end'] - request['start']
+                samples = round(seconds * 48000)
                 media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-threads', '2', '-ss', str(request['start']),
-                           '-i', str(path), '-t', str(request['end'] - request['start']),
-                           '-map', '0:v:0', '-an', '-vf', f'setpts=PTS-STARTPTS,fps=25,{scale_filter},{color_filter}', '-c:v', 'libx264',
+                           '-i', str(path), '-t', str(seconds),
+                           '-map', '0:v:0', '-map', '0:a:0?', '-c:a', 'aac', '-b:a', '192k',
+                           '-af', f'atrim=start=0:end={seconds},aresample=48000:async=1:first_pts=0,'
+                           f'apad=whole_len={samples},atrim=end_sample={samples},asetpts=N/SR/TB',
+                           '-vf', f'setpts=PTS-STARTPTS,fps=25,{scale_filter},{color_filter}', '-c:v', 'libx264',
                            '-threads', '2', '-filter_threads', '1', '-preset', 'fast', '-crf', '0', '-pix_fmt', 'yuv420p',
                            '-map_metadata', '-1', *media.SDR_FLAGS, str(segment)])
                 self.fulfill(device_id, request, segment)

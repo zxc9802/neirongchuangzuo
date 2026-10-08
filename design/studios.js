@@ -1,4 +1,4 @@
-import { getMixState, renderMixMaterials, bindMixMaterials, mixReadiness, mixFolderLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
+import { getMixState, renderMixMaterials, renderMixAudio, bindMixMaterials, mixReadiness, mixFolderLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
 
 const studioState = {
   mix: { activeId: null },
@@ -66,10 +66,10 @@ function mixInspector(ctx) {
     <div class="studio-inspector-body">
       ${ctx.renderBusinessEntry?.('mix') || ''}<label class="studio-field">宣传主题<select data-studio-field="skill">${selectOptions(modules.mix.names.map(item => item[0]), c.skill, esc)}</select></label>
       <label class="studio-field studio-script-field">宣传文案<textarea id="studio-prompt" maxlength="2000" placeholder="填写视频中要讲给客户的完整文案。例如：欢迎来到我们的门店，这里有现做的招牌产品，也有细致周到的服务。">${esc(c.prompt)}</textarea><span class="studio-char-count" id="studio-char-count">${c.prompt.length} / 2000</span></label>
-      <div class="studio-dual-fields"><div class="studio-field">视频时长<small class="mix-setting-value">文案与配音自动确定</small></div><div class="studio-field">成片数量<small class="mix-setting-value">每次 1 条</small></div></div>
+      <div class="studio-dual-fields"><div class="studio-field">视频时长<small class="mix-setting-value" id="mix-timing-hint">${c.voice_mode === 'original' ? '按文案阅读速度估算' : '文案与配音自动确定'}</small></div><div class="studio-field">成片数量<small class="mix-setting-value">每次 1 条</small></div></div>
       <div class="studio-setting-divider"></div>
       <label class="studio-switch-row"><span><strong>自动字幕</strong><small>让静音观看也能看懂</small></span><input type="checkbox" data-studio-field="subtitles" ${c.subtitles ? 'checked' : ''}><i aria-hidden="true"></i></label>
-      <div class="studio-switch-row mix-disabled-setting"><span><strong>背景音乐</strong><small>当前成片保留配音，音乐暂未开放</small></span></div>
+      <div id="mix-audio-settings">${renderMixAudio(ctx)}</div>
       ${button('settings', `<span>成片规格</span><strong>${esc(c.ratio)} · ${esc(c.quality)}</strong>${icon('chevron')}`, 'studio-setting-link')}
     </div>
     <footer class="studio-inspector-footer">${button('studio-generate', icon('star') + '开始智能混剪', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}<span id="studio-generation-hint">${esc(hint || `${mix.status.indexed} 个片段可供匹配`)}</span></footer>

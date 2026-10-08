@@ -23,12 +23,21 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(api.clean_error('provider failed: test-index-tts-private-key'),
                              'provider failed: [REDACTED]')
 
+    def test_errors_redact_separate_audio_cos_credentials(self):
+        with patch.dict(os.environ, {'MIX_AUDIO_COS_SECRET_ID': 'audio-secret-id',
+                                    'MIX_AUDIO_COS_SECRET_KEY': 'audio-secret-key'}):
+            self.assertEqual(api.clean_error('failed: audio-secret-id audio-secret-key'),
+                             'failed: [REDACTED] [REDACTED]')
+
     def test_indexing_does_not_require_rerank_or_tts_configuration(self):
         with patch.dict(os.environ, {'OPENLUX_API_KEY': 'test'}, clear=True), patch('app.shutil.which', return_value='/bin/tool'):
             health = readiness()
         self.assertTrue(health['indexing_configured'])
         self.assertFalse(health['configured'])
-        self.assertEqual(health['missing'], ['RERANK_API_KEY', 'INDEXTTS_302_API_KEY', 'INDEXTTS_SPEAKER_AUDIO_URL'])
+        self.assertEqual(health['missing'], ['RERANK_API_KEY'])
+        self.assertEqual(health['voice_missing'], ['INDEXTTS_302_API_KEY'])
+        self.assertFalse(health['voice_configured'])
+        self.assertFalse(health['default_voice_configured'])
 
     def test_generic_tts_uses_configured_speaker_and_no_private_reference_files(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {

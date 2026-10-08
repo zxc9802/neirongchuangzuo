@@ -146,6 +146,18 @@
 .mix-download .icon {width:12px;height:12px;}
 .mix-setting-value {border:1px solid #e3e7ed;border-radius:7px;background:#fafbfc;min-height:37px;padding:10px 7px;color:#6c7889;font-size:10px;line-height:1.6;}
 .mix-disabled-setting strong {color:#9ba5b3;}
+#mix-audio-settings {display:flex;flex-direction:column;gap:8px;margin-bottom:16px;}
+#mix-audio-settings .studio-field {margin-bottom:5px;}
+#mix-audio-settings small {display:block;font-size:10px;line-height:1.65;color:#8b96a5;overflow-wrap:anywhere;}
+#mix-audio-settings .mix-status-error {color:#ba6647;}
+.mix-audio-library {padding-top:12px;display:flex;flex-direction:column;gap:7px;}
+.mix-audio-actions {display:flex;gap:12px;align-items:center;font-size:11px;color:#2479e6;}
+.mix-audio-upload {position:relative;cursor:pointer;padding:3px 0;}
+.mix-audio-upload input {position:absolute;inset:0;width:100%;opacity:0;cursor:pointer;}
+.mix-audio-upload:focus-within {outline:2px solid #72adfb;outline-offset:3px;}
+.mix-audio-upload:has(input:disabled),.mix-audio-actions button:disabled {color:#a5afbd;cursor:default;}
+.mix-audio-library audio {width:100%;height:32px;}
+#mix-audio-settings progress {width:100%;height:5px;accent-color:var(--studio-blue);}
 .mix-job-history {display:flex;gap:10px;overflow:auto;min-height:72px;}
 .mix-job-card {display:grid;grid-template-columns:20px 1fr;gap:7px 8px;align-content:center;text-align:left;padding:11px 13px;min-width:166px;border:1px solid #e7ecf3;border-radius:7px;background:#fafcfe;color:#8698b0;}
 .mix-job-card.selected {border-color:#bcd5fa;background:#f3f8ff;}

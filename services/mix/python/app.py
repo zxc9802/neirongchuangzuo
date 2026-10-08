@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from api import clean_error
+from audio_library import AudioLibrary, attach_audio_library
 from browser_materials import attach_browser_materials
 from local_materials import MaterialBroker, MaterialsPending, valid_id
 
@@ -31,16 +32,16 @@ RECORD_TTL = 30 * 86400
 def readiness():
     missing = [name for name in ('OPENLUX_API_KEY', 'RERANK_API_KEY') if not os.environ.get(name)]
     indexing = bool(os.environ.get('OPENLUX_API_KEY'))
-    if not (os.environ.get('INDEXTTS_302_API_KEY') or os.environ.get('TTS_API_KEY')):
-        missing.append('INDEXTTS_302_API_KEY')
-    if not os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL'):
-        missing.append('INDEXTTS_SPEAKER_AUDIO_URL')
+    voice_missing = ([] if os.environ.get('INDEXTTS_302_API_KEY') or os.environ.get('TTS_API_KEY')
+                     else ['INDEXTTS_302_API_KEY'])
     for binary in ('ffmpeg', 'ffprobe'):
         if not shutil.which(binary):
             missing.append(binary)
             indexing = False
     return {'app': 'browser-material-mixer', 'browser_materials': True,
-            'configured': not missing, 'indexing_configured': indexing, 'missing': missing}
+            'configured': not missing, 'indexing_configured': indexing, 'missing': missing,
+            'voice_configured': not voice_missing, 'voice_missing': voice_missing,
+            'default_voice_configured': bool(os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL'))}
 
 
 def file_digest(path):
@@ -51,15 +52,31 @@ def file_digest(path):
     return digest.hexdigest()
 
 
-def generate(spec, folder, log):
+def generate(spec, folder, log, audio_library=None):
     """Resume the saved provider/matching checkpoints before doing new work."""
     config = readiness()
     if not config['configured']:
         raise ValueError('服务器混剪配置缺失：' + ', '.join(config['missing']))
-    from matcher import create_plan, resume_plan, write_json
+    from matcher import create_plan, estimate_timeline, resume_plan, write_json
     from voice import synthesize_plan
     from finish import deliver
     folder = Path(folder).resolve()
+    voice_mode = spec.get('voice_mode', 'synthesized')
+    if voice_mode == 'synthesized' and not (folder / 'narration.wav').is_file():
+        if not config.get('voice_configured', True):
+            raise ValueError('服务器配音配置缺失：' + ', '.join(config['voice_missing']))
+        if ('default_voice_configured' in config and not spec.get('voice_id')
+                and not spec.get('voice_config', {}).get('speaker_url') and not config['default_voice_configured']):
+            raise ValueError('请设置服务器 INDEXTTS_SPEAKER_AUDIO_URL 通用音色或选择自己的声线')
+    library = audio_library
+    if spec.get('voice_id') or spec.get('music_id'):
+        library = library if library is not None else AudioLibrary(folder.parent.parent)
+        if spec.get('voice_id'):
+            selected_voice = library.get(spec['owner'], spec['voice_id'], 'voice')
+            if selected_voice['sha256'] != spec['voice_sha256']:
+                raise ValueError('声线文件校验与任务记录不一致，不能复用已付费任务')
+        if spec.get('music_id'):
+            library.get(spec['owner'], spec['music_id'], 'music')
     broker = MaterialBroker(folder.parent.parent)
     broker.device(spec['device_id'], spec['owner'])
     catalog = folder / 'remote-catalog'
@@ -71,13 +88,23 @@ def generate(spec, folder, log):
     if plan['script'] != spec['text']:
         raise ValueError('保存的计划与任务文案不一致，不能复用已付费任务')
     plan['subtitles'] = spec['subtitles']
+    plan['voice_mode'] = voice_mode
     resume_plan(plan, catalog, folder, log=log)
-    if ((folder / 'narration.wav').is_file() and all(
+    if voice_mode == 'original':
+        plan['scenes'] = estimate_timeline(plan['scenes'], fps=plan['fps'])
+        plan['timing'] = 'estimated'
+        write_json(saved, plan)
+    elif ((folder / 'narration.wav').is_file() and all(
             scene.get('voice') and Path(scene['voice']).is_file() for scene in plan['scenes'])):
         log('复用已完成配音与时间轴')
     else:
-        synthesize_plan(plan, folder, log=log, **spec['voice_config'])
-    return deliver(plan, folder, spec['width'], spec['height'], catalog=catalog, log=log)
+        voice_config = dict(spec['voice_config'])
+        if spec.get('voice_id'):
+            voice_config.update(speaker_url=library.signed_url(spec['owner'], spec['voice_id']),
+                                speaker_cache_key='library:' + spec['voice_id'] + ':' + spec['voice_sha256'])
+        synthesize_plan(plan, folder, log=log, **voice_config)
+    music_file = library.download(spec['owner'], spec['music_id'], folder) if spec.get('music_id') else None
+    return deliver(plan, folder, spec['width'], spec['height'], catalog=catalog, music_file=music_file, log=log)
 
 
 class Jobs:
@@ -111,7 +138,12 @@ class Jobs:
             row = db.execute('SELECT * FROM jobs WHERE request_key=?', (key,)).fetchone()
             if row:
                 if row['spec'] != encoded:
-                    raise HTTPException(409, '同一 Idempotency-Key 不能提交不同文案或参数')
+                    previous = json.loads(row['spec'])
+                    # Jobs saved before audio choices existed used these same defaults.
+                    for field, default in (('voice_mode', 'synthesized'), ('voice_id', None), ('music_id', None)):
+                        previous.setdefault(field, default)
+                    if json.dumps(previous, sort_keys=True, ensure_ascii=False) != encoded:
+                        raise HTTPException(409, '同一 Idempotency-Key 不能提交不同文案或参数')
                 return row['id']
             if db.execute("SELECT count(*) FROM jobs WHERE state IN ('queued','running')").fetchone()[0] >= 20:
                 raise HTTPException(429, '任务队列已满，请稍后再试')
@@ -135,6 +167,13 @@ class Jobs:
             ids = [row['id'] for row in db.execute(
                 'SELECT id FROM jobs WHERE owner=? ORDER BY created DESC LIMIT 100', (owner,))]
         return [self.get(job_id, owner) for job_id in ids]
+
+    def audio_in_use(self, owner, ident):
+        with self.connect() as db:
+            rows = db.execute("SELECT spec FROM jobs WHERE owner=? AND state IN "
+                              "('queued','running','waiting_materials','interrupted','failed')", (owner,))
+            return any(ident in (spec.get('voice_id'), spec.get('music_id'))
+                       for spec in (json.loads(row['spec']) for row in rows))
 
     def resume(self, job_id, owner):
         self.get(job_id, owner)
@@ -209,7 +248,8 @@ class Jobs:
 
 
 def normalize(body, owner):
-    fields = {'text', 'device_id', 'ratio', 'quality', 'subtitles', 'music', 'count', 'duration'}
+    fields = {'text', 'device_id', 'ratio', 'quality', 'subtitles', 'music', 'count', 'duration',
+              'voice_mode', 'voice_id', 'music_id'}
     if set(body) - fields:
         raise HTTPException(400, '任务包含不支持的参数')
     text = body.get('text')
@@ -220,25 +260,42 @@ def normalize(body, owner):
     if ratio not in ('9:16', '16:9', '1:1') or quality not in ('720p', '1080p'):
         raise HTTPException(400, '画幅或清晰度无效')
     subtitles = body.get('subtitles', True)
-    if type(subtitles) is not bool or body.get('music', False) is not False:
-        raise HTTPException(400, '字幕须为布尔值；首版暂不支持背景音乐')
+    voice_mode = body.get('voice_mode', 'synthesized')
+    if voice_mode not in ('synthesized', 'original'):
+        raise HTTPException(400, '配音模式必须是 synthesized 或 original')
+    voice_id, music_id = body.get('voice_id'), body.get('music_id')
+    for ident in (voice_id, music_id):
+        if ident is not None:
+            valid_id(ident, 32)
+    if voice_mode == 'original' and voice_id is not None:
+        raise HTTPException(400, '原声模式不能选择合成配音声线')
+    enabled_music = music_id is not None
+    if type(subtitles) is not bool or type(body.get('music', enabled_music)) is not bool:
+        raise HTTPException(400, '字幕与背景音乐开关须为布尔值')
+    if body.get('music', enabled_music) != enabled_music:
+        raise HTTPException(400, '背景音乐开关与所选音频不一致')
     if type(body.get('count', 1)) is not int or body.get('count', 1) != 1 or body.get('duration') is not None:
-        raise HTTPException(400, '首版每次制作一条；时长由完整文案的实际配音决定')
+        raise HTTPException(400, '每次制作一条；时长由完整文案与所选声音模式决定')
     short, long = (720, 1280) if quality == '720p' else (1080, 1920)
     width, height = {'9:16': (short, long), '16:9': (long, short), '1:1': (short, short)}[ratio]
     return {'text': text, 'device_id': device_id, 'owner': owner, 'ratio': ratio, 'quality': quality,
-            'width': width, 'height': height, 'subtitles': subtitles, 'music': False,
+            'width': width, 'height': height, 'subtitles': subtitles, 'music': enabled_music,
+            'voice_mode': voice_mode, 'voice_id': voice_id, 'music_id': music_id,
             'count': 1, 'duration': None,
-            'voice_config': {'speaker_url': os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL', ''),
+            'voice_config': ({} if voice_mode == 'original' else {
+                             'speaker_url': None if voice_id else os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL', ''),
                              'emotion_url': os.environ.get('INDEXTTS_EMOTION_AUDIO_URL') or None,
-                             'emotion_file': os.environ.get('INDEXTTS_EMOTION_AUDIO_PATH') or None}}
+                             'emotion_file': os.environ.get('INDEXTTS_EMOTION_AUDIO_PATH') or None})}
 
 
-def create_app(root=None, token=None, start_worker=True, runner=generate):
+def create_app(root=None, token=None, start_worker=True, runner=generate, audio_library=None):
     token = token or os.environ.get('MIXER_API_TOKEN', '')
     if len(token) < 32 or not token.isascii():
         raise ValueError('MIXER_API_TOKEN 必须是至少 32 字符的随机 ASCII 密钥')
     jobs = Jobs(root or os.environ.get('DATA_DIR', 'data/mix'))
+    library = audio_library if audio_library is not None else AudioLibrary(jobs.root)
+    job_runner = ((lambda spec, folder, log: generate(spec, folder, log, audio_library=library))
+                  if runner is generate else runner)
     stop = threading.Event()
 
     def work():
@@ -249,7 +306,7 @@ def create_app(root=None, token=None, start_worker=True, runner=generate):
                     app.state.browser_materials.cleanup()
                     jobs.cleanup()
                     last_cleanup = time.monotonic()
-                if not jobs.run_one(runner):
+                if not jobs.run_one(job_runner):
                     stop.wait(1)
             except Exception as exc:
                 print('混剪工作线程暂不可用：' + clean_error(exc), flush=True)
@@ -265,7 +322,8 @@ def create_app(root=None, token=None, start_worker=True, runner=generate):
     app = FastAPI(title='Browser material mixer', docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.state.jobs = jobs
     app.state.materials = jobs.materials
-    app.state.runner = runner
+    app.state.audio_library = library
+    app.state.runner = job_runner
 
     def authorize(request: Request):
         value = request.headers.get('authorization', '')
@@ -298,6 +356,7 @@ def create_app(root=None, token=None, start_worker=True, runner=generate):
             raise HTTPException(400, '请求必须是 JSON 对象') from None
 
     attach_browser_materials(app, jobs.materials, authorize, material_body)
+    attach_audio_library(app, library, owner, jobs.audio_in_use)
 
     def payload(job):
         result = {key: value for key, value in job.items() if key != 'result'}
@@ -307,7 +366,20 @@ def create_app(root=None, token=None, start_worker=True, runner=generate):
 
     @app.get('/health', dependencies=[Depends(authorize)])
     def health():
-        return readiness()
+        return {**readiness(), 'audio_library': library.status()}
+
+    def submit_owned(key, spec):
+        # Deletion shares this lock, so an ID cannot disappear before its job is registered.
+        with library.lock:
+            try:
+                if spec['voice_id']:
+                    item = library.get(spec['owner'], spec['voice_id'], 'voice')
+                    spec['voice_sha256'] = item['sha256']
+                if spec['music_id']:
+                    library.get(spec['owner'], spec['music_id'], 'music')
+            except KeyError:
+                raise HTTPException(404, '音频不存在') from None
+            return jobs.submit(key, spec)
 
     @app.post('/v1/mix/jobs', status_code=202)
     async def submit(request: Request, owner_id=Depends(owner)):
@@ -316,7 +388,7 @@ def create_app(root=None, token=None, start_worker=True, runner=generate):
             raise HTTPException(400, '需要有效 Idempotency-Key')
         spec = normalize(await material_body(request, 32768), owner_id)
         await run_in_threadpool(app.state.browser_materials.check_device, spec['device_id'], owner_id)
-        job_id = await run_in_threadpool(jobs.submit, key, spec)
+        job_id = await run_in_threadpool(submit_owned, key, spec)
         return payload(jobs.get(job_id, owner_id))
 
     @app.get('/v1/mix/jobs')
@@ -355,7 +427,8 @@ def create_app(root=None, token=None, start_worker=True, runner=generate):
         saved = json.loads(artifact(job_id, owner_id, 'plan.json').read_text(encoding='utf-8'))
         scenes = [{key: scene[key] for key in ('text', 'query', 'start', 'end', 'visual_usage', 'visual_note') if key in scene}
                   for scene in saved.get('scenes', [])]
-        return JSONResponse({'script': saved.get('script'), 'fps': saved.get('fps'), 'timing': saved.get('timing'), 'scenes': scenes})
+        return JSONResponse({'script': saved.get('script'), 'fps': saved.get('fps'), 'timing': saved.get('timing'),
+                             'voice_mode': saved.get('voice_mode', 'synthesized'), 'scenes': scenes})
 
     @app.api_route('/v1/mix/jobs/{job_id}/captions', methods=['GET', 'HEAD'])
     def captions(job_id: str, owner_id=Depends(owner)):

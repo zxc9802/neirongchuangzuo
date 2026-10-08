@@ -6,7 +6,10 @@ const complete = job => ['done', 'completed'].includes(job?.state);
 const terminal = job => complete(job) || ['failed', 'cancelled', 'error', 'interrupted', 'expired'].includes(job?.state);
 const resumable = job => ['failed', 'interrupted'].includes(job?.state);
 const emptyStatus = () => ({ text: '选择素材文件夹', error: '', scanned: 0, indexed: 0, total: 0, connected: false, needsPermission: false });
+const emptyAudio = () => ({ voice: [], music: [], configured: null, missing: [], busy: false, loading: false, error: '', progress: null });
+const audioBindings = new WeakSet();
 const state = { ownerKey: null, ctx: null, client: null, status: emptyStatus(), health: null, media: [], fileCount: 0,
+  audio: emptyAudio(),
   job: null, jobs: [], pending: null, busy: false, error: '', view: 'materials', revision: 0, started: false,
   timer: null, loading: null, refreshPanels: null, controllers: new Set(), urls: new Map() };
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -17,6 +20,15 @@ const message = error => String(error?.message || error || '连接暂时不可�
 export function safeMixArtifactUrl(value, origin = globalThis.location?.origin) {
   if (typeof value !== 'string' || !/^\/api\/mix\/jobs\/[a-f0-9]{32}\/(video|captions|plan)$/.test(value)) return '';
   try { return new URL(value, origin).origin === origin ? value : ''; } catch { return ''; }
+}
+
+export function safeMixAudioUrl(value, origin = globalThis.location?.origin) {
+  if (typeof value !== 'string' || !/^\/api\/mix\/audio\/[a-f0-9]{32}\/stream$/.test(value)) return '';
+  try { return new URL(value, origin).origin === origin ? value : ''; } catch { return ''; }
+}
+
+function audioItem(item, kind) {
+  return item?.kind === kind && JOB_ID.test(item.id || '') && safeMixAudioUrl(item.url) === `/api/mix/audio/${item.id}/stream`;
 }
 
 function guard(revision = state.revision, ownerKey = state.ownerKey) {
@@ -35,8 +47,10 @@ export function stopMixMaterials() {
   state.controllers.clear();
   for (const item of state.urls.values()) URL.revokeObjectURL(item.url);
   state.urls.clear();
+  if (state.ctx?.configs?.mix) Object.assign(state.ctx.configs.mix, { voice_id: '', music_id: '', music: false });
   Object.assign(state, { ownerKey: null, status: emptyStatus(), health: null, media: [], fileCount: 0, job: null,
-    jobs: [], pending: null, busy: false, error: '', view: 'materials', loading: null, refreshPanels: null });
+    jobs: [], pending: null, busy: false, error: '', view: 'materials', loading: null, refreshPanels: null, audio: emptyAudio() });
+  updateAudio();
   updateStatus();
 }
 
@@ -124,7 +138,7 @@ function folderReadiness() {
   return readable ? '' : '请重新扫描可读取的素材';
 }
 
-export function mixFolderLocked() { return state.busy || !!(state.job && !terminal(state.job)) || !!(state.pending && !state.pending.id); }
+export function mixFolderLocked() { return state.busy || state.audio.busy || !!(state.job && !terminal(state.job)) || !!(state.pending && !state.pending.id); }
 
 export function mixReadiness(ctx = state.ctx) {
   const folderHint = folderReadiness();
@@ -132,7 +146,148 @@ export function mixReadiness(ctx = state.ctx) {
   if (!ctx?.configs?.mix?.prompt?.trim()) return '填写宣传文案后即可开始';
   if (state.busy || state.job && !terminal(state.job)) return '正在制作，请保持网页连接';
   if (state.pending && !state.pending.id) return '请确认上次提交的任务状态';
+  if (state.audio.busy) return '正在保存音频，请稍候';
+  const c = ctx?.configs?.mix;
+  if ((c.voice_mode || 'synthesized') === 'synthesized') {
+    if (state.health?.voice_configured === false) return '配音服务尚未配置，可选择保留素材原声';
+    if (c.voice_id ? !state.audio.voice.some(item => item.id === c.voice_id) : state.health?.default_voice_configured === false) return '上传并选择一个音色后即可合成人声';
+  }
+  if (c.music_id && !state.audio.music.some(item => item.id === c.music_id)) return '请重新选择背景音乐';
   return '';
+}
+
+export function renderMixAudio(ctx = state.ctx) {
+  const c = ctx?.configs?.mix || {};
+  const locked = mixFolderLocked() || state.audio.busy || state.audio.loading;
+  const disabled = locked ? 'disabled' : '';
+  const mode = c.voice_mode || 'synthesized';
+  const section = kind => {
+    const voice = kind === 'voice', selected = c[`${kind}_id`] || '';
+    const item = state.audio[kind].find(item => item.id === selected);
+    return `<div class="mix-audio-library"><label class="studio-field">${voice ? '音色库' : '背景音乐库'}<select data-mix-audio-field="${kind}_id" ${disabled} ${voice && mode === 'original' ? 'disabled' : ''}><option value="">${voice ? state.health?.default_voice_configured ? '使用默认音色' : '请选择音色' : '不加背景音乐'}</option>${state.audio[kind].map(item => `<option value="${item.id}" ${item.id === selected ? 'selected' : ''}>${escape(item.name)}</option>`).join('')}</select></label><div class="mix-audio-actions"><label class="mix-audio-upload">上传${voice ? '人声' : '音乐'}<input type="file" accept=".mp3,.wav,.m4a" data-mix-audio-upload="${kind}" ${disabled || (state.audio.configured !== true ? 'disabled' : '')}></label>${item ? `<button data-action="mix-audio-delete" data-kind="${kind}" data-id="${item.id}" ${disabled}>删除</button>` : ''}</div>${item ? `<audio controls preload="none" src="${escape(safeMixAudioUrl(item.url))}" aria-label="试听${escape(item.name)}"></audio>` : ''}<small>${voice ? 'MP3 / WAV / M4A，最多 32 MiB，取前 15 秒作参考' : 'MP3 / WAV / M4A，最多 128 MiB'}</small></div>`;
+  };
+  const progress = state.audio.progress;
+  return `<label class="studio-field">视频声音<select data-mix-audio-field="voice_mode" ${disabled}><option value="synthesized" ${mode === 'synthesized' ? 'selected' : ''}>合成人声</option><option value="original" ${mode === 'original' ? 'selected' : ''}>保留素材原声（不配音）</option></select></label><small>${mode === 'original' ? '保留视频原声音，画面与字幕时长按文案估算' : '按照文案合成配音，替换素材原声'}</small>${section('voice')}${section('music')}<div role="status" aria-live="polite">${state.audio.busy ? `<small>${progress && progress.loaded < progress.total ? '正在上传音频' : '正在处理音频'}</small>` : ''}${progress ? `<progress max="${progress.total || 1}" value="${progress.loaded}" aria-label="音频上传进度"></progress>` : ''}${state.audio.configured === false ? '<small>音频库待管理员配置</small>' : ''}${state.audio.error ? `<small class="mix-status-error">${escape(state.audio.error)}</small>` : ''}</div><div class="mix-audio-actions"><button data-action="mix-audio-refresh" ${disabled}>${state.audio.loading ? '正在加载音频库' : '刷新音频库'}</button></div>`;
+}
+
+function bindAudioControls(root) {
+  root.querySelectorAll('[data-mix-audio-field]').forEach(input => {
+    if (audioBindings.has(input)) return;
+    audioBindings.add(input);
+    input.addEventListener('change', () => {
+    if (mixFolderLocked() || state.audio.busy || state.audio.loading) return;
+    const c = state.ctx.configs.mix;
+    c[input.dataset.mixAudioField] = input.value;
+    c.music = !!c.music_id;
+    updateAudio(); updateStatus();
+    });
+  });
+  root.querySelectorAll('[data-mix-audio-upload]').forEach(input => {
+    if (audioBindings.has(input)) return;
+    audioBindings.add(input);
+    input.addEventListener('change', () => {
+    const file = input.files?.[0];
+    input.value = '';
+    if (file) uploadMixAudio(input.dataset.mixAudioUpload, file);
+    });
+  });
+}
+
+function updateAudio() {
+  const root = typeof document !== 'undefined' && document.querySelector('#mix-audio-settings');
+  if (!root) return;
+  root.innerHTML = renderMixAudio();
+  bindAudioControls(root);
+}
+
+async function loadAudio() {
+  if (state.audio.loading || state.audio.busy) return;
+  const revision = state.revision;
+  state.audio.loading = true;
+  state.audio.error = '';
+  updateAudio(); updateStatus();
+  try {
+    const lists = await Promise.all(['voice', 'music'].map(kind => request('/api/mix/audio?kind=' + kind)));
+    guard(revision);
+    lists.forEach((result, index) => { const kind = index ? 'music' : 'voice'; state.audio[kind] = (result.items || []).filter(item => audioItem(item, kind)); });
+    state.audio.configured = lists.every(result => result.configured === true);
+    state.audio.missing = [...new Set(lists.flatMap(result => result.missing || []))];
+  } catch (error) {
+    if (revision !== state.revision) return;
+    state.audio.error = error.name === 'AbortError' ? '音频库连接超时，请重试' : message(error);
+  } finally {
+    if (revision === state.revision) { state.audio.loading = false; updateAudio(); updateStatus(); }
+  }
+}
+
+export async function uploadMixAudio(kind, file, ctx = state.ctx) {
+  if (!['voice', 'music'].includes(kind) || mixFolderLocked() || state.audio.busy || state.audio.loading) return;
+  const revision = state.revision;
+  try {
+    guard(revision);
+    if (state.audio.configured !== true) throw new Error('音频库待管理员配置');
+    if (!/\.(mp3|wav|m4a)$/i.test(file?.name || '') || !file.size) throw new Error('请选择 MP3、WAV 或 M4A 音频');
+    if (file.size > (kind === 'voice' ? 32 : 128) * 1024 * 1024) throw new Error(kind === 'voice' ? '人声音频最大 32 MiB' : '背景音乐最大 128 MiB');
+    state.audio.busy = true; state.audio.error = ''; state.audio.progress = { loaded: 0, total: file.size };
+    updateAudio(); updateStatus();
+    const result = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      state.controllers.add(xhr);
+      const finish = (fn, value) => { state.controllers.delete(xhr); fn(value); };
+      xhr.open('POST', `/api/mix/audio?kind=${kind}&name=${encodeURIComponent(file.name)}`);
+      xhr.withCredentials = true; xhr.timeout = 600000;
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.setRequestHeader('X-Workbench-Request', '1');
+      xhr.upload.onprogress = event => {
+        try { guard(revision); } catch { return; }
+        if (event.lengthComputable) { state.audio.progress = { loaded: event.loaded, total: event.total }; updateAudio(); }
+      };
+      xhr.onload = () => {
+        try {
+          guard(revision);
+          if (xhr.status === 401) { stopMixMaterials(); state.error = '登录已失效，请重新登录'; updateStatus(); throw stopped(); }
+          const body = JSON.parse(xhr.responseText);
+          if (xhr.status < 200 || xhr.status >= 300) throw new Error(message(body.error || body.detail));
+          finish(resolve, body);
+        } catch (error) { finish(reject, error); }
+      };
+      xhr.onerror = xhr.ontimeout = () => finish(reject, new Error('音频上传未完成，请重试'));
+      xhr.onabort = () => finish(reject, stopped());
+      try { xhr.send(file); } catch (error) { finish(reject, error); }
+    });
+    guard(revision);
+    if (!audioItem(result.item, kind)) throw new Error('服务器未返回有效音频，请重新加载');
+    state.audio[kind] = [result.item, ...state.audio[kind].filter(item => item.id !== result.item.id)];
+    ctx.configs.mix[`${kind}_id`] = result.item.id;
+    ctx.configs.mix.music = !!ctx.configs.mix.music_id;
+  } catch (error) {
+    if (revision !== state.revision || error.name === 'AbortError') return;
+    state.audio.error = message(error);
+    ctx?.toast?.(state.audio.error);
+  } finally {
+    if (revision === state.revision) { state.audio.busy = false; state.audio.progress = null; updateAudio(); updateStatus(); }
+  }
+}
+
+async function deleteAudio(kind, id) {
+  if (!['voice', 'music'].includes(kind) || !state.audio[kind].some(item => item.id === id) || mixFolderLocked() || state.audio.busy || state.audio.loading) return;
+  const revision = state.revision;
+  state.audio.busy = true; state.audio.error = '';
+  updateAudio(); updateStatus();
+  try {
+    await request('/api/mix/audio/' + id, { method: 'DELETE' });
+    guard(revision);
+    state.audio[kind] = state.audio[kind].filter(item => item.id !== id);
+    const c = state.ctx.configs.mix;
+    if (c[`${kind}_id`] === id) c[`${kind}_id`] = '';
+    c.music = !!c.music_id;
+  } catch (error) {
+    if (revision !== state.revision || error.name === 'AbortError') return;
+    state.audio.error = message(error);
+    state.ctx?.toast?.(state.audio.error);
+  } finally {
+    if (revision === state.revision) { state.audio.busy = false; updateAudio(); updateStatus(); }
+  }
 }
 
 export function renderMixMaterials(ctx = state.ctx) {
@@ -145,7 +300,7 @@ export function renderMixMaterials(ctx = state.ctx) {
   const locked = mixFolderLocked();
   const disabled = locked ? 'disabled title="制作时请保持原素材文件夹连接"' : '';
   const scan = status.connected && !status.needsPermission;
-  const resumeHint = state.busy ? '正在继续制作' : folderReadiness();
+  const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : folderReadiness();
   const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>继续制作</button>` : '';
   return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite"><div class="mix-status-label">${icon}<strong>${escape(status.folderName || '本地素材文件夹')}</strong></div><span>${escape(status.text)}</span>${indexed}${progress}${jobState}${missing ? `<small>${escape(missing)}</small>` : ''}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}<small>原视频保留在本机，制作时临时传输命中的素材。网页关闭后会暂停读取。</small><div class="mix-folder-actions"><button data-action="mix-${scan ? 'scan' : 'choose-folder'}" ${scan ? disabled : ''}>${status.needsPermission ? '重新连接' : scan ? '扫描新增 / 修改' : '选择文件夹'}</button>${status.connected ? `<button data-action="mix-choose-folder" ${status.needsPermission ? '' : disabled}>更换</button><button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}</div></div>`;
 }
@@ -166,6 +321,8 @@ function updateStatus() {
   if (generate) { generate.disabled = !!hint; generate.title = hint; }
   const hintNode = root.querySelector('#studio-generation-hint');
   if (hintNode) hintNode.textContent = hint || `${state.status.indexed} 个片段可供匹配`;
+  const timingNode = root.querySelector('#mix-timing-hint');
+  if (timingNode) timingNode.textContent = state.ctx?.configs?.mix?.voice_mode === 'original' ? '按文案阅读速度估算' : '文案与配音自动确定';
   const jobNode = root.querySelector('#mix-job-progress');
   if (jobNode && state.job) jobNode.textContent = mixJobLabel();
   const resultButton = root.querySelector('[data-action="mix-show-result"]');
@@ -174,6 +331,10 @@ function updateStatus() {
     const locked = mixFolderLocked() && (button.dataset.action !== 'mix-choose-folder' || state.status.connected && !state.status.needsPermission);
     button.disabled = locked;
     button.title = locked ? '制作时请保持原素材文件夹连接' : '';
+  });
+  root.querySelectorAll('[data-mix-audio-field], [data-mix-audio-upload], [data-action="mix-audio-delete"], [data-action="mix-audio-refresh"]').forEach(input => {
+    input.disabled = mixFolderLocked() || state.audio.busy || state.audio.loading || input.dataset.mixAudioUpload && state.audio.configured !== true
+      || input.dataset.mixAudioField === 'voice_id' && state.ctx?.configs?.mix?.voice_mode === 'original';
   });
 }
 
@@ -245,7 +406,7 @@ async function submit(pending) {
 }
 
 async function resumeJob() {
-  if (state.busy || !resumable(state.job)) return;
+  if (state.busy || state.audio.busy || !resumable(state.job)) return;
   const hint = folderReadiness();
   if (hint) { state.ctx?.toast?.(hint); return; }
   const revision = state.revision;
@@ -298,7 +459,8 @@ export function initializeMixMaterials(ctx) {
     } });
   state.loading = (async () => {
     const results = await Promise.allSettled([
-      (async () => { state.health = await request('/api/mix/health'); guard(revision); updateStatus(); })(),
+      (async () => { const health = await request('/api/mix/health'); guard(revision); state.health = health; updateAudio(); updateStatus(); })(),
+      loadAudio(),
       state.client.restore(),
       (async () => {
         const result = await request('/api/mix/jobs');
@@ -322,7 +484,12 @@ export function initializeMixMaterials(ctx) {
 
 export const startMixMaterials = initializeMixMaterials;
 
-export function bindMixMaterials(ctx) { state.ctx = ctx; state.refreshPanels = ctx.refreshMixPanels || state.refreshPanels; updateStatus(); }
+export function bindMixMaterials(ctx) {
+  state.ctx = ctx; state.refreshPanels = ctx.refreshMixPanels || state.refreshPanels;
+  const root = typeof document !== 'undefined' && document.querySelector('#mix-audio-settings');
+  if (root) bindAudioControls(root);
+  updateStatus();
+}
 
 export function handleMixMaterialAction(action, el, ctx) {
   if (ctx.mode !== 'mix' && !action.startsWith('mix-')) return false;
@@ -336,7 +503,9 @@ export function handleMixMaterialAction(action, el, ctx) {
       const c = ctx.configs.mix;
       if (c.prompt.length > 2000) { ctx.toast('宣传文案最多 2000 字，请精简后继续。'); return true; }
       state.pending = { key: crypto.randomUUID(), body: { text: c.prompt.trim(), device_id: state.client.deviceId,
-        ratio: c.ratio, quality: c.quality, subtitles: c.subtitles, music: false, count: 1, duration: null } };
+        ratio: c.ratio, quality: c.quality, subtitles: c.subtitles, voice_mode: c.voice_mode || 'synthesized',
+        voice_id: c.voice_mode === 'original' ? null : c.voice_id || null, music_id: c.music_id || null,
+        music: !!c.music_id, count: 1, duration: null } };
       state.view = 'result';
       submit(state.pending);
     }
@@ -344,6 +513,8 @@ export function handleMixMaterialAction(action, el, ctx) {
   }
   if (!action.startsWith('mix-')) return false;
   switch (action) {
+    case 'mix-audio-refresh': if (!mixFolderLocked()) loadAudio(); break;
+    case 'mix-audio-delete': deleteAudio(el.dataset.kind, el.dataset.id); break;
     case 'mix-choose-folder':
     case 'mix-scan': {
       const reconnecting = !state.status.connected || state.status.needsPermission;
@@ -366,7 +537,7 @@ export function handleMixMaterialAction(action, el, ctx) {
       });
       break;
     }
-    case 'mix-retry-submit': if (state.pending?.key && !state.busy) submit(state.pending); break;
+    case 'mix-retry-submit': if (state.pending?.key && !state.busy && !state.audio.busy) submit(state.pending); break;
     case 'mix-resume-job': resumeJob(); break;
     case 'mix-refresh-job': pollJob(); break;
     case 'mix-show-result': state.view = 'result'; refreshPreview(); break;

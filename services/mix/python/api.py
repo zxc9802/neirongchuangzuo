@@ -17,7 +17,8 @@ RERANK_URL = 'https://api.302.ai/v1/reranks'
 def clean_error(value):
     text = str(value)
     for name in ('OPENLUX_API_KEY', 'RERANK_API_KEY', 'TTS_API_KEY', 'SUNO_API_KEY', 'MINIMAX_API_KEY',
-                 'COS_SECRET_ID', 'COS_SECRET_KEY', 'INDEXTTS_302_API_KEY', 'MIXER_API_TOKEN'):
+                 'COS_SECRET_ID', 'COS_SECRET_KEY', 'MIX_AUDIO_COS_SECRET_ID', 'MIX_AUDIO_COS_SECRET_KEY',
+                 'INDEXTTS_302_API_KEY', 'MIXER_API_TOKEN'):
         if os.environ.get(name):
             text = text.replace(os.environ[name], '[REDACTED]')
     return re.sub(r'sk-[A-Za-z0-9_-]+', '[REDACTED]', text)[:1000]

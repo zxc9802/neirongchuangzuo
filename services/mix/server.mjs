@@ -18,6 +18,9 @@ function reply(res, status, code, message) {
 
 function route(path, method) {
   if (path === '/api/mix/health' && method === 'GET') return '/health';
+  if (path === '/api/mix/audio' && ['GET', 'POST'].includes(method)) return '/v1/mix/audio';
+  if (/^\/api\/mix\/audio\/[a-f0-9]{32}$/.test(path) && method === 'DELETE') return path.replace('/api/mix', '/v1/mix');
+  if (/^\/api\/mix\/audio\/[a-f0-9]{32}\/stream$/.test(path) && ['GET', 'HEAD'].includes(method)) return path.replace('/api/mix', '/v1/mix');
   if (path === '/api/mix/jobs' && ['GET', 'POST'].includes(method)) return '/v1/mix/jobs';
   if (/^\/api\/mix\/jobs\/[a-f0-9]{32}$/.test(path) && method === 'GET') return path.replace('/api/mix', '/v1/mix');
   if (/^\/api\/mix\/jobs\/[a-f0-9]{32}\/(video|plan|captions)$/.test(path) && ['GET', 'HEAD'].includes(method)) return path.replace('/api/mix', '/v1/mix');
@@ -77,7 +80,8 @@ export function createMixHandler({ dataDir, env = process.env, serviceUrl, token
   }
 
   const handle = async (req, res) => {
-    const path = new URL(req.url, 'http://localhost').pathname;
+    const url = new URL(req.url, 'http://localhost');
+    const path = url.pathname;
     const target = route(path, req.method);
     if (!target) { reply(res, 404, 'NOT_FOUND', '接口不存在。'); return true; }
     if (!req.authenticatedUserId) { reply(res, 401, 'UNAUTHENTICATED', '请先登录后继续。'); return true; }
@@ -104,7 +108,9 @@ export function createMixHandler({ dataDir, env = process.env, serviceUrl, token
     catch { reply(res, 503, 'MIX_UNAVAILABLE', '混剪服务启动失败，请管理员检查 Python 依赖与服务器配置。'); return true; }
     if (req.aborted || res.destroyed) return true;
     await new Promise(resolve => {
-      const upstream = request(new URL(target, backend), { method: req.method, headers }, response => {
+      const address = new URL(target, backend);
+      address.search = url.search;
+      const upstream = request(address, { method: req.method, headers }, response => {
         const excluded = new Set([...hopHeaders, ...String(response.headers.connection || '').split(',').map(item => item.trim().toLowerCase())]);
         res.writeHead(response.statusCode || 502, { ...Object.fromEntries(Object.entries(response.headers).filter(([key]) => !excluded.has(key))), 'Cache-Control': 'no-store' });
         response.on('error', () => res.destroy());

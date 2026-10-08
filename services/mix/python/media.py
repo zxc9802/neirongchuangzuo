@@ -2,9 +2,11 @@
 import json
 import math
 import re
+import struct
 import subprocess
 import threading
 import unicodedata
+import wave
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from time import perf_counter
@@ -66,6 +68,60 @@ def duration(path):
     return value
 
 
+def has_audio(path):
+    info = json.loads(run(['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+                           '-show_entries', 'stream=index', '-of', 'json', str(path)]))
+    return bool(info['streams'])
+
+
+def pcm_audible(path, start=0, length=None):
+    """Inspect just this interval of a generated 16-bit PCM stem."""
+    with wave.open(str(path), 'rb') as audio:
+        rate = audio.getframerate()
+        first = min(round(start * rate), audio.getnframes())
+        audio.setpos(first)
+        remaining = audio.getnframes() - first if length is None else round(length * rate)
+        while remaining > 0:
+            count = min(rate, remaining)
+            chunk = audio.readframes(count)
+            if not chunk:
+                break
+            if any(abs(sample[0]) > 3 for sample in struct.iter_unpack('<h', chunk)):
+                return True
+            remaining -= count
+    return False
+
+
+def original_audio(cuts, pieces, output):
+    """Use precisely the picture cuts; pad silent/short audio to each shot's sample count."""
+    names, audible, audio_cache, cursor = [], False, {}, 0
+    for (i, j, shot), cut in zip(pieces, cuts):
+        name = f'original-{i+1:03}-{j+1:02}.wav'
+        source = cut.get('source')
+        if source not in audio_cache:
+            audio_cache[source] = has_audio(source) if source else False
+        count = round(shot['duration'] * 48000)
+        args = ['ffmpeg', '-v', 'error', '-nostdin', '-y']
+        if audio_cache[source]:
+            args += ['-ss', str(cut['source_start']), '-i', source, '-map', '0:a:0', '-af',
+                     f'atrim=start=0:end={cut["used_seconds"]},aresample=48000:async=1:first_pts=0,'
+                     f'apad=whole_len={count},atrim=end_sample={count},asetpts=N/SR/TB']
+        else:
+            args += ['-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo', '-t', str(shot['duration'])]
+        args += ['-ar', '48000', '-ac', '2', '-c:a', 'pcm_s16le', str(output / name)]
+        run(args)
+        cut['audio_present'] = audio_cache[source] and pcm_audible(output / name)
+        audible = audible or cut['audio_present']
+        cut.update(start=cursor, end=cursor + shot['duration'])
+        cursor += shot['duration']
+        names.append(name)
+    (output / 'original-concat.txt').write_text(''.join(f"file '{name}'\n" for name in names), encoding='utf-8')
+    stem = output / 'original-audio.wav'
+    run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-f', 'concat', '-safe', '1',
+         '-i', 'original-concat.txt', '-c:a', 'pcm_s16le', stem.name], cwd=output)
+    return stem, audible
+
+
 def proxy(source, start, length, output, fps=4):
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
@@ -95,7 +151,7 @@ def write_srt(scenes, target):
 
 
 def render(plan, output, width=1920, height=1080, log=print):
-    """Silent, captioned storyboard. Missing scenes remain explicit black slates."""
+    """Captioned storyboard; original mode retains only sound from the selected cuts."""
     import random
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -185,7 +241,9 @@ def render(plan, output, width=1920, height=1080, log=print):
     log(f'镜头转码完成：{completed}/{len(commands)}，耗时 {perf_counter()-started:.2f} 秒')
     # Relative safe generated filenames avoid FFmpeg quoting problems with Chinese paths.
     (output / 'concat.txt').write_text(''.join(f"file '{s}'\n" for s in segments), encoding='utf-8')
-    write_srt(plan['scenes'], output / ('captions.srt' if plan.get('narration') else 'estimated.srt'))
+    write_srt(plan['scenes'], output / 'captions.srt')
+    if not plan.get('narration'):
+        write_srt(plan['scenes'], output / 'estimated.srt')
     display = [{**s, 'text': s['text'] + ('\n【缺少匹配素材】' if not s['match']['selected'] else '')}
                for s in plan['scenes']]
     write_srt(display, output / 'display.srt')
@@ -203,18 +261,22 @@ def render(plan, output, width=1920, height=1080, log=print):
          '-preset', 'fast', '-crf', crf, '-pix_fmt', 'yuv420p',
          '-map_metadata', '-1', *SDR_FLAGS, '-movflags', '+faststart', 'preview.mp4'], cwd=output)
     log(f'字幕合成完成：耗时 {perf_counter()-started:.2f} 秒')
-    if plan.get('narration'):
+    if plan.get('voice_mode') == 'original':
+        stem, audible = original_audio(cut_log, pieces, output)
+        plan.update(original_audio=str(stem), original_audio_present=audible)
+    audio = plan.get('original_audio') if plan.get('voice_mode') == 'original' else plan.get('narration')
+    if audio:
         started = perf_counter()
         # Never use -shortest to hide a truncated picture or narration track.
         expected = plan['scenes'][-1]['end']
         tolerance = 1 / fps + .001
         if abs(duration(output/'preview.mp4') - expected) > tolerance:
             raise ValueError('画面时长与时间轴不一致，禁止截短口播来导出')
-        if abs(duration(plan['narration']) - expected) > tolerance:
+        if abs(duration(audio) - expected) > tolerance:
             raise ValueError('配音时长与时间轴不一致，请重新对齐场景后导出')
         run(['ffmpeg','-hide_banner','-loglevel','error','-nostdin','-y','-i','preview.mp4',
-             '-i',plan['narration'],'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac',
+             '-i',audio,'-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac',
              '-b:a','192k','-movflags','+faststart','video.mp4'],cwd=output)
         log(f'配音合成完成：耗时 {perf_counter()-started:.2f} 秒')
     (output / 'cuts.json').write_text(json.dumps(cut_log, ensure_ascii=False, indent=2), encoding='utf-8')
-    return output / ('video.mp4' if plan.get('narration') else 'preview.mp4')
+    return output / ('video.mp4' if audio else 'preview.mp4')
