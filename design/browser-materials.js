@@ -268,6 +268,7 @@ const root = globalThis;
       this.repairs = new Map();
       this.attempts = new Map();
       this.workers = new Map();
+      this.requestWorker = null;
       this.registered = new Set();
       this.requests = [];
       this.generation = 0;
@@ -289,6 +290,7 @@ const root = globalThis;
       this.active = true;
       this.abort = new AbortController();
       this.workers = new Map();
+      this.requestWorker = null;
       this.stages = { frames: { active: 0, waiting: [], limit: FRAME_WORKERS },
         analysis: { active: 0, waiting: [], limit: ANALYSIS_WORKERS } };
       this.lastRequests = 0;
@@ -672,14 +674,14 @@ const root = globalThis;
       this.timer = setTimeout(() => this._cycle(token), delay);
     }
 
-    async _cycle(token) {
-      if (!this.active || token !== this.generation || this.cycleToken === token) return;
-      this.cycleToken = token;
+    _startRequests(token) {
+      if (this.requestWorker || (this.retryAfter.get('connection') || 0) > Date.now() ||
+        Date.now() - this.lastRequests < 3000 && Date.now() - this.lastHeartbeat < 15000 &&
+        !this.requests.some(item => (this.retryAfter.get('request:' + item.id) || 0) <= Date.now())) return;
       let delay = 3000;
-      try {
+      const work = Promise.resolve().then(async () => {
         this._guard(token);
-        const now = Date.now();
-        if (now - this.lastRequests >= 3000) {
+        if (Date.now() - this.lastRequests >= 3000) {
           const result = await this._api(this._devicePath('/requests'), {}, token);
           this._guard(token);
           this.requests = result.requests || [];
@@ -700,52 +702,72 @@ const root = globalThis;
             this._error('素材传输', error);
           }
           delay = 0;
-        } else {
-          if (Date.now() - this.lastStateCheck >= 30000) {
-            const busy = Object.values(this.record.manifest).filter(entry => this.files.has(entry.relativePath))
-              .flatMap(entry => entry.clips.filter(clip => this.registered.has(clip.id) && clip.state === 'indexing' && !this.workers.has(clip.id)));
-            await this._register(busy, token);
-            this._guard(token);
-            this.lastStateCheck = Date.now();
-            this._ready();
+        }
+      }).catch(error => {
+        if (this.active && token === this.generation && !isAbort(error)) {
+          this.retryAfter.set('connection', Date.now() + 3000);
+          this._error('素材连接', error);
+        }
+      })
+        .finally(() => {
+          if (this.active && token === this.generation && this.requestWorker === work) {
+            this.requestWorker = null;
+            this._schedule(delay, token);
           }
-          const candidates = Object.values(this.record.manifest)
-            .filter(item => this.files.has(item.relativePath) && !this.unreadableFiles.has(item.assetId))
-            .flatMap(item => item.clips.filter(clip => this.registered.has(clip.id) && !this.workers.has(clip.id) &&
-              ['pending', 'error'].includes(clip.state)).map(clip => ({ item, clip })));
-          const fresh = candidates.filter(({ clip }) => !this.attempts.has(clip.id));
-          if (!fresh.length && !this.workers.size) this.processingDeferred = true;
-          let queued = fresh;
-          if (!fresh.length && this.processingDeferred) {
-            const repairs = [...this.repairs.values()];
-            const repairing = [...this.workers.keys()].some(key => key.startsWith('repair:'));
-            const firstPassBusy = [...this.workers.keys()].some(key => !key.startsWith('repair:') && this.attempts.get(key) === 1) ||
-              Object.values(this.record.manifest).some(item => this.files.has(item.relativePath) && !this.unreadableFiles.has(item.assetId) &&
-                item.clips.some(clip => this.registered.has(clip.id) && clip.state === 'indexing'));
-            const failedRepairs = repairs.filter(item => item.failed && this.attempts.get('repair:' + item.relativePath) < MAX_ATTEMPTS);
-            const repair = repairs.find(item => !item.attempted) || (!firstPassBusy && failedRepairs
-              .filter(item => (this.retryAfter.get('repair:' + item.relativePath) || 0) <= Date.now())
-              .sort((a, b) => this.attempts.get('repair:' + a.relativePath) - this.attempts.get('repair:' + b.relativePath))[0]);
-            if (repair && !repairing && this.workers.size < PIPELINE_WORKERS) {
-              const key = 'repair:' + repair.relativePath;
-              repair.attempted = true;
-              this.attempts.set(key, (this.attempts.get(key) || 0) + 1);
-              this._startWork(key, () => this._repairFile(repair, token), token);
-            }
-            queued = !repair && !repairing && !firstPassBusy && !failedRepairs.length ? candidates
-              .filter(({ clip }) => this.attempts.get(clip.id) < MAX_ATTEMPTS &&
-                (this.retryAfter.get('clip:' + clip.id) || 0) <= Date.now())
-              .sort((a, b) => this.attempts.get(a.clip.id) - this.attempts.get(b.clip.id)) : [];
+        });
+      this.requestWorker = work;
+    }
+
+    async _cycle(token) {
+      if (!this.active || token !== this.generation || this.cycleToken === token) return;
+      this.cycleToken = token;
+      try {
+        this._guard(token);
+        this._startRequests(token);
+        if (Date.now() - this.lastStateCheck >= 30000) {
+          const busy = Object.values(this.record.manifest).filter(entry => this.files.has(entry.relativePath))
+            .flatMap(entry => entry.clips.filter(clip => this.registered.has(clip.id) && clip.state === 'indexing' && !this.workers.has(clip.id)));
+          await this._register(busy, token);
+          this._guard(token);
+          this.lastStateCheck = Date.now();
+          this._ready();
+        }
+        const candidates = Object.values(this.record.manifest)
+          .filter(item => this.files.has(item.relativePath) && !this.unreadableFiles.has(item.assetId))
+          .flatMap(item => item.clips.filter(clip => this.registered.has(clip.id) && !this.workers.has(clip.id) &&
+            ['pending', 'error'].includes(clip.state)).map(clip => ({ item, clip })));
+        const fresh = candidates.filter(({ clip }) => !this.attempts.has(clip.id));
+        if (!fresh.length && !this.workers.size) this.processingDeferred = true;
+        let queued = fresh;
+        if (!fresh.length && this.processingDeferred) {
+          const repairs = [...this.repairs.values()];
+          const repairing = [...this.workers.keys()].some(key => key.startsWith('repair:'));
+          const firstPassBusy = [...this.workers.keys()].some(key => !key.startsWith('repair:') && this.attempts.get(key) === 1) ||
+            Object.values(this.record.manifest).some(item => this.files.has(item.relativePath) && !this.unreadableFiles.has(item.assetId) &&
+              item.clips.some(clip => this.registered.has(clip.id) && clip.state === 'indexing'));
+          const failedRepairs = repairs.filter(item => item.failed && this.attempts.get('repair:' + item.relativePath) < MAX_ATTEMPTS);
+          const repair = repairs.find(item => !item.attempted) || (!firstPassBusy && failedRepairs
+            .filter(item => (this.retryAfter.get('repair:' + item.relativePath) || 0) <= Date.now())
+            .sort((a, b) => this.attempts.get('repair:' + a.relativePath) - this.attempts.get('repair:' + b.relativePath))[0]);
+          if (repair && !repairing && this.workers.size < PIPELINE_WORKERS) {
+            const key = 'repair:' + repair.relativePath;
+            repair.attempted = true;
+            this.attempts.set(key, (this.attempts.get(key) || 0) + 1);
+            this._startWork(key, () => this._repairFile(repair, token), token);
           }
-          for (const { item, clip } of queued.slice(0, PIPELINE_WORKERS - this.workers.size)) {
-            this.attempts.set(clip.id, (this.attempts.get(clip.id) || 0) + 1);
-            this._startWork(clip.id, () => this._analyzeClip(item, clip, token), token);
-          }
+          queued = !repair && !repairing && !firstPassBusy && !failedRepairs.length ? candidates
+            .filter(({ clip }) => this.attempts.get(clip.id) < MAX_ATTEMPTS &&
+              (this.retryAfter.get('clip:' + clip.id) || 0) <= Date.now())
+            .sort((a, b) => this.attempts.get(a.clip.id) - this.attempts.get(b.clip.id)) : [];
+        }
+        for (const { item, clip } of queued.slice(0, PIPELINE_WORKERS - this.workers.size)) {
+          this.attempts.set(clip.id, (this.attempts.get(clip.id) || 0) + 1);
+          this._startWork(clip.id, () => this._analyzeClip(item, clip, token), token);
         }
       } catch (error) { if (this.active && token === this.generation && !isAbort(error)) this._error('素材连接', error); }
       finally {
         if (this.cycleToken === token) this.cycleToken = null;
-        this._schedule(delay, token);
+        this._schedule(3000, token);
       }
     }
 

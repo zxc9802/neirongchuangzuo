@@ -476,7 +476,7 @@ test('a clip larger than the body limit gives an actionable error without submit
   } finally { controller.stop(); }
 });
 
-test('matching requests are served before queued analysis and indexed clips are not reanalyzed', async () => {
+test('matching requests and queued analysis both complete without reanalyzing indexed clips', async () => {
   assert.equal(typeof BrowserMaterials?.prototype.selectFiles, 'function');
   const backend = server();
   const events = [];
@@ -491,9 +491,129 @@ test('matching requests are served before queued analysis and indexed clips are 
     } });
   try {
     await controller.selectFiles([videoFile('素材/a.mp4')]);
-    await eventually(() => controller.status.indexed === 1);
-    assert.deepEqual(events, ['proxy', 'analysis']);
+    await eventually(() => controller.status.indexed === 1 && events.includes('proxy'));
+    await controller._cycle(controller.generation);
+    assert.deepEqual([...events].sort(), ['analysis', 'proxy']);
   } finally { controller.stop(); }
+});
+
+test('a stalled mix source upload leaves all five analysis slots running and new clips advancing', async () => {
+  const backend = server(), releases = new Map();
+  const source = videoFile('素材/source.mp4', 1, Buffer.alloc(helpers.CHUNK_SIZE + 7));
+  let releaseUpload, cycle, uploading = false, completed = false, frames = 0, analyses = 0, peak = 0, creates = 0, polls = 0;
+  const upload = new Promise(resolve => { releaseUpload = resolve; });
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: async () => { frames++; return ['frame']; }, api: async (path, options = {}) => {
+      if (path.endsWith('/clips')) {
+        const result = await backend.api(path, options);
+        const sourceId = controller.record.manifest['source.mp4'].clips[0].id;
+        result.clips.forEach(clip => { if (clip.id === sourceId) clip.state = 'indexed'; });
+        return result;
+      }
+      if (path.endsWith('/requests')) { polls++; return { requests: completed ? [] : [{ id: '2'.repeat(32), kind: 'source',
+        asset_id: controller.record.manifest['source.mp4'].assetId }] }; }
+      if (path.endsWith('/file')) { creates++; return { id: '3'.repeat(32), offset: 0 }; }
+      if (options.method === 'PATCH') {
+        uploading = true; await upload;
+        return { offset: Number(options.headers['Upload-Offset']) + options.body.byteLength };
+      }
+      if (path.endsWith('/complete')) { completed = true; return { complete: true }; }
+      if (path.endsWith('/analyze')) {
+        analyses++; peak = Math.max(peak, analyses);
+        const id = JSON.parse(options.body).clip_id;
+        await new Promise(resolve => releases.set(id, resolve));
+        analyses--;
+      }
+      return backend.api(path, options);
+    } });
+  controller._schedule = () => {};
+  try {
+    await controller.selectFiles([source, ...Array.from({ length: 12 }, (_, i) => videoFile(`素材/${i}.mp4`))]);
+    cycle = controller._cycle(controller.generation);
+    await eventually(() => uploading);
+    await eventually(() => analyses === 5 && frames === 10);
+    assert.equal(controller.workers.size, 10, 'the transfer must not occupy a background pipeline slot');
+    for (const release of releases.values()) release();
+    await eventually(() => controller.status.indexed >= 6);
+    await controller._cycle(controller.generation);
+    await eventually(() => frames === 12);
+    assert.equal(peak, 5);
+    assert.equal(creates, 1, 'repeated cycles must not duplicate the active upload');
+    assert.equal(polls, 1, 'do not poll overlapping copies of the same active transfer');
+    for (let i = 0; i < 4; i++) {
+      for (const release of releases.values()) release();
+      await new Promise(resolve => setImmediate(resolve));
+      await controller._cycle(controller.generation);
+    }
+    await eventually(() => controller.status.indexed === 13);
+    assert.equal(completed, false, 'indexing finished while the source upload was still waiting');
+    const reports = [];
+    controller.onStatus = status => reports.push(status);
+    const requestWork = controller.requestWorker;
+    controller.stop(); releaseUpload();
+    await Promise.all([cycle, requestWork]);
+    assert.equal(completed, false, 'cancelled upload must not complete after a late response');
+    assert.equal(reports.length, 0);
+  } finally {
+    controller.stop(); releaseUpload(); for (const release of releases.values()) release();
+    await Promise.all([cycle, controller.requestWorker]);
+  }
+});
+
+test('slow mix request polling or heartbeat cannot block background analysis', async () => {
+  for (const blocked of ['/requests', '/heartbeat']) {
+    const backend = server();
+    let release, cycle, waiting = false, blockedCalls = 0;
+    const pending = new Promise(resolve => { release = resolve; });
+    const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+      sampleFrames: async () => ['frame'], api: async (path, options) => {
+        if (path.endsWith(blocked)) { blockedCalls++; waiting = true; await pending; }
+        return backend.api(path, options);
+      } });
+    controller._schedule = () => {};
+    try {
+      await controller.selectFiles(Array.from({ length: 3 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+      cycle = controller._cycle(controller.generation);
+      await eventually(() => waiting);
+      await eventually(() => controller.status.indexed === 3);
+      for (let i = 0; i < 3; i++) await controller._cycle(controller.generation);
+      assert.equal(blockedCalls, 1, 'keep only one material request worker per connection');
+      const work = controller.requestWorker;
+      controller.stop(); release(); await Promise.all([cycle, work]);
+    } finally { controller.stop(); release(); await Promise.all([cycle, controller.requestWorker]); }
+  }
+});
+
+test('failed mix request polling or heartbeat backs off while background analysis continues', async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  try {
+    Date.now = () => now;
+    for (const failed of ['/requests', '/heartbeat']) {
+      const backend = server();
+      let failedCalls = 0;
+      const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+        sampleFrames: async () => ['frame'], api: async (path, options) => {
+          if (path.endsWith(failed) && ++failedCalls === 1) throw new Error('mix connection unavailable');
+          return backend.api(path, options);
+        } });
+      controller._schedule = () => {};
+      const cycle = async () => {
+        await controller._cycle(controller.generation);
+        await Promise.all([...controller.workers.values(), controller.requestWorker]);
+      };
+      try {
+        await controller.selectFiles(Array.from({ length: 3 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+        await cycle();
+        assert.equal(controller.status.indexed, 3);
+        for (let i = 0; i < 3; i++) await cycle();
+        assert.equal(failedCalls, 1, 'fast indexing completions must not hammer a failed mix connection');
+        now += 3000;
+        await cycle();
+        assert.equal(failedCalls, 2, 'retry the mix connection after its own cooldown');
+      } finally { controller.stop(); }
+    }
+  } finally { Date.now = originalNow; }
 });
 
 test('a folder picker completed after stop cannot reconnect or write to the server', async () => {
