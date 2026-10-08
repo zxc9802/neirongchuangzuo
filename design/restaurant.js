@@ -170,7 +170,11 @@ function renderAnalysis(task) {
   return `<details class="restaurant-analysis"><summary>照片分析 <span>${usable} / ${sources.length || items.length} 张可用</span></summary><div class="restaurant-analysis-grid">${items.map((item, index) => {
     const source = sources.find(image => image.id === item.imageId);
     const url = source?.expired || timestamp(source?.expiresAt) <= Date.now() ? '' : safeRestaurantFileUrl(source?.url);
-    return `<article class="restaurant-analysis-item ${item.usable ? '' : 'excluded'}">${url ? `<img src="${escape(url)}" alt="照片 ${index + 1} ${escape(IMAGE_NAMES[item.imageType] || '实拍')}" loading="lazy">` : '<div class="restaurant-file-placeholder">原图已过期</div>'}<div><strong>照片 ${index + 1} · ${escape(IMAGE_NAMES[item.imageType] || '实拍')}</strong><span>${item.usable ? '可用' : '不采用'}${Number.isFinite(item.qualityScore) ? ` · 质量 ${escape(item.qualityScore)}` : ''}</span><p>${escape(item.usable ? (item.visibleObjects || []).map(txt).join('、') : item.rejectionReason || '不适合当前内容')}</p>${item.privacyRisk === 'high' ? '<small>隐私风险较高</small>' : ''}</div></article>`;
+    const needsConfirmation = item.usable && (item.privacyRisk === 'low' || item.textRisk === 'warning');
+    const riskReasons = (Array.isArray(item.riskReasons) ? item.riskReasons : []).map(txt).filter(Boolean);
+    const riskHints = needsConfirmation && !riskReasons.length ? [item.privacyRisk === 'low' ? '发布前请确认照片中人物已授权。' : '', item.textRisk === 'warning' ? '发布前请确认图片中文字的真实性。' : ''].filter(Boolean) : riskReasons;
+    const label = item.usable ? needsConfirmation ? '可用 · 发布前需确认' : '可用' : '不采用';
+    return `<article class="restaurant-analysis-item ${item.usable ? '' : 'excluded'}">${url ? `<img src="${escape(url)}" alt="照片 ${index + 1} ${escape(IMAGE_NAMES[item.imageType] || '实拍')}" loading="lazy">` : '<div class="restaurant-file-placeholder">原图已过期</div>'}<div><strong>照片 ${index + 1} · ${escape(IMAGE_NAMES[item.imageType] || '实拍')}</strong><span>${label}</span>${Number.isFinite(item.qualityScore) ? `<small>拍摄质量评分 ${escape(item.qualityScore)} · 仅供参考</small>` : ''}<p>${escape(item.usable ? (item.visibleObjects || []).map(txt).join('、') : item.rejectionReason || '不适合当前内容')}</p>${riskHints.map(reason => `<small>${escape(reason)}</small>`).join('')}${item.privacyRisk === 'high' ? '<small>隐私风险较高</small>' : ''}</div></article>`;
   }).join('')}</div></details>`;
 }
 function renderDirections(task) {

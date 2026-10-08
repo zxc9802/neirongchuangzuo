@@ -59,7 +59,16 @@ async function setup(t, options = {}) {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}/api/restaurant`;
   async function api(path, body, user = 'owner') { const response = await fetch(base + path, { method: body === undefined ? 'GET' : path === '/profile' ? 'PUT' : 'POST', headers: { ...(user ? { 'x-test-user': user } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, body: response.headers.get('content-type')?.includes('json') ? await response.json() : Buffer.from(await response.arrayBuffer()) }; }
-  async function wait(id, states) { for (let index = 0; index < 150; index++) { const response = await api(`/tasks/${id}`); if (states.includes(response.body.task?.status)) return response.body.task; await new Promise(resolve => setTimeout(resolve, 20)); } throw new Error('task did not reach expected status'); }
+  async function wait(id, states) {
+    const deadline = performance.now() + 15_000;
+    let last;
+    do {
+      const response = await api(`/tasks/${id}`); last = response.body.task;
+      if (states.includes(last?.status)) return last;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (performance.now() < deadline);
+    throw new Error(`task did not reach ${states.join('/')} within 15s; last status: ${last?.status}, stage: ${last?.progress?.stage}, code: ${last?.code}, error: ${last?.error}`);
+  }
   t.after(async () => { await handler.shutdown(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
   return { api, wait, model, handler, root };
 }
@@ -464,6 +473,39 @@ test('warning requires explicit confirmation before download and package charge'
   assert.ok(responses.every(response => response.body.task.status === 'completed')); assert.equal((await app.api('/usage')).body.usage.used, 1);
 });
 
+test('background code and public phone warnings keep real photos in recommendations and require result confirmation', async t => {
+  let model;
+  model = mockModel({ async analyse(items) {
+    model.counts.analyse++;
+    // The provider adapter validates once; the handler validates the same DTO again.
+    return validateAnalysis({ images: analysis(items).map((item, index) => ({ ...item,
+      textRisk: index === 0 ? 'none' : 'warning',
+      visibleTexts: index === 1 ? ['门店订餐电话 010-12345678'] : [],
+      riskReasons: index === 0 ? ['未发现电话或二维码隐私风险'] : index === 1
+        ? ['公开门店电话，请发布前核对'] : ['背景有用途不明的二维码，文案不引用扫码信息'],
+    })) }, items.map(item => item.id));
+  } });
+  const app = await setup(t, { model }), { id, task } = await uploadPool(app, 6);
+  assert.equal(task.status, 'awaiting_selection', task.error);
+  assert.equal(task.analysis.filter(item => item.usable).length, 6);
+  assert.equal(task.analysis.filter(item => item.textRisk === 'warning').length, 4);
+  assert.equal(task.directions[0].supportingImageIds.length, 6);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', outputCount: 6 });
+  const pending = await app.wait(id, ['awaiting_confirmation', 'completed', 'failed']);
+  assert.equal(pending.status, 'awaiting_confirmation', pending.error);
+  assert.equal(pending.review.status, 'passed_with_warning'); assert.deepEqual(pending.review.errors, []);
+  assert.equal(pending.copy.imageOrder.length, 6); assert.equal(pending.files.filter(item => item.role === 'image').length, 6);
+  assert.equal(model.counts.audit, 1); assert.equal((await app.api('/usage')).body.usage.used, 0);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
+  assert.equal((await app.api(`/tasks/${id}/confirm`, {})).body.code, 'WARNING_CONFIRMATION_REQUIRED');
+  const confirmed = await app.api(`/tasks/${id}/confirm`, { confirmWarnings: true });
+  assert.equal(confirmed.body.task.status, 'completed'); assert.equal((await app.api('/usage')).body.usage.used, 1);
+  const downloaded = await app.api(`/tasks/${id}/files/package.zip`);
+  assert.equal(downloaded.status, 200); assert.equal(Object.keys(unzipSync(downloaded.body)).filter(name => name.endsWith('.jpg')).length, 6);
+  await app.api(`/tasks/${id}/confirm`, { confirmWarnings: true });
+  assert.equal((await app.api('/usage')).body.usage.used, 1);
+});
+
 test('three day image expiry preserves text and prevents downloading or cloning expired sources', async t => {
   let clock = Date.now(); const app = await setup(t, { now: () => clock }), { id } = await newTask(app);
   await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true }); await app.wait(id, ['completed']);
@@ -510,7 +552,7 @@ test('injected global provider ledger stays open when restaurant closes', async 
 
 test('risk text can be removed only by validated crop that preserves all subject pixels', async t => {
   const base = analysis([{ id: 'photo-1' }])[0];
-  const risky = { ...base, imageType: 'staff', textRisk: 'warning', visibleTexts: ['联系电话'], riskReasons: ['二维码位于底部'] };
+  const risky = { ...base, imageType: 'staff', textRisk: 'high', visibleTexts: ['私人联系电话'], riskReasons: ['底部纸条明确标出个人姓名及私人联系电话，需要裁除后使用'] };
   const excluded = validateAnalysis({ images: [risky] }, ['photo-1']); assert.equal(excluded[0].usable, false); assert.equal(excluded[0].textRisk, 'high');
   const safe = { ...risky, safeCrop: { left: 0, top: 0, width: 1, height: 0.8 }, subjectBox: { left: 0.1, top: 0.1, width: 0.8, height: 0.6 }, riskyTextBoxes: [{ left: 0, top: 0.85, width: 1, height: 0.1 }] };
   const approved = validateAnalysis({ images: [safe] }, ['photo-1']); assert.equal(approved[0].usable, true); assert.equal(approved[0].textRisk, 'none'); assert.ok(approved[0].crop);

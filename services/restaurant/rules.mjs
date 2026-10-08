@@ -77,11 +77,13 @@ export function validateAnalysis(value, imageIds) {
       || !['none', 'warning', 'high'].includes(item.textRisk) || !strings(item.riskReasons ?? [], 12)) bad('模型照片分析数据不符合格式。');
     seen.add(item.imageId);
     const crop = checkedSafeCrop(item);
-    const contactRisk = /二维码|电话|手机号|联系方式/.test(`${(item.visibleTexts ?? []).join(' ')} ${(item.riskReasons ?? []).join(' ')}`);
-    const unsafeText = (item.textRisk === 'high' || contactRisk) && !crop;
+    // Descriptive text may negate a risk or refer to public store information.
+    // Only the explicit severity can block a photo; keywords cannot establish it.
+    const unsafeText = item.textRisk === 'high' && !crop;
     return { imageId: item.imageId, imageType: item.imageType, visibleObjects: item.visibleObjects, possibleScene: item.possibleScene, qualityScore: item.qualityScore,
       privacyRisk: item.privacyRisk, usable: item.usable && item.privacyRisk !== 'high' && !unsafeText,
-      rejectionReason: item.privacyRisk === 'high' ? '照片存在严重隐私风险，请换用已获授权且风险可控的素材。' : unsafeText ? '图片存在无法安全裁剪的联系方式、二维码或严重宣传风险，请换图。' : item.rejectionReason,
+      rejectionReason: item.privacyRisk === 'high' ? item.rejectionReason.trim() || '照片存在严重隐私风险，请换用已获授权且风险可控的素材。'
+        : unsafeText ? item.rejectionReason.trim() || '图片存在无法安全处理的私人敏感信息或严重宣传风险，请换图。' : item.rejectionReason,
       visibleTexts: item.visibleTexts ?? [], textRisk: crop ? 'none' : unsafeText ? 'high' : item.textRisk, riskReasons: item.riskReasons ?? [],
       ...(crop ? { crop, safeCrop: item.safeCrop, subjectBox: item.subjectBox, riskyTextBoxes: item.riskyTextBoxes, cropReason: '保留至少75%画面及完整主体，裁除画面边缘风险文字。' } : {}) };
   });

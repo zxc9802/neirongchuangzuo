@@ -49,6 +49,60 @@ test('switching to a conservative direction excludes required facts left over fr
   assert.deepEqual(restaurantMissingFacts({ selection: { directionId: 'group-buy' }, missingFacts: staleFacts }, { id: 'group-buy' }), staleFacts);
 });
 
+test('photo analysis distinguishes publication warnings from shooting quality and escapes specific risk and rejection text', async () => {
+  const original = Object.fromEntries(['document', 'fetch', 'sessionStorage', 'location', 'matchMedia'].map(key => [key, globalThis[key]]));
+  let markup = '';
+  const root = { contains: () => false, querySelector: () => null, querySelectorAll: () => [], set outerHTML(value) { markup = value; } };
+  globalThis.document = { activeElement: null, querySelector: selector => selector === '#restaurant-workspace' ? root : null, getElementById: () => null };
+  globalThis.location = { origin: 'http://127.0.0.1:5173' };
+  globalThis.matchMedia = () => ({ matches: true });
+  globalThis.sessionStorage = { getItem: key => key === 'restaurant-active-task' ? id : null, setItem() {}, removeItem() {} };
+  const analysis = [
+    { imageId: 'photo-1', imageType: 'customers', usable: true, qualityScore: 12, privacyRisk: 'low', textRisk: 'none', visibleObjects: ['顾客用餐'], riskReasons: ['请确认照片中人物授权', '<script>alert(1)</script>'] },
+    { imageId: 'photo-2', imageType: 'exterior', usable: true, qualityScore: 83, privacyRisk: 'none', textRisk: 'warning', visibleObjects: ['真实门头'], riskReasons: ['公开门头旁有收款码，请在发布前确认'] },
+    { imageId: 'photo-3', imageType: 'food', usable: true, qualityScore: 20, privacyRisk: 'none', textRisk: 'none', visibleObjects: ['真实菜品'], riskReasons: [] },
+    { imageId: 'photo-4', imageType: 'other', usable: false, qualityScore: 99, privacyRisk: 'none', textRisk: 'high', rejectionReason: '主体只有联系方式 <b>请换图</b>', riskReasons: ['联系方式占据主要画面'] },
+    { imageId: 'photo-5', imageType: 'staff', usable: true, qualityScore: 70, privacyRisk: 'low', textRisk: 'warning', visibleObjects: ['员工工作'], riskReasons: [] },
+  ];
+  const task = { id, status: 'awaiting_selection', createdAt: Date.now(), analysis, sourceImages: analysis.map(item => ({ id: item.imageId, url: `/api/restaurant/tasks/${id}/files/${item.imageId}.jpg`, expiresAt: Date.now() + 60000 })), directions: [{ id: 'daily', label: '真实门店日常', supportingImageIds: ['photo-1', 'photo-2', 'photo-3', 'photo-5'], missingFacts: [] }] };
+  globalThis.fetch = async url => {
+    if (url.endsWith('/status')) return Response.json({ enabled: true });
+    if (url.endsWith('/profile')) return Response.json({ profile });
+    if (url.endsWith('/usage')) return Response.json({ usage: { limit: 20, remaining: 20 } });
+    return Response.json(url.endsWith('/' + id) ? { task } : { tasks: [task] });
+  };
+  const module = await import('../design/restaurant.js?ui-analysis-warnings');
+  const ctx = { icon: () => '', toast() {} };
+  try {
+    module.renderRestaurant(ctx); module.bindRestaurant(ctx);
+    for (let count = 0; count < 60 && !markup.includes('照片分析'); count++) await new Promise(resolve => setImmediate(resolve));
+    assert.match(markup, /4 \/ 5 张可用/);
+    const cards = [...markup.matchAll(/<article class="restaurant-analysis-item[^]*?<\/article>/g)].map(match => match[0]);
+    assert.equal(cards.length, 5);
+    assert.match(cards[0], /<span>可用 · 发布前需确认<\/span>/);
+    assert.match(cards[0], /拍摄质量评分 12 · 仅供参考/);
+    assert.match(cards[0], /请确认照片中人物授权/);
+    assert.match(cards[0], /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
+    assert.ok(!cards[0].includes('<script>'));
+    assert.match(cards[1], /<span>可用 · 发布前需确认<\/span>/);
+    assert.match(cards[1], /公开门头旁有收款码，请在发布前确认/);
+    assert.match(cards[2], /<span>可用<\/span>/);
+    assert.match(cards[2], /拍摄质量评分 20 · 仅供参考/);
+    assert.ok(!cards[2].includes('发布前需确认'));
+    assert.match(cards[3], /<span>不采用<\/span>/);
+    assert.match(cards[3], /主体只有联系方式 &lt;b&gt;请换图&lt;\/b&gt;/);
+    assert.match(cards[3], /联系方式占据主要画面/);
+    assert.ok(!cards[3].includes('<b>请换图</b>'));
+    assert.match(cards[4], /<span>可用 · 发布前需确认<\/span>/);
+    assert.match(cards[4], /发布前请确认照片中人物已授权/);
+    assert.match(cards[4], /发布前请确认图片中文字的真实性/);
+    assert.equal(restaurantCanGenerate(task, task.directions[0], { acceptSparse: true }), true);
+  } finally {
+    module.disposeRestaurant();
+    for (const [key, value] of Object.entries(original)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value;
+  }
+});
+
 test('warning review provides read-only drafts and source references while keeping formal files hidden', async () => {
   const original = Object.fromEntries(['document', 'fetch', 'sessionStorage', 'location', 'matchMedia'].map(key => [key, globalThis[key]]));
   let markup = '';
