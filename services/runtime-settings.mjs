@@ -4,7 +4,10 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
 const ALLOWED = new Set(['WORKSPACE_DATA_DIR', 'RESTAURANT_DATABASE_URL', 'RESTAURANT_PACKAGE_DAILY_LIMIT',
-  'COS_SECRET_ID', 'COS_SECRET_KEY', 'COS_BUCKET', 'COS_REGION']);
+  'COS_SECRET_ID', 'COS_SECRET_KEY', 'COS_BUCKET', 'COS_REGION',
+  'MIX_PYTHON_BIN', 'RERANK_API_KEY', 'EMBEDDING_URL', 'LLM_URL', 'RERANK_URL',
+  'INDEXTTS_302_API_KEY', 'INDEXTTS_BASE_URL', 'INDEXTTS_SPEAKER_AUDIO_URL',
+  'INDEXTTS_EMOTION_AUDIO_PATH', 'INDEXTTS_EMOTION_AUDIO_URL', 'INDEXTTS_DOWNLOAD_HOSTS']);
 
 // Production configuration only comes from the deployment environment.
 // Do not load authentication databases or mount-confirmation bypasses from a developer file.

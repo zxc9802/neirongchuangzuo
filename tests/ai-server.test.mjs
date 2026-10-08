@@ -550,6 +550,26 @@ test('remote image URL checks reject unsafe schemes, credentials, ports and loca
 
 const RETENTION_MS = 72 * 60 * 60 * 1000;
 
+test('temporary Windows metadata locks retain a completed image without repeating provider dispatch', { skip: process.platform !== 'win32' }, async t => {
+  const native = await import('node:fs/promises');
+  let calls = 0, locks = 0;
+  const clock = Date.parse('2026-09-01T01:00:00.000Z');
+  const app = await server(t, { now: () => clock, fetchImpl: async () => { calls++; return imageResult(); }, retentionOptions: { fsOverrides: { rename: async (...args) => {
+    const snapshot = JSON.parse(await native.readFile(args[0], 'utf8'));
+    if (snapshot.status === 'completed' && locks < 2) throw Object.assign(new Error('temporary local lock'), { code: ['EPERM', 'EBUSY'][locks++] });
+    return native.rename(...args);
+  } } } });
+  const body = input();
+  assert.equal((await app.post('/api/ai/images', body)).status, 202);
+  const task = await finished(app, body.requestId);
+  assert.equal(task.status, 'completed');
+  assert.equal(task.expiresAt, new Date(clock + RETENTION_MS).toISOString());
+  assert.equal((await fetch(app.base + task.images[0].url)).status, 200);
+  assert.equal((await app.post('/api/ai/images', body)).status, 200);
+  assert.equal(calls, 1);
+  assert.equal(locks, 2);
+});
+
 async function seedTask(storageDir, overrides = {}) {
   const id = overrides.id || randomUUID();
   const task = {

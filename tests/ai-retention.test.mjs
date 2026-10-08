@@ -203,6 +203,59 @@ test('metadata writes are atomic and reject invalid IDs or states', async t => {
   await assert.rejects(ctx.store.resultPath(task.id, 'source.png'), /Invalid/);
 });
 
+test('Windows metadata replacement retries transient locks for one snapshot and remains bounded', { skip: process.platform !== 'win32' }, async t => {
+  const native = await import('node:fs/promises');
+  let contention = null, attempts = 0, writes = 0;
+  const ctx = await setup(t, { fsOverrides: {
+    writeFile: async (...args) => { writes++; return native.writeFile(...args); },
+    rename: async (...args) => {
+      if (contention && ++attempts <= contention.length) throw Object.assign(new Error('temporary local lock'), { code: contention[attempts - 1] });
+      return native.rename(...args);
+    },
+  } });
+  const task = completed({ status: 'queued', completedAt: undefined });
+  await ctx.store.save(task);
+  task.status = 'completed'; contention = ['EPERM', 'EBUSY'];
+  const before = writes;
+  await ctx.store.save(task);
+  assert.equal(attempts, 3);
+  assert.equal(writes - before, 1, 'the serialized snapshot is written once');
+  const metadata = join(ctx.storageDir, task.id, 'task.json');
+  assert.equal(JSON.parse(await readFile(metadata, 'utf8')).status, 'completed');
+  assert.equal(ctx.store.publicTask(task).expiresAt, iso(START + IMAGE_RETENTION_MS));
+  task.status = 'failed'; attempts = 0; contention = Array(10).fill('EPERM');
+  await assert.rejects(ctx.store.save(task), { code: 'EPERM' });
+  assert.equal(attempts, 4, 'persistent locks fail after a finite local retry');
+  assert.equal(JSON.parse(await readFile(metadata, 'utf8')).status, 'completed');
+  assert.deepEqual(await readdir(join(ctx.storageDir, task.id)), ['task.json']);
+});
+
+test('a Windows metadata retry rechecks the destination and cannot replace a newly introduced symlink', { skip: process.platform !== 'win32' }, async t => {
+  const native = await import('node:fs/promises');
+  let intercept = false, attempts = 0, outside;
+  const ctx = await setup(t, { fsOverrides: { rename: async (...args) => {
+    if (intercept) {
+      attempts++;
+      await native.unlink(args[1]);
+      await native.symlink(outside, args[1], 'file');
+      throw Object.assign(new Error('temporary local lock'), { code: 'EPERM' });
+    }
+    return native.rename(...args);
+  } } });
+  outside = join(ctx.directory, 'outside-file');
+  await writeFile(outside, 'outside contents');
+  const probe = join(ctx.directory, 'symlink-probe');
+  try { await symlink(outside, probe, 'file'); await unlink(probe); }
+  catch (error) { if (error.code === 'EPERM') return t.skip('Creating file symlinks requires a Windows privilege'); throw error; }
+  const task = completed({ status: 'queued', completedAt: undefined });
+  await ctx.store.save(task);
+  task.status = 'completed'; intercept = true;
+  await assert.rejects(ctx.store.save(task), /Unsafe/);
+  assert.equal(attempts, 1);
+  assert.equal(await readFile(outside, 'utf8'), 'outside contents');
+  assert.equal((await lstat(join(ctx.storageDir, task.id, 'task.json'))).isSymbolicLink(), true);
+});
+
 test('task junctions and result directories are never traversed or removed', async t => {
   const ctx = await setup(t);
   const outside = join(ctx.directory, 'outside');

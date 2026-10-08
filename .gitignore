@@ -5,3 +5,9 @@ node_modules/
 !.env.*.example
 .data/
 *.log
+
+# Local remix runtimes and acceptance evidence
+.mix-venv/
+__pycache__/
+*.pyc
+outputs/
