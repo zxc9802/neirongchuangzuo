@@ -121,7 +121,8 @@ test('completed and failed tasks cannot submit or edit speech', async t => {
 });
 
 test('eligible failed output rechecks the same task once without generating again', async t => {
-  const task = { ...speechDraft(), status: 'failed', canRecheck: true }, calls = [];
+  const task = { ...speechDraft(), status: 'failed', canRecheck: true, code: 'VIDEO_SPEECH_INVALID',
+    error: '成片台词与原视频不一致，未交付成片；请核对素材后重新生成。' }, calls = [];
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
     if (options?.method !== 'POST') return;
     calls.push({ path, body: JSON.parse(options.body) });
@@ -129,6 +130,8 @@ test('eligible failed output rechecks the same task once without generating agai
   } });
   page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /id="replica-recheck"[^>]*>重新检查成片/);
+  assert.match(page.html(), /成片未通过语音检查，请核对台词后重新检查。/);
+  assert.doesNotMatch(page.html(), /请核对素材后重新生成/);
   assert.match(page.html(), /textarea[^>]*aria-label="第 1 段台词"/);
   page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
   page.node('#replica-recheck').onclick(); page.node('#replica-recheck').onclick(); await page.settle();

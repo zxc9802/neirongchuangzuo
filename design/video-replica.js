@@ -51,7 +51,9 @@ function result(ctx) {
   const task = state.current;
   if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p><span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
-  return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${labels[task.status] || '正在处理'}</h3><p>${ctx.esc(task.error || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击开始人物复刻。' : '请重新上传素材创建任务。'))}</p></div>`;
+  const message = task.status === 'failed' && task.canRecheck === true && task.code === 'VIDEO_SPEECH_INVALID'
+    ? '成片未通过语音检查，请核对台词后重新检查。' : task.error;
+  return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${labels[task.status] || '正在处理'}</h3><p>${ctx.esc(message || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击开始人物复刻。' : '请重新上传素材创建任务。'))}</p></div>`;
 }
 function progress(ctx) {
   const task = state.current;
