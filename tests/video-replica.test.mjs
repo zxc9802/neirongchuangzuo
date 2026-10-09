@@ -25,7 +25,7 @@ async function fixture(t, options = {}) {
     async createMaterial(url, kind) { state.creates.push({ url, kind }); return { id: kind + '-id', status: state.review }; },
     async queryMaterial() { return state.review; },
     async generate(task) { state.generations++; state.body = generationBody(task); if (options.uncertain) throw new Error('Network disconnected'); return { taskId: 'provider-1' }; },
-    async query() { state.queries++; return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; },
+    async query() { state.queries++; if (options.query) return options.query(); return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; },
   };
   let app, handler, base;
   async function open(overrides = {}) {
@@ -113,6 +113,42 @@ test('two materials, signed source access, playable range response and exactly-o
   assert.equal((await app.call(`/tasks/${id}/result`, { owner: 'bob' })).status, 404);
   for (let i = 0; i < 3; i++) assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
   assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+});
+
+test('provider completion accepts message URLs without a video extension', async () => {
+  const url = 'https://cdn.example/download/result?token=test';
+  const config = { video: { base: 'https://provider.example' } };
+  for (const data of [{ status: 2, message: url }, { status: 2, result: { message: url } }]) {
+    const provider = createVideoProvider(config, async () => Response.json({ success: true, data }));
+    const result = await provider.query('provider-1');
+    assert.equal(result.url, url);
+    assert.equal(result.completed, true);
+  }
+  assert.equal(parseGeneration({ data: { status: 1, message: 'processing' } }).url, undefined);
+});
+
+test('completed replies without media are visible and recover on the original task after restart', async t => {
+  let reply = { status: 2, message: 'https://cdn.example/download/result?token=test' };
+  const config = { video: { base: 'https://provider.example' } };
+  const provider = createVideoProvider(config, async () => Response.json({ success: true, data: reply }));
+  const app = await fixture(t, { query: () => provider.query('provider-1') });
+  const id = await app.init(); await app.upload(id);
+  reply = { status: 2, message: 'Result is being prepared' };
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const waiting = await app.until(id, task => task.code === 'VIDEO_RESULT_PENDING');
+  assert.equal(waiting.status, 'running');
+  assert.match(waiting.error, /完成.*成片/);
+  assert.ok(waiting.startedAt >= waiting.createdAt);
+  assert.ok(waiting.lastCheckedAt >= waiting.startedAt);
+  assert.equal(waiting.resultUrl, null);
+  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  await app.close();
+  reply = { status: 2, message: 'https://cdn.example/download/result?token=test' };
+  await app.open();
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.error, ''); assert.equal(completed.code, undefined);
+  assert.equal(completed.billing.chargedPoints, 45);
+  assert.equal(app.state.generations, 1);
 });
 
 test('unlimited zero-balance account completes a person replica without charges and still waits for settlement', async t => {

@@ -11,11 +11,17 @@ function account() {
   if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
 }
 async function request(path, options = {}) {
-  const response = await fetch(API + path, { credentials: 'same-origin', cache: 'no-store', ...options });
-  let data;
-  try { data = await response.json(); } catch { throw new Error('视频服务暂时不可用，请刷新任务记录。'); }
-  if (!response.ok) throw new Error(data.error || '请求失败，请稍后重试。');
-  return data;
+  const signal = options.method ? undefined : AbortSignal.timeout(15_000);
+  try {
+    const response = await fetch(API + path, { credentials: 'same-origin', cache: 'no-store', signal, ...options });
+    let data;
+    try { data = await response.json(); } catch { throw new Error('视频服务暂时不可用，请刷新任务记录。'); }
+    if (!response.ok) throw new Error(data.error || '请求失败，请稍后重试。');
+    return data;
+  } catch (cause) {
+    if (signal?.aborted) throw new Error('查询任务超时，正在自动重试；不会重新生成。');
+    throw cause;
+  }
 }
 function jsonPost(body = {}) { return { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }; }
 function remember(task) {
@@ -43,7 +49,16 @@ function result(ctx) {
   const task = state.current;
   if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p><span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
-  return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${labels[task.status] || '正在处理'}</h3><p>${ctx.esc(task.error || (pending(task) ? '生成通常需要几分钟，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击开始人物复刻。' : '请重新上传素材创建任务。'))}</p></div>`;
+  return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${labels[task.status] || '正在处理'}</h3><p>${ctx.esc(task.error || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击开始人物复刻。' : '请重新上传素材创建任务。'))}</p></div>`;
+}
+function progress(ctx) {
+  const task = state.current;
+  if (!pending(task)) return '';
+  const now = Date.now(), elapsed = Math.max(0, now - (task.startedAt || task.createdAt));
+  const duration = ms => { const seconds = Math.max(0, Math.floor(ms / 1000)); return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`; };
+  return `<p>已等待 ${duration(elapsed)} · ${task.lastCheckedAt ? `最近收到模型回复：${duration(now - task.lastCheckedAt)}前` : '等待模型回复'}</p>
+    ${state.pollError ? `<p class="replica-error">${ctx.esc(state.pollError)}</p>` : elapsed >= 600_000 ? '<p>等待时间较长，仍在查询原任务，请勿重复提交。</p>' : ''}
+    <small>任务编号：${ctx.esc(task.id)}</small>`;
 }
 function history(ctx) {
   return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" ${state.busy ? 'disabled' : ''}><span>${labels[task.status] || '正在处理'}</span><small>${ctx.esc(new Date(task.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} · ${task.duration || '—'} 秒</small></button>`).join('') : '<p class="replica-muted">你的复刻记录会保存在这里</p>';
@@ -65,7 +80,7 @@ export function renderVideoReplica(ctx) {
       <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(state.error || state.pollError || (!state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : ''))}</p>
         <button type="button" id="replica-submit" class="primary" ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传与提交…' : pending(task) ? labels[task.status] : state.uploaded || (task?.photo && task?.video && !Object.keys(state.files).length) ? '开始人物复刻' : unlimited || exempt ? '上传素材，确认时长' : '上传素材，查看费用'}</button>
         <button type="button" id="replica-new" class="textbutton" ${state.busy || pending(task) ? 'disabled' : ''}>新建复刻</button></div></section>
-      <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
+      <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
 async function selectFile(kind, file) {
   if (!file) return;
@@ -103,17 +118,19 @@ async function poll() {
   try {
     const [config, data] = await Promise.all([state.config ? Promise.resolve(state.config) : request('/config'), request('/tasks')]);
     if (state.owner !== owner) return;
-    const previous = state.current && JSON.stringify(state.current), firstLoad = state.loading;
+    const previous = state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }), firstLoad = state.loading;
     state.config = config; state.tasks = data.tasks; state.loading = false; state.pollError = '';
     if (state.current) state.current = data.tasks.find(item => item.id === state.current.id) || state.current;
     else if (!Object.keys(state.files).length) state.current = data.tasks.find(pending) || null;
     for (const task of data.tasks) observeCreditTask(task);
     if (!document.querySelector('#replica-submit')) return;
-    if (firstLoad || previous !== (state.current && JSON.stringify(state.current))) refresh();
+    if (firstLoad || previous !== (state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }))) refresh();
     else { document.querySelector('#replica-history').innerHTML = history(context); document.querySelector('#replica-error').textContent = state.error || (!config.enabled ? '人物复刻服务尚未配置，请联系管理员。' : ''); }
+    const details = document.querySelector('#replica-progress'); if (details) details.innerHTML = progress(context);
   } catch (cause) {
     state.pollError = cause.message;
     const message = document.querySelector('#replica-error'); if (message) message.textContent = state.error || state.pollError;
+    const details = document.querySelector('#replica-progress'); if (details && context) details.innerHTML = progress(context);
   } finally { polling = false; }
 }
 export function bindVideoReplica(ctx) {

@@ -58,6 +58,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const expired = task.expiresAt <= now();
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
+      startedAt: task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video, photo: task.photo, error: task.error || '', code: task.code,
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
       sourcePhotoUrl: !expired && task.photo ? `${PREFIX}/tasks/${task.id}/photo` : null,
@@ -89,12 +90,18 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return `${config.publicOrigin}${PREFIX}/source/${task.id}/${kind}?expires=${expires}&signature=${signature(task.id, kind, expires)}`;
   }
   async function acceptResult(task, result) {
+    task.lastCheckedAt = now();
     if (result.failed) { await fail(task, '视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。', 'VIDEO_GENERATION_FAILED'); return; }
     if (result.taskId) task.providerId = result.taskId;
     if (result.url) { task.resultSource = result.url; task.status = 'downloading'; }
     else if (task.providerId) task.status = 'running';
     else { await fail(task, '模型未返回任务编号，未自动重试。请核对模型服务记录后再创建任务。', 'VIDEO_SUBMISSION_UNCERTAIN'); return; }
-    task.error = ''; delete task.code; await save(task);
+    task.error = ''; delete task.code;
+    if (result.completed && !result.url) {
+      task.error = '模型已返回完成状态，但尚未提供可下载成片，正在重新查询原任务。';
+      task.code = 'VIDEO_RESULT_PENDING';
+    }
+    await save(task);
   }
   async function processTask(task) {
     if (closing || fatal) return;

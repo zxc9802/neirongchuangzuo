@@ -43,11 +43,13 @@ function nestedVideoUrl(value, key = '', depth = 0) {
 export function parseGeneration(body) {
   const layers = [body, body?.data, body?.data?.result, body?.result].filter(item => item && typeof item === 'object');
   const first = keys => layers.flatMap(layer => keys.map(key => layer[key])).find(value => value !== undefined && value !== null && value !== '');
-  const status = String(first(['status', 'state', 'task_status']) ?? '').toLowerCase();
+  const status = String(first(['status', 'state', 'task_status']) ?? '').trim().toLowerCase();
+  const completed = ['2', 'succeeded', 'success', 'completed', 'done', 'finished'].includes(status);
   const taskId = first(['taskId', 'task_id', 'id']);
-  const url = layers.flatMap(layer => ['videoUrl', 'video_url', 'resultUrl', 'url', 'content'].map(key => layer[key]))
+  // Seedance queryResult returns the finished media URL in message, including extensionless URLs.
+  const url = layers.flatMap(layer => ['videoUrl', 'video_url', 'resultUrl', 'url', 'content', ...(completed ? ['message'] : [])].map(key => layer[key]))
     .find(value => typeof value === 'string' && /^https?:\/\//.test(value)) || nestedVideoUrl(body);
-  return { taskId: taskId == null ? null : String(taskId), url,
+  return { taskId: taskId == null ? null : String(taskId), url, completed,
     failed: ['3', '4', 'failed', 'failure', 'error', 'cancelled', 'canceled'].includes(status) };
 }
 export function createVideoProvider(config, fetchImpl = fetch) {

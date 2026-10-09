@@ -5,7 +5,7 @@ import { refreshWorkspaceCredits } from '../design/workspace-credits.js';
 const finiteWallet = () => ({ available: 1000, held: 0, total: 1000, unlimited: false,
   pricing: { imagePerUnit: 50, videoPoints: 333, videoSeconds: 30 } });
 
-async function fixture(t, { wallet = finiteWallet(), tasks = [] } = {}) {
+async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch } = {}) {
   const keys = ['workspaceUser', 'document', 'fetch', 'setInterval', 'clearInterval'];
   const original = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
   const nodes = new Map();
@@ -15,8 +15,8 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [] } = {}) {
   globalThis.document = { body: { dataset: { page: 'video' } }, querySelector: node };
   globalThis.setInterval = callback => { poll = callback; return 1; };
   globalThis.clearInterval = () => {};
-  globalThis.fetch = async path => path === '/api/workspace/credits' ? Response.json(wallet) : path.endsWith('/tasks')
-    ? failing ? new Response('<html>Service restarting</html>', { status: 502 }) : Response.json({ tasks })
+  globalThis.fetch = async (path, options) => path === '/api/workspace/credits' ? Response.json(wallet) : path.endsWith('/tasks')
+    ? failing ? new Response('<html>Service restarting</html>', { status: 502 }) : taskFetch ? taskFetch(options) : Response.json({ tasks })
     : Response.json({ enabled: true, prompt: '人物复刻' });
   const module = await import(`../design/video-replica.js?test-${crypto.randomUUID()}`);
   let html;
@@ -95,4 +95,43 @@ test('an exempt task with zero estimated points does not fall back to paid-task 
   assert.equal(page.cost(), '10 秒');
   assert.doesNotMatch(page.html(), /预计冻结|失败退回预留积分|已冻结|已使用|查看费用/);
   assert.match(page.html(), /id="replica-submit"[^>]*disabled[^>]*>正在替换人物/);
+});
+
+test('pending tasks show elapsed time, last model reply and a task ID instead of a fixed wait estimate', async t => {
+  const now = Date.now();
+  const task = { id: 'waiting-task', status: 'running', createdAt: now - 700_000, startedAt: now - 650_000, lastCheckedAt: now - 30_000 };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll();
+  assert.match(page.html(), /已等待 10 分/);
+  assert.match(page.html(), /最近收到模型回复/);
+  assert.match(page.html(), /waiting-task/);
+  assert.match(page.html(), /等待时间较长/);
+  assert.doesNotMatch(page.html(), /通常需要几分钟/);
+  const before = page.html();
+  task.lastCheckedAt = Date.now();
+  await page.poll();
+  assert.match(page.node('#replica-progress').innerHTML, /最近收到模型回复：0 秒前/);
+  assert.equal(page.html(), before, 'a new poll timestamp does not rebuild the video player');
+});
+
+for (const stalledPart of ['headers', 'body']) test(`a stalled ${stalledPart} request times out and later polls recover without submitting`, async t => {
+  let controller;
+  t.mock.method(AbortSignal, 'timeout', ms => { assert.equal(ms, 15_000); controller = new AbortController(); return controller.signal; });
+  let stall = true, calls = 0;
+  const task = { id: 'existing-task', status: 'running', createdAt: Date.now() };
+  const page = await fixture(t, { taskFetch: options => {
+    calls++; assert.equal(options.method, undefined);
+    if (!stall) return Response.json({ tasks: [task] });
+    const pending = new Promise((resolve, reject) => options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+    return stalledPart === 'headers' ? pending : { ok: true, json: () => pending };
+  } });
+  page.recover(); await page.poll();
+  assert.ok(controller, 'status requests need a bounded timeout');
+  controller.abort(new DOMException('Timed out', 'TimeoutError'));
+  await page.poll();
+  assert.match(page.message(), /查询任务超时/);
+  stall = false; await page.poll();
+  assert.equal(page.message(), '');
+  assert.equal(calls, 2);
+  assert.match(page.html(), /正在替换人物/);
 });
