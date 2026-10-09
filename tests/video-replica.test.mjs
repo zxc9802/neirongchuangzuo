@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile, readFile, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, realpath, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -11,7 +11,7 @@ import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
 import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT } from '../services/video/provider.mjs';
 import { normalizePhoto, downloadVideo } from '../services/video/media.mjs';
-import { alignmentSegments, speechTimeline } from '../services/video/speech.mjs';
+import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
 
 const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(100)]);
@@ -138,6 +138,172 @@ test('voice analysis rejects silence, unaligned words, rewritten scripts and exc
   assert.throws(() => alignmentSegments(SPEECH, long), /语速/);
   const generated = { ...SPEECH, segments: [{ ...SPEECH.segments[0], start: 0.5, end: 2.75 }] };
   assert.deepEqual(alignmentSegments(SPEECH, generated)[0], { start: 0.5, end: 2.75, targetStart: 1.25, targetEnd: 3.5, rate: 1 });
+});
+
+test('ASR words crossing a real pause cannot expand VAD intervals into artificial overlap', () => {
+  const result = speechTimeline({ words: [
+    { word: '你好', start: 0, end: 1.6 },
+    { word: '世界', start: 1.4, end: 2.2 },
+  ] }, [{ start: 0, end: 1 }, { start: 1.5, end: 2.5 }], 3);
+  assert.equal(result.text, '你好世界');
+  assert.deepEqual(result.segments.map(({ start, end }) => ({ start, end })), [{ start: 0, end: 1 }, { start: 1.5, end: 2.5 }]);
+  assert.deepEqual(result.segments.map(segment => segment.words[0]), [
+    { word: '你好', start: 0, end: 1 }, { word: '世界', start: 1.5, end: 2.2 },
+  ]);
+  assert.throws(() => speechTimeline({ words: SPEECH.segments[0].words }, [{ start: 0, end: 2 }, { start: 1.5, end: 3 }], 4), /检测区间无效/);
+  assert.throws(() => speechTimeline({ words: [{ word: '不匹配', start: 2.5, end: 3 }] }, [{ start: 0, end: 1 }], 4), /不一致/);
+});
+
+test('confirmed speech changes text while retaining measured boundaries and original word timestamps', () => {
+  const corrected = confirmSpeech(SPEECH, [{ text: '你好老板', start: 0, end: 99 }]);
+  assert.equal(corrected.text, '你好老板');
+  assert.equal(SPEECH.text, '你好世界');
+  assert.equal(corrected.segments[0].start, SPEECH.segments[0].start);
+  assert.equal(corrected.segments[0].end, SPEECH.segments[0].end);
+  assert.deepEqual(corrected.segments[0].words, SPEECH.segments[0].words);
+  for (const segments of [[], [{ text: '' }], [{ text: '。。。' }], [{ text: 'a'.repeat(2001) }], [{ text: 42 }]]) {
+    assert.throws(() => confirmSpeech(SPEECH, segments), /台词/);
+  }
+});
+
+test('draft correction is persisted and the supplier receives the confirmed rather than the original ASR text', async t => {
+  const corrected = confirmSpeech(SPEECH, [{ text: '你好老板' }]);
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : corrected }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/analyze`, { body: {} });
+  assert.equal((await app.call(`/tasks/${id}/speech`, { body: { segments: [] } })).status, 422);
+  assert.equal((await app.call(`/tasks/${id}/speech`, { owner: 'bob', body: { segments: [{ text: '你好老板' }] } })).status, 404);
+  const saved = await app.call(`/tasks/${id}/speech`, { body: { segments: [{ text: '你好老板', start: 0 }] } });
+  assert.equal(saved.status, 200);
+  const disk = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal(disk.originalSpeech.text, '你好世界'); assert.equal(disk.speech.text, '你好老板');
+  assert.equal(disk.speech.start, SPEECH.start);
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } });
+  await app.until(id, task => task.status === 'running');
+  assert.match(app.state.body.prompt, /你好老板/); assert.doesNotMatch(app.state.body.prompt, /你好世界/);
+  assert.equal((await app.call(`/tasks/${id}/speech`, { body: { segments: [{ text: '你好世界' }] } })).status, 409);
+  app.state.done = true; await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 1);
+});
+
+test('a failed voice check can recheck the existing media after restart and settle exactly one delivery', async t => {
+  let valid = false;
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') || valid ? SPEECH : { ...SPEECH, text: '错词' },
+      align: async (_source, output, original, generated) => { alignmentSegments(original, generated); await writeFile(output, VIDEO); return { transcriptMatched: true }; } }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  assert.equal(failed.canRecheck, true); assert.equal(failed.resultUrl, null);
+  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  await app.close(); await app.open();
+  assert.equal((await app.current(id)).canRecheck, true);
+  assert.equal((await app.call(`/tasks/${id}/recheck`, { owner: 'bob', body: {} })).status, 404);
+  valid = true;
+  const responses = await Promise.all([app.call(`/tasks/${id}/recheck`, { body: {} }), app.call(`/tasks/${id}/recheck`, { body: {} })]);
+  assert.deepEqual(responses.map(response => response.status).sort(), [200, 202]);
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.billing.chargedPoints, 45);
+  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal(app.state.generations, 1); assert.equal(app.state.creates.length, 3);
+  for (let i = 0; i < 3; i++) await app.call(`/tasks/${id}/recheck`, { body: {} });
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  const disk = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal((await app.wallet.reservation('alice', id)).status, 'released');
+  assert.equal((await app.wallet.reservation('alice', disk.billingTaskId)).status, 'settled');
+});
+
+test('failed rechecks release each recovery hold without another video generation or premature asset', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错词' },
+      align: async (_source, _output, original, generated) => alignmentSegments(original, generated) }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await app.call(`/tasks/${id}/recheck`, { body: {} })).status, 202);
+    await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+    assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+    assert.equal((await app.call(`/tasks/${id}/result`)).status, 409);
+  }
+  assert.equal(app.state.generations, 1);
+});
+
+test('a lost recovery reservation acknowledgement is refunded before a second attempt can start', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错词' },
+      align: async (_source, _output, original, generated) => alignmentSegments(original, generated) }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  await app.close();
+  await app.open({ credits: { ...app.wallet, reserve: async request => { await app.wallet.reserve(request); throw new Error('Acknowledgement lost'); } } });
+  assert.equal((await app.call(`/tasks/${id}/recheck`, { body: {} })).status, 503);
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  assert.equal(failed.canRecheck, true);
+  const disk = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal((await app.wallet.reservation('alice', disk.billingTaskId)).status, 'released');
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  assert.equal(app.state.generations, 1);
+});
+
+test('a pending refund blocks recheck and keeps the original hold addressable', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错词' },
+      align: async (_source, _output, original, generated) => alignmentSegments(original, generated) }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.close();
+  await app.open({ credits: { ...app.wallet, release: async () => { throw new Error('Refund unavailable'); } } });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'release_pending');
+  assert.equal(failed.canRecheck, false);
+  assert.equal((await app.call(`/tasks/${id}/recheck`, { body: {} })).status, 409);
+  const disk = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal(disk.billingTaskId, undefined); assert.equal(disk.recheckAttempt, undefined);
+  assert.equal((await app.wallet.reservation('alice', id)).status, 'reserved');
+  await app.close(); await app.open();
+  await app.until(id, task => task.billing?.status === 'released');
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  assert.equal(app.state.generations, 1);
+});
+
+test('restart refunds a committed recovery hold from its persisted reserve-pending journal without replaying generation', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错词' },
+      align: async (_source, _output, original, generated) => alignmentSegments(original, generated) }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  await app.close();
+  const originalReservation = await app.wallet.reservation('alice', id);
+  const taskPath = join(app.root, 'video', id, 'task.json');
+  const journal = JSON.parse(await readFile(taskPath, 'utf8'));
+  const recoveryId = `video-recheck:${id}:1`;
+  journal.recheckAttempt = 1; journal.billingTaskId = recoveryId; journal.recheckStartedAt = Date.now();
+  journal.status = 'reserving'; journal.error = ''; delete journal.code;
+  journal.billing = { status: 'reserve_pending', reservedPoints: 0, chargedPoints: 0, exempt: false };
+  await writeFile(taskPath, JSON.stringify(journal));
+  await app.wallet.reserve({ userId: 'alice', taskId: recoveryId, kind: 'video', units: journal.duration });
+  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  const releases = [], queriesBeforeRestart = app.state.queries, materialsBeforeRestart = app.state.creates.length;
+  await app.open({ credits: { ...app.wallet, release: async request => { releases.push(request.taskId); return app.wallet.release(request); } } });
+  assert.deepEqual(releases, [recoveryId]);
+  const failed = await app.current(id);
+  assert.equal(failed.status, 'failed'); assert.equal(failed.code, 'VIDEO_INTERRUPTED');
+  assert.equal(failed.billing.status, 'released'); assert.equal(failed.canRecheck, true); assert.equal(failed.resultUrl, null);
+  assert.equal((await app.wallet.reservation('alice', recoveryId)).status, 'released');
+  assert.deepEqual(await app.wallet.reservation('alice', id), originalReservation);
+  const wallet = await app.wallet.snapshot('alice'); assert.equal(wallet.held, 0); assert.equal(wallet.available, 1000);
+  const recovered = JSON.parse(await readFile(taskPath, 'utf8'));
+  assert.equal(recovered.billingTaskId, recoveryId); assert.equal(recovered.recheckAttempt, 1);
+  assert.deepEqual(recovered.speech, journal.speech);
+  assert.deepEqual(await readFile(join(app.root, 'video', id, 'generated.mp4')), VIDEO);
+  await app.close(); await app.open();
+  assert.equal((await app.current(id)).billing.status, 'released');
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  assert.equal(app.state.generations, 1); assert.equal(app.state.queries, queriesBeforeRestart);
+  assert.equal(app.state.creates.length, materialsBeforeRestart); assert.deepEqual(releases, [recoveryId]);
 });
 
 test('two materials, signed source access, playable range response and exactly-once billing', async t => {
@@ -311,6 +477,41 @@ test('three-day expiry removes media while keeping deduplication and billing rec
   assert.equal((await app.current(id)).status, 'expired');
   assert.equal((await app.wallet.snapshot('alice')).available, 955);
   assert.equal(app.state.generations, 1);
+});
+
+test('three-day expiry erases private voice, ASR, VAD and download artifacts while retaining the text task and settled bill', async t => {
+  let time = Date.now();
+  const app = await fixture(t, { now: () => time,
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  await app.until(id, task => task.status === 'completed');
+  const taskFolder = join(app.root, 'video', id), taskPath = join(taskFolder, 'task.json');
+  const completed = JSON.parse(await readFile(taskPath, 'utf8'));
+  const reservation = await app.wallet.reservation('alice', id);
+  const privateArtifacts = ['photo.jpg', 'source.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4',
+    'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json',
+    'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm',
+    'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm'];
+  await Promise.all(privateArtifacts.map(name => writeFile(join(taskFolder, name), `private material: ${name}`)));
+  time += 3 * 86400_000 + 1;
+  for (const kind of ['photo', 'video', 'voice', 'result']) assert.equal((await app.call(`/tasks/${id}/${kind}`)).status, 410);
+  let expired;
+  for (let i = 0; i < 300; i++) {
+    expired = JSON.parse(await readFile(taskPath, 'utf8'));
+    if (expired.cleaned) break;
+    await delay(10);
+  }
+  assert.equal(expired.cleaned, true);
+  assert.deepEqual(await readdir(taskFolder), ['task.json']);
+  assert.equal(expired.status, 'expired'); assert.equal(expired.id, id); assert.equal(expired.userId, 'alice');
+  assert.deepEqual(expired.speech, completed.speech); assert.deepEqual(expired.originalSpeech, completed.originalSpeech);
+  assert.equal(expired.completedAt, completed.completedAt); assert.deepEqual(expired.billing, completed.billing);
+  assert.deepEqual(await app.wallet.reservation('alice', id), reservation);
+  const current = await app.current(id);
+  assert.equal(current.sourcePhotoUrl, null); assert.equal(current.sourceVideoUrl, null); assert.equal(current.sourceVoiceUrl, null);
+  assert.equal(current.resultUrl, null); assert.equal(current.canRecheck, false);
+  assert.equal((await app.wallet.snapshot('alice')).available, 955); assert.equal(app.state.generations, 1);
 });
 
 test('photo validation rejects small or non-image files and strips metadata into JPEG', async () => {

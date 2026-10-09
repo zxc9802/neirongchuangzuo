@@ -1,6 +1,6 @@
 export const MODEL = 'doubao-seedance-2-0-260128';
 export const DURATIONS = [4, 5, 6, 8, 10, 12, 15];
-export const PROMPT = '将参考视频中的人物替换成参考图片中的人物形象。替换后的人物形象100%参考图片中的人物形象，严格保持人物五官、脸型、发型和外观特征的一致性。保留参考视频的动作、镜头、场景与说话内容。人物说话要带有情绪和情感，自然一些，不要生硬。人物面部表情也自然不僵硬，带有表情。视频画面不要出现任何字幕和文字信息。';
+export const PROMPT = '将参考视频中的人物替换成参考图片中的人物形象。替换后的人物形象100%参考图片中的人物形象，严格保持人物五官、脸型、发型和外观特征的一致性。保留参考视频的动作、镜头、场景与说话内容，逐时刻保持动作和镜头顺序，不增加动作、不重复片段、不延伸表演。人物说话要带有情绪和情感，自然一些，不要生硬。人物面部表情也自然不僵硬，带有表情。去除画面叠加的字幕，不生成新的字幕；保留真实商品包装与场景标识。';
 export class VideoError extends Error {
   constructor(message, status = 400, code = 'VIDEO_INVALID_INPUT') { super(message); this.status = status; this.code = code; }
 }
@@ -26,8 +26,17 @@ export function videoConfig(env = {}, publicOrigin) {
   return config;
 }
 export function generationBody(task) {
-  const voicePrompt = task.voice ? `\n参考音频仅用于人物音色，不使用参考音频的台词。人物必须使用参考音频的音色，逐字说出参考视频的原台词，保持原视频的语气、停顿和说话节奏。原视频人声从第 ${task.speech.start.toFixed(3)} 秒开始，此前人物不得说话。严格按以下原视频时间线说话：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。不要增加、删减或改写台词。` : '';
-  return { modelId: MODEL, abilityType: 'VIDEO', prompt: PROMPT + voicePrompt,
+  const lengthPrompt = task.video?.duration ? `\n参考视频实际时长为${task.video.duration.toFixed(3)}秒。动作严格对应原视频时刻，输出超过原视频时长的部分保持末帧静止、闭嘴和无声。` : '';
+  let voicePrompt = '';
+  if (task.voice) {
+    const segments = task.speech.segments;
+    const gaps = [];
+    let end = 0;
+    for (const segment of segments) { if (segment.start > end) gaps.push(`${end.toFixed(3)}–${segment.start.toFixed(3)}秒`); end = segment.end; }
+    if (task.duration > end) gaps.push(`${end.toFixed(3)}秒至成片结束`);
+    voicePrompt = `\n以下用户确认的台词是唯一台词依据。参考视频提供动作和节奏，参考音频仅提供音色，不使用参考音频的台词。全片只有照片中的一个人物说话，使用参考音频的同一音色，不保留或混入原视频的人声，不添加旁白或第二个人声。原视频人声从第 ${task.speech.start.toFixed(3)} 秒开始，此前人物不得说话。严格按以下原视频时间线说话：${segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。每段仅说一次，严格按顺序，价格、数字、单位按原字说，不改写、不补全、不重复。只在列出的台词区间说话，${gaps.length ? `${gaps.join('；')}必须保持静音。` : ''}最后一段结束后不得补说或复读。`;
+  }
+  return { modelId: MODEL, abilityType: 'VIDEO', prompt: PROMPT + lengthPrompt + voicePrompt,
     payload: { params: { mode: 'fusion_video', resolution: '720p', scale: task.ratio, duration: task.duration, generateAudio: true },
       resources: [`asset://${task.materials.photo.id}`], referVideoUrl: [`asset://${task.materials.video.id}`],
       ...(task.voice ? { referAudioUrl: [`asset://${task.materials.voice.id}`] } : {}) } };

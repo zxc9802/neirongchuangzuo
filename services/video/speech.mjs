@@ -7,7 +7,12 @@ import { VideoError } from './provider.mjs';
 const run = promisify(execFile);
 const worker = fileURLToPath(new URL('./speech_vad.py', import.meta.url));
 export const VOICE_LIMIT = 15 * 1024 * 1024;
-export const speechText = text => String(text || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+export const speechText = text => String(text || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, (character, index, normalized) => {
+  // Ignore sentence punctuation without merging distinct prices or signed numbers.
+  if (character === '.' && /\d/.test(normalized[index - 1] || '') && /\d/.test(normalized[index + 1] || '')) return character;
+  if ((character === '+' || character === '-') && /\d/.test(normalized[index + 1] || '')) return character;
+  return '';
+});
 const invalid = message => new VideoError(message, 422, 'VIDEO_SPEECH_INVALID');
 export function speechConfig(env = {}) {
   const prefix = env.VIDEO_TRANSCRIPTION_API_KEY ? 'VIDEO_TRANSCRIPTION' : env.MOTION_API_KEY ? 'MOTION' : 'INDEXTTS';
@@ -41,6 +46,12 @@ export async function normalizeVoice(input, output) {
   } catch { throw new VideoError('声音参考需为可播放的 MP3 / WAV，时长 2–15 秒。', 400, 'VIDEO_VOICE_INVALID'); }
 }
 export function speechTimeline(data, intervals, duration) {
+  if (!Number.isFinite(duration) || duration <= 0 || intervals.some((interval, index) =>
+    !Number.isFinite(interval.start) || !Number.isFinite(interval.end) || interval.start < 0
+    || interval.end <= interval.start || interval.end > duration + 0.1
+    || index && interval.start < intervals[index - 1].end)) {
+    throw invalid('人声检测区间无效，请重新检查素材。');
+  }
   const words = [];
   let pending = '';
   let previous = 0;
@@ -64,19 +75,36 @@ export function speechTimeline(data, intervals, duration) {
       return distance(segment) < distance(best) ? segment : best;
     });
     if (Math.max(nearest.start - center, center - nearest.end, 0) > 0.4) throw invalid('语音识别与人声检测结果不一致，请检查背景音乐或多人说话。');
-    nearest.words.push({ start: word.start, end: Math.min(duration, word.end), word: word.word });
+    // VAD measures speech boundaries; ASR word timestamps must not extend them
+    // across a pause. Keep every recognized word, including zero-length Chinese tokens.
+    const clamp = value => Math.max(nearest.start, Math.min(nearest.end, value));
+    nearest.words.push({ start: clamp(word.start), end: clamp(word.end), word: word.word });
     nearest.text += word.word;
   }
-  const spoken = segments.filter(segment => segment.words.length).map(segment => ({ ...segment,
-    start: Math.min(segment.start, segment.words[0].start), end: Math.max(segment.end, segment.words.at(-1).end) }));
+  const spoken = segments.filter(segment => segment.words.length);
   if (!spoken.length || spoken.length > 30) throw invalid('人声分段不符合单人口播要求。');
-  if (spoken.some((segment, index) => index && segment.start < spoken[index - 1].end)) throw invalid('人声区间存在重叠，暂时无法精确保留停顿。');
-  return { engine: 'silero-vad+whisper-1', start: spoken[0].start, end: spoken.at(-1).end,
+  return { engine: 'silero-vad+whisper-1', timingSource: 'vad', start: spoken[0].start, end: spoken.at(-1).end,
     text: words.map(word => word.word).join(''), segments: spoken };
+}
+
+export function confirmSpeech(timeline, segments) {
+  if (!timeline?.segments?.length || !Array.isArray(segments) || segments.length !== timeline.segments.length) {
+    throw invalid('请保留原有台词分段，仅修改识别文字。');
+  }
+  const confirmed = timeline.segments.map((segment, index) => {
+    const text = segments[index]?.text;
+    if (typeof text !== 'string' || !speechText(text) || text.length > 2000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(text)) {
+      throw invalid('每段台词不能为空，且不能超过2000个字符。');
+    }
+    return { ...segment, text: text.trim() };
+  });
+  const text = confirmed.map(segment => segment.text).join('');
+  if (text.length > 5000) throw invalid('台词过长，请核对识别内容。');
+  return { ...timeline, text, segments: confirmed };
 }
 export function createSpeechService(env = {}, fetchImpl = fetch) {
   const config = speechConfig(env);
-  async function analyze(path, duration) {
+  async function analyze(path, duration, { diagnosticsPath } = {}) {
     if (!config.key) throw new VideoError('声音参考的语音识别服务尚未配置。', 503, 'VIDEO_SPEECH_NOT_CONFIGURED');
     const intervals = await detectSpeech(path, config);
     if (!intervals.length) throw invalid('素材中未检测到人声，请上传清晰的单人口播。');
@@ -91,7 +119,16 @@ export function createSpeechService(env = {}, fetchImpl = fetch) {
       const response = await fetchImpl(new URL('/v1/audio/transcriptions', config.base), {
         method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${config.key}` }, body: form, signal: AbortSignal.timeout(120_000) });
       if (!response.ok) throw new VideoError('语音识别服务未完成分析，请稍后重新分析素材。', 502, 'VIDEO_TRANSCRIPTION_FAILED');
-      return speechTimeline(await response.json(), intervals, duration);
+      const data = await response.json();
+      const diagnostic = { duration, vad: intervals, asr: { text: data.text, words: data.words } };
+      try {
+        const timeline = speechTimeline(data, intervals, duration);
+        if (diagnosticsPath) await writeFile(diagnosticsPath, JSON.stringify({ ...diagnostic, timeline }), { mode: 0o600 });
+        return timeline;
+      } catch (cause) {
+        if (diagnosticsPath) await writeFile(diagnosticsPath, JSON.stringify({ ...diagnostic, error: { code: cause.code, message: cause.message } }), { mode: 0o600 });
+        throw cause;
+      }
     } finally { await rm(audio, { force: true }); }
   }
   return { enabled: Boolean(config.key), analyze, detect: path => detectSpeech(path, config), align: alignSpeech };

@@ -5,7 +5,7 @@ import { refreshWorkspaceCredits } from '../design/workspace-credits.js';
 const finiteWallet = () => ({ available: 1000, held: 0, total: 1000, unlimited: false,
   pricing: { imagePerUnit: 50, videoPoints: 333, videoSeconds: 30 } });
 
-async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch } = {}) {
+async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiFetch } = {}) {
   const keys = ['workspaceUser', 'document', 'fetch', 'setInterval', 'clearInterval'];
   const original = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
   const nodes = new Map();
@@ -15,9 +15,12 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch } = {
   globalThis.document = { body: { dataset: { page: 'video' } }, querySelector: node };
   globalThis.setInterval = callback => { poll = callback; return 1; };
   globalThis.clearInterval = () => {};
-  globalThis.fetch = async (path, options) => path === '/api/workspace/credits' ? Response.json(wallet) : path.endsWith('/tasks')
-    ? failing ? new Response('<html>Service restarting</html>', { status: 502 }) : taskFetch ? taskFetch(options) : Response.json({ tasks })
-    : Response.json({ enabled: true, prompt: '人物复刻' });
+  globalThis.fetch = async (path, options) => {
+    if (apiFetch) { const response = await apiFetch(path, options); if (response) return response; }
+    return path === '/api/workspace/credits' ? Response.json(wallet) : path.endsWith('/tasks')
+      ? failing ? new Response('<html>Service restarting</html>', { status: 502 }) : taskFetch ? taskFetch(options) : Response.json({ tasks })
+      : Response.json({ enabled: true, prompt: '人物复刻' });
+  };
   const module = await import(`../design/video-replica.js?test-${crypto.randomUUID()}`);
   let html;
   const ctx = { esc: value => String(value ?? ''), icon: () => '', refresh() {
@@ -34,7 +37,7 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch } = {
   await settle();
   return { node, ctx, recover: () => { failing = false; }, fail: () => { failing = true; },
     poll: async () => { poll(); await settle(); }, message: () => node('#replica-error').textContent,
-    html: () => html, cost: () => node('#replica-cost').textContent,
+    html: () => html, cost: () => node('#replica-cost').textContent, settle,
     select: id => node('#replica-history').onclick({ target: { closest: () => ({ dataset: { replicaTask: id } }) } }),
     wallet: async value => { wallet = value; await refreshWorkspaceCredits(); } };
 }
@@ -49,6 +52,119 @@ test('automatic successful polling clears restart errors on first load and after
   page.recover(); await page.poll();
   assert.equal(page.message(), '');
   page.ctx.refresh(); assert.equal(page.message(), '');
+});
+
+function speechDraft() {
+  return { id: 'editable-task', status: 'draft', createdAt: Date.now(), video: {}, photo: {}, voice: {},
+    speech: { start: 0, end: 2, segments: [{ start: 0, end: 1, text: '薄饼' }, { start: 1.3, end: 2, text: '真的超好吃' }] } };
+}
+
+test('draft corrections survive refresh and are saved with original timings before one generation starts', async t => {
+  let task = speechDraft();
+  const calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (options?.method !== 'POST') return;
+    calls.push({ path, body: JSON.parse(options.body) });
+    if (path.endsWith('/speech')) task = { ...task, speech: { ...task.speech, segments: task.speech.segments.map((segment, i) => ({ ...segment, text: JSON.parse(options.body).segments[i].text })) } };
+    if (path.endsWith('/start')) task = { ...task, status: 'running' };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /textarea[^>]*aria-label="第 1 段台词"/);
+  assert.match(page.html(), /Max模型/);
+  assert.doesNotMatch(page.html(), /SEEDANCE/);
+  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
+  await page.poll(); page.ctx.refresh();
+  assert.match(page.html(), />博主<\/textarea>/);
+  page.node('#replica-submit').onclick(); page.node('#replica-submit').onclick(); await page.settle();
+  assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', '/api/video-replica/tasks/editable-task/speech', '/api/video-replica/tasks/editable-task/start']);
+  assert.deepEqual(calls[1].body, { segments: [{ text: '博主' }, { text: '真的超好吃' }] });
+  assert.deepEqual(task.speech.segments.map(segment => [segment.start, segment.end]), [[0, 1], [1.3, 2]]);
+  assert.equal(calls[2].body.speechConfirmed, true);
+  assert.doesNotMatch(page.html(), /textarea[^>]*data-replica-segment/);
+});
+
+test('blank corrected segments do not save or start a task', async t => {
+  const task = speechDraft(), calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => { if (options?.method) calls.push(path); } });
+  page.recover(); await page.poll(); page.select(task.id);
+  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '1' }, value: '  ' } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(page.message(), '每段台词不能为空。');
+  assert.deepEqual(calls, []);
+});
+
+test('failed correction save preserves edits and never submits generation', async t => {
+  const task = speechDraft(), calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (options?.method !== 'POST') return;
+    calls.push(path);
+    return path.endsWith('/speech') ? Response.json({ error: '台词保存失败，请重试。' }, { status: 503 }) : Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(page.message(), '台词保存失败，请重试。');
+  assert.match(page.html(), />博主<\/textarea>/);
+  assert.deepEqual(calls, ['/api/video-replica/tasks', '/api/video-replica/tasks/editable-task/speech']);
+});
+
+test('completed and failed tasks cannot submit or edit speech', async t => {
+  for (const status of ['running', 'completed', 'failed']) {
+    const task = { ...speechDraft(), status }, calls = [];
+    const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => { if (options?.method) calls.push(path); } });
+    page.recover(); await page.poll(); page.select(task.id);
+    assert.doesNotMatch(page.html(), /textarea[^>]*data-replica-segment/);
+    page.node('#replica-submit').onclick(); await page.settle();
+    assert.deepEqual(calls, []);
+  }
+});
+
+test('eligible failed output rechecks the same task once without generating again', async t => {
+  const task = { ...speechDraft(), status: 'failed', canRecheck: true }, calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (options?.method !== 'POST') return;
+    calls.push({ path, body: JSON.parse(options.body) });
+    return Response.json({ task: path.endsWith('/speech') ? task : { ...task, status: 'verifying', canRecheck: false } });
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /id="replica-recheck"[^>]*>重新检查成片/);
+  assert.match(page.html(), /textarea[^>]*aria-label="第 1 段台词"/);
+  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
+  page.node('#replica-recheck').onclick(); page.node('#replica-recheck').onclick(); await page.settle();
+  assert.deepEqual(calls, [{ path: '/api/video-replica/tasks/editable-task/speech', body: { segments: [{ text: '博主' }, { text: '真的超好吃' }] } }, { path: '/api/video-replica/tasks/editable-task/recheck', body: {} }]);
+  assert.doesNotMatch(page.html(), /id="replica-recheck"/);
+});
+
+test('blank corrected segments block rechecking an existing output', async t => {
+  const task = { ...speechDraft(), status: 'failed', canRecheck: true }, calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => { if (options?.method) calls.push(path); } });
+  page.recover(); await page.poll(); page.select(task.id);
+  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '' } });
+  page.node('#replica-recheck').onclick(); await page.settle();
+  assert.equal(page.message(), '每段台词不能为空。');
+  assert.deepEqual(calls, []);
+});
+
+test('tasks without recoverable output do not request recheck', async t => {
+  const task = { ...speechDraft(), status: 'failed', canRecheck: false }, calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => { if (options?.method) calls.push(path); } });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.doesNotMatch(page.html(), /id="replica-recheck"/);
+  page.node('#replica-recheck').onclick(); await page.settle();
+  assert.deepEqual(calls, []);
+});
+
+test('downloading output shows received size and progress with or without content length', async t => {
+  const task = { id: 'download-task', status: 'downloading', createdAt: Date.now(), downloadProgress: { receivedBytes: 1024 * 1024, totalBytes: 4 * 1024 * 1024 } };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll();
+  assert.match(page.html(), /保存成片：1.0 MB \/ 4.0 MB/);
+  assert.match(page.html(), /progress aria-label="成片保存进度" max="4194304" value="1048576"/);
+  task.downloadProgress.totalBytes = null;
+  await page.poll();
+  assert.match(page.html(), /保存成片：1.0 MB/);
+  assert.doesNotMatch(page.html(), /progress aria-label="成片保存进度"/);
 });
 
 test('successful status polling preserves input validation errors', async t => {
