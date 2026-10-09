@@ -154,6 +154,16 @@ test('ASR words crossing a real pause cannot expand VAD intervals into artificia
   assert.throws(() => speechTimeline({ words: [{ word: '不匹配', start: 2.5, end: 3 }] }, [{ start: 0, end: 1 }], 4), /不一致/);
 });
 
+test('an untranscribed short closing phrase cannot disappear from the speech timeline', () => {
+  const intervals = [{ start: 0, end: 9.28 }, { start: 11.232, end: 12.282 }];
+  assert.throws(() => speechTimeline({ words: [{ word: '又薄又脆', start: 8, end: 9.28 }] }, intervals, 12.3), cause => {
+    assert.equal(cause.code, 'VIDEO_SPEECH_INVALID');
+    assert.match(cause.message, /台词识别不完整/);
+    assert.deepEqual(cause.unmatchedVadIntervals, [intervals[1]]);
+    return true;
+  });
+});
+
 test('confirmed speech changes text while retaining measured boundaries and original word timestamps', () => {
   const corrected = confirmSpeech(SPEECH, [{ text: '你好老板', start: 0, end: 99 }]);
   assert.equal(corrected.text, '你好老板');
@@ -487,7 +497,14 @@ test('three-day expiry erases private voice, ASR, VAD and download artifacts whi
   await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
   await app.until(id, task => task.status === 'completed');
   const taskFolder = join(app.root, 'video', id), taskPath = join(taskFolder, 'task.json');
-  const completed = JSON.parse(await readFile(taskPath, 'utf8'));
+  let completed;
+  const settlementDeadline = performance.now() + 15_000;
+  do {
+    completed = JSON.parse(await readFile(taskPath, 'utf8'));
+    if (completed.billing?.status === 'settled') break;
+    await delay(50);
+  } while (performance.now() < settlementDeadline);
+  assert.equal(completed.billing?.status, 'settled');
   const reservation = await app.wallet.reservation('alice', id);
   const privateArtifacts = ['photo.jpg', 'source.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4',
     'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json',
@@ -497,11 +514,12 @@ test('three-day expiry erases private voice, ASR, VAD and download artifacts whi
   time += 3 * 86400_000 + 1;
   for (const kind of ['photo', 'video', 'voice', 'result']) assert.equal((await app.call(`/tasks/${id}/${kind}`)).status, 410);
   let expired;
-  for (let i = 0; i < 300; i++) {
+  const cleanupDeadline = performance.now() + 15_000;
+  do {
     expired = JSON.parse(await readFile(taskPath, 'utf8'));
     if (expired.cleaned) break;
-    await delay(10);
-  }
+    await delay(50);
+  } while (performance.now() < cleanupDeadline);
   assert.equal(expired.cleaned, true);
   assert.deepEqual(await readdir(taskFolder), ['task.json']);
   assert.equal(expired.status, 'expired'); assert.equal(expired.id, id); assert.equal(expired.userId, 'alice');

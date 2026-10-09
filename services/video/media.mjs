@@ -83,12 +83,14 @@ async function videoResponse(url, headers, signal, options, hops = 0) {
 export async function downloadVideo(url, path, signalOrOptions, extraOptions = {}) {
   const options = signalOrOptions?.addEventListener ? { ...extraOptions, signal: signalOrOptions } : { ...(signalOrOptions || {}), ...extraOptions };
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new Error('Video download timed out')), options.attemptTimeoutMs ?? 600_000);
+  const attemptTimeoutMs = options.attemptTimeoutMs ?? 600_000;
+  const deadline = performance.now() + attemptTimeoutMs;
+  const timer = setTimeout(() => controller.abort(new Error('Video download timed out')), attemptTimeoutMs);
   const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
   const metadataPath = path + '.download.json';
   const maxBytes = Math.min(options.maxBytes ?? DOWNLOAD_LIMIT, DOWNLOAD_LIMIT);
   const progress = values => { try { Promise.resolve(options.onProgress?.(values)).catch(() => {}); } catch {} };
-  let response, output;
+  let response, output, throughputTimer;
   try {
     signal.throwIfAborted();
     let previous, existing = 0;
@@ -142,6 +144,22 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
     await writeFile(metadataPath, JSON.stringify({ version: 1, url: String(url), etag, totalBytes }), { mode: 0o600 });
     let bytes = start;
     progress({ bytes, totalBytes, resumed: start > 0, complete: false });
+    if (totalBytes !== null) {
+      // A CDN can keep its socket alive while sending too slowly to meet our
+      // deadline. Measure this response only, not a retained partial download.
+      // Unknown lengths and small final tails retain the existing timeout rules.
+      let observedAt = performance.now(), observedBytes = bytes;
+      throughputTimer = setInterval(() => {
+        const now = performance.now(), elapsed = now - observedAt;
+        const received = bytes - observedBytes, remaining = totalBytes - bytes;
+        const timeLeft = deadline - now;
+        if (remaining > 64 * 1024 && timeLeft > 0 && elapsed > 0
+          && (received === 0 || remaining * elapsed / received > timeLeft)) {
+          response.destroy(new Error('Video download too slow to finish before deadline'));
+        }
+        observedAt = now; observedBytes = bytes;
+      }, options.throughputWindowMs ?? 30_000);
+    }
     const limit = new Transform({ transform(chunk, _encoding, done) {
       if (bytes + chunk.length > maxBytes || totalBytes !== null && bytes + chunk.length > totalBytes) return done(new Error('Video too large or longer than declared'));
       bytes += chunk.length;
@@ -153,7 +171,7 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
     await rm(metadataPath, { force: true });
     progress({ bytes, totalBytes: totalBytes ?? bytes, resumed: start > 0, complete: true });
     return { bytes, totalBytes: totalBytes ?? bytes, resumed: start > 0 };
-  } finally { clearTimeout(timer); response?.destroy(); await output?.close(); }
+  } finally { clearTimeout(timer); clearInterval(throughputTimer); response?.destroy(); await output?.close(); }
 }
 export async function serveMedia(req, res, path, type, download = false) {
   const { size } = await stat(path);

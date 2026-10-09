@@ -66,7 +66,7 @@ export function speechTimeline(data, intervals, duration) {
     words.push({ ...word, word: pending + word.word }); pending = '';
   }
   if (pending && words.length) words.at(-1).word += pending;
-  if (!words.length || !intervals.length) throw invalid('未识别到清晰的人声和台词，请更换口播素材。');
+  if (!intervals.length) throw invalid('未识别到清晰的人声和台词，请更换口播素材。');
   const segments = intervals.map(interval => ({ ...interval, text: '', words: [] }));
   for (const word of words) {
     const center = (word.start + word.end) / 2;
@@ -81,7 +81,11 @@ export function speechTimeline(data, intervals, duration) {
     nearest.words.push({ start: clamp(word.start), end: clamp(word.end), word: word.word });
     nearest.text += word.word;
   }
-  const spoken = segments.filter(segment => segment.words.length);
+  const unmatchedVadIntervals = segments.filter(segment => !segment.words.length).map(({ start, end }) => ({ start, end }));
+  if (unmatchedVadIntervals.length) {
+    throw Object.assign(invalid('台词识别不完整，请核对素材后重新分析。'), { unmatchedVadIntervals });
+  }
+  const spoken = segments;
   if (!spoken.length || spoken.length > 30) throw invalid('人声分段不符合单人口播要求。');
   return { engine: 'silero-vad+whisper-1', timingSource: 'vad', start: spoken[0].start, end: spoken.at(-1).end,
     text: words.map(word => word.word).join(''), segments: spoken };
@@ -126,7 +130,8 @@ export function createSpeechService(env = {}, fetchImpl = fetch) {
         if (diagnosticsPath) await writeFile(diagnosticsPath, JSON.stringify({ ...diagnostic, timeline }), { mode: 0o600 });
         return timeline;
       } catch (cause) {
-        if (diagnosticsPath) await writeFile(diagnosticsPath, JSON.stringify({ ...diagnostic, error: { code: cause.code, message: cause.message } }), { mode: 0o600 });
+        if (diagnosticsPath) await writeFile(diagnosticsPath, JSON.stringify({ ...diagnostic, unmatchedVadIntervals: cause.unmatchedVadIntervals,
+          error: { code: cause.code, message: cause.message } }), { mode: 0o600 });
         throw cause;
       }
     } finally { await rm(audio, { force: true }); }
@@ -134,7 +139,7 @@ export function createSpeechService(env = {}, fetchImpl = fetch) {
   return { enabled: Boolean(config.key), analyze, detect: path => detectSpeech(path, config), align: alignSpeech };
 }
 export function alignmentSegments(original, generated) {
-  if (speechText(original.text) !== speechText(generated.text)) throw invalid('成片台词与原视频不一致，未交付成片；请核对素材后重新生成。');
+  if (speechText(original.text) !== speechText(generated.text)) throw invalid('成片识别结果与确认台词不一致，未交付成片；请核对台词后重新检查。');
   const words = generated.segments.flatMap(segment => segment.words);
   let position = 0, index = 0;
   return original.segments.map(segment => {

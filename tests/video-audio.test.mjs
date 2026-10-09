@@ -1,14 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, realpath, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, realpath, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { detectSpeech, normalizeVoice, alignSpeech } from '../services/video/speech.mjs';
+import { detectSpeech, normalizeVoice, alignSpeech, createSpeechService } from '../services/video/speech.mjs';
 
 const enabled = Boolean(process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN);
 const voice = fileURLToPath(new URL('./fixtures/replica-speech.wav', import.meta.url));
+test('analysis preserves VAD and ASR diagnostics when a closing speech interval has no recognized words', { skip: !enabled }, async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'replica-asr-diagnostic-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const input = join(root, 'source.wav'), diagnosticPath = join(root, 'verification-source.json');
+  await writeFile(input, await readFile(voice));
+  const intervals = await detectSpeech(input);
+  assert.equal(intervals.length, 2);
+  const words = [{ word: '你好', start: intervals[0].start, end: intervals[0].end }];
+  const speech = createSpeechService({
+    VIDEO_TRANSCRIPTION_API_KEY: 'test-no-network',
+    VIDEO_TRANSCRIPTION_BASE_URL: 'https://transcription.example',
+    VIDEO_PYTHON_BIN: process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN,
+  }, async () => new Response(JSON.stringify({ text: '你好', words }), { headers: { 'content-type': 'application/json' } }));
+  await assert.rejects(speech.analyze(input, 5, { diagnosticsPath: diagnosticPath }), /台词识别不完整/);
+  const diagnostic = JSON.parse(await readFile(diagnosticPath, 'utf8'));
+  assert.deepEqual(diagnostic.vad, intervals);
+  assert.deepEqual(diagnostic.asr, { text: '你好', words });
+  assert.deepEqual(diagnostic.unmatchedVadIntervals, [intervals[1]]);
+  assert.equal(diagnostic.error.code, 'VIDEO_SPEECH_INVALID');
+  assert.match(diagnostic.error.message, /台词识别不完整/);
+  assert.equal(diagnostic.timeline, undefined);
+  await assert.rejects(readFile(input + '.asr.wav'), { code: 'ENOENT' });
+});
+
 test('real Silero detects delayed speech and corrected FFmpeg audio within 100 ms, rejects a music tone', { skip: !enabled }, async t => {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'replica-audio-'));
   t.after(() => rm(root, { recursive: true, force: true }));

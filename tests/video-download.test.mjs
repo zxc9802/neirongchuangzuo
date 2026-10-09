@@ -117,6 +117,96 @@ test('overall cancellation also retains safe resume metadata, while steady strea
   assert.deepEqual(await readFile(steady.path), steadyBody);
 });
 
+test('an impossibly slow CDN stream stops early and resumes on a newly resolved pinned public address', async t => {
+  const body = Buffer.alloc(512 * 1024, 6), resolved = [], pinned = [];
+  const app = await fixture(t, async (req, res, count) => {
+    if (count > 1) { range(res, body, Number(/^bytes=(\d+)-$/.exec(req.headers.range)[1])); return; }
+    res.writeHead(200, { ETag: ETAG, 'Content-Length': body.length });
+    for (let offset = 0; offset < body.length && !res.destroyed; offset += 1024) {
+      res.write(body.subarray(offset, offset + 1024));
+      await delay(25);
+    }
+    if (!res.destroyed) res.end();
+  }, {
+    lookup: async host => {
+      resolved.push(host);
+      return [{ address: resolved.length === 1 ? '8.8.8.8' : '1.1.1.1', family: 4 }];
+    },
+    throughputWindowMs: 150,
+    attemptTimeoutMs: 5000,
+  });
+  const transport = app.settings.transport;
+  app.settings.transport = (target, settings, callback) => {
+    settings.lookup(target.hostname, { all: false }, (_error, address) => pinned.push(address));
+    return transport(target, settings, callback);
+  };
+  const started = performance.now();
+  await assert.rejects(app.run(), /too slow to finish/);
+  assert.ok(performance.now() - started < 2500, 'A trickling socket should not consume the full attempt deadline');
+  const prefix = (await stat(app.path)).size;
+  assert.ok(prefix > 0 && prefix < body.length);
+  assert.equal(JSON.parse(await readFile(app.path + '.download.json')).etag, ETAG);
+  assert.equal((await app.run()).resumed, true);
+  assert.deepEqual(resolved, ['video.example', 'video.example']);
+  assert.deepEqual(pinned, ['8.8.8.8', '1.1.1.1']);
+  assert.equal(app.calls[1].headers.Range, `bytes=${prefix}-`);
+  assert.equal(app.calls[1].headers['If-Range'], ETAG);
+  assert.deepEqual(await readFile(app.path), body);
+});
+
+test('the throughput estimate uses the deadline remaining after DNS, not a fresh timeout', async t => {
+  const body = Buffer.alloc(512 * 1024, 7);
+  const app = await fixture(t, (_req, res) => {
+    res.writeHead(200, { ETag: ETAG, 'Content-Length': body.length });
+    res.write(body.subarray(0, 128 * 1024));
+  }, {
+    lookup: async () => { await delay(1700); return [{ address: '8.8.8.8', family: 4 }]; },
+    attemptTimeoutMs: 2500,
+    throughputWindowMs: 250,
+  });
+  await assert.rejects(app.run(), /too slow to finish/);
+  assert.equal((await stat(app.path)).size, 128 * 1024);
+});
+
+test('known-length streams that can finish in time and small final tails are not interrupted', async t => {
+  const body = Buffer.alloc(256 * 1024, 8);
+  const steady = await fixture(t, async (_req, res) => {
+    res.writeHead(200, { ETag: ETAG, 'Content-Length': body.length });
+    for (let offset = 0; offset < body.length && !res.destroyed; offset += 32 * 1024) {
+      res.write(body.subarray(offset, offset + 32 * 1024));
+      await delay(80);
+    }
+    if (!res.destroyed) res.end();
+  });
+  await steady.run({ attemptTimeoutMs: 4000, throughputWindowMs: 120 });
+  assert.deepEqual(await readFile(steady.path), body);
+  const tail = await fixture(t, async (_req, res) => {
+    res.writeHead(200, { ETag: ETAG, 'Content-Length': body.length });
+    res.write(body.subarray(0, body.length - 1024));
+    await written(tail.path, body.length - 1024);
+    await delay(400);
+    if (!res.destroyed) res.end(body.subarray(-1024));
+  });
+  await tail.run({ attemptTimeoutMs: 2500, throughputWindowMs: 100 });
+  assert.deepEqual(await readFile(tail.path), body);
+});
+
+test('unknown-length streams keep their idle and overall timeouts without throughput estimates', async t => {
+  const body = Buffer.alloc(128 * 1024, 9);
+  const app = await fixture(t, async (_req, res) => {
+    res.writeHead(200, { ETag: ETAG });
+    res.write(body.subarray(0, 1024));
+    await written(app.path, 1024);
+    await delay(400);
+    if (!res.destroyed) res.end(body.subarray(1024));
+  });
+  const result = await app.run({ throughputWindowMs: 100, attemptTimeoutMs: 2500 });
+  assert.equal(result.bytes, body.length);
+  assert.deepEqual(await readFile(app.path), body);
+  const stalled = await fixture(t, (_req, res) => { res.writeHead(200); res.write(Buffer.alloc(1024)); });
+  await assert.rejects(stalled.run({ throughputWindowMs: 50, idleTimeoutMs: 300 }), /stalled/);
+});
+
 test('the previous AbortSignal argument remains supported and progress observers cannot break a download', async t => {
   const body = Buffer.alloc(4096, 5), controller = new AbortController();
   const app = await fixture(t, async (_req, res, count) => {
