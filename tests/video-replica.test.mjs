@@ -11,6 +11,7 @@ import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
 import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT } from '../services/video/provider.mjs';
 import { normalizePhoto, downloadVideo } from '../services/video/media.mjs';
+import { alignmentSegments, speechTimeline } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
 
 const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(100)]);
@@ -81,6 +82,62 @@ test('Seedance 2.0 connection matches reference project and never returns creden
   assert.equal(parseGeneration({ data: { status: 3 } }).failed, true);
   assert.equal(parseGeneration({ data: { results: [{ video_url: 'https://cdn.example/clip.mp4' }] } }).url, 'https://cdn.example/clip.mp4');
   assert.equal(videoConfig({}).enabled, false);
+});
+
+const SPEECH = { engine: 'silero-vad+whisper-1', start: 1.25, end: 3.5, text: '你好世界',
+  segments: [{ start: 1.25, end: 3.5, text: '你好世界', words: [{ word: '你好', start: 1.25, end: 2.2 }, { word: '世界', start: 2.2, end: 3.5 }] }] };
+function fakeSpeech(overrides = {}) { return { enabled: true, detect: async () => [{ start: 0.2, end: 2.5 }],
+  analyze: async () => SPEECH, align: async (_source, output) => { await writeFile(output, VIDEO); return { transcriptMatched: true }; }, ...overrides }; }
+async function uploadVoice(app, id) {
+  const response = await fetch(app.base + `/api/video-replica/tasks/${id}/voice`, { method: 'PUT', body: VIDEO });
+  assert.equal(response.status, 200, await response.text());
+}
+
+test('voice reference requires analysis confirmation and reaches the provider as an audio material', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  assert.equal((await app.call(`/tasks/${id}/voice`, { owner: 'bob' })).status, 404);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 409);
+  assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  const analyzed = await app.call(`/tasks/${id}/analyze`, { body: {} });
+  assert.equal(analyzed.status, 200); assert.equal((await analyzed.json()).task.speech.start, 1.25);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 409);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+  assert.match(app.state.body.prompt, /1\.250 秒/); assert.match(app.state.body.prompt, /你好世界/);
+  const signed = new URL(app.state.creates.find(item => item.kind === 'voice').url);
+  const response = await fetch(app.base + signed.pathname + signed.search);
+  assert.equal(response.headers.get('content-type'), 'audio/wav'); assert.equal(response.status, 200);
+  app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.audioCheck.afterOffsetMs, 0); assert.equal(completed.audioCheck.lipSync, 'needs_preview');
+  assert.equal(app.state.generations, 1);
+});
+
+test('a replacement video invalidates voice analysis and failed result verification refunds credits', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错误台词' } }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal((await app.current(id)).speech, undefined);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } })).status, 409);
+  await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  assert.equal(failed.code, 'VIDEO_SPEECH_INVALID'); assert.equal(failed.resultUrl, null);
+  assert.equal((await app.wallet.snapshot('alice')).available, 1000); assert.equal(app.state.generations, 1);
+});
+
+test('voice analysis rejects silence, unaligned words, rewritten scripts and excessive speed changes', () => {
+  assert.throws(() => speechTimeline({ words: SPEECH.segments[0].words }, [], 4), /未识别/);
+  assert.throws(() => speechTimeline({ words: [{ word: '你好', start: 1, end: 0 }] }, [{ start: 1, end: 2 }], 4), /时间戳/);
+  const zeroCharacter = speechTimeline({ words: [{ word: '欢', start: 1, end: 1 }, { word: '迎', start: 1, end: 1.5 }] }, [{ start: 1, end: 1.5 }], 2);
+  assert.equal(zeroCharacter.text, '欢迎'); assert.equal(zeroCharacter.segments[0].words[0].start, 1);
+  assert.throws(() => alignmentSegments(SPEECH, { ...SPEECH, text: '台词改变' }), /台词/);
+  const long = { ...SPEECH, segments: [{ ...SPEECH.segments[0], start: 0, end: 9 }] };
+  assert.throws(() => alignmentSegments(SPEECH, long), /语速/);
+  const generated = { ...SPEECH, segments: [{ ...SPEECH.segments[0], start: 0.5, end: 2.75 }] };
+  assert.deepEqual(alignmentSegments(SPEECH, generated)[0], { start: 0.5, end: 2.75, targetStart: 1.25, targetEnd: 3.5, rate: 1 });
 });
 
 test('two materials, signed source access, playable range response and exactly-once billing', async t => {

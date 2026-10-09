@@ -26,9 +26,11 @@ export function videoConfig(env = {}, publicOrigin) {
   return config;
 }
 export function generationBody(task) {
-  return { modelId: MODEL, abilityType: 'VIDEO', prompt: PROMPT,
+  const voicePrompt = task.voice ? `\n参考音频仅用于人物音色，不使用参考音频的台词。人物必须使用参考音频的音色，逐字说出参考视频的原台词，保持原视频的语气、停顿和说话节奏。原视频人声从第 ${task.speech.start.toFixed(3)} 秒开始，此前人物不得说话。严格按以下原视频时间线说话：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。不要增加、删减或改写台词。` : '';
+  return { modelId: MODEL, abilityType: 'VIDEO', prompt: PROMPT + voicePrompt,
     payload: { params: { mode: 'fusion_video', resolution: '720p', scale: task.ratio, duration: task.duration, generateAudio: true },
-      resources: [`asset://${task.materials.photo.id}`], referVideoUrl: [`asset://${task.materials.video.id}`] } };
+      resources: [`asset://${task.materials.photo.id}`], referVideoUrl: [`asset://${task.materials.video.id}`],
+      ...(task.voice ? { referAudioUrl: [`asset://${task.materials.voice.id}`] } : {}) } };
 }
 function nestedVideoUrl(value, key = '', depth = 0) {
   if (depth > 6 || !value) return undefined;
@@ -75,7 +77,7 @@ export function createVideoProvider(config, fetchImpl = fetch) {
   }
   return {
     async createMaterial(url, kind) {
-      const result = await call('material', '/openApi/material/create', { name: `replica-${kind}`, originalUrl: url, type: 1, fileType: kind === 'photo' ? 1 : 3, thirdChannel: 1 });
+      const result = await call('material', '/openApi/material/create', { name: `replica-${kind}`, originalUrl: url, type: 1, fileType: kind === 'photo' ? 1 : kind === 'voice' ? 2 : 3, thirdChannel: 1 });
       if (!result.data?.materialId) throw new VideoError('素材服务未返回素材编号。', 502, 'VIDEO_MATERIAL_INVALID');
       return { id: String(result.data.materialId), status: Number(result.data.status || 1) };
     },

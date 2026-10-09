@@ -5,15 +5,16 @@ import { createRequestLedger } from '../ai/request-ledger.mjs';
 import { calculateCredits } from '../credits/store.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, DURATIONS, PROMPT } from './provider.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
+import { createSpeechService, normalizeVoice, speechText, VOICE_LIMIT } from './speech.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
 const DAY = 86400_000;
-const ACTIVE = new Set(['reserving', 'reviewing', 'submitting', 'running', 'downloading']);
+const ACTIVE = new Set(['reserving', 'reviewing', 'submitting', 'running', 'downloading', 'verifying']);
 const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const error = (message, status = 400, code) => new VideoError(message, status, code);
 const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' }); res.end(JSON.stringify(value)); };
-export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo)$/.test(path);
+export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo|voice)$/.test(path);
 
 async function readBody(req, limit) {
   if (Number(req.headers['content-length']) > limit) throw error('文件过大，请压缩后重试。', 413, 'VIDEO_UPLOAD_TOO_LARGE');
@@ -32,13 +33,14 @@ async function readJSON(req) {
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), probe = probeVideo,
-  photo = normalizePhoto, download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map();
   // Share the existing durable single-writer lock implementation, in a separate directory.
   const instance = createRequestLedger({ storageDir });
   let closing = false, fatal = false, timer, ticking, shutdownPromise;
   const folder = task => join(storageDir, task.id);
-  const file = (task, kind) => join(folder(task), kind === 'photo' ? 'photo.jpg' : kind === 'video' ? 'source.mp4' : 'result.mp4');
+  const file = (task, kind) => join(folder(task), kind === 'photo' ? 'photo.jpg' : kind === 'video' ? 'source.mp4' : kind === 'voice' ? 'reference.wav' : 'result.mp4');
+  const mime = kind => kind === 'photo' ? 'image/jpeg' : kind === 'voice' ? 'audio/wav' : 'video/mp4';
   function serialize(key, action) {
     const pending = (locks.get(key) || Promise.resolve()).catch(() => {}).then(action);
     locks.set(key, pending);
@@ -59,9 +61,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.startedAt, lastCheckedAt: task.lastCheckedAt,
-      ratio: task.ratio, video: task.video, photo: task.photo, error: task.error || '', code: task.code,
+      ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
       sourcePhotoUrl: !expired && task.photo ? `${PREFIX}/tasks/${task.id}/photo` : null,
+      sourceVoiceUrl: !expired && task.voice ? `${PREFIX}/tasks/${task.id}/voice` : null,
       estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? calculateCredits('video', task.duration) : null,
       billing: task.billing && { source: 'workspace', status: task.billing.status, reservedPoints: task.billing.reservedPoints, chargedPoints: task.billing.chargedPoints, exempt: task.billing.exempt === true },
       resultUrl: !expired && task.status === 'completed' && settled ? `${PREFIX}/tasks/${task.id}/result` : null };
@@ -111,7 +114,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       await reconcile(task);
       if (!task.cleaned) {
-        for (const name of ['photo.jpg', 'source.mp4', 'result.mp4', 'upload.tmp', 'result.tmp']) await rm(join(folder(task), name), { force: true });
+        for (const name of ['photo.jpg', 'source.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'upload.tmp', 'result.tmp']) await rm(join(folder(task), name), { force: true });
         task.cleaned = true; await save(task);
       }
       return;
@@ -121,11 +124,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (now() - task.startedAt > DAY) { await fail(task, '模型任务超时，预留积分将退回。未自动重新生成。', 'VIDEO_TIMEOUT'); return; }
     if (task.status === 'reviewing') {
       if (now() - task.startedAt > 180_000) { await fail(task, '素材审核超时，请检查人物照片和参考视频后重试。', 'VIDEO_REVIEW_TIMEOUT'); return; }
-      for (const kind of ['photo', 'video']) {
+      for (const kind of ['photo', 'video', ...(task.voice ? ['voice'] : [])]) {
         if (!task.materials[kind]) { task.materials[kind] = await provider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
         const material = task.materials[kind];
         if (material.status !== 2) material.status = await provider.queryMaterial(material.id);
-        if (material.status === 3) { await fail(task, `${kind === 'photo' ? '人物照片' : '参考视频'}未通过素材审核，请更换清晰、符合要求的素材。`, 'VIDEO_REVIEW_REJECTED'); return; }
+        if (material.status === 3) { await fail(task, `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : '参考视频'}未通过素材审核，请更换清晰、符合要求的素材。`, 'VIDEO_REVIEW_REJECTED'); return; }
         await save(task);
       }
       if (Object.values(task.materials).some(value => value.status !== 2)) return;
@@ -142,13 +145,32 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await download(task.resultSource, temporary);
       const metadata = await probe(temporary);
       if (metadata.duration > task.duration + 1 || metadata.duration < 1 || !metadata.audio) throw error('成片缺少声音或时长不符合要求，预留积分将退回。', 502, 'VIDEO_RESULT_INVALID');
-      await rename(temporary, file(task, 'result'));
+      await rename(temporary, task.voice ? join(folder(task), 'generated.mp4') : file(task, 'result'));
       task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
+      if (task.voice) { task.status = 'verifying'; await save(task); }
+      else { await complete(task); }
+    }
+    if (task.status === 'verifying') {
+      const generated = join(folder(task), 'generated.mp4'), aligned = join(folder(task), 'result.tmp');
+      const timeline = await speech.analyze(generated, task.actualDuration);
+      const check = await speech.align(generated, aligned, task.speech, timeline, task.actualDuration);
+      const verified = await speech.analyze(aligned, task.actualDuration);
+      if (speechText(verified.text) !== speechText(task.speech.text)
+        || verified.segments.length !== task.speech.segments.length
+        || verified.segments.some((segment, index) => Math.abs(segment.start - task.speech.segments[index].start) > 0.1 || Math.abs(segment.end - task.speech.segments[index].end) > 0.1)) {
+        throw error('校正后的声音仍未通过台词和时间检查，未交付成片，预留积分将退回。', 422, 'VIDEO_SPEECH_INVALID');
+      }
+      const metadata = await probe(aligned);
+      if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw error('声音校正后的成片无效。', 502, 'VIDEO_RESULT_INVALID');
+      task.audioCheck = { ...check, afterOffsetMs: Math.round((verified.start - task.speech.start) * 1000), lipSync: 'needs_preview' };
+      await rename(aligned, file(task, 'result')); await complete(task);
+    }
+  }
+  async function complete(task) {
       task.status = 'completed'; task.error = ''; delete task.code;
       task.completedAt = now();
       task.expiresAt = now() + 3 * DAY;
       await save(task); await reconcile(task);
-    }
   }
   async function tick() {
     if (ticking || closing || fatal) return;
@@ -156,6 +178,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       try { await processTask(task); }
       catch (cause) {
         if (fatal) return;
+        if (task.status === 'verifying') { await fail(task, cause instanceof VideoError ? cause.message : '成片声音检查未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
         if (task.status === 'reviewing' && cause instanceof VideoError && ['VIDEO_PROVIDER_IP_DENIED', 'VIDEO_PROVIDER_REJECTED', 'VIDEO_MATERIAL_INVALID'].includes(cause.code)) {
           await fail(task, cause.message, cause.code); return;
         }
@@ -185,13 +208,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     try {
       await ready;
       const url = new URL(req.url, 'http://localhost'), path = url.pathname;
-      const source = /^\/api\/video-replica\/source\/([a-f0-9-]{36})\/(video|photo)$/.exec(path);
+      const source = /^\/api\/video-replica\/source\/([a-f0-9-]{36})\/(video|photo|voice)$/.exec(path);
       if (source) {
         const task = jobs.get(source[1]), expires = Number(url.searchParams.get('expires')), supplied = url.searchParams.get('signature') || '';
         const valid = config.signingSecret && /^\d{13}$/.test(url.searchParams.get('expires') || '') && /^[a-f0-9]{64}$/.test(supplied)
           && timingSafeEqual(Buffer.from(supplied), Buffer.from(signature(source[1], source[2], expires)));
         if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || expires <= now() || expires !== task.startedAt + DAY || task.status === 'expired') throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
-        await serveMedia(req, res, file(task, source[2]), source[2] === 'photo' ? 'image/jpeg' : 'video/mp4'); return;
+        if (!task[source[2]]) throw error('素材尚未上传。', 404, 'VIDEO_NOT_FOUND');
+        await serveMedia(req, res, file(task, source[2]), mime(source[2])); return;
       }
       const userId = req.authenticatedUserId;
       if (!userId) throw error('请先登录后继续。', 401, 'UNAUTHENTICATED');
@@ -200,7 +224,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers.origin && req.headers.origin !== expected) throw error('请求来源无效。', 403, 'VIDEO_ORIGIN_REJECTED');
         if (closing || fatal) throw error('视频服务暂时不可用，请稍后查询原任务。', 503, 'VIDEO_UNAVAILABLE');
       }
-      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled: config.enabled, model: MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT }); return; }
+      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled: config.enabled, voiceEnabled: speech.enabled, model: MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return; }
       if (path === `${PREFIX}/tasks` && req.method === 'GET') {
         const tasks = [...jobs.values()].filter(task => task.userId === userId).sort((a, b) => b.createdAt - a.createdAt).map(view);
         json(res, 200, { tasks: url.searchParams.get('completed') === 'true' ? tasks.filter(task => task.status === 'completed') : tasks.slice(0, 50) }); return;
@@ -218,33 +242,43 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
-      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|start|result))?$/.exec(path);
+      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|analyze|start|result))?$/.exec(path);
       const task = match && jobs.get(match[1]);
       if (!task || task.userId !== userId) throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
       if (!match[2] && req.method === 'GET') { json(res, 200, { task: view(task) }); return; }
       if (task.expiresAt <= now()) throw error('素材或成片已过期，请重新上传。', 410, 'VIDEO_EXPIRED');
-      if (['video', 'photo'].includes(match[2]) && ['GET', 'HEAD'].includes(req.method)) {
+      if (['video', 'photo', 'voice'].includes(match[2]) && ['GET', 'HEAD'].includes(req.method)) {
         if (!task[match[2]]) throw error('素材尚未上传。', 404, 'VIDEO_NOT_FOUND');
-        await serveMedia(req, res, file(task, match[2]), match[2] === 'photo' ? 'image/jpeg' : 'video/mp4'); return;
+        await serveMedia(req, res, file(task, match[2]), mime(match[2])); return;
       }
       if (match[2] === 'result' && ['GET', 'HEAD'].includes(req.method)) {
         if (!view(task).resultUrl) throw error('成片尚未准备好。', 409, 'VIDEO_NOT_READY');
         await serveMedia(req, res, file(task, 'result'), 'video/mp4', url.searchParams.get('download') === '1'); return;
       }
       await serialize(task.id, async () => {
-        if (['video', 'photo'].includes(match[2]) && req.method === 'PUT') {
+        if (['video', 'photo', 'voice'].includes(match[2]) && req.method === 'PUT') {
           if (task.status !== 'draft') throw error('任务已提交，不能替换素材。', 409);
-          const kind = match[2], bytes = await readBody(req, kind === 'video' ? VIDEO_LIMIT : PHOTO_LIMIT);
+          const kind = match[2], bytes = await readBody(req, kind === 'video' ? VIDEO_LIMIT : kind === 'voice' ? VOICE_LIMIT : PHOTO_LIMIT);
           const temporary = join(folder(task), 'upload.tmp');
           if (kind === 'photo') {
             const normalized = await photo(bytes); await writeFile(temporary, normalized, { mode: 0o600 });
             task.photo = { ready: true };
+          } else if (kind === 'voice') {
+            if (!speech.enabled) throw error('声音参考的语音识别服务尚未配置。', 503, 'VIDEO_SPEECH_NOT_CONFIGURED');
+            await writeFile(temporary, bytes, { mode: 0o600 });
+            const normalized = join(folder(task), 'voice.tmp.wav');
+            const metadata = await voice(temporary, normalized);
+            const intervals = await speech.detect(normalized);
+            if (!intervals.length || intervals.reduce((sum, interval) => sum + interval.end - interval.start, 0) < 0.5) throw error('声音参考中未检测到足够的人声，请使用清晰的单人声音。', 422, 'VIDEO_VOICE_INVALID');
+            await rename(normalized, file(task, 'voice')); task.voice = { ...metadata, speechStart: intervals[0].start }; delete task.speech;
+            await save(task); json(res, 200, { task: view(task) }); return;
           } else {
             if (bytes.length < 12 || bytes.toString('ascii', 4, 8) !== 'ftyp') throw error('请上传 MP4 或 MOV 视频。');
             await writeFile(temporary, bytes, { mode: 0o600 });
             const metadata = await probe(temporary);
             if (metadata.duration < 2 || metadata.duration > 15 || metadata.width < 300 || metadata.height < 300) throw error('参考视频需为 2–15 秒，宽高至少 300 像素。');
             task.video = metadata;
+            delete task.speech;
             task.duration = DURATIONS.find(value => value >= Math.ceil(metadata.duration - 0.05)) || 15;
             task.ratio = RATIOS.reduce((best, ratio) => {
               const value = text => text.split(':').reduce((a, b) => a / b);
@@ -253,10 +287,18 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           }
           await rename(temporary, file(task, kind)); await save(task); json(res, 200, { task: view(task) }); return;
         }
-        if (match[2] === 'start' && req.method === 'POST') {
+        if (match[2] === 'analyze' && req.method === 'POST') {
           await readJSON(req);
+          if (task.status !== 'draft' || !task.video || !task.voice) throw error('请先上传参考视频和声音参考，再分析人声。', 409);
+          if (!task.video.audio) throw error('参考视频没有音轨，无法保留原台词。', 422, 'VIDEO_SPEECH_INVALID');
+          if (!task.speech) { task.speech = await speech.analyze(file(task, 'video'), task.video.duration); await save(task); }
+          json(res, 200, { task: view(task) }); return;
+        }
+        if (match[2] === 'start' && req.method === 'POST') {
+          const body = await readJSON(req);
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
+          if (task.voice && (!task.speech || body.speechConfirmed !== true)) throw error('请先分析并确认原视频的台词与开口时间。', 409, 'VIDEO_SPEECH_CONFIRM_REQUIRED');
           if (!config.enabled) throw error('人物复刻服务尚未配置。', 503, 'VIDEO_NOT_CONFIGURED');
           if ([...jobs.values()].some(item => item.userId === userId && ACTIVE.has(item.status))) throw error('当前有视频正在生成，请完成后再提交。', 409, 'VIDEO_BUSY');
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);

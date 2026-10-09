@@ -11,3 +11,4 @@
 @media(max-width:760px){.video-replica-workspace{margin-left:58px}}
 
 .video-function-trigger{display:inline-flex;align-items:center;gap:8px;white-space:nowrap;font-size:12px}.video-function-trigger .icon{width:16px;height:16px}
+.replica-voice-slot{grid-column:1/-1}.replica-voice-slot .replica-input-preview{height:64px}.replica-voice-slot audio{width:100%}.replica-slot-title small{margin-left:8px;color:#819087;font-size:11px;font-weight:400}.replica-speech{margin-top:18px;padding:15px;border:1px solid #cde5da;border-radius:12px;background:#f4faf6}.replica-speech h3{margin:0;font-size:13px}.replica-speech p,.replica-speech li{font-size:12px;line-height:1.8}.replica-speech p{color:#728379}.replica-speech ol{padding-left:18px}.replica-speech time{display:block;color:#728379;font-size:11px}.replica-speech li{margin-bottom:8px}.replica-speech button{font-size:12px}
