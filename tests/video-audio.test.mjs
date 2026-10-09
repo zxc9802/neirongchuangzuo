@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, rm, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -30,6 +30,12 @@ test('real Silero detects delayed speech and corrected FFmpeg audio within 100 m
     assert.ok(Math.abs(corrected[i].start - original[i].start) <= 0.1, JSON.stringify(corrected));
     assert.ok(Math.abs(corrected[i].end - original[i].end) <= 0.1, JSON.stringify(corrected));
   }
+  const playlist = join(root, 'playlist.mp3');
+  await writeFile(playlist, `#EXTM3U\n${voice}\n`);
+  await assert.rejects(normalizeVoice(playlist, join(root, 'invalid.wav')), /MP3 \/ WAV/);
+  const mp3 = join(root, 'voice.mp3');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', voice, mp3]);
+  assert.equal((await normalizeVoice(mp3, join(root, 'mp3-reference.wav'))).ready, true);
   const tone = join(root, 'music.wav');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', tone]);
   assert.deepEqual(await detectSpeech(tone), []);

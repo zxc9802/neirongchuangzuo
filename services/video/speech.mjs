@@ -27,7 +27,12 @@ export async function detectSpeech(path, config = speechConfig(process.env)) {
 }
 export async function normalizeVoice(input, output) {
   try {
-    await run('ffmpeg', ['-v', 'error', '-y', '-protocol_whitelist', 'file,pipe', '-i', input,
+    const header = (await readFile(input)).subarray(0, 12);
+    const wav = ['RIFF', 'RF64'].includes(header.toString('ascii', 0, 4)) && header.toString('ascii', 8, 12) === 'WAVE';
+    const mp3 = header.toString('ascii', 0, 3) === 'ID3' || header[0] === 0xff && (header[1] & 0xe0) === 0xe0 && (header[1] & 6) === 2;
+    if (!wav && !mp3) throw new Error();
+    // Force the advertised audio format so uploaded playlists cannot read local files.
+    await run('ffmpeg', ['-v', 'error', '-y', '-protocol_whitelist', 'file,pipe', '-f', wav ? 'wav' : 'mp3', '-i', input,
       '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', '-t', '15.1', output], { timeout: 30_000 });
     const { stdout } = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'json', output], { timeout: 10_000 });
     const duration = Number(JSON.parse(stdout).format?.duration);
