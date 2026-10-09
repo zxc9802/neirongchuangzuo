@@ -7,7 +7,11 @@ import { VideoError } from './provider.mjs';
 const run = promisify(execFile);
 const worker = fileURLToPath(new URL('./speech_vad.py', import.meta.url));
 export const VOICE_LIMIT = 15 * 1024 * 1024;
-export const speechText = text => String(text || '').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, (character, index, normalized) => {
+const CHINESE_DIGITS = { '〇': '0', '零': '0', '一': '1', '二': '2', '三': '3', '四': '4', '五': '5', '六': '6', '七': '7', '八': '8', '九': '9' };
+export const speechText = text => String(text || '').normalize('NFKC').toLowerCase()
+  // Match digit spellings only; preserve units and do not interpret compound amounts.
+  .replace(/[〇零一二三四五六七八九]/gu, character => CHINESE_DIGITS[character])
+  .replace(/[^\p{L}\p{N}]/gu, (character, index, normalized) => {
   // Ignore sentence punctuation without merging distinct prices or signed numbers.
   if (character === '.' && /\d/.test(normalized[index - 1] || '') && /\d/.test(normalized[index + 1] || '')) return character;
   if ((character === '+' || character === '-') && /\d/.test(normalized[index + 1] || '')) return character;
