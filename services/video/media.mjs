@@ -32,6 +32,12 @@ export async function normalizePhoto(bytes) {
     return await input.rotate().resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 95 }).toBuffer();
   } catch { throw new VideoError('请上传清晰的 JPG、PNG 或 WebP 人物照片，宽高至少 300 像素。', 400, 'VIDEO_PHOTO_INVALID'); }
 }
+export async function muteVideo(input, output) {
+  try {
+    await run('ffmpeg', ['-v', 'error', '-y', '-protocol_whitelist', 'file,pipe', '-i', input,
+      '-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart', '-f', 'mp4', output], { timeout: 30_000 });
+  } catch { throw new VideoError('无法准备换声参考视频，请重新上传可播放的视频。', 400, 'VIDEO_MEDIA_INVALID'); }
+}
 const DOWNLOAD_LIMIT = 200 * 1024 * 1024;
 const strongEtag = value => typeof value === 'string' && /^"[^\r\n"]*"$/.test(value) ? value : null;
 const byteCount = value => typeof value === 'string' && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null;

@@ -32,6 +32,7 @@ async function fixture(t, options = {}) {
   async function open(overrides = {}) {
     handler = createVideoHandler({ storageDir: join(root, 'video'), config: CONFIG, provider, credits: wallet,
       photo: async () => Buffer.from('photo'), probe: async () => META, download: async (_url, path) => writeFile(path, VIDEO),
+      mute: async (_input, output) => writeFile(output, Buffer.from('silent-video')),
       pollIntervalMs: 15, ...options, ...overrides });
     await handler.ready;
     app = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-owner'] || 'alice'; void handler(req, res); });
@@ -109,6 +110,10 @@ test('voice reference requires analysis confirmation and reaches the provider as
   const signed = new URL(app.state.creates.find(item => item.kind === 'voice').url);
   const response = await fetch(app.base + signed.pathname + signed.search);
   assert.equal(response.headers.get('content-type'), 'audio/wav'); assert.equal(response.status, 200);
+  const signedVideo = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  const providerVideo = await fetch(app.base + signedVideo.pathname + signedVideo.search);
+  assert.equal(await providerVideo.text(), 'silent-video');
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
   app.state.done = true;
   const completed = await app.until(id, task => task.status === 'completed');
   assert.equal(completed.audioCheck.afterOffsetMs, 0); assert.equal(completed.audioCheck.lipSync, 'needs_preview');
@@ -138,6 +143,18 @@ test('voice analysis rejects silence, unaligned words, rewritten scripts and exc
   assert.throws(() => alignmentSegments(SPEECH, long), /语速/);
   const generated = { ...SPEECH, segments: [{ ...SPEECH.segments[0], start: 0.5, end: 2.75 }] };
   assert.deepEqual(alignmentSegments(SPEECH, generated)[0], { start: 0.5, end: 2.75, targetStart: 1.25, targetEnd: 3.5, rate: 1 });
+});
+
+test('alignment removes generated pauses inside an originally continuous phrase', () => {
+  const generated = { start: 0.5, text: '你好世界', segments: [
+    { start: 0.5, end: 1.5, words: [{ word: '你好', start: 0.5, end: 1.5 }] },
+    { start: 2.1, end: 3.1, words: [{ word: '世界', start: 2.1, end: 3.1 }] },
+  ] };
+  const [segment] = alignmentSegments(SPEECH, generated);
+  assert.deepEqual(segment.parts, [{ start: 0.5, end: 1.5 }, { start: 2.1, end: 3.1 }]);
+  assert.ok(Math.abs(segment.rate - 2 / 2.25) < 1e-12);
+  assert.equal(segment.targetStart, 1.25);
+  assert.equal(segment.targetEnd, 3.5);
 });
 
 test('ASR words crossing a real pause cannot expand VAD intervals into artificial overlap', () => {

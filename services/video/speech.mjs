@@ -155,9 +155,12 @@ export function alignmentSegments(original, generated) {
     const last = generated.segments.find(item => item.words.includes(words[index - 1]));
     const sourceStart = interval.words[0] === words[begin] ? interval.start : start;
     const sourceEnd = last.words.at(-1) === words[index - 1] ? last.end : end;
-    const rate = (sourceEnd - sourceStart) / (segment.end - segment.start);
+    const parts = generated.segments.map(item => ({ start: Math.max(sourceStart, item.start), end: Math.min(sourceEnd, item.end) }))
+      .filter(item => item.end > item.start);
+    const rate = parts.reduce((sum, item) => sum + item.end - item.start, 0) / (segment.end - segment.start);
     if (rate < 0.7 || rate > 1.4) throw invalid('生成语速与原视频差异过大，无法自然对齐，请重新生成。');
-    return { start: sourceStart, end: sourceEnd, targetStart: segment.start, targetEnd: segment.end, rate };
+    return { start: sourceStart, end: sourceEnd, targetStart: segment.start, targetEnd: segment.end, rate,
+      ...(parts.length > 1 ? { parts } : {}) };
   });
 }
 export async function alignSpeech(video, output, original, generated, duration) {
@@ -165,8 +168,10 @@ export async function alignSpeech(video, output, original, generated, duration) 
   const rate = 48000, track = Buffer.alloc(Math.ceil(duration * rate) * 4), pcm = output + '.aligned.pcm';
   try {
     for (const segment of segments) {
-      const { stdout } = await run('ffmpeg', ['-v', 'error', '-i', video, '-vn', '-af',
-        `atrim=start=${segment.start}:end=${segment.end},asetpts=PTS-STARTPTS,atempo=${segment.rate}`,
+      const parts = segment.parts || [segment];
+      const filter = parts.map((part, index) => `[0:a]atrim=start=${part.start}:end=${part.end},asetpts=PTS-STARTPTS[p${index}]`).join(';')
+        + `;${parts.map((_, index) => `[p${index}]`).join('')}concat=n=${parts.length}:v=0:a=1,atempo=${segment.rate}[speech]`;
+      const { stdout } = await run('ffmpeg', ['-v', 'error', '-i', video, '-vn', '-filter_complex', filter, '-map', '[speech]',
         '-ar', String(rate), '-ac', '1', '-f', 'f32le', 'pipe:1'], { timeout: 30_000, encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 });
       const offset = Math.round(segment.targetStart * rate) * 4;
       const length = Math.min(stdout.length, Math.round((segment.targetEnd - segment.targetStart) * rate) * 4, track.length - offset);

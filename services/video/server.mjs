@@ -4,7 +4,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createRequestLedger } from '../ai/request-ledger.mjs';
 import { calculateCredits } from '../credits/store.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, DURATIONS, PROMPT } from './provider.mjs';
-import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
+import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, muteVideo, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, speechText, VOICE_LIMIT } from './speech.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
@@ -33,7 +33,7 @@ async function readJSON(req) {
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), probe = probeVideo,
-  photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  photo = normalizePhoto, mute = muteVideo, voice = normalizeVoice, speech = createSpeechService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   // Share the existing durable single-writer lock implementation, in a separate directory.
   const instance = createRequestLedger({ storageDir });
@@ -118,7 +118,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       await reconcile(task);
       if (!task.cleaned) {
-        for (const name of ['photo.jpg', 'source.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
+        for (const name of ['photo.jpg', 'source.mp4', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         task.cleaned = true; await save(task);
       }
       return;
@@ -239,7 +239,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           && timingSafeEqual(Buffer.from(supplied), Buffer.from(signature(source[1], source[2], expires)));
         if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || expires <= now() || expires !== task.startedAt + DAY || task.status === 'expired') throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
         if (!task[source[2]]) throw error('素材尚未上传。', 404, 'VIDEO_NOT_FOUND');
-        await serveMedia(req, res, file(task, source[2]), mime(source[2])); return;
+        const input = source[2] === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4') : file(task, source[2]);
+        await serveMedia(req, res, input, mime(source[2])); return;
       }
       const userId = req.authenticatedUserId;
       if (!userId) throw error('请先登录后继续。', 401, 'UNAUTHENTICATED');
@@ -302,6 +303,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             const metadata = await probe(temporary);
             if (metadata.duration < 2 || metadata.duration > 15 || metadata.width < 300 || metadata.height < 300) throw error('参考视频需为 2–15 秒，宽高至少 300 像素。');
             task.video = metadata;
+            delete task.videoAudioRemoved;
             delete task.speech;
             delete task.originalSpeech; delete task.speechConfirmedAt;
             task.duration = DURATIONS.find(value => value >= Math.ceil(metadata.duration - 0.05)) || 15;
@@ -360,6 +362,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (task.voice && (!task.speech || body.speechConfirmed !== true)) throw error('请先分析并确认原视频的台词与开口时间。', 409, 'VIDEO_SPEECH_CONFIRM_REQUIRED');
           if (!config.enabled) throw error('人物复刻服务尚未配置。', 503, 'VIDEO_NOT_CONFIGURED');
           if ([...jobs.values()].some(item => item.userId === userId && ACTIVE.has(item.status))) throw error('当前有视频正在生成，请完成后再提交。', 409, 'VIDEO_BUSY');
+          if (task.voice && !task.videoAudioRemoved) {
+            await mute(file(task, 'video'), join(folder(task), 'source-silent.mp4'));
+            task.videoAudioRemoved = true;
+          }
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           try {
             if (credits) {
