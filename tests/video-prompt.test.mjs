@@ -24,7 +24,7 @@ test('voice prompt includes measured lead-in, interior pause and output-tail sil
   assert.match(request.prompt, /11\.232–12\.282 秒：真的超好吃。/);
   assert.match(request.prompt, /每段仅说一次/);
   assert.match(request.prompt, /价格、数字、单位按原字说，不改写、不补全、不重复/);
-  assert.match(request.prompt, /参考音频仅提供音色，不使用参考音频的台词/);
+  assert.match(request.prompt, /音频1仅提供音色，不使用音频1的台词/);
   assert.match(request.prompt, /不保留或混入原视频的人声/);
   assert.deepEqual(request.payload.referAudioUrl, ['asset://voice-1']);
 });
@@ -47,7 +47,7 @@ test('a continuous full-duration speech track does not invent a silent gap', () 
 test('rounded-up video duration freezes the end frame without removing real packaging text', () => {
   const { prompt, payload } = generationBody(task());
 
-  assert.match(prompt, /参考视频实际时长为12\.300秒/);
+  assert.match(prompt, /视频1实际时长为12\.300秒/);
   assert.match(prompt, /输出超过原视频时长的部分保持末帧静止、闭嘴和无声/);
   assert.match(prompt, /不增加动作、不重复片段、不延伸表演/);
   assert.match(prompt, /去除画面叠加的字幕/);
@@ -55,4 +55,14 @@ test('rounded-up video duration freezes the end frame without removing real pack
   assert.doesNotMatch(prompt, /原视频人声从第|唯一台词依据/);
   assert.equal(payload.params.duration, 15);
   assert.equal('referAudioUrl' in payload, false);
+});
+
+test('person replacement explicitly edits the numbered video instead of requesting reference generation', () => {
+  const { prompt, payload } = generationBody(task());
+  assert.match(prompt, /^严格编辑视频1/);
+  assert.match(prompt, /仅将视频1中的唯一人物改为图片1/);
+  assert.doesNotMatch(prompt, /参考视频/);
+  assert.match(prompt, /不新增图片1中不存在的服饰文字或装饰/);
+  assert.deepEqual(payload.resources, ['asset:\/\/photo-1']);
+  assert.deepEqual(payload.referVideoUrl, ['asset:\/\/video-1']);
 });
