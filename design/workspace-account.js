@@ -1,16 +1,17 @@
 import { refreshWorkspaceCredits, subscribeWorkspaceCredits } from './workspace-credits.js';
 function login() { location.replace('/login?next=' + encodeURIComponent(location.pathname + location.search + location.hash)); }
-function paintCredits(current) {
+export function paintCredits(current) {
   const button = document.querySelector('#workspace-credits');
   if (!button) return;
   button.hidden = false;
-  button.querySelector('strong').textContent = current.snapshot ? String(current.snapshot.available) : '—';
-  button.querySelector('small').textContent = current.stale ? '积分待刷新' : '可用积分';
-  button.title = current.stale ? current.error || '正在读取积分' : `可用 ${current.snapshot.available} 积分，冻结 ${current.snapshot.held} 积分`;
+  const unlimited = current.snapshot?.unlimited === true;
+  button.querySelector('strong').textContent = unlimited ? '∞' : current.snapshot ? String(current.snapshot.available) : '—';
+  button.querySelector('small').textContent = current.stale ? '积分待刷新' : unlimited ? '无限积分' : '可用积分';
+  button.title = current.stale ? current.error || '正在读取积分' : unlimited ? '无限积分' : `可用 ${current.snapshot.available} 积分，冻结 ${current.snapshot.held} 积分`;
   const summary = document.querySelector('#account-credit-summary');
-  summary.textContent = current.snapshot ? `可用 ${current.snapshot.available} 积分 · 冻结 ${current.snapshot.held} 积分${current.stale ? '（上次余额，待刷新）' : ''}` : current.error || '正在读取积分…';
+  summary.textContent = unlimited ? `无限积分${current.stale ? '（待刷新）' : ''}` : current.snapshot ? `可用 ${current.snapshot.available} 积分 · 冻结 ${current.snapshot.held} 积分${current.stale ? '（上次余额，待刷新）' : ''}` : current.error || '正在读取积分…';
   const pricing = current.snapshot?.pricing;
-  document.querySelector('#account-credit-rules').textContent = pricing ? `图片 ${pricing.imagePerUnit} 积分/张；视频 ${pricing.videoPoints} 积分/${pricing.videoSeconds} 秒，按实际时长。` : '积分规则暂时无法读取。';
+  document.querySelector('#account-credit-rules').textContent = unlimited ? '' : pricing ? `图片 ${pricing.imagePerUnit} 积分/张；视频 ${pricing.videoPoints} 积分/${pricing.videoSeconds} 秒，按实际时长。` : '积分规则暂时无法读取。';
   document.querySelector('#account-credit-error').textContent = current.error;
 }
 try {

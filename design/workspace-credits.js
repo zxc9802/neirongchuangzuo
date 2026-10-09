@@ -15,7 +15,7 @@ export function normalizeCredits(value) {
     || !whole(pricing?.imagePerUnit) || pricing.imagePerUnit < 1
     || !whole(pricing?.videoPoints) || pricing.videoPoints < 1
     || !Number.isFinite(pricing?.videoSeconds) || pricing.videoSeconds <= 0) return null;
-  return { available, balance: available, held: data.held, total: data.total,
+  return { available, balance: available, held: data.held, total: data.total, unlimited: data.unlimited === true,
     initialPoints: whole(data.initialPoints) ? data.initialPoints : pricing.initialPoints,
     pricing: { ...pricing } };
 }
@@ -40,16 +40,18 @@ export function estimatedSpeechSeconds(text, speed = 1) {
   return length ? Math.max(1, Math.round(length / 4 / (Number.isFinite(speed) && speed > 0 ? speed : 1))) : null;
 }
 export function creditInsufficiency(points, current = workspaceCreditsState()) {
-  if (current.stale || !current.snapshot || !Number.isFinite(points)) return '';
+  if (current.stale || !current.snapshot || current.snapshot.unlimited === true || !Number.isFinite(points)) return '';
   return points > current.snapshot.available ? `积分不足，本次预计需要 ${points} 积分，可用 ${current.snapshot.available} 积分。` : '';
 }
 export function creditEstimateText(points) {
   const current = workspaceCreditsState();
+  if (current.snapshot?.unlimited === true) return `无限积分${current.stale ? ' · 待刷新' : ''}`;
   if (!Number.isFinite(points)) return current.error ? '积分价格暂时无法读取' : '正在读取积分价格…';
   return `预计 ${points} 积分${current.stale ? ' · 余额待刷新' : ''}`;
 }
 export function videoCreditEstimateText(seconds) {
   const points = videoPoints(seconds), current = workspaceCreditsState();
+  if (current.snapshot?.unlimited === true) return `${Number.isFinite(seconds) && seconds > 0 ? `约 ${seconds} 秒 · ` : ''}${creditEstimateText(points)}`;
   if (!Number.isFinite(points)) {
     const p = current.snapshot?.pricing;
     return p ? `${p.videoSeconds} 秒 ${p.videoPoints} 积分 · 按实际时长` : creditEstimateText(null);
@@ -90,7 +92,7 @@ export async function refreshWorkspaceCredits({ afterCurrent = false } = {}) {
 }
 export function observeCreditTask(task) {
   if (!task?.id || !owner()) return;
-  const signature = JSON.stringify([task.status || task.state, task.billing?.reservedPoints, task.billing?.chargedPoints, task.billing?.status]);
+  const signature = JSON.stringify([task.status || task.state, task.billing?.reservedPoints, task.billing?.chargedPoints, task.billing?.status, task.billing?.exempt]);
   const key = `${task.id}:${task.kind || ''}`;
   if (observedTasks.get(key) === signature) return;
   observedTasks.set(key, signature);
@@ -99,6 +101,7 @@ export function observeCreditTask(task) {
 }
 export function billingPointsText(task) {
   const billing = task?.billing;
+  if (billing?.exempt === true) return '';
   if (whole(billing?.chargedPoints) && billing.chargedPoints > 0) return `已使用 ${billing.chargedPoints} 积分`;
   if (billing?.status === 'released') return '未扣积分';
   if (['failed', 'cancelled', 'error', 'interrupted'].includes(task?.status || task?.state) && whole(billing?.chargedPoints) && billing.chargedPoints === 0) return '未扣积分';

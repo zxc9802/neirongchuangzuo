@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import BrowserMaterials from '../design/browser-materials.js';
 import { renderStudio, bindStudio } from '../design/studios.js';
+import { refreshWorkspaceCredits } from '../design/workspace-credits.js';
 
 const id = 'a'.repeat(32);
 const settle = async predicate => {
@@ -9,7 +10,7 @@ const settle = async predicate => {
   assert.ok(predicate(), 'browser UI did not finish expected work');
 };
 
-async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, xhr, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [], voice_configured: true, default_voice_configured: true } } = {}) {
+async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchCredits, xhr, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [], voice_configured: true, default_voice_configured: true } } = {}) {
   const original = Object.fromEntries(['workspaceUser', 'document', 'window', 'location', 'indexedDB', 'localStorage', 'fetch', 'XMLHttpRequest'].map(key => [key, globalThis[key]]));
   const storage = new Map();
   const databases = new Map();
@@ -37,6 +38,7 @@ async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, xhr, pend
     '#mix-material-status': { innerHTML: '' },
     '[data-action="studio-generate"]': { disabled: true, title: '' },
     '#studio-generation-hint': { textContent: '' },
+    '#mix-credit-estimate': { textContent: '' },
     '#studio-char-count': { textContent: '' },
     '#studio-prompt': { addEventListener(name, fn) { this[name] = fn; } },
   };
@@ -63,6 +65,7 @@ async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, xhr, pend
   } };
   globalThis.fetch = async (url, options = {}) => {
     calls.push({ url, ...options });
+    if (url === '/api/workspace/credits' && fetchCredits) return fetchCredits();
     if (url === '/api/mix/health') return fetchHealth ? fetchHealth() : Response.json(health);
     if (url.startsWith('/api/mix/audio')) return fetchAudio ? fetchAudio(url, options, calls) : Response.json({ configured: true, missing: [], items: [] });
     if (url === '/api/browser-materials/connect') return Response.json({ device_id: 'c'.repeat(32) });
@@ -100,6 +103,24 @@ test('mix studio keeps its columns and labels the submitted text as promotional 
     assert.match(html, /文案与配音自动确定/);
     assert.doesNotMatch(html, /最多 30 段/);
     assert.doesNotMatch(html, /data-studio-field="count"|data-studio-field="duration"|data-studio-field="music"/);
+  } finally { f.restore(); }
+});
+
+test('mix generation follows server unlimited credits instead of blocking a zero balance', async () => {
+  let unlimited = false;
+  const f = await fixture({ fetchCredits: () => Response.json({ available: 0, held: 0, total: 0, unlimited,
+    pricing: { imagePerUnit: 50, videoPoints: 333, videoSeconds: 30 } }) });
+  try {
+    await refreshWorkspaceCredits();
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.match(f.mod.mixReadiness(f.ctx), /积分不足/);
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
+    unlimited = true;
+    await refreshWorkspaceCredits();
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, false);
+    assert.match(f.nodes['#mix-credit-estimate'].textContent, /无限积分/);
+    assert.doesNotMatch(f.nodes['#mix-credit-estimate'].textContent, /预计 \d+ 积分|按实际时长/);
   } finally { f.restore(); }
 });
 

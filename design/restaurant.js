@@ -142,7 +142,9 @@ function restaurantCreditEstimate(task, direction) {
   return imagePoints(Math.min(restaurantOutputCount(task, direction, state.outputCount), restaurantAvailablePhotos(task, direction)));
 }
 function restaurantImagePrice() {
-  const unit = workspaceCreditsState().snapshot?.pricing?.imagePerUnit;
+  const snapshot = workspaceCreditsState().snapshot;
+  if (snapshot?.unlimited === true) return '无限积分';
+  const unit = snapshot?.pricing?.imagePerUnit;
   return Number.isFinite(unit) ? `${unit} 积分 / 张` : '按图片张数计费，价格以服务器为准';
 }
 function renderRestaurantCredits(task, direction) {
@@ -277,9 +279,9 @@ function renderTask() {
   if (task.review?.status === 'blocked') return analysis + renderReview(task);
   if (task.status === 'completed') return renderResult(task);
   if (['awaiting_selection', 'awaiting_facts'].includes(task.status) && originalsExpired(task)) return `${analysis}<section class="restaurant-empty"><h2>原图已过期，请重新上传</h2><p>照片和下载包保留 3 天；任务文字记录保留 30 天。</p>${button('recommend', '重新推荐', 'restaurant-text', 'disabled')}${button('new', '重新上传照片')}</section>`;
-  if (task.status === 'awaiting_confirmation' && filesExpired(task)) return `<section class="restaurant-empty"><h2>发布包已过期，请重新开始</h2><p>未交付的成品不扣积分。</p>${button('new', '重新上传照片')}</section>`;
+  if (task.status === 'awaiting_confirmation' && filesExpired(task)) return `<section class="restaurant-empty"><h2>发布包已过期，请重新开始</h2>${task.billing?.exempt === true ? '' : '<p>未交付的成品不扣积分。</p>'}${button('new', '重新上传照片')}</section>`;
   if (task.status === 'awaiting_confirmation') return analysis + renderReview(task);
-  if (task.status === 'failed') return `${analysis}<section class="restaurant-empty restaurant-failure" role="status"><h2>这次没有完成发布包</h2><p>${escape(message(task.error || task.failureReason || task.message || '请稍后重试，或调整照片和门店资料。'))}</p><small>未使用的冻结积分将在确认后退回。</small><div>${task.retryable !== false && !task.uncertain && !filesExpired(task) ? button('retry', '重试任务', 'restaurant-secondary', state.busy || state.pending ? 'disabled' : '') : ''}${button('new', '重新上传照片')}</div></section>`;
+  if (task.status === 'failed') return `${analysis}<section class="restaurant-empty restaurant-failure" role="status"><h2>这次没有完成发布包</h2><p>${escape(message(task.error || task.failureReason || task.message || '请稍后重试，或调整照片和门店资料。'))}</p>${task.billing?.exempt === true ? '' : '<small>未使用的冻结积分将在确认后退回。</small>'}<div>${task.retryable !== false && !task.uncertain && !filesExpired(task) ? button('retry', '重试任务', 'restaurant-secondary', state.busy || state.pending ? 'disabled' : '') : ''}${button('new', '重新上传照片')}</div></section>`;
   return analysis + renderDirections(task);
 }
 function renderHistory() {

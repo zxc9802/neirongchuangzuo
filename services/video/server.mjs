@@ -61,8 +61,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       ratio: task.ratio, video: task.video, photo: task.photo, error: task.error || '', code: task.code,
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
       sourcePhotoUrl: !expired && task.photo ? `${PREFIX}/tasks/${task.id}/photo` : null,
-      estimatedPoints: task.duration ? calculateCredits('video', task.duration) : null,
-      billing: task.billing && { source: 'workspace', status: task.billing.status, reservedPoints: task.billing.reservedPoints, chargedPoints: task.billing.chargedPoints },
+      estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? calculateCredits('video', task.duration) : null,
+      billing: task.billing && { source: 'workspace', status: task.billing.status, reservedPoints: task.billing.reservedPoints, chargedPoints: task.billing.chargedPoints, exempt: task.billing.exempt === true },
       resultUrl: !expired && task.status === 'completed' && settled ? `${PREFIX}/tasks/${task.id}/result` : null };
   }
   async function reconcile(task) {
@@ -72,7 +72,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (record?.status === 'reserved') record = task.status === 'completed'
         ? await credits.settle({ userId: task.userId, taskId: task.id, units: Math.min(task.duration, task.actualDuration) })
         : await credits.release({ userId: task.userId, taskId: task.id });
-      task.billing = record ? { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints }
+      task.billing = record ? { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true }
         : { status: 'released', reservedPoints: 0, chargedPoints: 0 };
     } catch { task.billing = { ...task.billing, status: task.status === 'completed' ? 'settle_pending' : 'release_pending' }; }
     await save(task);
@@ -256,7 +256,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           try {
             if (credits) {
               const record = await credits.reserve({ userId, taskId: task.id, kind: 'video', units: task.duration });
-              task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints };
+              task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true };
             }
             task.status = 'reviewing'; await save(task);
           } catch (cause) {

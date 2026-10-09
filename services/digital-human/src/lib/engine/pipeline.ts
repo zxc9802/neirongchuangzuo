@@ -139,7 +139,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     if (task.billing?.isExternalUser) {
       log(
         task.billing.source === "workspace"
-          ? `💳 共用积分：30秒333积分，按实际时长向上取整；已预留 ${task.billing.reservedPoints} 积分`
+          ? task.billing.exempt === true ? "🎟️ 无限积分，本次任务免扣积分"
+            : `💳 共用积分：30秒333积分，按实际时长向上取整；已预留 ${task.billing.reservedPoints} 积分`
           : `💳 外部用户计费：费率 ${POINTS_PER_SECOND}积分/秒 (0.20元/秒)，已预留 ${task.billing.estimatedPoints} 积分 (预估 ${task.billing.estimatedDuration}s)`,
         "info"
       );
@@ -261,6 +262,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           userId: currentTaskData.userId, requestId: currentTaskData.billing.requestId,
           actualDuration, chargedPoints, sessionToken, source: currentTaskData.billing.source,
         });
+        chargedPoints = settlement.chargedPoints;
+        costCny = settlement.costCny;
         pointsBalanceAfter = settlement.pointsBalance;
       }
 
@@ -589,7 +592,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       costCny = calculateCostCny(actualDuration, currentTaskData.billing.source);
       log(
         currentTaskData.billing.source === "workspace"
-          ? `💳 正在结算共用积分：实际时长 ${actualDuration.toFixed(1)}秒，扣除 ${chargedPoints} 积分`
+          ? currentTaskData.billing.exempt === true ? "💳 正在确认任务结算"
+            : `💳 正在结算共用积分：实际时长 ${actualDuration.toFixed(1)}秒，扣除 ${chargedPoints} 积分`
           : `💳 正在结算主站积分消耗: 实际时长 ${actualDuration.toFixed(1)}s × ${POINTS_PER_SECOND}积分/秒 = ${chargedPoints} 积分 (¥${costCny})...`,
         "info"
       );
@@ -604,9 +608,13 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         sessionToken,
         source: currentTaskData.billing.source,
       });
+      chargedPoints = settleResult.chargedPoints;
+      costCny = settleResult.costCny;
       pointsBalanceAfter = settleResult.pointsBalance;
       log(
-        `${currentTaskData.billing.source === "workspace" ? "✅ 积分结算成功" : "✅ 主站积分结算成功"}：扣除 ${chargedPoints} 积分${currentTaskData.billing.source === "workspace" ? "" : ` (¥${costCny})`}，当前账户剩余: ${
+        currentTaskData.billing.source === "workspace" && currentTaskData.billing.exempt === true
+          ? "✅ 任务结算成功，本次免扣积分"
+          : `${currentTaskData.billing.source === "workspace" ? "✅ 积分结算成功" : "✅ 主站积分结算成功"}：扣除 ${chargedPoints} 积分${currentTaskData.billing.source === "workspace" ? "" : ` (¥${costCny})`}，当前账户剩余: ${
           pointsBalanceAfter !== undefined ? `${pointsBalanceAfter} 积分` : "正常"
         }`,
         "success"

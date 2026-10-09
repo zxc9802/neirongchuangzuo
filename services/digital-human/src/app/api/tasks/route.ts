@@ -133,6 +133,7 @@ export async function POST(req: NextRequest) {
       progress: 0,
       billing: {
         source: reservation.source,
+        exempt: reservation.exempt === true,
         isExternalUser: reservation.chargeRequired,
         ratePerSecond: reservation.source === "workspace" ? 333 / 30 : POINTS_PER_SECOND,
         costCnyPerSecond: reservation.source === "workspace" ? 0 : CNY_PER_SECOND,
@@ -172,6 +173,7 @@ export async function POST(req: NextRequest) {
       source: reservation.source, sessionToken: session?.token };
     const task = workspaceTask
       ? TaskStore.update(workspaceTask.id, { billing: { ...workspaceTask.billing!, status: "reserved",
+        exempt: reservation.exempt === true, estimatedPoints: reservation.requiredPoints,
         reservedPoints: reservation.reservedPoints, pointsBalanceBefore: reservation.pointsBalance } })
       : createTask(reservation);
     if (!task) throw new Error("任务保存失败");

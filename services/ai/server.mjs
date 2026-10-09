@@ -249,7 +249,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
         : retention.isExpired(task) || task.status === 'failed' ? await credits.release(input)
         : task.status === 'completed' ? await credits.settle({ ...input, units: task.images.length }) : null;
       if (!record) return;
-      task.billing = { ...task.billing, status: record.status, chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints };
+      task.billing = { ...task.billing, status: record.status, chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints, exempt: record.exempt === true };
       await persist(task);
     } catch (error) {
       task.billing.status = task.status === 'completed' && !retention.isExpired(task) ? 'settle_pending' : 'release_pending';
@@ -547,7 +547,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
         if (kind === 'image' && credits) {
           pointsReservation = await credits.reserve({ userId: userId || 'local-dev', taskId: body.requestId, kind: 'image', units: outputCount });
           if (pointsReservation.status !== 'reserved') throw new ApiError('此任务的积分记录已结束，请重新开始创作。', 409, 'CREDITS_TASK_ENDED');
-          task.billing = { ...task.billing, status: 'reserved', reservedPoints: pointsReservation.reservedPoints };
+          task.billing = { ...task.billing, status: 'reserved', reservedPoints: pointsReservation.reservedPoints, exempt: pointsReservation.exempt === true };
           await persist(task);
         }
       } catch (error) {

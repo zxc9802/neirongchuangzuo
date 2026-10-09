@@ -115,6 +115,27 @@ test('two materials, signed source access, playable range response and exactly-o
   assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
 });
 
+test('unlimited zero-balance account completes a person replica without charges and still waits for settlement', async t => {
+  const app = await fixture(t);
+  await app.wallet.reserve({ userId: 'alice', taskId: 'spent_initial', kind: 'image', units: 20 });
+  await app.wallet.settle({ userId: 'alice', taskId: 'spent_initial', units: 20 });
+  await app.wallet.setUnlimited('alice', true);
+  const id = await app.init(); await app.upload(id);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.billing.exempt, true); assert.equal(running.billing.reservedPoints, 0);
+  assert.equal(running.estimatedPoints, 0);
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 409);
+  app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.billing.status, 'settled'); assert.equal(completed.billing.chargedPoints, 0);
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
+  assert.equal((await app.wallet.snapshot('alice')).available, 0);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  assert.equal((await app.wallet.snapshot('bob')).unlimited, false);
+  assert.equal(app.state.generations, 1);
+});
+
 test('missing inputs, invalid duration and cross-origin requests never dispatch', async t => {
   const app = await fixture(t, { probe: async () => ({ ...META, duration: 20 }) });
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID() }, headers: { Origin: 'https://evil.example' } })).status, 403);

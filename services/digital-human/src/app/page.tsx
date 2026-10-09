@@ -49,7 +49,7 @@ export default function StudioPage() {
   const [loading, setLoading] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [userSession, setUserSession] = useState<{ user?: any; billing?: any; credits?: { available: number; held: number } } | null>(null);
+  const [userSession, setUserSession] = useState<{ user?: any; billing?: any; credits?: { available: number; held: number; unlimited?: boolean } } | null>(null);
   const [videoInputKey, setVideoInputKey] = useState(0);
 
   // 1. Initial restore on mount
@@ -368,6 +368,7 @@ export default function StudioPage() {
             {scriptText.trim().length > 0 && (() => {
               const estDuration = Math.max(3, Math.ceil(scriptText.trim().length / 4.4));
               const workspace = userSession?.billing?.source === "workspace";
+              const unlimited = workspace && userSession?.credits?.unlimited === true;
               const estPoints = Math.ceil(estDuration * (userSession?.billing?.ratePerSecond ?? 20));
               const userBalance = workspace ? userSession?.credits?.available : userSession?.user?.pointsBalance;
               const estimatedReserve = Math.ceil(estimateReservationDuration(scriptText) * (userSession?.billing?.ratePerSecond ?? 20));
@@ -379,6 +380,7 @@ export default function StudioPage() {
                   userSession?.user?.billingAudience !== "internal");
               const isInsufficient =
                 isExternal &&
+                !unlimited &&
                 typeof userBalance === "number" &&
                 userBalance < (workspace ? estPoints : reservedPoints);
 
@@ -399,11 +401,11 @@ export default function StudioPage() {
                               isInsufficient ? "text-rose-400" : "text-amber-300"
                             }`}
                           >
-                            预计消耗: {estPoints.toLocaleString()} 积分
+                            {unlimited ? "无限积分 · 本次免扣" : `预计消耗: ${estPoints.toLocaleString()} 积分`}
                           </span>
-                          <span className="text-[10px] text-zinc-400">
+                          {!unlimited && <span className="text-[10px] text-zinc-400">
                             {workspace ? "(333分/30秒)" : <>(¥{estCny} · {userSession?.billing?.ratePerSecond ?? 20}分/秒)</>}
-                          </span>
+                          </span>}
                         </div>
                       ) : (
                         <span className="text-emerald-400 font-semibold text-[11px]">
@@ -413,7 +415,7 @@ export default function StudioPage() {
                     </div>
                   </div>
 
-                  {isExternal && <p className="text-[11px] text-zinc-400">先预留 {reservedPoints.toLocaleString()} 积分，按{audioOnly ? "配音" : "成片"}实际时长结算，多余积分退回。</p>}
+                  {isExternal && !unlimited && <p className="text-[11px] text-zinc-400">先预留 {reservedPoints.toLocaleString()} 积分，按{audioOnly ? "配音" : "成片"}实际时长结算，多余积分退回。</p>}
                   {isInsufficient && (
                     <div className="flex items-center gap-2 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300">
                       <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
@@ -600,6 +602,7 @@ export default function StudioPage() {
           {/* Action Trigger */}
           {(() => {
             const estDuration = estimateReservationDuration(scriptText);
+            const unlimited = userSession?.billing?.source === "workspace" && userSession?.credits?.unlimited === true;
             const estimate = Math.ceil(estDuration * (userSession?.billing?.ratePerSecond ?? 20));
             const estPoints = userSession?.billing?.source === "workspace" && typeof userSession.credits?.available === "number"
               ? Math.min(estimate, userSession.credits.available) : estimate;
@@ -618,7 +621,7 @@ export default function StudioPage() {
                 <span>
                   {isRunning
                     ? "流水线正在运行中..."
-                    : isExternal && scriptText.trim()
+                    : isExternal && !unlimited && scriptText.trim()
                     ? `${audioOnly ? "生成配音 (MP3)" : "开始执行数字人对口型流水线"} (预留 ${estPoints.toLocaleString()} 积分)`
                     : audioOnly ? "生成配音 (MP3)" : "开始执行数字人对口型流水线"}
                 </span>

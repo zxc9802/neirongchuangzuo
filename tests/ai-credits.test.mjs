@@ -126,6 +126,23 @@ test('one generated image costs 50 points and downloads only after settlement', 
   assert.deepEqual(Buffer.from(await image.arrayBuffer()), PNG); assert.equal(calls, 1);
 });
 
+test('unlimited account can generate and download a full image set with zero available points', async t => {
+  let calls = 0;
+  const { app, wallet } = await fixture(t, { fetchImpl: async () => { calls++; return imageResult(); } });
+  await wallet.reserve({ userId: 'account_alice', taskId: 'spent_before_grant', kind: 'image', units: 20 });
+  await wallet.settle({ userId: 'account_alice', taskId: 'spent_before_grant', units: 20 });
+  await wallet.setUnlimited('account_alice', true);
+  assert.equal((await app.points()).available, 0); assert.equal((await app.points()).unlimited, true);
+  assert.equal((await app.points('bob')).unlimited, false);
+  const body = input({ generationMode: 'series', outputCount: 15 });
+  assert.equal((await app.post('/api/ai/images', body)).status, 202);
+  const task = await finished(app, body.requestId);
+  assert.equal(task.images.length, 15); assert.equal(task.billing.exempt, true);
+  assert.equal(task.billing.reservedPoints, 0); assert.equal(task.billing.chargedPoints, 0);
+  assert.equal((await app.points()).available, 0); assert.equal((await app.points()).held, 0);
+  assert.equal((await app.get(task.images[0].url)).status, 200); assert.equal(calls, 15);
+});
+
 test('15-image set reserves 750 points and settles all successful output images', async t => {
   let calls = 0;
   const { app } = await fixture(t, { fetchImpl: async () => { calls++; return imageResult(); } });

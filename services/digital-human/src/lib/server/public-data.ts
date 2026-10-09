@@ -96,6 +96,7 @@ export function toPublicTask(task: TaskItem): PublicTaskItem {
     billing: task.billing
       ? {
           source: task.billing.source,
+          exempt: task.billing.source === "workspace" && task.billing.exempt === true,
           isExternalUser: task.billing.isExternalUser,
           estimatedDuration: task.billing.estimatedDuration,
           estimatedPoints: task.billing.estimatedPoints,

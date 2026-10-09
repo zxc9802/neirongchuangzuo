@@ -18,14 +18,15 @@ from local_materials import MaterialsPending
 
 
 class Wallet:
-    def __init__(self, available=1000):
+    def __init__(self, available=1000, unlimited=False):
         self.available, self.held = available, 0
+        self.unlimited = unlimited
         self.records, self.reserves, self.charges = {}, 0, 0
         self.fail_settle = False
         self.lost_settle_reply = False
 
     def snapshot(self, owner):
-        return {'available': self.available, 'held': self.held,
+        return {'available': self.available, 'held': self.held, 'unlimited': self.unlimited,
                 'pricing': {'videoPoints': 333, 'videoSeconds': 30}}
 
     def read(self, owner, task):
@@ -34,18 +35,19 @@ class Wallet:
     def reserve(self, owner, task, units):
         if task in self.records:
             return self.records[task]
-        points = math.ceil(units * 333 / 30)
+        exempt = self.unlimited is True
+        points = 0 if exempt else math.ceil(units * 333 / 30)
         if points > self.available:
             raise CreditError('积分不足', 402)
         self.available -= points
         self.held += points
         self.reserves += 1
-        self.records[task] = {'status': 'reserved', 'reservedPoints': points, 'chargedPoints': 0}
+        self.records[task] = {'status': 'reserved', 'reservedPoints': points, 'chargedPoints': 0, 'exempt': exempt}
         return self.records[task]
 
     def extend(self, owner, task, units):
         record = self.records[task]
-        extra = max(0, math.ceil(units * 333 / 30) - record['reservedPoints'])
+        extra = 0 if record['exempt'] else max(0, math.ceil(units * 333 / 30) - record['reservedPoints'])
         if extra > self.available:
             raise CreditError('积分不足', 402)
         self.available -= extra
@@ -60,7 +62,7 @@ class Wallet:
         record = self.records[task]
         if record['status'] == 'settled':
             return record
-        points = math.ceil(units * 333 / 30)
+        points = 0 if record['exempt'] else math.ceil(units * 333 / 30)
         if points > self.available + record['reservedPoints']:
             raise CreditError('积分不足', 402)
         self.available += record['reservedPoints'] - points
@@ -138,6 +140,85 @@ class CreditsTests(unittest.TestCase):
         self.assertFalse(self.jobs.run_one(lambda *args: called.append(args)))
         self.assertEqual(called, [])
         self.assertEqual(self.wallet.reserves, 0)
+
+    def test_unlimited_zero_balance_preserves_estimate_and_settles_real_duration(self):
+        self.wallet.available = 0
+        self.wallet.unlimited = True
+        response = self.submit(body={**self.spec, 'text': '真' * 6000})
+        self.assertEqual(response.status_code, 202, response.text)
+        ident = response.json()['id']
+        billing = response.json()['billing']
+        self.assertTrue(billing['exempt'])
+        self.assertEqual(billing['estimatedSeconds'], 1500)
+        self.assertEqual(billing['initialUnits'], 1877)
+        self.assertEqual(billing['reservedPoints'], 0)
+        def extended_runner(spec, folder, log):
+            spec['_credit_gate'](2400)
+            self.assertEqual(self.jobs.get(ident)['billing']['reservedPoints'], 0)
+            self.assertTrue(self.jobs.get(ident)['billing']['exempt'])
+            return checked_runner(spec, folder, log)
+        self.run_job(2400, extended_runner)
+        done = self.jobs.get(ident)
+        self.assertEqual(done['state'], 'done', done['error'])
+        self.assertEqual(done['billing']['status'], 'settled')
+        self.assertEqual(done['billing']['actualSeconds'], 2400)
+        self.assertEqual(done['billing']['chargedPoints'], 0)
+        self.assertTrue(done['billing']['exempt'])
+        self.assertEqual((self.wallet.available, self.wallet.held), (0, 0))
+        self.assertEqual((self.wallet.reserves, self.wallet.charges), (1, 1))
+        self.assertEqual(self.client.get(f'/v1/mix/jobs/{ident}/video', headers=self.headers).status_code, 200)
+
+    def test_only_boolean_unlimited_wallet_flag_skips_balance_gate(self):
+        self.wallet.available = 0
+        for flag in (None, False, 1, 'true', 'false'):
+            with self.subTest(flag=flag):
+                self.wallet.unlimited = flag
+                response = self.submit('flag-' + str(flag))
+                self.assertEqual(response.status_code, 402, response.text)
+        self.assertEqual(self.wallet.reserves, 0)
+        self.assertFalse(self.jobs.run_one(lambda *args: self.fail('有限账户余额不足不得生成')))
+
+    def test_exemption_comes_from_reservation_record_instead_of_wallet_snapshot(self):
+        original = self.wallet.snapshot
+        self.wallet.snapshot = lambda owner: {**original(owner), 'unlimited': True}
+        response = self.submit()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertFalse(response.json()['billing']['exempt'])
+        self.assertGreater(response.json()['billing']['reservedPoints'], 0)
+        self.run_job(30)
+        self.assertFalse(self.jobs.get(response.json()['id'])['billing']['exempt'])
+        self.assertEqual(self.wallet.available, 667)
+
+    def test_browser_cannot_enable_unlimited_credits_or_exemption(self):
+        for field, value in (('unlimited', True), ('exempt', True), ('wallet', {'unlimited': True}),
+                             ('billing', {'exempt': True})):
+            with self.subTest(field=field):
+                response = self.submit(body={**self.spec, field: value})
+                self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.wallet.reserves, 0)
+
+    def test_unlimited_settlement_outage_blocks_download_and_resumes_saved_artifact(self):
+        self.wallet.available = 0
+        self.wallet.unlimited = True
+        ident = self.submit().json()['id']
+        credit_id = self.jobs.get(ident)['billing']['creditId']
+        self.wallet.fail_settle = True
+        self.run_job(60)
+        interrupted = self.jobs.get(ident)
+        self.assertEqual(interrupted['state'], 'interrupted')
+        self.assertEqual(interrupted['billing']['status'], 'settle_pending')
+        self.assertEqual(interrupted['billing']['actualSeconds'], 60)
+        self.assertTrue(interrupted['billing']['exempt'])
+        self.assertEqual(self.client.get(f'/v1/mix/jobs/{ident}/video', headers=self.headers).status_code, 409)
+        self.jobs = Jobs(self.root, credits=self.wallet)
+        self.jobs.resume(ident, self.owner)
+        self.assertEqual(self.jobs.get(ident)['billing']['creditId'], credit_id)
+        self.run_job(60, lambda *args: self.fail('已成片结算恢复不得重新生成'))
+        done = self.jobs.get(ident)
+        self.assertEqual(done['state'], 'done', done['error'])
+        self.assertTrue(done['billing']['exempt'])
+        self.assertEqual(done['billing']['chargedPoints'], 0)
+        self.assertEqual((self.wallet.reserves, self.wallet.charges), (1, 1))
 
     def test_original_audio_settles_actual_sixty_seconds_instead_of_script_preview(self):
         ident = self.submit().json()['id']

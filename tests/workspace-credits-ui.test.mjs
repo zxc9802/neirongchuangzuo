@@ -36,6 +36,27 @@ test('estimates use server prices and spendable balance while held points cannot
   assert.equal(credits.creditInsufficiency(150, { snapshot, stale: true }), '');
 });
 
+test('only the server boolean grants unlimited points and removes insufficient balance checks', () => {
+  const snapshot = credits.normalizeCredits({ ...balance(0), unlimited: true });
+  assert.equal(snapshot.unlimited, true);
+  assert.equal(credits.creditInsufficiency(1000000, { snapshot, stale: false }), '');
+  for (const unlimited of [undefined, false, 'true', 1]) {
+    const finite = credits.normalizeCredits({ ...balance(0), unlimited });
+    assert.equal(finite.unlimited, false);
+    assert.match(credits.creditInsufficiency(50, { snapshot: finite, stale: false }), /积分不足/);
+  }
+});
+
+test('an account name or browser user flag cannot grant unlimited points', async t => {
+  workspace(t, async () => Response.json(balance(0)));
+  globalThis.workspaceUser = { id: crypto.randomUUID(), account: 'zxc9911', unlimited: true };
+  const module = await freshModule();
+  await module.refreshWorkspaceCredits();
+  assert.equal(module.workspaceCreditsState().snapshot.unlimited, false);
+  assert.match(module.creditInsufficiency(module.imagePoints(1)), /积分不足/);
+  assert.equal(module.creditEstimateText(module.imagePoints(1)), '预计 50 积分');
+});
+
 test('incomplete, negative and fractional account balances never turn into a default balance', () => {
   assert.equal(credits.normalizeCredits({}), null);
   assert.equal(credits.normalizeCredits({ ...balance(), available: -1 }), null);
@@ -104,6 +125,10 @@ test('billing receipts use actual server settlement including partial success an
   assert.equal(credits.billingPointsText({ status: 'failed', billing: { chargedPoints: 0, reservedPoints: 300 } }), '未扣积分');
   assert.equal(credits.billingPointsText({ status: 'running', billing: { reservedPoints: 300 } }), '已冻结 300 积分');
   assert.equal(credits.billingPointsText({ status: 'completed' }), '');
+  for (const status of ['running', 'completed', 'failed']) {
+    assert.equal(credits.billingPointsText({ status, billing: { exempt: true, status: 'released', reservedPoints: 0, chargedPoints: 0 } }), '');
+  }
+  assert.equal(credits.billingPointsText({ status: 'completed', billing: { exempt: false, reservedPoints: 300, chargedPoints: 50 } }), '已使用 50 积分');
 });
 
 const esc = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]));
@@ -116,6 +141,50 @@ test('generic image controls quote one, six or fifteen outputs from the authenti
   assert.match(renderImageGenerationOptions(ctx), /预计 300 积分/);
   ctx.configs.image.count = '15'; assert.match(renderImageGenerationOptions(ctx), /预计 750 积分/);
   ctx.configs.image.generationMode = 'single'; assert.match(renderImageGenerationOptions(ctx), /预计 50 积分/);
+});
+
+test('unlimited image and video estimates show no charge while unavailable services remain disabled', async t => {
+  workspace(t, async () => Response.json({ ...balance(0), unlimited: true }));
+  const saved = globalThis.localStorage;
+  globalThis.localStorage = { getItem: () => null, setItem() {} };
+  t.after(() => { if (saved === undefined) delete globalThis.localStorage; else globalThis.localStorage = saved; });
+  await credits.refreshWorkspaceCredits();
+  const image = renderImageGenerationOptions({ esc, button, configs: { image: { generationMode: 'series', count: '15' } } });
+  assert.match(image, /无限积分/);
+  assert.doesNotMatch(image, /预计 \d+ 积分/);
+  const video = renderDigitalHuman({ esc, button, icon: () => '', storeInfo: {}, configs: { avatar: { prompt: '真'.repeat(120) } } });
+  assert.match(video, /约 30 秒 · 无限积分/);
+  assert.doesNotMatch(video, /预计 \d+ 积分|按实际时长/);
+  assert.match(video, /data-action="dh-generate"[^>]*disabled/);
+  assert.equal(credits.videoCreditEstimateText(null), '无限积分');
+});
+
+test('account balance and pricing labels follow the server unlimited flag and preserve stale lookup state', async t => {
+  workspace(t, async () => new Response('', { status: 401 }));
+  const saved = Object.fromEntries(['document', 'location'].map(key => [key, globalThis[key]]));
+  const strong = {}, small = {};
+  const nodes = {
+    '#workspace-credits': { querySelector: selector => selector === 'strong' ? strong : small },
+    '#account-credit-summary': {}, '#account-credit-rules': {}, '#account-credit-error': {},
+  };
+  globalThis.document = { querySelector: selector => nodes[selector] };
+  globalThis.location = { pathname: '/', search: '', hash: '', replace() {} };
+  t.after(() => { for (const [key, value] of Object.entries(saved)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value; });
+  const { paintCredits } = await import(`../design/workspace-account.js?wallet-labels-${crypto.randomUUID()}`);
+  const snapshot = credits.normalizeCredits({ ...balance(0, 50), unlimited: true });
+  paintCredits({ snapshot, stale: false, error: '' });
+  assert.equal(strong.textContent, '∞');
+  assert.equal(small.textContent, '无限积分');
+  assert.equal(nodes['#account-credit-summary'].textContent, '无限积分');
+  assert.equal(nodes['#account-credit-rules'].textContent, '');
+  paintCredits({ snapshot, stale: true, error: '连接中断' });
+  assert.match(nodes['#account-credit-summary'].textContent, /无限积分.*待刷新/);
+  assert.equal(nodes['#account-credit-error'].textContent, '连接中断');
+  paintCredits({ snapshot: credits.normalizeCredits(balance(0, 50)), stale: false, error: '' });
+  assert.equal(strong.textContent, '0');
+  assert.equal(small.textContent, '可用积分');
+  assert.match(nodes['#account-credit-summary'].textContent, /可用 0 积分 · 冻结 50 积分/);
+  assert.match(nodes['#account-credit-rules'].textContent, /图片 50 积分\/张/);
 });
 
 test('digital-human estimates quote a 30-second script and show actual-duration settlement without claiming an unavailable service is ready', async t => {
@@ -136,7 +205,7 @@ test('speech previews use the selected playback speed and leave an empty script 
   assert.equal(credits.estimatedSpeechSeconds('   '), null);
 });
 
-async function restaurantView(t, { available = 1000, photos = 12, count = 9 } = {}) {
+async function restaurantView(t, { available = 1000, unlimited = false, photos = 12, count = 9, taskOverrides = {} } = {}) {
   const taskId = crypto.randomUUID();
   const saved = Object.fromEntries(['document', 'sessionStorage', 'location', 'matchMedia'].map(key => [key, globalThis[key]]));
   const usable = Array.from({ length: photos }, (_, index) => ({ imageId: `photo-${index + 1}`, usable: true, imageType: 'food', privacyRisk: 'none', textRisk: 'none', qualityScore: 80 }));
@@ -144,7 +213,7 @@ async function restaurantView(t, { available = 1000, photos = 12, count = 9 } = 
   const analysis = [...usable, { imageId: 'unusable-1', usable: false }, { imageId: 'unusable-2', usable: false }];
   const task = { id: taskId, status: 'awaiting_selection', createdAt: Date.now(), outputCount: count,
     analysis, directions: [{ id: 'meal', label: '真实午餐', supportingImageIds: usable.map(item => item.imageId), missingFacts: [] }],
-    sourceImages: analysis.map(item => ({ id: item.imageId, expiresAt: Date.now() + 60000, url: `/api/restaurant/tasks/${taskId}/files/${item.imageId}.jpg` })) };
+    sourceImages: analysis.map(item => ({ id: item.imageId, expiresAt: Date.now() + 60000, url: `/api/restaurant/tasks/${taskId}/files/${item.imageId}.jpg` })), ...taskOverrides };
   let markup = '', countListener;
   const control = { disabled: false, innerHTML: '', title: '' };
   const estimate = { set outerHTML(value) { markup = markup.replace(/<p id="restaurant-credit-estimate"[\s\S]*?<\/p>/, value); } };
@@ -157,7 +226,7 @@ async function restaurantView(t, { available = 1000, photos = 12, count = 9 } = 
   const calls = [];
   workspace(t, async (url, options = {}) => {
     calls.push({ url, method: options.method || 'GET' });
-    if (url.endsWith('/credits')) return Response.json(balance(available));
+    if (url.endsWith('/credits')) return Response.json({ ...balance(available), unlimited });
     if (url.endsWith('/status')) return Response.json({ enabled: true });
     if (url.endsWith('/profile')) return Response.json({ profile: { name: '真实店铺', city: '杭州', address: '街道1号', category: '餐饮' } });
     if (url.endsWith('/usage')) return Response.json({ usage: { limit: 20, remaining: 20 } });
@@ -171,8 +240,9 @@ async function restaurantView(t, { available = 1000, photos = 12, count = 9 } = 
   module.renderRestaurant(ctx); module.bindRestaurant(ctx);
   for (let i = 0; i < 30 && !markup.includes('我的图文任务'); i++) await tick();
   module.handleRestaurantAction('rest-open-task', { dataset: { id: taskId } }, ctx);
-  for (let i = 0; i < 30 && !markup.includes('restaurant-credit-estimate'); i++) await tick();
-  assert.match(markup, /restaurant-credit-estimate/);
+  const marker = task.status === 'failed' ? 'restaurant-failure' : 'restaurant-credit-estimate';
+  for (let i = 0; i < 30 && !markup.includes(marker); i++) await tick();
+  assert.ok(markup.includes(marker));
   return { html: () => markup, module, ctx, control, calls, count: number => countListener({ target: { value: String(number) } }) };
 }
 
@@ -191,6 +261,23 @@ test('restaurant prevents a known insufficient wallet from posting a package, wh
   await tick(); assert.equal(view.calls.filter(call => call.method === 'POST').length, 0);
   view.count(6); assert.equal(view.control.disabled, false);
   assert.match(view.control.innerHTML, /生成图文发布包/);
+});
+
+test('restaurant accepts a server unlimited wallet with zero balance without quoting a charge', async t => {
+  const view = await restaurantView(t, { available: 0, unlimited: true });
+  assert.match(view.html(), /无限积分/);
+  assert.doesNotMatch(view.html(), /积分不足|预计 \d+ 积分/);
+  view.count(9);
+  assert.equal(view.control.disabled, false);
+  view.module.handleRestaurantAction('rest-generate', { dataset: {} }, view.ctx);
+  await tick();
+  assert.equal(view.calls.filter(call => call.method === 'POST').length, 1);
+});
+
+test('restaurant exempt failures do not promise to refund frozen points', async t => {
+  const view = await restaurantView(t, { unlimited: true, taskOverrides: { status: 'failed', billing: { exempt: true, reservedPoints: 0, chargedPoints: 0 } } });
+  assert.match(view.html(), /这次没有完成发布包/);
+  assert.doesNotMatch(view.html(), /冻结积分|扣积分/);
 });
 
 test('a sparse two-photo restaurant package costs two image units and never the uploaded or fixed package count', async t => {

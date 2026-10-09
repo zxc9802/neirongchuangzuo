@@ -18,6 +18,7 @@ export interface PublicLogEntry {
 
 export interface PublicTaskBilling {
   source?: "workspace" | "main-app" | "internal";
+  exempt?: boolean;
   isExternalUser: boolean;
   estimatedDuration?: number;
   estimatedPoints?: number;

@@ -29,6 +29,8 @@ export interface LogEntry {
 
 export interface TaskBillingInfo {
   source?: "workspace" | "main-app" | "internal";
+  /** Ledger-confirmed exemption, retained for this task's billing display. */
+  exempt?: boolean;
   isExternalUser: boolean;
   ratePerSecond: number;
   costCnyPerSecond: number;

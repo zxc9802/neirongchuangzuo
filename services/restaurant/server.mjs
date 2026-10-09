@@ -122,7 +122,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     try {
       reservation = await credits.reserve({ userId, taskId, kind: 'restaurant', units });
       if (reservation.status !== 'reserved') throw new RestaurantError('此任务积分记录已结束，请重新生成。', 409, 'CREDITS_TASK_ENDED');
-      return await store.patchTask(userId, task.id, { billing: { source: 'workspace', taskId, status: 'reserved', requestedUnits: units, reservedPoints: reservation.reservedPoints, chargedPoints: 0 } });
+      return await store.patchTask(userId, task.id, { billing: { source: 'workspace', taskId, status: 'reserved', requestedUnits: units, reservedPoints: reservation.reservedPoints, chargedPoints: 0, exempt: reservation.exempt === true } });
     } catch (error) {
       if (reservation?.status === 'reserved') await credits.release({ userId, taskId }).catch(() => report('CREDITS_RELEASE_PENDING'));
       await store.patchTask(userId, task.id, { billing: { source: 'workspace', taskId, status: 'release_pending', requestedUnits: units, chargedPoints: 0 } }).catch(() => {});
@@ -132,7 +132,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   async function releaseTaskCredits(userId, task) {
     if (!credits || task.billing?.source !== 'workspace' || ['settled', 'released'].includes(task.billing.status)) return;
     const saved = await credits.reservation(userId, task.billing.taskId);
-    if (saved?.status === 'settled') { await store.patchTask(userId, task.id, { billing: { ...task.billing, status: 'settled', chargedPoints: saved.chargedPoints } }); return; }
+    if (saved?.status === 'settled') { await store.patchTask(userId, task.id, { billing: { ...task.billing, status: 'settled', chargedPoints: saved.chargedPoints, exempt: saved.exempt === true } }); return; }
     if (saved) await credits.release({ userId, taskId: task.billing.taskId });
     await store.patchTask(userId, task.id, { billing: { ...task.billing, status: 'released', chargedPoints: 0 } });
   }
@@ -145,7 +145,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (!units || files.some(file => file.expired || file.expiresAt <= now())) throw new RestaurantError('成品已过期，无法结算，请重新生成。', 410, 'FILES_EXPIRED');
     const pending = await store.patchTask(userId, id, { ...patch, status: 'generating', progress: { stage: 'credits_settlement' }, billing: { ...task.billing, status: 'settle_pending', deliveredUnits: units } });
     const record = await credits.settle({ userId, taskId: task.billing.taskId, units });
-    return store.completeTask(userId, id, { billing: { ...pending.billing, status: 'settled', chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints }, progress: null, error: null, code: null, completedAt: now() });
+    return store.completeTask(userId, id, { billing: { ...pending.billing, status: 'settled', chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints, exempt: record.exempt === true }, progress: null, error: null, code: null, completedAt: now() });
   }
   async function fail(userId, id, cause) {
     const current = await store.getTask(userId, id);

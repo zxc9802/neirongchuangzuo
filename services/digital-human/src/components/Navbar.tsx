@@ -23,7 +23,7 @@ interface SessionData {
     cnyPerSecond: number;
     isExternal: boolean;
   };
-  credits?: { available: number; held: number };
+  credits?: { available: number; held: number; unlimited?: boolean };
 }
 
 export default function Navbar() {
@@ -78,6 +78,7 @@ export default function Navbar() {
 
   const isExternal = session?.billing?.isExternal ?? (session?.user?.role !== "admin" && session?.user?.billingAudience !== "internal");
   const workspace = session?.authMode === "standalone" || session?.billing?.source === "workspace";
+  const unlimited = workspace && session?.credits?.unlimited === true;
   const points = workspace ? session?.credits?.available : session?.user?.pointsBalance;
 
   return (
@@ -130,15 +131,15 @@ export default function Navbar() {
               {isExternal && (
                 <div
                   className="flex items-center gap-1.5 font-medium text-amber-300"
-                  title={workspace ? `30秒333积分，按实际时长向上取整；冻结 ${session?.credits?.held ?? 0} 积分` : `主站外部用户费率: ${session?.billing?.ratePerSecond ?? 20}积分/秒 (0.2元/秒)`}
+                  title={unlimited ? "无限积分，生成免扣积分" : workspace ? `30秒333积分，按实际时长向上取整；冻结 ${session?.credits?.held ?? 0} 积分` : `主站外部用户费率: ${session?.billing?.ratePerSecond ?? 20}积分/秒 (0.2元/秒)`}
                 >
                   <Coins className="h-3.5 w-3.5 text-amber-400" />
                   <span className="font-mono font-bold">
-                    {typeof points === "number" ? points.toLocaleString() : "--"}
+                    {unlimited ? "无限积分" : typeof points === "number" ? points.toLocaleString() : "--"}
                   </span>
-                  <span className="text-[10px] text-amber-400/80 bg-amber-400/10 px-1.5 py-0.5 rounded">
+                  {!unlimited && <span className="text-[10px] text-amber-400/80 bg-amber-400/10 px-1.5 py-0.5 rounded">
                     {workspace ? "333分/30秒" : <>{session?.billing?.ratePerSecond ?? 20}分/秒</>}
-                  </span>
+                  </span>}
                 </div>
               )}
               {isExternal && <span className="text-zinc-500">|</span>}

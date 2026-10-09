@@ -110,11 +110,18 @@ export async function extendTaskCreditCoverage(input: {
   if (!input.userId || !current.requestId || current.status !== "reserved") {
     throw new MainAppBillingError("任务缺少有效积分预留", 500, "BILLING_IDENTITY_MISSING");
   }
+  if (!Number.isFinite(input.durationSeconds) || input.durationSeconds <= 0) {
+    throw new MainAppBillingError("实际配音时长无效，不能继续生成", 400, "BILLING_DURATION_INVALID");
+  }
   try {
     const result = await getWorkspaceCreditsLedger().extendReservation({
       userId: input.userId, taskId: current.requestId, units: input.durationSeconds,
     });
-    assertTaskCreditCoverage({ ...current, reservedPoints: result.reservedPoints }, input.durationSeconds);
+    assertLedgerReservationActive(result);
+    // Only the ledger response can exempt this task; the persisted task flag is display metadata.
+    if (result.exempt !== true) {
+      assertTaskCreditCoverage({ ...current, reservedPoints: result.reservedPoints }, input.durationSeconds);
+    }
     return result.reservedPoints;
   } catch (error) {
     if (error instanceof MainAppBillingError) throw error;
@@ -122,11 +129,16 @@ export async function extendTaskCreditCoverage(input: {
   }
 }
 
-export async function assertWorkspaceReservationActive(userId: string, requestId: string): Promise<void> {
-  const reservation = await getWorkspaceCreditsLedger().reservation(userId, requestId);
-  if (reservation?.status !== "reserved" || reservation.reservedPoints <= 0) {
+function assertLedgerReservationActive(reservation: { status: string; reservedPoints: number; exempt?: boolean } | null): void {
+  if (reservation?.status !== "reserved" || !Number.isSafeInteger(reservation.reservedPoints) ||
+    reservation.reservedPoints < 0 || (reservation.reservedPoints === 0 && reservation.exempt !== true)) {
     throw new MainAppBillingError("积分预留已结束，请重新创建任务", 409, "BILLING_RESERVATION_CLOSED");
   }
+}
+
+export async function assertWorkspaceReservationActive(userId: string, requestId: string): Promise<void> {
+  const reservation = await getWorkspaceCreditsLedger().reservation(userId, requestId);
+  assertLedgerReservationActive(reservation);
 }
 
 /**
@@ -263,7 +275,7 @@ export async function reserveMainAppCredits(input: {
   estimatedDuration: number;
   minimumDuration?: number;
   beforeReserve?: (reservation: { source: "workspace"; requestId: string; chargeRequired: true;
-    requiredPoints: number; reservedPoints: number; estimatedDuration: number; costCny: number }) => void | Promise<void>;
+    requiredPoints: number; reservedPoints: number; estimatedDuration: number; costCny: number; exempt?: boolean }) => void | Promise<void>;
 }): Promise<{
   source: BillingSource;
   requestId: string;
@@ -273,6 +285,7 @@ export async function reserveMainAppCredits(input: {
   estimatedDuration: number;
   costCny: number;
   pointsBalance?: number;
+  exempt?: boolean;
 }> {
   const source = billingSource(input.user);
   const chargeRequired = source !== "internal";
@@ -306,21 +319,19 @@ export async function reserveMainAppCredits(input: {
     try {
       const wallet = await workspaceCreditsSnapshot(input.user.id);
       const minimumPoints = calculateRequiredPoints(input.minimumDuration ?? input.estimatedDuration, source);
-      if (wallet.available < minimumPoints) {
+      if (wallet.unlimited !== true && wallet.available < minimumPoints) {
         throw new MainAppBillingError(`积分余额不足：本次预计至少需要 ${minimumPoints} 积分`, 402, "INSUFFICIENT_POINTS");
       }
       // Only the conservative duration margin may be truncated; real audio is checked again before lip-sync.
-      const units = requiredPoints <= wallet.available ? input.estimatedDuration
+      const units = wallet.unlimited === true || requiredPoints <= wallet.available ? input.estimatedDuration
         : Math.max(0, wallet.available * WORKSPACE_VIDEO_SECONDS / WORKSPACE_VIDEO_POINTS - 1e-8);
       const reserved = await getWorkspaceCreditsLedger().reserve({
         userId: input.user.id, taskId: requestId, kind: "digital-human", units,
       });
-      if (reserved.status !== "reserved" || reserved.reservedPoints <= 0) {
-        throw new MainAppBillingError("该积分预留已结束，请重新创建任务", 409, "BILLING_RESERVATION_CLOSED");
-      }
-      return { source, requestId, chargeRequired: true, requiredPoints,
+      assertLedgerReservationActive(reserved);
+      return { source, requestId, chargeRequired: true, requiredPoints: reserved.exempt === true ? 0 : requiredPoints,
         reservedPoints: reserved.reservedPoints, estimatedDuration: input.estimatedDuration,
-        costCny: 0, pointsBalance: reserved.wallet.available };
+        costCny: 0, pointsBalance: reserved.wallet.available, exempt: reserved.exempt === true };
     } catch (error) {
       if (error instanceof MainAppBillingError) throw error;
       throw workspaceBillingError(error);

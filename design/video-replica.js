@@ -1,10 +1,10 @@
-import { billingPointsText, observeCreditTask, refreshWorkspaceCredits } from './workspace-credits.js';
+import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 
 const API = '/api/video-replica';
 const labels = { draft: '等待提交', reserving: '正在预留积分', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', settling: '正在确认积分', completed: '复刻完成', failed: '生成未完成', expired: '已过期' };
 const pending = task => task && !['draft', 'completed', 'failed', 'expired'].includes(task.status);
 let state = { owner: null, config: null, tasks: [], current: null, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
-let context, timer, polling = false;
+let context, timer, polling = false, unsubscribeCredits;
 function resetFiles() { for (const url of Object.values(state.urls)) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; state.uploaded = false; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
@@ -55,11 +55,15 @@ function summary(ctx) {
 export function renderVideoReplica(ctx) {
   account(); context = ctx;
   const task = state.current, finished = task && ['completed', 'failed', 'expired'].includes(task.status);
+  const unlimited = workspaceCreditsState().snapshot?.unlimited === true, exempt = task?.billing?.exempt === true;
+  const cost = unlimited ? `${creditEstimateText(task?.estimatedPoints)}${task?.duration ? ` · ${task.duration} 秒` : ''}`
+    : exempt ? task?.duration ? `${task.duration} 秒` : '上传后确认时长。'
+      : task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '上传后确认时长和积分；失败退回预留积分。';
   return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · SEEDANCE 2.0</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}</div>
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
-      <div class="replica-submit-area"><p id="replica-cost">${task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '上传后确认时长和积分；失败退回预留积分。'}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(state.error || state.pollError || (!state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : ''))}</p>
-        <button type="button" id="replica-submit" class="primary" ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传与提交…' : pending(task) ? labels[task.status] : state.uploaded || (task?.photo && task?.video && !Object.keys(state.files).length) ? '开始人物复刻' : '上传素材，查看费用'}</button>
+      <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(state.error || state.pollError || (!state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : ''))}</p>
+        <button type="button" id="replica-submit" class="primary" ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传与提交…' : pending(task) ? labels[task.status] : state.uploaded || (task?.photo && task?.video && !Object.keys(state.files).length) ? '开始人物复刻' : unlimited || exempt ? '上传素材，确认时长' : '上传素材，查看费用'}</button>
         <button type="button" id="replica-new" class="textbutton" ${state.busy || pending(task) ? 'disabled' : ''}>新建复刻</button></div></section>
       <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
@@ -114,6 +118,7 @@ async function poll() {
 }
 export function bindVideoReplica(ctx) {
   context = ctx;
+  if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refresh);
   for (const kind of ['video', 'photo']) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
   document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.error = ''; refresh(); };
@@ -124,4 +129,4 @@ export function bindVideoReplica(ctx) {
   };
   if (!timer) { void poll(); timer = setInterval(() => { void poll(); }, 5000); }
 }
-export function disposeVideoReplica() { clearInterval(timer); timer = null; context = null; }
+export function disposeVideoReplica() { clearInterval(timer); timer = null; context = null; unsubscribeCredits?.(); unsubscribeCredits = null; }

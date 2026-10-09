@@ -49,7 +49,7 @@ const conflict = message => new CreditsError(message, 409, 'CREDITS_REQUEST_CONF
 
 function walletSnapshot(wallet) {
   return { initialPoints: INITIAL_POINTS, balance: wallet.available, available: wallet.available,
-    held: wallet.held, total: wallet.available + wallet.held, pricing: { ...PRICING } };
+    held: wallet.held, total: wallet.available + wallet.held, unlimited: wallet.unlimited === true, pricing: { ...PRICING } };
 }
 
 function publicReservation(record, wallet) {
@@ -57,7 +57,8 @@ function publicReservation(record, wallet) {
 }
 
 function validateWallet(wallet) {
-  if (!wallet || !Number.isSafeInteger(wallet.available) || wallet.available < 0
+  if (!wallet || (wallet.unlimited !== undefined && typeof wallet.unlimited !== 'boolean')
+    || !Number.isSafeInteger(wallet.available) || wallet.available < 0
     || !Number.isSafeInteger(wallet.held) || wallet.held < 0
     || !Number.isSafeInteger(wallet.available + wallet.held)
     || !Number.isSafeInteger(wallet.createdAt) || !Number.isSafeInteger(wallet.updatedAt)) throw unavailable();
@@ -65,15 +66,18 @@ function validateWallet(wallet) {
 
 function validateRecord(record, userId, taskId) {
   if (!record || record.userId !== userId || record.taskId !== taskId || !KINDS.has(record.kind)
+    || (record.exempt !== undefined && typeof record.exempt !== 'boolean')
     || !['reserved', 'settled', 'released'].includes(record.status)
     || !Number.isSafeInteger(record.reservedPoints) || record.reservedPoints < 0
     || !Number.isSafeInteger(record.chargedPoints) || record.chargedPoints < 0
     || !Number.isSafeInteger(record.createdAt) || !Number.isSafeInteger(record.updatedAt)) throw unavailable();
   try {
     calculateCredits(record.kind, record.units);
-    if (record.units <= 0 || calculateCredits(record.kind, record.reservedUnits) !== record.reservedPoints
+    const reservedCost = calculateCredits(record.kind, record.reservedUnits);
+    const settledCost = record.status === 'settled' ? calculateCredits(record.kind, record.settledUnits) : 0;
+    if (record.units <= 0 || (record.exempt === true ? 0 : reservedCost) !== record.reservedPoints
       || record.reservedUnits < record.units
-      || (record.status === 'settled' && calculateCredits(record.kind, record.settledUnits) !== record.chargedPoints)
+      || (record.status === 'settled' && (record.exempt === true ? 0 : settledCost) !== record.chargedPoints)
       || (record.status !== 'settled' && record.chargedPoints !== 0)) throw unavailable();
   } catch { throw unavailable(); }
 }
@@ -116,6 +120,8 @@ const SCHEMA = `
     created_at BIGINT NOT NULL, UNIQUE (user_id,event_key)
   );
   CREATE INDEX IF NOT EXISTS credits_ledger_user_created ON workspace_credits.ledger(user_id,created_at);
+  ALTER TABLE workspace_credits.wallets ADD COLUMN IF NOT EXISTS unlimited BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE workspace_credits.reservations ADD COLUMN IF NOT EXISTS exempt BOOLEAN NOT NULL DEFAULT FALSE;
 `;
 
 function rowRecord(row) {
@@ -123,6 +129,7 @@ function rowRecord(row) {
   return { userId: row.user_id, taskId: row.task_id, kind: row.kind, units: Number(row.units),
     reservedUnits: Number(row.reserved_units), reservedPoints: Number(row.reserved_points), chargedPoints: Number(row.charged_points),
     settledUnits: row.settled_units == null ? null : Number(row.settled_units), status: row.status,
+    exempt: row.exempt === true,
     createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
 }
 
@@ -140,7 +147,7 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
     return value;
   }
   function event(userId, taskId, kind, availableDelta, heldDelta, wallet, at, suffix = kind) {
-    return { id: randomUUID(), userId, taskId, eventKey: taskId == null ? 'welcome' : JSON.stringify([taskId, suffix]),
+    return { id: randomUUID(), userId, taskId, eventKey: taskId == null ? (kind === 'welcome' ? 'welcome' : JSON.stringify([kind, suffix])) : JSON.stringify([taskId, suffix]),
       kind, availableDelta, heldDelta, availableAfter: wallet.available, heldAfter: wallet.held, createdAt: at };
   }
   async function writeEvent(client, item) {
@@ -279,8 +286,8 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
       const at = timestamp();
       const inserted = await client.query(`INSERT INTO workspace_credits.wallets (user_id,available,held,created_at,updated_at)
         VALUES ($1,$2,0,$3,$3) ON CONFLICT (user_id) DO NOTHING RETURNING user_id`, [userId, INITIAL_POINTS, at]);
-      const { rows: [row] } = await client.query('SELECT available,held,created_at,updated_at FROM workspace_credits.wallets WHERE user_id=$1 FOR UPDATE', [userId]);
-      const wallet = row && { available: Number(row.available), held: Number(row.held), createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
+      const { rows: [row] } = await client.query('SELECT available,held,created_at,updated_at,unlimited FROM workspace_credits.wallets WHERE user_id=$1 FOR UPDATE', [userId]);
+      const wallet = row && { available: Number(row.available), held: Number(row.held), unlimited: row.unlimited === true, createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
       validateWallet(wallet);
       if (inserted.rowCount) await writeEvent(client, event(userId, null, 'welcome', INITIAL_POINTS, 0, wallet, at));
       const record = taskId == null ? null : rowRecord((await client.query('SELECT * FROM workspace_credits.reservations WHERE user_id=$1 AND task_id=$2', [userId, taskId])).rows[0]);
@@ -289,15 +296,15 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
       const state = { wallet, record, events: [], at };
       const result = action(state); validateWallet(wallet);
       if (state.record) validateRecord(state.record, userId, taskId);
-      if (JSON.stringify(wallet) !== beforeWallet) await client.query('UPDATE workspace_credits.wallets SET available=$2,held=$3,updated_at=$4 WHERE user_id=$1', [userId, wallet.available, wallet.held, wallet.updatedAt]);
+      if (JSON.stringify(wallet) !== beforeWallet) await client.query('UPDATE workspace_credits.wallets SET available=$2,held=$3,updated_at=$4,unlimited=$5 WHERE user_id=$1', [userId, wallet.available, wallet.held, wallet.updatedAt, wallet.unlimited === true]);
       if (JSON.stringify(state.record) !== beforeRecord) {
         const r = state.record;
         await client.query(`INSERT INTO workspace_credits.reservations
-          (user_id,task_id,kind,units,reserved_units,reserved_points,charged_points,settled_units,status,created_at,updated_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+          (user_id,task_id,kind,units,reserved_units,reserved_points,charged_points,settled_units,status,created_at,updated_at,exempt)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
           ON CONFLICT (user_id,task_id) DO UPDATE SET reserved_units=EXCLUDED.reserved_units,reserved_points=EXCLUDED.reserved_points,
           charged_points=EXCLUDED.charged_points,settled_units=EXCLUDED.settled_units,status=EXCLUDED.status,updated_at=EXCLUDED.updated_at`,
-        [r.userId, r.taskId, r.kind, r.units, r.reservedUnits, r.reservedPoints, r.chargedPoints, r.settledUnits, r.status, r.createdAt, r.updatedAt]);
+        [r.userId, r.taskId, r.kind, r.units, r.reservedUnits, r.reservedPoints, r.chargedPoints, r.settledUnits, r.status, r.createdAt, r.updatedAt, r.exempt === true]);
       }
       for (const item of state.events) await writeEvent(client, item);
       await client.query('COMMIT'); return clone(result);
@@ -330,6 +337,15 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
     ready,
     mode: databaseUrl || injectedPool ? 'postgres' : 'local',
     snapshot(userId) { return run(userId, null, state => walletSnapshot(state.wallet)); },
+    setUnlimited(userId, enabled) {
+      if (typeof enabled !== 'boolean') throw new CreditsError('无限积分设置必须为布尔值。');
+      return run(userId, null, state => {
+        if ((state.wallet.unlimited === true) === enabled) return walletSnapshot(state.wallet);
+        state.wallet.unlimited = enabled;
+        update(state, userId, null, enabled ? 'unlimited_enabled' : 'unlimited_disabled', 0, 0, randomUUID());
+        return walletSnapshot(state.wallet);
+      });
+    },
     reservation(userId, taskId) { identifier(taskId, '任务'); return run(userId, taskId, state => publicReservation(state.record, state.wallet)); },
     reserve({ userId, taskId, kind, units } = {}) {
       identifier(taskId, '任务');
@@ -340,10 +356,12 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
           if (state.record.kind !== kind || state.record.units !== units) throw conflict('同一任务不能重复提交不同的计费参数。');
           return publicReservation(state.record, state.wallet);
         }
-        if (state.wallet.available < points) throw insufficient();
-        state.record = { userId, taskId, kind, units, reservedUnits: units, reservedPoints: points, chargedPoints: 0,
+        const exempt = state.wallet.unlimited === true;
+        const reservedPoints = exempt ? 0 : points;
+        if (state.wallet.available < reservedPoints) throw insufficient();
+        state.record = { userId, taskId, kind, units, reservedUnits: units, reservedPoints, chargedPoints: 0, exempt,
           settledUnits: null, status: 'reserved', createdAt: state.at, updatedAt: state.at };
-        update(state, userId, taskId, 'reserve', -points, points);
+        update(state, userId, taskId, 'reserve', -reservedPoints, reservedPoints);
         return publicReservation(state.record, state.wallet);
       });
     },
@@ -352,6 +370,12 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
       return run(userId, taskId, state => {
         const record = requiredRecord(state), points = calculateCredits(record.kind, units);
         if (record.status !== 'reserved') throw conflict('该任务的积分预留已结束，不能追加冻结。');
+        if (record.exempt === true) {
+          if (units <= record.reservedUnits) return publicReservation(record, state.wallet);
+          record.reservedUnits = units;
+          update(state, userId, taskId, 'extend', 0, 0, `extend:${units}`);
+          return publicReservation(record, state.wallet);
+        }
         if (points <= record.reservedPoints) return publicReservation(record, state.wallet);
         const extra = points - record.reservedPoints;
         if (state.wallet.available < extra) throw insufficient();
@@ -363,7 +387,8 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
     settle({ userId, taskId, units } = {}) {
       identifier(taskId, '任务');
       return run(userId, taskId, state => {
-        const record = requiredRecord(state), points = calculateCredits(record.kind, units);
+        const record = requiredRecord(state), cost = calculateCredits(record.kind, units);
+        const points = record.exempt === true ? 0 : cost;
         if (record.status === 'settled') {
           if (record.settledUnits !== units) throw conflict('该任务已经按其他实际用量结算。');
           return publicReservation(record, state.wallet);

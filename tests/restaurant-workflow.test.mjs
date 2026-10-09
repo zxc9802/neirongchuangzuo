@@ -102,6 +102,24 @@ test('restaurant points: upload and analysis are free, cover replaces first phot
   assert.equal((await app.credits.snapshot('another-owner')).balance, 1000);
 });
 
+test('restaurant unlimited account delivers a complete cover package with zero balance and no point charge', async t => {
+  const app = await setup(t, { withCredits: true });
+  await app.credits.reserve({ userId: 'owner', taskId: 'previous-images', kind: 'image', units: 20 });
+  await app.credits.settle({ userId: 'owner', taskId: 'previous-images', units: 20 });
+  await app.credits.setUnlimited('owner', true);
+  const { id } = await newTask(app);
+  assert.equal((await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true, imageMode: 'cover' })).status, 202);
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  assert.equal(task.files.filter(file => /^image\//.test(file.mime)).length, 2);
+  assert.equal(task.billing.status, 'settled'); assert.equal(task.billing.exempt, true);
+  assert.equal(task.billing.chargedPoints, 0); assert.equal(task.billing.reservedPoints, 0);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 200);
+  assert.equal((await app.credits.snapshot('owner')).available, 0);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.equal((await app.credits.snapshot('another-owner')).unlimited, false);
+});
+
 test('restaurant points: failed noncore photo refunds the difference and only the actual package photos are charged', async t => {
   const imageProcessor = { ...processor, async processPhoto(bytes, options) {
     if ((await sharp(bytes).stats()).channels[0].mean < 90) throw new Error('unavailable photo');

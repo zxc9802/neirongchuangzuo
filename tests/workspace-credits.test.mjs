@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { createCreditsLedger, calculateCredits, INITIAL_POINTS, IMAGE_POINTS, VIDEO_POINTS, VIDEO_SECONDS, CreditsError } from '../services/credits/store.mjs';
+import { parseAccountCreditsArguments, manageAccountCredits } from '../scripts/account-credits.mjs';
 
 const failure = (code, status) => error => error instanceof CreditsError && error.code === code && error.status === status && error.statusCode === status;
 const task = (taskId, units, kind = 'image', userId = 'account_alice') => ({ userId, taskId, units, kind });
@@ -51,7 +52,7 @@ test('new and existing accounts each receive the welcome grant exactly once', as
   const { ledger, state } = await local(t);
   const snapshots = await Promise.all(Array.from({ length: 30 }, () => ledger.snapshot('account_alice')));
   for (const snapshot of snapshots) {
-    assert.deepEqual(snapshot, { initialPoints: 1000, balance: 1000, available: 1000, held: 0, total: 1000,
+    assert.deepEqual(snapshot, { initialPoints: 1000, balance: 1000, available: 1000, held: 0, total: 1000, unlimited: false,
       pricing: { imagePerUnit: 50, videoPoints: 333, videoSeconds: 30, initialPoints: 1000, version: '2026-10-08' } });
   }
   assert.equal((await state()).users.account_alice.ledger.filter(item => item.kind === 'welcome').length, 1);
@@ -65,7 +66,7 @@ test('concurrent image reservations cannot spend the same balance twice', async 
   const rejections = results.filter(result => result.status === 'rejected');
   assert.equal(rejections.length, 5);
   for (const result of rejections) assert.ok(failure('INSUFFICIENT_POINTS', 402)(result.reason));
-  assert.deepEqual(await ledger.snapshot('account_alice'), { initialPoints: 1000, balance: 0, available: 0, held: 1000, total: 1000,
+  assert.deepEqual(await ledger.snapshot('account_alice'), { initialPoints: 1000, balance: 0, available: 0, held: 1000, total: 1000, unlimited: false,
     pricing: { imagePerUnit: 50, videoPoints: 333, videoSeconds: 30, initialPoints: 1000, version: '2026-10-08' } });
 });
 
@@ -278,17 +279,17 @@ function transactionalPool() {
             return { rows: reservation ? [structuredClone(reservation)] : [], rowCount: reservation ? 1 : 0 };
           }
           if (sql.startsWith('UPDATE workspace_credits.wallets')) {
-            const [id, available, held, at] = args;
+            const [id, available, held, at, unlimited] = args;
             const wallet = transaction.wallets.get(id); assert.ok(wallet);
-            Object.assign(wallet, { available: String(available), held: String(held), updated_at: String(at) });
+            Object.assign(wallet, { available: String(available), held: String(held), updated_at: String(at), unlimited });
             return { rows: [], rowCount: 1 };
           }
           if (sql.startsWith('INSERT INTO workspace_credits.reservations')) {
-            const [user_id, task_id, kind, units, reserved_units, reserved_points, charged_points, settled_units, status, created_at, updated_at] = args;
+            const [user_id, task_id, kind, units, reserved_units, reserved_points, charged_points, settled_units, status, created_at, updated_at, exempt] = args;
             const key = user_id + '\0' + task_id, previous = transaction.reservations.get(key);
             transaction.reservations.set(key, { user_id, task_id, kind: previous?.kind ?? kind, units: previous?.units ?? units,
               reserved_units, reserved_points: String(reserved_points), charged_points: String(charged_points), settled_units,
-              status, created_at: String(previous?.created_at ?? created_at), updated_at: String(updated_at) });
+              status, created_at: String(previous?.created_at ?? created_at), updated_at: String(updated_at), exempt: previous?.exempt ?? exempt });
             return { rows: [], rowCount: 1 };
           }
           if (sql.startsWith('INSERT INTO workspace_credits.ledger')) {
@@ -343,6 +344,16 @@ test('PostgreSQL reconnect never reissues the welcome grant and DB failure never
   const before = pool.state(); pool.failConnect();
   await assert.rejects(b.reserve(task('unreachable', 1)), failure('CREDITS_STORAGE_UNAVAILABLE', 503));
   assert.deepEqual(pool.state(), before);
+});
+
+test('account unlimited permission and its audit event roll back together if the database write fails', async t => {
+  const pool = transactionalPool(), ledger = createCreditsLedger({ pool });
+  t.after(() => ledger.close()); await ledger.ready; await ledger.snapshot('account_alice');
+  const before = pool.state(); pool.failEvent('unlimited_enabled');
+  await assert.rejects(ledger.setUnlimited('account_alice', true), failure('CREDITS_STORAGE_UNAVAILABLE', 503));
+  assert.deepEqual(pool.state(), before); assert.equal((await ledger.snapshot('account_alice')).unlimited, false);
+  await ledger.setUnlimited('account_alice', true);
+  assert.equal((await ledger.snapshot('account_alice')).unlimited, true);
 });
 
 test('PostgreSQL extension, competing reservations and replay preserve atomic balance across instances', async t => {
@@ -430,7 +441,7 @@ test('real PostgreSQL SQL persists welcome, holds, extensions, settlement and ro
   assert.deepEqual(welcome.rows, [{ user_id: 'account_alice', count: 1 }, { user_id: 'account_bob', count: 1 }]);
   const events = await pg.query("SELECT kind,count(*)::integer AS count FROM workspace_credits.ledger WHERE user_id=$1 GROUP BY kind ORDER BY kind", ['account_alice']);
   assert.deepEqual(events.rows, [{ kind: 'extend', count: 1 }, { kind: 'release', count: 1 }, { kind: 'reserve', count: 4 }, { kind: 'settle', count: 2 }, { kind: 'welcome', count: 1 }]);
-  await assert.rejects(pg.query('INSERT INTO workspace_credits.wallets VALUES ($1,$2,$3,$4,$5)', ['bad_wallet', -1, 0, 0, 0]), { code: '23514' });
+  await assert.rejects(pg.query('INSERT INTO workspace_credits.wallets (user_id,available,held,created_at,updated_at) VALUES ($1,$2,$3,$4,$5)', ['bad_wallet', -1, 0, 0, 0]), { code: '23514' });
   const beforeTrigger = await a.snapshot('account_alice');
   await pg.exec(`CREATE FUNCTION workspace_credits.reject_test_settlement() RETURNS trigger AS $$
     BEGIN IF NEW.task_id='sql_rollback' AND NEW.kind='settle' THEN RAISE EXCEPTION 'test ledger failure'; END IF; RETURN NEW; END;
@@ -474,4 +485,95 @@ test('a lost COMMIT acknowledgement can be queried and replayed without duplicat
   await assert.rejects(ledger.release(task('uncertain_commit', 3)), failure('CREDITS_REQUEST_CONFLICT', 409));
   const counts = await pg.query('SELECT kind,count(*)::integer AS count FROM workspace_credits.ledger GROUP BY kind ORDER BY kind');
   assert.deepEqual(counts.rows, [{ kind: 'reserve', count: 1 }, { kind: 'settle', count: 1 }, { kind: 'welcome', count: 1 }]);
+});
+
+test('unlimited account with zero balance can reserve, extend and settle every creation kind without spending points', async t => {
+  const { ledger, state } = await local(t);
+  await ledger.reserve(task('spent_welcome', 20)); await ledger.settle(task('spent_welcome', 20));
+  assert.equal((await ledger.setUnlimited('account_alice', true)).available, 0);
+  for (const kind of ['image', 'restaurant', 'video', 'mix', 'digital-human']) {
+    const argument = task(`unlimited_${kind}`, 200, kind);
+    const reserved = await ledger.reserve(argument);
+    assert.equal(reserved.exempt, true); assert.equal(reserved.reservedPoints, 0);
+    const extended = await ledger.extendReservation({ ...argument, units: 400 });
+    assert.equal(extended.reservedUnits, 400); assert.equal(extended.reservedPoints, 0);
+    const settled = await ledger.settle({ ...argument, units: 450 });
+    assert.equal(settled.status, 'settled'); assert.equal(settled.settledUnits, 450);
+    assert.equal(settled.chargedPoints, 0); assert.equal(settled.wallet.available, 0); assert.equal(settled.wallet.held, 0);
+    assert.deepEqual(await ledger.settle({ ...argument, units: 450 }), settled);
+  }
+  assert.equal((await ledger.snapshot('account_bob')).unlimited, false);
+  await assert.rejects(ledger.reserve(task('ordinary_account', 200, 'image', 'account_bob')), failure('INSUFFICIENT_POINTS', 402));
+  assert.equal((await state()).users.account_alice.ledger.filter(item => item.kind === 'unlimited_enabled').length, 1);
+});
+
+test('unlimited changes persist, audit once, and do not retroactively change pending task charges', async t => {
+  const { ledger, open, state } = await local(t);
+  await ledger.reserve(task('ordinary_pending', 2));
+  await ledger.setUnlimited('account_alice', true); await ledger.setUnlimited('account_alice', true);
+  await ledger.reserve(task('exempt_pending', 500));
+  await ledger.close(); const reopened = open(); await reopened.ready;
+  assert.equal((await reopened.snapshot('account_alice')).unlimited, true);
+  assert.equal((await reopened.snapshot('account_alice')).held, 100);
+  await reopened.setUnlimited('account_alice', false);
+  assert.equal((await reopened.settle(task('exempt_pending', 500))).chargedPoints, 0);
+  assert.equal((await reopened.settle(task('ordinary_pending', 2))).chargedPoints, 100);
+  assert.equal((await reopened.snapshot('account_alice')).available, 900);
+  await assert.rejects(reopened.reserve(task('new_limited', 100)), failure('INSUFFICIENT_POINTS', 402));
+  await reopened.setUnlimited('account_alice', true); await reopened.setUnlimited('account_alice', false);
+  const events = (await state()).users.account_alice.ledger;
+  assert.equal(events.filter(item => item.kind === 'unlimited_enabled').length, 2);
+  assert.equal(events.filter(item => item.kind === 'unlimited_disabled').length, 2);
+  assert.equal(events.filter(item => item.kind === 'welcome').length, 1);
+});
+
+test('unlimited task failure releases once without minting points and request fields cannot grant unlimited status', async t => {
+  const { ledger, state } = await local(t);
+  await assert.rejects(ledger.reserve({ ...task('forged_exemption', 100), unlimited: true, exempt: true }), failure('INSUFFICIENT_POINTS', 402));
+  for (const value of [1, 'true', null, undefined]) await assert.rejects(async () => ledger.setUnlimited('account_alice', value), failure('CREDITS_INVALID_ARGUMENT', 400));
+  await ledger.setUnlimited('account_alice', true);
+  await ledger.reserve(task('free_failure', 300));
+  await ledger.release(task('free_failure', 300)); await ledger.release(task('free_failure', 300));
+  assert.equal((await ledger.snapshot('account_alice')).available, 1000);
+  assert.equal((await ledger.snapshot('account_alice')).held, 0);
+  assert.equal((await state()).users.account_alice.ledger.filter(item => item.kind === 'release').length, 1);
+  await assert.rejects(ledger.settle(task('free_failure', 300)), failure('CREDITS_REQUEST_CONFLICT', 409));
+});
+
+test('real SQL migrates old wallets and reservations and persists account exemptions across connections', async t => {
+  const pg = new PGlite(); await pg.waitReady;
+  const pool = pglitePool(pg); let ledger = createCreditsLedger({ pool });
+  t.after(async () => { await ledger.close(); await pg.close(); }); await ledger.ready;
+  await ledger.reserve(task('legacy_hold', 20)); await ledger.close();
+  await pg.exec('ALTER TABLE workspace_credits.wallets DROP COLUMN unlimited; ALTER TABLE workspace_credits.reservations DROP COLUMN exempt;');
+  ledger = createCreditsLedger({ pool }); await ledger.ready;
+  assert.equal((await ledger.snapshot('account_alice')).unlimited, false);
+  assert.equal((await ledger.reservation('account_alice', 'legacy_hold')).exempt, false);
+  const operations = await Promise.all(Array.from({ length: 10 }, () => ledger.setUnlimited('account_alice', true)));
+  assert.ok(operations.every(result => result.unlimited && result.available === 0 && result.held === 1000));
+  await ledger.reserve(task('sql_free', 500, 'digital-human'));
+  await ledger.extendReservation(task('sql_free', 900, 'digital-human'));
+  pool.loseNextCommitAck();
+  await assert.rejects(ledger.settle(task('sql_free', 900, 'digital-human')), failure('CREDITS_STORAGE_UNAVAILABLE', 503));
+  assert.equal((await ledger.settle(task('sql_free', 900, 'digital-human'))).chargedPoints, 0);
+  await ledger.close(); ledger = createCreditsLedger({ pool }); await ledger.ready;
+  assert.equal((await ledger.snapshot('account_alice')).unlimited, true);
+  assert.equal((await ledger.reservation('account_alice', 'sql_free')).exempt, true);
+  assert.equal((await pg.query("SELECT count(*)::integer AS count FROM workspace_credits.ledger WHERE kind='unlimited_enabled'")).rows[0].count, 1);
+  assert.equal((await pg.query("SELECT count(*)::integer AS count FROM workspace_credits.ledger WHERE task_id='sql_free' AND kind='settle'")).rows[0].count, 1);
+  assert.equal((await ledger.snapshot('account_bob')).unlimited, false);
+});
+
+test('admin command resolves exact registered account ID and never creates a wallet for a mistyped name', async t => {
+  const { ledger } = await local(t);
+  assert.deepEqual(parseAccountCreditsArguments(['unlimited', '--account', 'ZXC9911']), { command: 'unlimited', account: 'zxc9911' });
+  for (const argv of [[], ['unlimited'], ['unlimited', '--account', 'bad user'], ['unlimited', '--id', 'account_1'], ['unlimited', '--account', 'zxc9911', 'extra']]) assert.throws(() => parseAccountCreditsArguments(argv));
+  const queries = [];
+  const client = { async query(sql, values) { queries.push({ sql, values }); return { rows: values[0] === 'zxc9911' ? [{ id: 'account_verified', email: 'zxc9911' }] : [] }; } };
+  const result = await manageAccountCredits(parseAccountCreditsArguments(['unlimited', '--account', 'zxc9911']), { client, ledger });
+  assert.equal(result.userId, 'account_verified'); assert.equal(result.credits.unlimited, true);
+  assert.equal((await ledger.snapshot('zxc9911')).unlimited, false);
+  assert.ok(queries.every(query => query.sql.includes('WHERE email=$1') && query.values.length === 1));
+  await assert.rejects(manageAccountCredits({ command: 'unlimited', account: 'typo' }, { client, ledger }), /没有找到唯一/);
+  assert.equal((await manageAccountCredits({ command: 'limited', account: 'zxc9911' }, { client, ledger })).credits.unlimited, false);
 });

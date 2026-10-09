@@ -93,6 +93,71 @@ test("real audio coverage expands atomically and failures release the same reser
     billing: { ...reserved, isExternalUser: true, status: "reserved" }, durationSeconds: 60 }));
 });
 
+test("unlimited workspace reservations keep real units and zero charges after disabling the account flag", async () => {
+  const user = { id: "unlimited-empty", role: "member", billingAudience: "standalone" };
+  await ledger.reserve({ userId: user.id, taskId: "spent-before-unlimited", kind: "digital-human", units: 90.05 });
+  await ledger.settle({ userId: user.id, taskId: "spent-before-unlimited", units: 90.05 });
+  assert.equal((await ledger.snapshot(user.id)).available, 0);
+  await ledger.setUnlimited(user.id, true);
+  const reservation = await billing.reserveMainAppCredits({ user, taskId: "free-long-audio", estimatedDuration: 120, minimumDuration: 90 });
+  assert.equal(reservation.exempt, true);
+  assert.equal(reservation.reservedPoints, 0);
+  assert.equal(reservation.requiredPoints, 0);
+  assert.equal((await ledger.reservation(user.id, reservation.requestId)).units, 120);
+  await billing.assertWorkspaceReservationActive(user.id, reservation.requestId);
+  await assert.rejects(billing.extendTaskCreditCoverage({ userId: user.id,
+    billing: { ...reservation, status: "reserved", isExternalUser: true }, durationSeconds: 0 }),
+    error => error.code === "BILLING_DURATION_INVALID", "unlimited credits never waive real media duration validation");
+  await ledger.setUnlimited(user.id, false);
+  const taskBilling = { ...reservation, status: "reserved", isExternalUser: true, exempt: false };
+  assert.equal(await billing.extendTaskCreditCoverage({ userId: user.id, billing: taskBilling, durationSeconds: 300 }), 0,
+    "the ledger exemption applies even when task metadata omits it and the account no longer has unlimited credits");
+  await billing.assertWorkspaceReservationActive(user.id, reservation.requestId);
+  const settled = await billing.settleMainAppCredits({ userId: user.id, requestId: reservation.requestId,
+    source: "workspace", actualDuration: 300 });
+  assert.equal(settled.chargedPoints, 0);
+  assert.equal((await ledger.reservation(user.id, reservation.requestId)).settledUnits, 300);
+  assert.equal((await ledger.snapshot(user.id)).available, 0);
+  await assert.rejects(billing.assertWorkspaceReservationActive(user.id, reservation.requestId),
+    error => error.code === "BILLING_RESERVATION_CLOSED");
+  await assert.rejects(billing.reserveMainAppCredits({ user, estimatedDuration: 6 }),
+    error => error.code === "INSUFFICIENT_POINTS");
+});
+
+test("a forged task exemption cannot make a billed workspace reservation free", async () => {
+  const userId = "forged-exemption";
+  const reservation = await billing.reserveMainAppCredits({ user: { id: userId, billingAudience: "standalone" },
+    taskId: "billed-before-unlimited", estimatedDuration: 6 });
+  await ledger.setUnlimited(userId, true);
+  await assert.rejects(billing.extendTaskCreditCoverage({ userId,
+    billing: { ...reservation, status: "reserved", isExternalUser: true, exempt: true }, durationSeconds: 120 }),
+    error => error.code === "INSUFFICIENT_POINTS");
+  assert.equal((await ledger.reservation(userId, reservation.requestId)).exempt, false);
+  const settled = await billing.settleMainAppCredits({ userId, requestId: reservation.requestId, actualDuration: 6, source: "workspace" });
+  assert.equal(settled.chargedPoints, 67);
+  assert.throws(() => billing.assertTaskCreditCoverage({ source: "main-app", status: "reserved",
+    isExternalUser: true, reservedPoints: 0, exempt: true }, 6),
+    error => error.code === "BILLING_RESERVATION_TOO_SMALL", "external SSO never accepts a workspace exemption hint");
+});
+
+test("standalone sessions expose the ledger's unlimited flag with the real numeric balance", async () => {
+  const user = { id: "unlimited-session", role: "member", billingAudience: "standalone" };
+  await ledger.setUnlimited(user.id, true);
+  const route = loadSource("../src/app/api/session/route.ts", {
+    "next/server": { NextRequest, NextResponse },
+    "@/lib/auth-mode": { usesStandaloneAuth: () => true },
+    "@/lib/server/standalone-auth": { AUTH_COOKIE: "fixture-cookie", readStandaloneSession: async () => ({ user }) },
+    "../sso/session/route": { GET: () => assert.fail("standalone session must not use external SSO") },
+    "@/lib/server/workspace-credits": await import("../src/lib/server/workspace-credits.ts"),
+  });
+  const response = await route.GET(new NextRequest("https://example.test/api/session"));
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.data.credits.unlimited, true);
+  assert.equal(result.data.credits.available, 1000);
+  assert.equal(result.data.billing.source, "workspace");
+});
+
 test("task creation failure refunds its reservation and the persisted task ID matches the wallet ID", async () => {
   const user = { id: "task-create-owner", account: "owner", role: "member", billingAudience: "standalone" };
   let failCreation = true;
@@ -139,7 +204,7 @@ test("task creation failure refunds its reservation and the persisted task ID ma
     assert.ok(name in deps, `unexpected dependency ${name}`); return deps[name];
   }, module, module.exports);
   const post = () => module.exports.POST(new NextRequest("https://example.test/api/tasks", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scriptText: "你好" }),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scriptText: "你好", unlimited: true, exempt: true }),
   }));
   assert.equal((await post()).status, 500);
   assert.equal(calls, 0, "failed task persistence must stop before freezing any credits");
@@ -150,6 +215,7 @@ test("task creation failure refunds its reservation and the persisted task ID ma
     assert.equal((await post()).status, 200);
     assert.equal(submitted.id, submitted.billing.requestId);
     assert.equal(submitted.billing.source, "workspace");
+    assert.equal(submitted.billing.exempt, false, "browser flags cannot select free billing");
     assert.equal((await ledger.reservation(user.id, submitted.id)).status, "reserved");
     await billing.releaseMainAppCredits({ userId: user.id, requestId: submitted.id, source: "workspace" });
     finish?.();
@@ -284,14 +350,17 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
   try {
-    for (const scenario of ["success", "confirmed-failure", "uncertain", "submit-uncertain", "settlement-pending"]) {
+    for (const scenario of ["success", "unlimited-success", "unlimited-audio", "confirmed-failure", "uncertain", "submit-uncertain", "settlement-pending"]) {
       const userId = `pipeline-${scenario}`;
+      const exempt = scenario.startsWith("unlimited-");
+      const audioOnly = scenario === "unlimited-audio";
+      if (exempt) await ledger.setUnlimited(userId, true);
       const reservation = await billing.reserveMainAppCredits({
         user: { id: userId, role: "member", billingAudience: "standalone" }, taskId: `video-${scenario}`, estimatedDuration: 6,
       });
       let task = { id: reservation.requestId, userId, status: "pending", logs: [],
         billing: { ...reservation, isExternalUser: true, status: "reserved" },
-        inputs: { videoPath: source, outputType: "video", scriptText: "fixture", speakerAudioUrl: speaker,
+        inputs: { videoPath: audioOnly ? "" : source, outputType: audioOnly ? "audio" : "video", scriptText: "fixture", speakerAudioUrl: speaker,
           videoFit: "smart", lipsyncProvider: "veed" }, results: {} };
       const TaskStore = { get: () => task, isDeleted: () => false,
         addLog: (_id, message, level, publicMessage) => task.logs.push({ message, level, publicMessage }),
@@ -307,12 +376,14 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
           return { finalWavPath: file, rawDuration: 30, selectedDuration: 30 };
         } },
         "./ffmpeg": { probeMedia: async () => probe, sha256File: async () => "fixture-hash",
+          encodeMp3: async (_input, output) => { fs.writeFileSync(output, "fixture"); },
           prepareSourceVideo: async (_input, _seconds, output) => { fs.writeFileSync(output, "fixture"); return { duration: 30, width: 160, height: 120 }; },
           finalizeVideo: async (_video, _audio, output) => { fs.writeFileSync(output, "fixture"); return probe; } },
         "../mcp/heygen-adapter": { HeyGenMcpAdapter: {} },
         "./openlux-lipsync": { OpenLuxLipsyncAdapter: {} },
         "./fal-veed-lipsync": { FalVeedLipsyncAdapter: { execute: async options => {
-          assert.equal((await ledger.reservation(userId, reservation.requestId)).reservedPoints, 333,
+          assert.equal(audioOnly, false, "MP3 tasks never submit lip-sync");
+          assert.equal((await ledger.reservation(userId, reservation.requestId)).reservedPoints, exempt ? 0 : 333,
             "real audio must expand the hold before any paid lip-sync submission");
           await options.onProviderSubmitting?.();
           if (scenario === "submit-uncertain") throw new Error("submit response was lost");
@@ -334,11 +405,13 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
       }, module, module.exports);
       await module.exports.runDigitalHumanPipeline(task.id);
       const wallet = await ledger.snapshot(userId);
-      if (scenario === "success") {
+      if (["success", "unlimited-success", "unlimited-audio"].includes(scenario)) {
         assert.equal(task.status, "completed");
         assert.equal(task.billing.status, "settled");
-        assert.equal(task.results.chargedPoints, 333);
-        assert.equal(wallet.available, 667); assert.equal(wallet.held, 0);
+        assert.equal(task.results.chargedPoints, exempt ? 0 : 333);
+        assert.equal(task.billing.chargedPoints, exempt ? 0 : 333);
+        assert.equal(wallet.available, exempt ? 1000 : 667); assert.equal(wallet.held, 0);
+        assert.equal(publicData.toPublicTask(task).billing.exempt, exempt);
       } else if (scenario === "confirmed-failure") {
         assert.equal(task.billing.status, "released");
         assert.equal(wallet.available, 1000); assert.equal(wallet.held, 0);

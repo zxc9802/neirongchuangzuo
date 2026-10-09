@@ -190,6 +190,18 @@ test("toPublicTask exposes no provider, model, raw URL, local path or billing in
   assert.equal(publicTask.inputs.avatarId, makeTask().inputs.avatarId);
 });
 
+test("public workspace billing retains the task exemption independently of later account changes", () => {
+  const original = makeTask();
+  const exempt = toPublicTask(makeTask({ billing: { ...original.billing, source: "workspace", exempt: true,
+    reservedPoints: 0, chargedPoints: 0 } }));
+  assert.equal(exempt.billing.exempt, true);
+  assert.equal(exempt.billing.reservedPoints, 0);
+  assert.equal(exempt.billing.chargedPoints, 0);
+  assert.equal(toPublicTask(original).billing.exempt, false);
+  const external = toPublicTask(makeTask({ billing: { ...original.billing, source: "main-app", exempt: true } }));
+  assert.equal(external.billing.exempt, false, "workspace exemptions never change external SSO billing");
+});
+
 test("toPublicTask maps private providers to neutral engine codes and steps to neutral names", () => {
   const engineMap = { pixverse: "a", veed: "b", heygen: "c" };
   for (const [provider, code] of Object.entries(engineMap)) {
@@ -329,6 +341,7 @@ test("toPublicTask keeps only user-facing billing fields", () => {
     "costCny",
     "estimatedDuration",
     "estimatedPoints",
+    "exempt",
     "isExternalUser",
     "reservedPoints",
     "source",

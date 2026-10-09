@@ -171,12 +171,14 @@ class Jobs:
             if not data or data.get('status') == 'released':
                 seconds = estimate_seconds(spec['text'])
                 wallet = self.credits.snapshot(spec['owner'])
-                price = wallet['pricing']
-                available = wallet['available']
-                if math.ceil(seconds * price['videoPoints'] / price['videoSeconds']) > available:
-                    raise CreditError('积分余额不足，请缩短宣传文案后重试。', 402, 'INSUFFICIENT_POINTS')
-                maximum = available * price['videoSeconds'] / price['videoPoints']
-                reserve_seconds = min(seconds * 1.25 + 2, maximum)
+                reserve_seconds = seconds * 1.25 + 2
+                if wallet.get('unlimited') is not True:
+                    price = wallet['pricing']
+                    available = wallet['available']
+                    if math.ceil(seconds * price['videoPoints'] / price['videoSeconds']) > available:
+                        raise CreditError('积分余额不足，请缩短宣传文案后重试。', 402, 'INSUFFICIENT_POINTS')
+                    maximum = available * price['videoSeconds'] / price['videoPoints']
+                    reserve_seconds = min(reserve_seconds, maximum)
                 # Floating-point boundaries must not reserve one point more than the wallet.
                 reserve_seconds = math.floor(reserve_seconds * 1000) / 1000
                 reserve_seconds = max(seconds, reserve_seconds)
@@ -192,7 +194,7 @@ class Jobs:
                 data['status'] = 'released'; self._save_billing(job_id, data)
                 return self._reservation(job_id, spec)
             data.update(status=record['status'], reservedPoints=record['reservedPoints'],
-                        chargedPoints=record.get('chargedPoints', 0))
+                        chargedPoints=record.get('chargedPoints', 0), exempt=record.get('exempt') is True)
             self._save_billing(job_id, data)
             return data
 
@@ -207,7 +209,8 @@ class Jobs:
             if record and record['status'] == 'reserved':
                 record = self.credits.release(owner, data['creditId'])
             data.update(status=record['status'] if record else 'released',
-                        chargedPoints=(record or {}).get('chargedPoints', 0))
+                        chargedPoints=(record or {}).get('chargedPoints', 0),
+                        exempt=(record or {}).get('exempt') is True)
             self._save_billing(job_id, data)
 
     def _settle(self, job_id, spec, result):
@@ -223,7 +226,8 @@ class Jobs:
             record = self.credits.settle(spec['owner'], data['creditId'], seconds)
             if not record or record.get('status') != 'settled':
                 raise CreditError('成片已保存，积分结算暂未确认，请稍后继续。', uncertain=True)
-            data.update(status='settled', chargedPoints=record['chargedPoints'], reservedPoints=record['reservedPoints'])
+            data.update(status='settled', chargedPoints=record['chargedPoints'], reservedPoints=record['reservedPoints'],
+                        exempt=record.get('exempt') is True)
             self._save_billing(job_id, data)
 
     def _extend(self, job_id, spec, seconds):
@@ -232,7 +236,7 @@ class Jobs:
         with self.credit_lock:
             data = self._billing(job_id)
             record = self.credits.extend(spec['owner'], data['creditId'], seconds)
-            data.update(reservedPoints=record['reservedPoints'], status=record['status'])
+            data.update(reservedPoints=record['reservedPoints'], status=record['status'], exempt=record.get('exempt') is True)
             self._save_billing(job_id, data)
 
     def _credit_submission_error(self, job_id, owner, error):
