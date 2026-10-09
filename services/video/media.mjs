@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { lookup } from 'node:dns/promises';
+import { lookup, resolveCname } from 'node:dns/promises';
 import { request } from 'node:https';
 import { request as httpRequest } from 'node:http';
 import { createReadStream } from 'node:fs';
@@ -47,8 +47,10 @@ async function videoResponse(url, headers, signal, options, hops = 0) {
   if (String(url).length > 8192 || !['https:', 'http:'].includes(target.protocol) || target.username || target.password || target.port || hops > 3) throw new Error('Invalid video URL');
   const addresses = await abortable((options.lookup || lookup)(target.hostname, { all: true }), signal);
   if (!addresses.length || addresses.some(item => !isPublicAddress(item.address))) throw new Error('Private video address');
-  // Prefer IPv4, then try another pinned public address if connecting fails.
-  const choices = [...addresses].sort((a, b) => a.family - b.family).slice(0, 4);
+  // Prefer addresses that have not delivered a slow stream, then IPv4.
+  const avoided = options.avoidAddresses || [];
+  const choices = [...addresses].sort((a, b) => Number(avoided.includes(`${target.hostname}|${a.address}`))
+    - Number(avoided.includes(`${target.hostname}|${b.address}`)) || a.family - b.family).slice(0, 4);
   let response, cause;
   for (const address of choices) {
     signal.throwIfAborted();
@@ -67,6 +69,9 @@ async function videoResponse(url, headers, signal, options, hops = 0) {
         req.on('error', error => { clearTimeout(timer); reject(error); });
         req.end();
       });
+      response.downloadAddress = `${target.hostname}|${address.address}`;
+      response.hasDownloadAlternative = addresses.some(value => value.address !== address.address
+        && !avoided.includes(`${target.hostname}|${value.address}`));
       break;
     } catch (error) { cause = error; if (signal.aborted) throw error; }
   }
@@ -90,14 +95,17 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
   const metadataPath = path + '.download.json';
   const maxBytes = Math.min(options.maxBytes ?? DOWNLOAD_LIMIT, DOWNLOAD_LIMIT);
   const progress = values => { try { Promise.resolve(options.onProgress?.(values)).catch(() => {}); } catch {} };
-  let response, output, throughputTimer;
+  let response, output, throughputTimer, downloadState, slowAddress;
   try {
     signal.throwIfAborted();
-    let previous, existing = 0;
+    let previous, existing = 0, avoidAddresses = [];
     try {
       const file = await stat(path), metadataFile = await stat(metadataPath);
       if (file.isFile() && metadataFile.isFile() && metadataFile.size < 16_384) {
         const stored = JSON.parse(await readFile(metadataPath, 'utf8'));
+        if (stored?.version === 1 && stored.url === String(url) && Array.isArray(stored.avoidAddresses)) {
+          avoidAddresses = stored.avoidAddresses.filter(value => typeof value === 'string' && value.length < 512).slice(-16);
+        }
         if (stored?.version === 1 && stored.url === String(url) && strongEtag(stored.etag)
           && (stored.totalBytes === null || Number.isSafeInteger(stored.totalBytes) && stored.totalBytes >= file.size)) {
           previous = stored; existing = file.size;
@@ -106,8 +114,29 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
     } catch (cause) { if (cause.code !== 'ENOENT' && cause.code !== 'ENOTDIR' && !(cause instanceof SyntaxError)) throw cause; }
     if (existing > maxBytes) throw new Error('Video too large');
     const resumed = existing > 0;
-    response = await videoResponse(url, { Accept: 'video/mp4,application/octet-stream', 'Accept-Encoding': 'identity',
-      ...(resumed ? { Range: `bytes=${existing}-`, 'If-Range': previous.etag } : {}) }, signal, options);
+    let preferred = String(url);
+    const target = new URL(url);
+    // This provider alias can be much slower than the same object's native TOS
+    // endpoint. Keep signed/query URLs intact and retain the original fallback.
+    if (target.hostname === 'aggregationpic.buerdt.net' && target.protocol === 'https:'
+      && !target.username && !target.password && !target.port && !target.search && preferred.length <= 8192) {
+      try {
+        const discovery = AbortSignal.any([signal, AbortSignal.timeout(options.connectTimeoutMs ?? 15_000)]);
+        const aliases = await abortable((options.resolveCname || resolveCname)(target.hostname), discovery);
+        const origin = aliases.find(name => /^[a-z0-9-]+\.tos-[a-z0-9-]+\.volces\.com$/i.test(name));
+        if (origin) { target.hostname = origin; preferred = target.href; }
+      } catch (cause) { if (signal.aborted) throw cause; }
+    }
+    const candidates = preferred === String(url) ? [String(url)] : [preferred, String(url)];
+    const headers = { Accept: 'video/mp4,application/octet-stream', 'Accept-Encoding': 'identity',
+      ...(resumed ? { Range: `bytes=${existing}-`, 'If-Range': previous.etag } : {}) };
+    for (let index = 0; index < candidates.length; index++) {
+      try {
+        response = await videoResponse(candidates[index], headers, signal, { ...options, avoidAddresses });
+        if (index === candidates.length - 1 || [200, 206, 416].includes(response.statusCode)) break;
+        response.destroy();
+      } catch (cause) { if (index === candidates.length - 1 || signal.aborted) throw cause; }
+    }
     const etag = strongEtag(response.headers.etag);
     if (response.statusCode === 416) {
       const match = /^bytes \*\/(\d+)$/.exec(response.headers['content-range'] || '');
@@ -141,24 +170,28 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
     } else if (response.headers['content-range']) throw new Error('Unexpected video content range');
     if (totalBytes !== null && totalBytes > maxBytes) throw new Error('Video too large');
     output = await open(path, start > 0 ? 'a' : 'w', 0o600);
-    await writeFile(metadataPath, JSON.stringify({ version: 1, url: String(url), etag, totalBytes }), { mode: 0o600 });
+    downloadState = { version: 1, url: String(url), etag, totalBytes, avoidAddresses };
+    await writeFile(metadataPath, JSON.stringify(downloadState), { mode: 0o600 });
     let bytes = start;
     progress({ bytes, totalBytes, resumed: start > 0, complete: false });
     if (totalBytes !== null) {
-      // A CDN can keep its socket alive while sending too slowly to meet our
-      // deadline. Measure this response only, not a retained partial download.
+      // Avoid a slow address even if its stream could fit the ten-minute limit.
+      // Measure this response only, not a retained partial download.
       // Unknown lengths and small final tails retain the existing timeout rules.
       let observedAt = performance.now(), observedBytes = bytes;
       throughputTimer = setInterval(() => {
         const now = performance.now(), elapsed = now - observedAt;
         const received = bytes - observedBytes, remaining = totalBytes - bytes;
         const timeLeft = deadline - now;
+        const estimatedMs = received > 0 ? remaining * elapsed / received : Infinity;
         if (remaining > 64 * 1024 && timeLeft > 0 && elapsed > 0
-          && (received === 0 || remaining * elapsed / received > timeLeft)) {
-          response.destroy(new Error('Video download too slow to finish before deadline'));
+          && (estimatedMs > timeLeft || response.hasDownloadAlternative
+            && received * 1000 / elapsed < 128 * 1024 && estimatedMs > 30_000)) {
+          slowAddress = response.downloadAddress;
+          response.destroy(new Error('Video download too slow to finish promptly'));
         }
         observedAt = now; observedBytes = bytes;
-      }, options.throughputWindowMs ?? 30_000);
+      }, options.throughputWindowMs ?? 10_000);
     }
     const limit = new Transform({ transform(chunk, _encoding, done) {
       if (bytes + chunk.length > maxBytes || totalBytes !== null && bytes + chunk.length > totalBytes) return done(new Error('Video too large or longer than declared'));
@@ -171,7 +204,13 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
     await rm(metadataPath, { force: true });
     progress({ bytes, totalBytes: totalBytes ?? bytes, resumed: start > 0, complete: true });
     return { bytes, totalBytes: totalBytes ?? bytes, resumed: start > 0 };
-  } finally { clearTimeout(timer); clearInterval(throughputTimer); response?.destroy(); await output?.close(); }
+  } finally {
+    clearTimeout(timer); clearInterval(throughputTimer); response?.destroy(); await output?.close();
+    if (slowAddress && downloadState) {
+      downloadState.avoidAddresses = [...downloadState.avoidAddresses.filter(value => value !== slowAddress), slowAddress].slice(-16);
+      await writeFile(metadataPath, JSON.stringify(downloadState), { mode: 0o600 });
+    }
+  }
 }
 export async function serveMedia(req, res, path, type, download = false) {
   const { size } = await stat(path);

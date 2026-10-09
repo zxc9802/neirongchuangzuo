@@ -168,6 +168,46 @@ test('the throughput estimate uses the deadline remaining after DNS, not a fresh
   assert.equal((await stat(app.path)).size, 128 * 1024);
 });
 
+test('a low-speed stream switches a pinned address and safely resumes before the ten-minute deadline', async t => {
+  const body = Buffer.alloc(2 * 1024 * 1024, 11), pinned = [];
+  const app = await fixture(t, async (req, res, count) => {
+    if (count > 1) { range(res, body, Number(/^bytes=(\d+)-$/.exec(req.headers.range)[1])); return; }
+    res.writeHead(200, { ETag: ETAG, 'Content-Length': body.length });
+    for (let offset = 0; offset < body.length && !res.destroyed; offset += 1024) {
+      res.write(body.subarray(offset, offset + 1024)); await delay(40);
+    }
+    if (!res.destroyed) res.end();
+  }, { lookup: async () => [{ address: '8.8.8.8', family: 4 }, { address: '1.1.1.1', family: 4 }],
+    throughputWindowMs: 250, attemptTimeoutMs: 600_000 });
+  const transport = app.settings.transport;
+  app.settings.transport = (target, settings, callback) => {
+    settings.lookup(target.hostname, { all: false }, (_error, address) => pinned.push(address));
+    return transport(target, settings, callback);
+  };
+  await assert.rejects(app.run({ signal: AbortSignal.timeout(1500) }), /too slow/);
+  const prefix = (await stat(app.path)).size;
+  await app.run();
+  assert.deepEqual(pinned, ['8.8.8.8', '1.1.1.1']);
+  assert.equal(app.calls[1].headers.Range, `bytes=${prefix}-`);
+  assert.deepEqual(await readFile(app.path), body);
+});
+
+test('low-speed streams keep running when all available addresses have already been tried', async t => {
+  const body = Buffer.alloc(2 * 1024 * 1024, 12);
+  const app = await fixture(t, async (_req, res) => {
+    res.writeHead(200, { ETag: ETAG, 'Content-Length': body.length });
+    for (let offset = 0; offset < 20 * 1024 && !res.destroyed; offset += 1024) {
+      res.write(body.subarray(offset, offset + 1024)); await delay(40);
+    }
+    if (!res.destroyed) res.end(body.subarray(20 * 1024));
+  }, { lookup: async () => [{ address: '8.8.8.8', family: 4 }, { address: '1.1.1.1', family: 4 }],
+    throughputWindowMs: 250, attemptTimeoutMs: 600_000 });
+  await writeFile(app.path, '');
+  await writeFile(app.path + '.download.json', JSON.stringify({ version: 1, url: PUBLIC, etag: null,
+    totalBytes: body.length, avoidAddresses: ['video.example|8.8.8.8', 'video.example|1.1.1.1'] }));
+  await app.run(); assert.deepEqual(await readFile(app.path), body);
+});
+
 test('known-length streams that can finish in time and small final tails are not interrupted', async t => {
   const body = Buffer.alloc(256 * 1024, 8);
   const steady = await fixture(t, async (_req, res) => {
@@ -367,4 +407,81 @@ test('connection failures try another vetted address without changing the destin
   });
   assert.deepEqual(attempts, [{ host: 'video.example', pinned: '8.8.8.8' }, { host: 'video.example', pinned: '2001:4860:4860::8888' }]);
   assert.deepEqual(await readFile(app.path), body);
+});
+
+test('the provider custom domain downloads from its verified TOS CNAME instead of the slow alias', async t => {
+  const source = 'https://aggregationpic.buerdt.net/result.mp4';
+  const origin = 'aiaggregationserv-tos-prod.tos-cn-shanghai.volces.com';
+  const body = Buffer.alloc(8192, 15), resolved = [];
+  const app = await fixture(t, (_req, res, count) => {
+    res.writeHead(200, { 'Content-Length': body.length, ETag: ETAG });
+    if (new URL(app.calls[count - 1].url).hostname === origin) res.end(body);
+    else res.write(body.subarray(0, 1));
+  }, { resolveCname: async host => { resolved.push(host); return [origin]; } });
+  await downloadVideo(source, app.path, { ...app.settings, signal: AbortSignal.timeout(1000) });
+  assert.deepEqual(resolved, ['aggregationpic.buerdt.net']);
+  assert.equal(new URL(app.calls[0].url).hostname, origin);
+  assert.deepEqual(await readFile(app.path), body);
+});
+
+test('TOS origin errors and CNAME lookup failures fall back to the original provider URL', async t => {
+  const source = 'https://aggregationpic.buerdt.net/result.mp4';
+  for (const mode of ['status', 'connection', 'dns', 'dns-timeout']) {
+    await t.test(mode, async child => {
+      const body = Buffer.from('original fallback'), origin = 'bucket.tos-cn-shanghai.volces.com';
+      const app = await fixture(child, (_req, res, count) => {
+        if (new URL(app.calls[count - 1].url).hostname === origin) { res.writeHead(404); res.end(); }
+        else { res.writeHead(200, { 'Content-Length': body.length }); res.end(body); }
+      }, { connectTimeoutMs: 100, resolveCname: async () => {
+        if (mode === 'dns') throw new Error('CNAME unavailable');
+        if (mode === 'dns-timeout') return new Promise(() => {});
+        return [origin];
+      } });
+      if (mode === 'connection') {
+        const transport = app.settings.transport;
+        app.settings.transport = (target, settings, callback) => target.hostname === origin
+          ? request('http://127.0.0.1:1/result.mp4', settings, callback) : transport(target, settings, callback);
+      }
+      await downloadVideo(source, app.path, app.settings);
+      assert.equal(new URL(app.calls.at(-1).url).hostname, 'aggregationpic.buerdt.net');
+      assert.deepEqual(await readFile(app.path), body);
+    });
+  }
+});
+
+test('signed provider URLs and untrusted CNAME destinations retain the original URL', async t => {
+  for (const [url, alias] of [
+    ['https://aggregationpic.buerdt.net/result.mp4?signature=keep', 'bucket.tos-cn-shanghai.volces.com'],
+    ['https://aggregationpic.buerdt.net/result.mp4', 'bucket.tos-cn-shanghai.volces.com.evil.example'],
+    ['https://aggregationpic.buerdt.net/result.mp4', 'unrelated.example'],
+    [PUBLIC, 'bucket.tos-cn-shanghai.volces.com'],
+  ]) {
+    await t.test(url + ' ' + alias, async child => {
+      const body = Buffer.from('unchanged URL');
+      const app = await fixture(child, (_req, res) => { res.writeHead(200, { 'Content-Length': body.length }); res.end(body); },
+        { resolveCname: async () => [alias] });
+      await downloadVideo(url, app.path, app.settings);
+      assert.equal(app.calls[0].url, url);
+      assert.deepEqual(await readFile(app.path), body);
+    });
+  }
+});
+
+test('TOS resume validates the original strong ETag and never connects to private origin addresses', async t => {
+  const source = 'https://aggregationpic.buerdt.net/result.mp4', origin = 'bucket.tos-cn-shanghai.volces.com';
+  const body = Buffer.from('complete');
+  const app = await fixture(t, (_req, res) => range(res, body, 4), { resolveCname: async () => [origin] });
+  await writeFile(app.path, body.subarray(0, 4));
+  await writeFile(app.path + '.download.json', JSON.stringify({ version: 1, url: source, etag: ETAG, totalBytes: body.length }));
+  assert.equal((await downloadVideo(source, app.path, app.settings)).resumed, true);
+  assert.equal(app.calls[0].headers.Range, 'bytes=4-');
+  assert.equal(app.calls[0].headers['If-Range'], ETAG);
+  assert.deepEqual(await readFile(app.path), body);
+  const fallback = await fixture(t, (_req, res) => { res.writeHead(200, { 'Content-Length': body.length }); res.end(body); }, {
+    resolveCname: async () => [origin],
+    lookup: async host => [{ address: host === origin ? '127.0.0.1' : '8.8.8.8', family: 4 }],
+  });
+  await downloadVideo(source, fallback.path, fallback.settings);
+  assert.equal(fallback.calls.length, 1);
+  assert.equal(new URL(fallback.calls[0].url).hostname, 'aggregationpic.buerdt.net');
 });
