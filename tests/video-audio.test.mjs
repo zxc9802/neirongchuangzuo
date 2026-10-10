@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { detectSpeech, normalizeVoice, alignSpeech, createSpeechService } from '../services/video/speech.mjs';
-import { muteVideo, probeVideo } from '../services/video/media.mjs';
+import { probeVideo } from '../services/video/media.mjs';
 
 const enabled = Boolean(process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN);
 const voice = fileURLToPath(new URL('./fixtures/replica-speech.wav', import.meta.url));
@@ -44,19 +44,6 @@ test('speech correction keeps burned-in captions and mouth frames on the correct
   }
 });
 
-test('voice-reference input removes original audio while preserving video packets and their times', async t => {
-  const root = await mkdtemp(join(await realpath(tmpdir()), 'replica-silent-input-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const source = join(root, 'source.mp4'), silent = join(root, 'silent.mp4');
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=320x480:r=25:d=5', '-i', voice,
-    '-t', '5', '-c:v', 'libx264', '-c:a', 'aac', source]);
-  await muteVideo(source, silent);
-  assert.equal((await probeVideo(source)).audio, true);
-  assert.equal((await probeVideo(silent)).audio, false);
-  const packets = path => JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0',
-    '-show_packets', '-show_data_hash', 'sha256', '-show_entries', 'packet=pts_time,dts_time,duration_time,data_hash', '-of', 'json', path]));
-  assert.deepEqual(packets(silent), packets(source));
-});
 test('analysis preserves VAD and ASR diagnostics when a closing speech interval has no recognized words', { skip: !enabled }, async t => {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'replica-asr-diagnostic-'));
   t.after(() => rm(root, { recursive: true, force: true }));

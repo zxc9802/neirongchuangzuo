@@ -4,7 +4,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createRequestLedger } from '../ai/request-ledger.mjs';
 import { calculateCredits } from '../credits/store.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, DURATIONS, PROMPT } from './provider.mjs';
-import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, muteVideo, downloadVideo, serveMedia } from './media.mjs';
+import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createCaptionService, captionSpeech } from './captions.mjs';
@@ -35,7 +35,7 @@ async function readJSON(req) {
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), falProvider = createFalVideoProvider(config), probe = probeVideo,
-  photo = normalizePhoto, mute = muteVideo, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const models = [{ id: MODEL, name: '旗舰模型', resolution: '720p', enabled: Boolean(config.enabled) }];
   const enabled = models.some(model => model.enabled);
@@ -176,10 +176,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!ACTIVE.has(task.status)) return;
     if (task.status === 'preparing') {
       await analyzeSource(task);
-      if (task.voice && !task.videoAudioRemoved) {
-        await mute(file(task, 'video'), join(folder(task), 'source-silent.mp4'));
-        task.videoAudioRemoved = true;
-      }
       task.status = 'reviewing'; await save(task);
     }
     if (task.status === 'reviewing') {

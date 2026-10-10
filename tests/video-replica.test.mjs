@@ -6,11 +6,12 @@ import { mkdtemp, rm, writeFile, readFile, realpath, readdir } from 'node:fs/pro
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
 import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT } from '../services/video/provider.mjs';
-import { normalizePhoto, downloadVideo } from '../services/video/media.mjs';
+import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
 import { createFalVideoProvider, FAL_MODEL } from '../services/video/fal.mjs';
@@ -33,7 +34,6 @@ async function fixture(t, options = {}) {
   async function open(overrides = {}) {
     handler = createVideoHandler({ storageDir: join(root, 'video'), config: CONFIG, provider, credits: wallet,
       photo: async () => Buffer.from('photo'), probe: async () => META, download: async (_url, path) => writeFile(path, VIDEO),
-      mute: async (_input, output) => writeFile(output, Buffer.from('silent-video')),
       captions: { extract: async () => null },
       pollIntervalMs: 15, ...options, ...overrides });
     await handler.ready;
@@ -176,12 +176,9 @@ test('caption extraction and rendering failures deliver the playable model resul
   });
 });
 
-test('uploaded voice uses caption words and mutes the original video without smearing its subtitles', async t => {
+test('uploaded voice uses caption words and preserves the original emotional audio and subtitle pixels', async t => {
   let alignmentReference;
-  const app = await fixture(t, { mute: async (input, output) => {
-    assert.ok(input.endsWith('source.mp4')); assert.deepEqual(await readFile(input), VIDEO);
-    await writeFile(output, Buffer.from('silent-video'));
-  }, voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
     speech: fakeSpeech({ detect: async () => [{ start: .16, end: 3.5 }],
       align: async (_input, output, original) => { alignmentReference = original; await writeFile(output, VIDEO); return {}; } }),
     captions: { extract: async () => structuredClone(CAPTIONS), clean: async () => assert.fail('Do not inpaint the model input'),
@@ -193,9 +190,32 @@ test('uploaded voice uses caption words and mutes the original video without sme
   assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
   assert.match(app.state.body.prompt, /生腌真好吃只要9.9元/);
   const signed = new URL(app.state.creates.find(item => item.kind === 'video').url);
-  assert.equal(await (await fetch(app.base + signed.pathname + signed.search)).text(), 'silent-video');
+  assert.deepEqual(Buffer.from(await (await fetch(app.base + signed.pathname + signed.search)).arrayBuffer()), VIDEO);
   app.state.done = true; const completed = await app.until(id, task => task.status === 'completed');
   assert.equal(alignmentReference.text, '生腌真好吃只要9.9元'); assert.equal(completed.captionCheck.rendered, true);
+});
+
+test('direct voice replacement gives the model the complete unmodified original emotional audio track', async t => {
+  const app = await fixture(t, { probe: probeVideo,
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
+  const source = join(app.root, 'emotional-source.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x480:r=25:d=4',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4', '-af', 'volume=0.3:enable=between(t\\,1\\,2)',
+    '-c:v', 'libx264', '-threads', '2', '-c:a', 'aac', source]);
+  const input = await readFile(source), id = await app.init();
+  for (const [kind, bytes] of [['video', input], ['photo', VIDEO]]) {
+    const response = await fetch(app.base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: bytes });
+    assert.equal(response.status, 200);
+  }
+  await uploadVoice(app, id); await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running');
+  const signed = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  const supplied = Buffer.from(await (await fetch(app.base + signed.pathname + signed.search)).arrayBuffer());
+  assert.deepEqual(supplied, input, 'The model must receive the original audio and picture bytes');
+  const copy = join(app.root, 'supplied.mp4'); await writeFile(copy, supplied);
+  assert.equal((await probeVideo(copy)).audio, true);
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+  assert.equal(app.state.generations, 1);
 });
 
 test('reference voice detection no longer rejects empty or short speech detection', async t => {
@@ -225,7 +245,7 @@ test('one-click voice generation analyzes automatically and reaches the provider
   assert.equal(response.headers.get('content-type'), 'audio/wav'); assert.equal(response.status, 200);
   const signedVideo = new URL(app.state.creates.find(item => item.kind === 'video').url);
   const providerVideo = await fetch(app.base + signedVideo.pathname + signedVideo.search);
-  assert.equal(await providerVideo.text(), 'silent-video');
+  assert.deepEqual(Buffer.from(await providerVideo.arrayBuffer()), VIDEO);
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
   app.state.done = true;
   const completed = await app.until(id, task => task.status === 'completed');
