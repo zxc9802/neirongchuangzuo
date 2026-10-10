@@ -125,6 +125,47 @@ test('promotional processing failure retries locally and releases held credits w
   assert.equal((await app.credits.snapshot('owner')).held, 0); assert.equal((await app.api('/usage')).body.usage.used, 0);
 });
 
+const foodAppearance={description:'圆碗中的食物',portion:'一碗',arrangement:'食物在碗内',vessel:'圆碗',colors:['浅色'],visibleComponents:['条状食物'],texture:['可见纹理'],distinctiveFeatures:['圆碗'],uncertainDetails:[],dishCount:1,pieceCount:null};
+const foodReview={status:'passed',identityMatch:true,sceneMatch:true,shotMatch:true,compositionUsable:true,errors:[],warnings:[]};
+
+test('food rephotography changes angles, reuses completed calls during local retries and charges delivered images once', async t => {
+  let renders=0, attempts=0, identities=0;const plans=[],styles=[];
+  const model=mockModel({async identifyFood(){identities++;return foodAppearance;},async renderFood(input){renders++;plans.push(input.plan.angle);styles.push(Boolean(input.styleReference));return {bytes:input.photo.bytes,requestId:'render-id'};},async reviewFoodRender(input){assert.equal(input.photos.length,2);return foodReview;}});
+  const promotionalProcessor={...promotion,async processPromotionalPhoto(bytes,options){
+    assert.equal((await options.renderFood(options.analysis,{bytes})).requestId,'render-id');
+    if(++attempts===1)throw Error('local composition failed after successful rephotography');
+    return processor.processPhoto(bytes);
+  },async addPromotionalHeadline(result){return result;}};
+  const app=await setup(t,{model,withCredits:true,promotionalProcessor});const {id}=await newTask(app);
+  await app.api(`/tasks/${id}/generate`,{directionId:'D01',acceptSparse:true,imageMode:'promotional'});
+  const task=await app.wait(id,['completed','failed']);assert.equal(task.status,'completed',task.error);
+  assert.equal(renders,2);assert.equal(identities,2);assert.equal(attempts,3);assert.deepEqual(plans,['oblique','overhead']);assert.deepEqual(styles,[false,false]);
+  assert.equal(task.billing.chargedPoints,100);assert.equal((await app.credits.snapshot('owner')).balance,900);
+  assert.ok(task.analysis.every(image=>image.foodAppearance.description));
+  await app.api(`/tasks/${id}/generate`,{directionId:'D01',acceptSparse:true,imageMode:'promotional'});assert.equal(renders,2);
+});
+
+test('uncertain food-generation calls stop once, never get a quality retry and fully release the points', async t => {
+  let renders=0, attempts=0, reviews=0;
+  const model=mockModel({async identifyFood(){return foodAppearance;},async renderFood(){renders++;throw Object.assign(Error('result uncertain'),{code:'PROVIDER_UNCERTAIN'});},async reviewFoodRender(){reviews++;return foodReview;}});
+  const promotionalProcessor={...promotion,async processPromotionalPhoto(bytes,options){attempts++;await options.renderFood(options.analysis,{bytes});}};
+  const app=await setup(t,{model,withCredits:true,promotionalProcessor});const {id}=await newTask(app);
+  await app.api(`/tasks/${id}/generate`,{directionId:'D01',acceptSparse:true,imageMode:'promotional'});
+  const task=await app.wait(id,['completed','failed']);assert.equal(task.status,'failed');assert.equal(task.code,'PROVIDER_UNCERTAIN');
+  assert.equal(renders,1);assert.equal(attempts,1);assert.equal(reviews,0);assert.equal(task.files.length,0);
+  const wallet=await app.credits.snapshot('owner');assert.equal(wallet.balance,1000);assert.equal(wallet.held,0);
+});
+
+test('only completed food results with visible identity drift get a corrective generation; persistent drift releases all points',async t=>{
+  let renders=0;const attempts=[],corrections=[];
+  const model=mockModel({async identifyFood(){return foodAppearance;},async renderFood(input){renders++;attempts.push(input.attempt);corrections.push(input.corrections);return {bytes:input.photo.bytes,requestId:'render-id'};},async reviewFoodRender(){return {...foodReview,status:'blocked',identityMatch:false,errors:['多出一份食物']};}});
+  const app=await setup(t,{model,withCredits:true});const {id}=await newTask(app);
+  await app.api(`/tasks/${id}/generate`,{directionId:'D01',acceptSparse:true,imageMode:'promotional'});
+  const task=await app.wait(id,['completed','failed']);assert.equal(task.status,'failed');assert.equal(task.code,'FOOD_IDENTITY_MISMATCH');
+  assert.equal(renders,2);assert.deepEqual(attempts,[0,1]);assert.deepEqual(corrections,[[],['多出一份食物']]);
+  assert.equal(task.files.length,0);assert.equal((await app.credits.snapshot('owner')).balance,1000);
+});
+
 test('restaurant points: upload and analysis are free, cover replaces first photo, and repeated completion charges once', async t => {
   const app = await setup(t, { withCredits: true }), { id } = await newTask(app);
   assert.equal((await app.credits.snapshot('owner')).balance, 1000);

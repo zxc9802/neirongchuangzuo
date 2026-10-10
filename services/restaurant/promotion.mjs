@@ -123,22 +123,49 @@ function background(p, index, label, storeName) {
   </svg>`);
 }
 
-export async function processPromotionalPhoto(bytes, { analysis, crop, mask, seed = '', index = 0, label = '', storeName = '' } = {}) {
+export async function beautifyFood(subject) {
+  const { data, info } = await sharp(subject.bytes).ensureAlpha().raw().toBuffer({ resolveWithObject: true });
+  let sum = 0, count = 0;
+  for (let i = 0; i < data.length; i += 4) if (data[i + 3] >= 240) { sum += .2126 * data[i] + .7152 * data[i + 1] + .0722 * data[i + 2]; count++; }
+  const brightness = Math.max(1.02, Math.min(1.14, 145 / Math.max(1, sum / Math.max(1, count))));
+  const alpha = await sharp(subject.bytes).ensureAlpha().extractChannel('alpha').raw().toBuffer();
+  const rgb = await sharp(subject.bytes).removeAlpha().modulate({ brightness, saturation: 1.12 })
+    .linear(1.035, -3).sharpen({ sigma: .45, m1: .45, m2: 1.1 }).raw().toBuffer();
+  const bytes = await sharp(rgb, { raw: { width: info.width, height: info.height, channels: 3 } })
+    .joinChannel(alpha, { raw: { width: info.width, height: info.height, channels: 1 } }).png().toBuffer();
+  return { ...subject, bytes, enhancement: { brightness: Math.round(brightness * 1000) / 1000, saturation: 1.12, contrast: 1.035, sharpening: .45 } };
+}
+
+function sceneOverlay(p, label, storeName) {
+  return Buffer.from(`<svg width="1080" height="1440" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="header" x2="0" y2="1"><stop offset="0" stop-color="${p.base}"/><stop offset=".76" stop-color="${p.base}" stop-opacity=".94"/><stop offset="1" stop-color="${p.base}" stop-opacity="0"/></linearGradient><linearGradient id="footer" x2="0" y2="1"><stop offset="0" stop-color="#201c16" stop-opacity="0"/><stop offset="1" stop-color="#201c16" stop-opacity=".75"/></linearGradient></defs><rect width="1080" height="420" fill="url(#header)"/><rect y="1270" width="1080" height="170" fill="url(#footer)"/><rect x="64" y="66" width="${Math.min(760, Math.max(120, Array.from(label || '门店日常').length * 32 + 52))}" height="54" rx="27" fill="${p.accent}"/><text x="90" y="104" fill="white" font-size="30" font-weight="600" font-family="Noto Sans CJK SC,Microsoft YaHei,SimHei,sans-serif">${xml(Array.from(label || '门店日常').slice(0,20).join(''))}</text><text x="72" y="1367" fill="white" font-size="38" font-weight="700" font-family="Noto Sans CJK SC,Microsoft YaHei,SimHei,sans-serif">${xml(Array.from(storeName || '').slice(0,22).join(''))}</text></svg>`);
+}
+
+export async function processPromotionalPhoto(bytes, { analysis, crop, mask, renderFood, seed = '', index = 0, label = '', storeName = '' } = {}) {
   const source = await preparePhotoPixels(bytes, { crop });
+  const p = promotionalPalette(seed);
+  if (analysis?.imageType === 'food' && renderFood) {
+    const generated = await renderFood(analysis, source);
+    const output = await sharp(generated.bytes).resize(W,H,{fit:'contain',background:p.base})
+      .composite([{input:sceneOverlay(p,label,storeName)}]).jpeg({quality:95,chromaSubsampling:'4:4:4'}).toBuffer();
+    return { bytes: output, width: W, height: H, format: 'jpeg', composition: { version: 'food-promotion-v3', method: 'reference-rephotography',
+      sourceImageId: analysis.imageId, sourceHash: createHash('sha256').update(bytes).digest('hex'), palette: p.accent,
+      sceneType: generated.scene.type, sceneName: generated.scene.name, cameraAngle: generated.plan.angle, shotName: generated.plan.name,
+      generatedScene: true, foodRecreated: true, identityReview: generated.review, imageRequestId: generated.requestId } };
+  }
   let subject = { ...source, method: 'original-frame' };
   if (analysis?.imageType === 'food' && analysis.foodSubjects?.length) {
     try { subject = await extractFoodSubject(source, analysis.foodSubjects, { mask, crop }); }
     catch (cause) { subject = { ...source, method: 'original-frame', fallbackReason: cause.code || 'SUBJECT_MASK_FAILED' }; }
   }
-  const p = promotionalPalette(seed);
   const isCutout = subject.method === 'source-cutout';
+  subject = await beautifyFood(subject);
   const resized = await sharp(subject.bytes).resize(isCutout ? 950 : 912, isCutout ? 920 : 880, { fit: 'inside' }).png().toBuffer({ resolveWithObject: true });
   const left = Math.round((W - resized.info.width) / 2), top = Math.round(390 + (920 - resized.info.height) / 2);
   const shadow = Buffer.from(`<svg width="1080" height="1440" xmlns="http://www.w3.org/2000/svg"><defs><filter id="blur"><feGaussianBlur stdDeviation="20"/></filter></defs>${isCutout
     ? `<ellipse cx="540" cy="${Math.min(1230, top + resized.info.height - 15)}" rx="${resized.info.width * .36}" ry="24" fill="${p.ink}" opacity=".18" filter="url(#blur)"/>`
     : `<rect x="${left - 15}" y="${top - 15}" width="${resized.info.width + 30}" height="${resized.info.height + 30}" rx="16" fill="white"/>`}</svg>`);
   const output = await sharp(background(p, index, label, storeName)).composite([{ input: shadow }, { input: resized.data, left, top }]).jpeg({ quality: 95, chromaSubsampling: '4:4:4' }).toBuffer();
-  return { bytes: output, width: W, height: H, format: 'jpeg', composition: { version: 'food-promotion-v1', method: subject.method, sourceHash: createHash('sha256').update(bytes).digest('hex'), palette: p.accent, ...(subject.fallbackReason ? { fallbackReason: subject.fallbackReason } : {}) } };
+  return { bytes: output, width: W, height: H, format: 'jpeg', composition: { version: 'food-promotion-v2', method: subject.method, sourceHash: createHash('sha256').update(bytes).digest('hex'), palette: p.accent, enhancement: subject.enhancement, ...(subject.fallbackReason ? { fallbackReason: subject.fallbackReason } : {}) } };
 }
 
 export async function addPromotionalHeadline(result, title, seed = '', { index = 0 } = {}) {

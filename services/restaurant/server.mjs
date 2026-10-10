@@ -5,11 +5,12 @@ import { createRestaurantStore, FILES_TTL_MS } from './store.mjs';
 import { createRestaurantMedia } from './media.mjs';
 import * as images from './images.mjs';
 import * as promotion from './promotion.mjs';
+import { foodScene, foodPhotoPlan } from './scenes.mjs';
 import { createSubjectMasker } from './subject-mask.mjs';
 import { createRestaurantModel } from './model.mjs';
 import { displayModelName } from '../../design/model-labels.js';
 import { inspectCopyQuality } from './copy-quality.mjs';
-import { RestaurantError, UUID, fingerprint, normalizeProfile, requireProfile, normalizeFacts, resolveDirectionFacts, pendingFacts, validateAnalysis, validateDirections, validateCopy, validateAudit, localReview } from './rules.mjs';
+import { RestaurantError, UUID, fingerprint, normalizeProfile, requireProfile, normalizeFacts, resolveDirectionFacts, pendingFacts, validateAnalysis, validateDirections, validateCopy, validateAudit, localReview, validateFoodAppearance, validateFoodRenderReview } from './rules.mjs';
 
 const MB = 1024 * 1024;
 const ACTIVE = new Set(['uploading', 'analysing', 'generating', 'retrying']);
@@ -278,6 +279,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
         ? await promotionalProcessor.processPromotionalPhoto(photo.bytes, { ...options, mask: bytes => subjectMasker.mask(bytes) })
         : await imageProcessor.processPhoto(photo.bytes, options); }
       catch (cause) {
+        if (cause.code && /^(?:FOOD_|PROVIDER_|MODEL_|DAILY_QUOTA_EXCEEDED|RATE_LIMITED|SERVICE_CLOSING|AI_|REQUEST_)/.test(cause.code)) throw cause;
         if (attempt === 2) throw cause;
         await store.patchTask(userId, task.id, { status: 'retrying', progress: { stage: 'image', imageId: photo.id, retry: attempt + 1 } });
       }
@@ -316,12 +318,42 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     const processed = new Map();
     const targetCount = selection.outputCount ?? selection.imageIds.length;
     const promoSeed = `${task.id}:${selection.directionId}`;
+    const onBudgetWait = () => store.patchTask(userId, id, { progress: { stage: 'waiting_for_budget', message: '共享请求较多，正在排队等待继续生成。' } });
+    const foodRenders = new Map();
+    let shotIndex = 0;
+    const renderFood = model.renderFood ? (analysis, source) => {
+      if (!foodRenders.has(analysis.imageId)) foodRenders.set(analysis.imageId, (async () => {
+        const scene = foodScene(analysis, task.profileSnapshot, selection.facts), plan = foodPhotoPlan(scene, shotIndex++);
+        const reference = { ...await imageProcessor.prepareAnalysisPhoto(source.bytes), id: analysis.imageId };
+        reference.dataUrl = `data:${reference.mime};base64,${reference.bytes.toString('base64')}`;
+        await store.patchTask(userId, id, { status: 'generating', progress: { stage: 'food_identity', imageId: analysis.imageId } });
+        const appearance = validateFoodAppearance(analysis.foodAppearance || await model.identifyFood({ analysis, photos: [reference] }, { onBudgetWait }));
+        analysis.foodAppearance = appearance;
+        await store.patchTask(userId, id, { analysis: task.analysis, progress: { stage: 'food_render', imageId: analysis.imageId, shot: plan.name } });
+        let corrections = [];
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const result = await model.renderFood({ scene, photo: reference, appearance, plan, taskId: id, imageId: analysis.imageId, attempt, corrections }, { onBudgetWait });
+          const preview = await imageProcessor.prepareAnalysisPhoto(result.bytes);
+          const review = validateFoodRenderReview(await model.reviewFoodRender({ sourceImageId: analysis.imageId, foodAppearance: appearance, scene: { type: scene.type, name: scene.name }, plan,
+            photos: [reference, { id: 'generated-food', dataUrl: `data:${preview.mime};base64,${preview.bytes.toString('base64')}` }] }, { onBudgetWait }));
+          if (review.status === 'passed') {
+            return { ...result, scene, plan, review };
+          }
+          corrections = review.errors;
+          await store.patchTask(userId, id, { status: 'retrying', progress: { stage: 'food_consistency', imageId: analysis.imageId, retry: attempt + 1 } });
+        }
+        throw new RestaurantError('菜品重拍后仍有明显差异，未交付本套内容，也未扣除生成积分。', 502, 'FOOD_IDENTITY_MISMATCH');
+      })());
+      return foodRenders.get(analysis.imageId);
+    } : undefined;
     for (const item of candidates) {
       if (processed.size >= targetCount) break;
       const source = sources.find(photo => photo.id === item.imageId);
       try { processed.set(item.imageId, await process(userId, task, source, { ...(item.crop ? { crop: item.crop } : {}),
-        ...(selection.imageMode === 'promotional' ? { promotional: true, analysis: item, seed: promoSeed, index: processed.size, label: selection.direction.label, storeName: task.profileSnapshot.name } : {}) })); selected.push(item); }
-      catch { /* Failed photos may be removed before copy is written against remaining evidence. */ }
+        ...(selection.imageMode === 'promotional' ? { promotional: true, analysis: item, renderFood, seed: promoSeed, index: processed.size, label: selection.direction.label, storeName: task.profileSnapshot.name } : {}) })); selected.push(item); }
+      catch (cause) {
+        if (cause.code && /^(?:FOOD_|PROVIDER_|MODEL_|DAILY_QUOTA_EXCEEDED|RATE_LIMITED|SERVICE_CLOSING|AI_|REQUEST_)/.test(cause.code)) throw cause;
+      }
     }
     if (!selected.length) throw new RestaurantError('可用图片处理失败，未形成完整内容包。', 502, 'IMAGES_FAILED');
     if (selection.strictOutputCount && selected.length !== targetCount) throw new RestaurantError(`可用照片处理后不足${targetCount}张，同方向备用照片也无法补齐，未扣正式生成额度。`, 502, 'INSUFFICIENT_PROCESSED_IMAGES');
@@ -341,7 +373,6 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       return { id: item.imageId, dataUrl: `data:${photo.mime};base64,${photo.bytes.toString('base64')}` };
     }));
     let copy, review, copyQuality;
-    const onBudgetWait = () => store.patchTask(userId, id, { progress: { stage: 'waiting_for_budget', message: '共享请求较多，正在排队等待继续生成。' } });
     for (let revision = 0; revision < 2; revision++) {
       const draft = copy, qualityIssues = review?.errors ?? [];
       if (revision) await store.patchTask(userId, id, { progress: { stage: 'copy_refining' } });

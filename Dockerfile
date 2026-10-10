@@ -8,7 +8,6 @@ RUN npm ci --include=dev
 COPY scripts ./scripts
 COPY design ./design
 COPY services ./services
-RUN node scripts/setup-restaurant-model.mjs
 RUN npm run build
 
 FROM public.ecr.aws/docker/library/node:24-bookworm-slim AS runner

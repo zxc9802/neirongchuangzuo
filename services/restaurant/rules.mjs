@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { SCENE_TYPES, CAMERA_ANGLES } from './scenes.mjs';
 
 export class RestaurantError extends Error {
   constructor(message, statusCode = 400, code = 'INVALID_REQUEST') { super(message); this.statusCode = statusCode; this.code = code; }
@@ -22,6 +23,23 @@ function checkedSafeCrop(item) {
   return Object.fromEntries(['left', 'top', 'width', 'height'].map(key => [key, crop[key]]));
 }
 export const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+export function validateFoodAppearance(value) {
+  if (!value || !text(value.description, 400) || !value.description.trim() || !text(value.portion, 200)
+    || !text(value.arrangement, 300) || !text(value.vessel, 200) || !strings(value.colors, 8) || !strings(value.visibleComponents, 12)
+    || !strings(value.texture, 8) || !strings(value.distinctiveFeatures, 10) || !strings(value.uncertainDetails, 8)
+    || value.dishCount !== null && (!Number.isInteger(value.dishCount) || value.dishCount < 1 || value.dishCount > 12)
+    || value.pieceCount !== null && (!Number.isInteger(value.pieceCount) || value.pieceCount < 1 || value.pieceCount > 120)) bad('菜品视觉特征格式不正确。');
+  return Object.fromEntries(['description','portion','arrangement','vessel','colors','visibleComponents','texture','distinctiveFeatures','uncertainDetails','dishCount','pieceCount'].map(key => [key,value[key]]));
+}
+
+export function validateFoodRenderReview(value) {
+  if (!value || !['passed','blocked'].includes(value.status) || !strings(value.errors, 12) || !strings(value.warnings, 12)
+    || !['identityMatch','sceneMatch','shotMatch','compositionUsable'].every(key => typeof value[key] === 'boolean')) bad('菜品一致性检查格式不正确。');
+  const passed = value.status === 'passed' && !value.errors.length && value.identityMatch && value.sceneMatch && value.shotMatch && value.compositionUsable;
+  return { ...Object.fromEntries(['identityMatch','sceneMatch','shotMatch','compositionUsable'].map(key => [key,value[key]])), status: passed ? 'passed' : 'blocked',
+    errors: passed ? [] : value.errors.length ? value.errors : ['成品菜品或摄影构图未通过一致性检查。'], warnings: value.warnings };
+}
 export function normalizeProfile(body) {
   const source = body?.profile ?? body;
   if (!source || typeof source !== 'object' || Array.isArray(source)) throw new RestaurantError('请填写门店资料。');
@@ -80,11 +98,16 @@ export function validateAnalysis(value, imageIds) {
     // Descriptive text may negate a risk or refer to public store information.
     // Only the explicit severity can block a photo; keywords cannot establish it.
     const unsafeText = item.textRisk === 'high' && !crop;
+    let foodAppearance;
+    if (item.imageType === 'food' && item.foodAppearance) try { foodAppearance = validateFoodAppearance(item.foodAppearance); } catch { /* Selected food can be described again before rendering. */ }
     return { imageId: item.imageId, imageType: item.imageType, visibleObjects: item.visibleObjects, possibleScene: item.possibleScene, qualityScore: item.qualityScore,
       privacyRisk: item.privacyRisk, usable: item.usable && item.privacyRisk !== 'high' && !unsafeText,
       rejectionReason: item.privacyRisk === 'high' ? item.rejectionReason.trim() || '照片存在严重隐私风险，请换用已获授权且风险可控的素材。'
         : unsafeText ? item.rejectionReason.trim() || '图片存在无法安全处理的私人敏感信息或严重宣传风险，请换图。' : item.rejectionReason,
       visibleTexts: item.visibleTexts ?? [], textRisk: crop ? 'none' : unsafeText ? 'high' : item.textRisk, riskReasons: item.riskReasons ?? [],
+      ...(item.imageType === 'food' && SCENE_TYPES.includes(item.presentation?.sceneType) && CAMERA_ANGLES.includes(item.presentation?.cameraAngle)
+        ? { presentation: { sceneType: item.presentation.sceneType, cameraAngle: item.presentation.cameraAngle } } : {}),
+      ...(foodAppearance ? { foodAppearance } : {}),
       ...(Array.isArray(item.foodSubjects) && item.foodSubjects.length <= 12 && item.foodSubjects.every(subject => rectangle(subject?.box)
         && Number.isFinite(subject.confidence) && subject.confidence >= 0 && subject.confidence <= 1 && text(subject.label ?? '', 80))
         ? { foodSubjects: item.foodSubjects.map(subject => ({ box: Object.fromEntries(['left', 'top', 'width', 'height'].map(key => [key, subject.box[key]])), confidence: subject.confidence, label: subject.label ?? '',

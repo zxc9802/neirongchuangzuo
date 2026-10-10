@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createRequestLedger } from '../ai/request-ledger.mjs';
-import { RestaurantError, fingerprint, validateAnalysis, validateDirections, validateCopy, validateAudit } from './rules.mjs';
-import { ANALYSIS_PROMPT, RECOMMEND_PROMPT, RECOMMEND_REPAIR_PROMPT, COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT } from './prompts.mjs';
+import { RestaurantError, fingerprint, validateAnalysis, validateDirections, validateCopy, validateAudit, validateFoodAppearance, validateFoodRenderReview } from './rules.mjs';
+import { ANALYSIS_PROMPT, RECOMMEND_PROMPT, RECOMMEND_REPAIR_PROMPT, COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT, FOOD_IDENTITY_PROMPT, FOOD_RENDER_AUDIT_PROMPT } from './prompts.mjs';
 import { recommendationQualityIssues } from './recommendation-quality.mjs';
+import { createFoodRenderer } from './food-renderer.mjs';
 
 /** Separate durable provider-attempt budget. User package charges live in the store. */
 export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, now = Date.now, timeoutMs = 90_000, ledger: injectedLedger,
@@ -11,6 +12,7 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
   const ledger = injectedLedger ?? createRequestLedger({ storageDir, now, limits: config.limits });
   const ready = ledger.ready;
   let stopping = false;
+  const renderFood = createFoodRenderer({ config, ledger, fetchImpl, isStopping: () => stopping, sleepImpl, budgetWaitMaxMs, budgetWaitStepMs });
   async function call(prompt, input, photos = [], { onBudgetWait } = {}) {
     if (!config.apiKey) throw new RestaurantError('尚未配置内容分析接口，请联系管理员。', 503, 'MODEL_NOT_CONFIGURED');
     const id = randomUUID();
@@ -61,6 +63,9 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
   return {
     ready,
     enabled: Boolean(config.apiKey),
+    renderFood,
+    async identifyFood({ analysis, photos }, options) { return validateFoodAppearance(await call(FOOD_IDENTITY_PROMPT, { imageId: analysis.imageId }, photos, options)); },
+    async reviewFoodRender({ photos, ...input }, options) { return validateFoodRenderReview(await call(FOOD_RENDER_AUDIT_PROMPT, input, photos, options)); },
     async analyse(photos, profile, options) { return validateAnalysis(await call(ANALYSIS_PROMPT, { profile, images: photos.map(photo => ({ imageId: photo.id, width: photo.width, height: photo.height })) }, photos, options), photos.map(photo => photo.id)); },
     async recommend(analysis, profile, options) {
       const input = { profile, images: analysis };

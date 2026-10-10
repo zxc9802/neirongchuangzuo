@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRestaurantModel } from '../services/restaurant/model.mjs';
-import { COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT } from '../services/restaurant/prompts.mjs';
+import { COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT, FOOD_IDENTITY_PROMPT, FOOD_RENDER_AUDIT_PROMPT } from '../services/restaurant/prompts.mjs';
 
 const config = { apiKey: 'vision-test-only-not-a-secret', baseUrl: 'https://provider.invalid/v1', chatModel: 'test-vision', limits: { chatDaily: 100 } };
 const profile = { name: '桃园火锅', city: '重庆', address: '南滨路二十六号', category: '火锅店' };
@@ -42,6 +42,24 @@ function harness(result, failure, responseFactory) {
   } });
   return { model, requests, reservations, dispatches, finishes };
 }
+
+test('food identity analysis receives the original photograph and returns a structured visual identity',async()=>{
+  const appearance={description:'原图可见食品',portion:'一份',arrangement:'盘内摆放',vessel:'圆形餐盘',colors:['浅色'],visibleComponents:['可见主体'],texture:['表面纹理'],distinctiveFeatures:['圆盘'],uncertainDetails:['内部不可见'],dishCount:1,pieceCount:null};
+  const app=harness(appearance);
+  assert.deepEqual(await app.model.identifyFood({analysis:analysis[0],photos:[photos[1]]}),appearance);
+  const [system,user]=app.requests[0].body.messages;
+  assert.equal(system.content,FOOD_IDENTITY_PROMPT);assert.equal(user.content[1].image_url.url,photos[1].dataUrl);
+  assert.equal(JSON.parse(user.content[0].text).imageId,'photo-food');assertCompletedAttempt(app);
+});
+
+test('food consistency audit compares original and generated photos and explicitly checks the planned camera',async()=>{
+  const review={status:'passed',identityMatch:true,sceneMatch:true,shotMatch:true,compositionUsable:true,errors:[],warnings:[]};
+  const app=harness(review),plan={angle:'overhead',name:'俯拍摆盘'};
+  assert.equal((await app.model.reviewFoodRender({sourceImageId:'photo-food',foodAppearance:{description:'参考食品'},plan,photos})).shotMatch,true);
+  const [system,user]=app.requests[0].body.messages;
+  assert.equal(system.content,FOOD_RENDER_AUDIT_PROMPT);assert.deepEqual(user.content.slice(1).map(item=>item.image_url.url),photos.map(photo=>photo.dataUrl));
+  assert.deepEqual(JSON.parse(user.content[0].text).plan,plan);assertCompletedAttempt(app);
+});
 function visualInput(request, expectedPrompt) {
   assert.equal(request.url, 'https://provider.invalid/v1/chat/completions');
   const [system, user] = request.body.messages;

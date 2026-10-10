@@ -37,6 +37,11 @@ test('old repeat-three-times placeholder cannot pass by padding a generic paragr
   assert.ok(result.issues.some(issue => /重复/.test(issue)));
 });
 
+test('food-copy editing instructions cannot leak into the public body', () => {
+  const result=inspect({...goodCopy(),body:goodBody+'\n不额外延伸菜名或口味描述。'});
+  assert.equal(result.passed,false);assert.ok(result.issues.some(issue=>/内部|报告/.test(issue)));
+});
+
 test('repeating a long sentence with different punctuation is rejected', () => {
   const sentence = '门口的木质入口与旁边的绿植一起留在这张夜间实拍里';
   const result = inspect({ ...goodCopy(), body: goodBody + '\n' + sentence + '。' + sentence.slice(0, 8) + '，' + sentence.slice(8) + '。' });
