@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { createNarrationService, muxNarration } from '../services/video/narration.mjs';
@@ -21,7 +21,7 @@ test('IndexTTS uses uploaded timbre and per-segment source emotion, at most thre
   const requests = [], events = [];
   const uploads = [];
   const service = createNarrationService({ INDEXTTS_302_API_KEY: 'unit-test-key' }, {
-    upload: async input => { uploads.push(input); return `https://fal.media/${input.split('/').at(-1)}`; },
+    upload: async input => { uploads.push(input); return `https://fal.media/${basename(input)}`; },
     fetchImpl: async (url, options) => {
       if (options.method === 'POST') { const body = JSON.parse(options.body); requests.push(body); return Response.json({ task_id: `speech-${requests.length}` }); }
       events.push(String(url)); return Response.json({ state: 'SUCCESS', audio_url: 'https://file.302.ai/unit.wav' });
