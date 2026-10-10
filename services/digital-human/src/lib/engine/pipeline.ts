@@ -8,6 +8,7 @@ import { TaskStore, TaskItem, TaskStep } from "../store/task-store";
 import { getAppConfig } from "../config";
 import { generateIndexTTS } from "./indextts";
 import { prepareFaceLipsync, finalizeFaceLipsync } from "./face-lipsync";
+import { deliverNarrationFallback } from "./narration-fallback";
 import {
   probeMedia,
   prepareSourceVideo,
@@ -310,7 +311,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       localVideoPath,
       ttsResult.selectedDuration,
       preparedVideoPath,
-      task.inputs.videoFit
+      "smart"
     );
     ensureTaskActive();
 
@@ -349,14 +350,21 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
     let providerVideoPath = preparedVideoPath;
     let providerAudioPath = ttsResult.finalWavPath;
+    let faceWorkflow = false;
     if (lipsyncProvider === "veed") {
-      log("正在检查人脸清晰度并准备口型素材...", "info");
-      const face = await prepareFaceLipsync({ inputVideoPath: localVideoPath,
-        audioPath: ttsResult.finalWavPath, durationSeconds: ttsResult.selectedDuration, jobDir, taskId });
-      providerVideoPath = face.videoPath;
-      providerAudioPath = face.audioPath;
+      log("正在准备口型画面...", "info");
+      try {
+        const face = await prepareFaceLipsync({ inputVideoPath: localVideoPath,
+          audioPath: ttsResult.finalWavPath, durationSeconds: ttsResult.selectedDuration, jobDir, taskId });
+        providerVideoPath = face.videoPath;
+        providerAudioPath = face.audioPath;
+        faceWorkflow = true;
+      } catch (error) {
+        logServerError("pipeline.face_preparation_fallback", error, "warn");
+        log("局部口型画面准备未完成，自动使用完整画面继续生成", "warn");
+      }
       ensureTaskActive();
-      TaskStore.update(taskId, { results: { faceWorkflowVersion: 1 } });
+      TaskStore.update(taskId, { results: { faceWorkflowVersion: faceWorkflow ? 1 : undefined } });
     }
 
     // Submission title based on hashes for idempotency
@@ -373,6 +381,13 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
     // If cloud object storage is configured, upload prepared video & audio to COS for 100% reachable public access
     if (CosService.isConfigured()) {
+      if (!faceWorkflow) {
+        const saved = await Promise.allSettled([
+          CosService.uploadFile(preparedVideoPath, `jobs/${taskId}/source-video.mp4`),
+          CosService.uploadFile(ttsResult.finalWavPath, `jobs/${taskId}/voice-track.wav`),
+        ]);
+        if (saved.some(item => item.status === "rejected")) log("恢复素材暂未保存到云端，继续使用本地素材生成", "warn");
+      }
       try {
         ensureTaskActive();
         log("☁️ 正在将预处理音画直链同步至云端高速分发...", "info");
@@ -466,7 +481,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           audioPath: providerAudioPath,
           videoUrl: publicVideoUrl,
           audioUrl: publicAudioUrl,
-          objectKeyPrefix: `jobs/${taskId}/face-provider`,
+          objectKeyPrefix: faceWorkflow ? `jobs/${taskId}/face-provider` : `jobs/${taskId}`,
           onLog: logProvider,
           onChunkProgress: recordChunk,
           onProviderAccepted: markProviderCommitted,
@@ -547,7 +562,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
     const finalProbe = await finalizeFaceLipsync({ jobDir, renderedPath: heygenDownloadedPath,
       audioPath: ttsResult.finalWavPath, outputPath: finalVideoPath,
-      faceWorkflow: lipsyncProvider === "veed", onLog: log });
+      faceWorkflow, onLog: log });
     ensureTaskActive();
 
     // 6. Generate an implementation-neutral production report
@@ -699,6 +714,16 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
   } catch (err: any) {
     const errorMsg = err.message || "未知流水线异常";
     logServerError("pipeline.failed", err);
+    // Quality/provider/media failures are not delivery gates. Never turn an
+    // authorization or settlement failure into a free alternative output.
+    if (!audioOnly && ["media_prep", "mcp_preflight", "mcp_lipsync_submit", "mcp_lipsync_polling", "finalize"].includes(currentStep) &&
+      !/^(BILLING_|INSUFFICIENT_|NETWORK_ERROR)/.test(err.code || "")) {
+      try {
+        if (await deliverNarrationFallback(taskId, sessionToken)) return;
+      } catch (fallbackError) {
+        logServerError("pipeline.narration_fallback_failed", fallbackError);
+      }
+    }
     log(`❌ 流程发生错误: ${errorMsg}`, "error", "处理失败，请稍后重试");
 
     // Release reserved billing credits on failure

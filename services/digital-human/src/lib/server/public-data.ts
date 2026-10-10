@@ -40,7 +40,8 @@ const PUBLIC_LOG_FALLBACK = {
 
 export function isTaskOutputDeliverable(task: TaskItem): boolean {
   if (task.status !== "completed" || isTaskOutputExpired(task)) return false;
-  return !task.billing?.isExternalUser || task.billing.status === "settled";
+  return !task.billing?.isExternalUser || task.billing.status === "settled" ||
+    task.results.deliveryMode === "narration_fallback" && task.billing.status === "released";
 }
 
 export function resolvePrivateEngine(engine: unknown): LipsyncProvider {
@@ -124,6 +125,7 @@ export function toPublicTask(task: TaskItem): PublicTaskItem {
       engine: toPublicEngine(provider),
     },
     results: {
+      deliveryMode: task.results.deliveryMode,
       downloadUrl: deliverable
         ? task.results.finalVideoUrl
           ? `/api/tasks/${encodeURIComponent(task.id)}/download/final.mp4`

@@ -694,3 +694,62 @@ test("face recovery uses padded provider duration and removes context before del
     assert.equal(result.results.faceWorkflowVersion, 1);
   } finally {s.close();}
 });
+
+test("recovery exports narration when provider output, crop composition or duration is unusable", async () => {
+  for (const failure of ["provider", "composite", "duration"]) {
+    const s = sandbox();
+    try {
+      recoveryStubs(s);
+      const {video, audio} = makeMedia(s.tmp);
+      const {TaskStore} = s.load("src/lib/store/task-store.ts");
+      const task = TaskStore.create({...baseTask(), status: "failed",
+        billing: {isExternalUser: false, status: "not_applicable"},
+        results: {heygenLipsyncId: "existing-job"}});
+      const dir = path.join(s.tmp, ".runtime/jobs", task.id);
+      fs.mkdirSync(dir, {recursive: true});
+      fs.copyFileSync(video, path.join(dir, "source-video.mp4"));
+      fs.copyFileSync(audio, path.join(dir, "voice-track.wav"));
+      if (failure !== "provider") fs.copyFileSync(video, path.join(dir, "rendered-source.mp4"));
+      if (failure === "duration") {
+        const cut = spawnSync("ffmpeg", ["-v", "error", "-y", "-i", video, "-t", "0.5", "-c", "copy", path.join(dir, "rendered-source.mp4")]);
+        assert.equal(cut.status, 0);
+      }
+      s.overrides.set("src/lib/engine/face-lipsync.ts", {finalizeFaceLipsync: async () => {
+        throw Object.assign(new Error("crop not usable"), {code: "LIPSYNC_MEDIA"});
+      }});
+      s.overrides.set("src/lib/engine/fal-veed-lipsync.ts", {FalVeedLipsyncAdapter: {
+        fetchResult: async () => ({status: "FAILED"}),
+        execute: () => assert.fail("recovery must not resubmit paid generation"),
+      }});
+      const result = await s.load("src/lib/engine/recover-lipsync.ts").recoverStuckLipsyncTask(task.id);
+      assert.equal(result.status, "completed");
+      assert.equal(result.results.deliveryMode, "narration_fallback");
+      const probe = await s.load("src/lib/engine/ffmpeg.ts").probeMedia(result.results.finalVideoUrl);
+      assert.ok(Math.abs(probe.durationSeconds - 3) < 0.1);
+      assert.equal(probe.hasAudio, true);
+      assert.equal(s.load("src/lib/server/public-data.ts").isTaskOutputDeliverable(result), true);
+    } finally {s.close();}
+  }
+});
+
+test("narration fallback cannot revive deleted, expired, audio-only or billing-blocked tasks", async () => {
+  const s = sandbox();
+  try {
+    const {TaskStore} = s.load("src/lib/store/task-store.ts");
+    const {deliverNarrationFallback} = s.load("src/lib/engine/narration-fallback.ts");
+    for (const billingStatus of ["reserving", "settle_pending", "settled", "insufficient_balance"]) {
+      const task = TaskStore.create({...baseTask(), billing: {...baseTask().billing, status: billingStatus}});
+      assert.equal(await deliverNarrationFallback(task.id), null);
+    }
+    const audio = TaskStore.create({...baseTask(), inputs: {...baseTask().inputs, outputType: "audio"}});
+    assert.equal(await deliverNarrationFallback(audio.id), null);
+    const expired = TaskStore.create({...baseTask(), completedAt: Date.now() - 4 * 86400000});
+    assert.equal(await deliverNarrationFallback(expired.id), null);
+    const deleted = TaskStore.create(baseTask());
+    TaskStore.delete(deleted.id);
+    assert.equal(await deliverNarrationFallback(deleted.id), null);
+    const missingVoice = TaskStore.create(baseTask());
+    assert.equal(await deliverNarrationFallback(missingVoice.id), null, "never fabricate narration or silently use original speech");
+    assert.equal(TaskStore.get(missingVoice.id).status, "pending");
+  } finally {s.close();}
+});

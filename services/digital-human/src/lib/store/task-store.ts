@@ -86,6 +86,7 @@ export interface TaskItem {
     lipsyncProvider?: LipsyncProvider;
   };
   results: {
+    deliveryMode?: "narration_fallback";
     originalVideoUrl?: string;
     finalVideoUrl?: string;
     exactAudioUrl?: string;

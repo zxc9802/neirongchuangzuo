@@ -5,6 +5,8 @@ import { resolveLipsyncProvider } from "../lipsync-provider";
 import { TaskItem, TaskStore } from "../store/task-store";
 import { concatVideos, probeMedia, sha256File } from "./ffmpeg";
 import { restoreFaceLipsync, finalizeFaceLipsync } from "./face-lipsync";
+import { deliverNarrationFallback } from "./narration-fallback";
+import { logServerError } from "../server/safe-log";
 import { planLipsyncChunks } from "./lipsync-chunks";
 import { withTaskExecution } from "./task-execution";
 import { downloadFileToDisk } from "./download-file";
@@ -205,6 +207,14 @@ export async function recoverStuckLipsyncTask(
     } catch (error) {
       const task = TaskStore.get(taskId);
       const errorCode = (error as { code?: string })?.code;
+      if (!/^(BILLING_|INSUFFICIENT_|NETWORK_ERROR)/.test(errorCode || "")) {
+        try {
+          const fallback = await deliverNarrationFallback(taskId, sessionToken);
+          if (fallback) return fallback;
+        } catch (fallbackError) {
+          logServerError("recovery.narration_fallback_failed", fallbackError);
+        }
+      }
       if (task?.billing?.isExternalUser && task.billing.status === "provider_committed" &&
         task.billing.source === "workspace" && errorCode === "LIPSYNC_GENERATION_FAILED" && task.userId && task.billing.requestId) {
         await releaseMainAppCredits({ userId: task.userId, requestId: task.billing.requestId, source: task.billing.source, sessionToken });
@@ -227,7 +237,8 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
   if (
     task.status === "completed" &&
     (task.results?.finalVideoUrl || task.inputs.outputType === "audio" && task.results?.exactAudioUrl) &&
-    (!task.billing?.isExternalUser || task.billing.status === "settled")
+    (!task.billing?.isExternalUser || task.billing.status === "settled" ||
+      task.results.deliveryMode === "narration_fallback" && task.billing.status === "released")
   ) {
     return task;
   }

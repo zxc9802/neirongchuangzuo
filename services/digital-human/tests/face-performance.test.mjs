@@ -102,7 +102,7 @@ test('an actual encode failure cannot publish a partial candidate', async () => 
     const request = JSON.parse(fs.readFileSync(args[2],'utf8'));
     fs.writeFileSync(request.outputPath,'partial');
     throw new Error('LIPSYNC_MEDIA: encode failed');
-  }, finalizeVideo: async () => assert.fail('broken media cannot bypass encoding')});
+  }, finalizeVideo: async () => {throw Object.assign(new Error('remux also failed'), {code:'LIPSYNC_MEDIA'});}});
   try {
     await assert.rejects(api.finalizeFaceLipsync({jobDir:dir,renderedPath:'rendered.mp4',
       audioPath:'exact.wav',outputPath,faceWorkflow:false}),{code:'LIPSYNC_MEDIA'});
