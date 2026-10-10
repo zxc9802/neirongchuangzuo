@@ -30,9 +30,9 @@ test('real price wording matches ASR Arabic digits without changing prices or cu
     recognized.replace('8块9', '8块8'),
     recognized.replace('6块钱', '6元钱'),
     recognized.replace('6块钱', '6块'),
-    recognized.replace('甚至连', '甚至'),
     recognized + '不要9块9。',
   ]) assert.throws(() => alignmentSegments(timeline(confirmed), timeline(wrong)), { code: 'VIDEO_SPEECH_INVALID' });
+  assert.equal(alignmentSegments(timeline(confirmed), timeline(recognized.replace('甚至连', '甚至'))).length, 1);
 });
 
 test('digit aliases preserve ASR word and segment boundaries during alignment', () => {

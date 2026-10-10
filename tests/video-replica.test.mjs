@@ -133,6 +133,31 @@ test('a replacement video invalidates voice analysis and failed result verificat
   assert.equal((await app.wallet.snapshot('alice')).available, 1000); assert.equal(app.state.generations, 1);
 });
 
+test('minor ASR differences deliver a real result and settle once without concealing either verification stage', async t => {
+  const text = '这款饼干又薄又脆打开包装就能闻到浓浓的香味吃起来清爽可口适合大家分享真的超级好吃';
+  const minor = text.replace('包装', '包妆').replace('香味', '香卫');
+  const timeline = value => ({ ...SPEECH, text: value, segments: [{ ...SPEECH.segments[0], text: value,
+    words: [{ word: value, start: 1.25, end: 3.5 }] }] });
+  for (const [raw, aligned] of [[minor, text], [text, minor], [minor, minor]]) await t.test(`${raw === text ? 'exact' : 'minor'} raw, ${aligned === text ? 'exact' : 'minor'} aligned`, async t => {
+    const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+      speech: fakeSpeech({ analyze: async path => timeline(path.endsWith('source.mp4') ? text : path.endsWith('generated.mp4') ? raw : aligned),
+        align: async (_source, output, original, generated) => { alignmentSegments(original, generated); await writeFile(output, VIDEO); return { transcriptMatched: true }; } }) });
+    const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+    await app.call(`/tasks/${id}/analyze`, { body: {} });
+    await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+    const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+    assert.equal(completed.audioCheck.transcriptMatched, false);
+    assert.equal(completed.audioCheck.transcriptDifferences, 2);
+    assert.equal(completed.audioCheck.afterOffsetMs, 0);
+    assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+    assert.equal(completed.billing.chargedPoints, 45);
+    await app.close(); await app.open();
+    assert.equal((await app.current(id)).status, 'completed');
+    assert.equal((await app.wallet.snapshot('alice')).available, 955);
+    assert.equal(app.state.generations, 1);
+  });
+});
+
 test('voice analysis rejects silence, unaligned words, rewritten scripts and excessive speed changes', () => {
   assert.throws(() => speechTimeline({ words: SPEECH.segments[0].words }, [], 4), /未识别/);
   assert.throws(() => speechTimeline({ words: [{ word: '你好', start: 1, end: 0 }] }, [{ start: 1, end: 2 }], 4), /时间戳/);

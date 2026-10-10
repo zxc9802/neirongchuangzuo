@@ -18,6 +18,33 @@ export const speechText = text => String(text || '').normalize('NFKC').toLowerCa
   return '';
 });
 const invalid = message => new VideoError(message, 422, 'VIDEO_SPEECH_INVALID');
+export function compareSpeech(expectedText, actualText) {
+  const expected = Array.from(speechText(expectedText)), actual = Array.from(speechText(actualText));
+  if (expected.join('') === actual.join('')) return { exact: true, accepted: true, differences: 0, mapping: expected.map((_, index) => index) };
+  const limit = Math.min(2, Math.floor(expected.length * 0.05));
+  const numbers = characters => characters.join('').match(/[+-]?(?:\d+(?:\.\d+)?|[两十百千万亿]+)[\d两十百千万亿块元角分钱%倍年月日秒斤克]*/g) || [];
+  if (Math.abs(expected.length - actual.length) > limit || JSON.stringify(numbers(expected)) !== JSON.stringify(numbers(actual))) {
+    return { exact: false, accepted: false, differences: null };
+  }
+  const rows = [Uint16Array.from({ length: actual.length + 1 }, (_, index) => index)];
+  for (let i = 1; i <= expected.length; i++) {
+    const row = new Uint16Array(actual.length + 1); row[0] = i;
+    for (let j = 1; j <= actual.length; j++) row[j] = Math.min(rows[i - 1][j] + 1, row[j - 1] + 1,
+      rows[i - 1][j - 1] + (expected[i - 1] === actual[j - 1] ? 0 : 1));
+    rows.push(row);
+    if (Math.min(...row) > limit) return { exact: false, accepted: false, differences: null };
+  }
+  const differences = rows[expected.length][actual.length];
+  if (differences > limit) return { exact: false, accepted: false, differences };
+  const mapping = Array(expected.length).fill(null);
+  let i = expected.length, j = actual.length;
+  while (i || j) {
+    if (i && j && rows[i][j] === rows[i - 1][j - 1] + (expected[i - 1] === actual[j - 1] ? 0 : 1)) mapping[--i] = --j;
+    else if (i && rows[i][j] === rows[i - 1][j] + 1) i--;
+    else j--;
+  }
+  return { exact: false, accepted: true, differences, mapping };
+}
 export function speechConfig(env = {}) {
   const prefix = env.VIDEO_TRANSCRIPTION_API_KEY ? 'VIDEO_TRANSCRIPTION' : env.MOTION_API_KEY ? 'MOTION' : 'INDEXTTS';
   return { key: env[`${prefix}_API_KEY`] || env.INDEXTTS_302_API_KEY,
@@ -155,13 +182,20 @@ export function createSpeechService(env = {}, fetchImpl = fetch) {
   return { enabled: Boolean(config.key), analyze, detect: path => detectSpeech(path, config), align: alignSpeech };
 }
 export function alignmentSegments(original, generated) {
-  if (speechText(original.text) !== speechText(generated.text)) throw invalid('成片识别结果与确认台词不一致，未交付成片；请核对台词后重新检查。');
+  const comparison = compareSpeech(original.text, generated.text);
+  if (!comparison.accepted) throw invalid('成片识别结果与确认台词差异过大或数字有变化，未交付成片；请核对台词后重新检查。');
   const words = generated.segments.flatMap(segment => segment.words);
-  let position = 0, index = 0;
+  let wordPosition = 0;
+  const wordEnds = words.map(word => wordPosition += Array.from(speechText(word.word)).length);
+  let position = 0, previousEnd = -1;
   return original.segments.map(segment => {
-    const begin = index, target = position + speechText(segment.text).length;
-    while (index < words.length && position < target) position += speechText(words[index++].word).length;
-    if (position !== target || index === begin) throw invalid('台词分段无法精确匹配，未交付成片。');
+    const target = position + Array.from(speechText(segment.text)).length;
+    const mapped = comparison.mapping.slice(position, target).filter(index => index !== null);
+    position = target;
+    const begin = mapped.length ? wordEnds.findIndex(end => end > mapped[0]) : -1;
+    const index = mapped.length ? wordEnds.findIndex(end => end > mapped.at(-1)) + 1 : 0;
+    if (begin < 0 || index <= begin || begin <= previousEnd) throw invalid('台词分段缺失或无法精确匹配，未交付成片。');
+    previousEnd = index - 1;
     const start = words[begin].start, end = words[index - 1].end;
     const interval = generated.segments.find(item => item.words.includes(words[begin]));
     const last = generated.segments.find(item => item.words.includes(words[index - 1]));
@@ -177,6 +211,7 @@ export function alignmentSegments(original, generated) {
 }
 export async function alignSpeech(video, output, original, generated, duration) {
   const segments = alignmentSegments(original, generated);
+  const comparison = compareSpeech(original.text, generated.text);
   const rate = 48000, track = Buffer.alloc(Math.ceil(duration * rate) * 4), pcm = output + '.aligned.pcm';
   try {
     for (const segment of segments) {
@@ -194,5 +229,6 @@ export async function alignSpeech(video, output, original, generated, duration) 
       '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-f', 'mp4', output], { timeout: 60_000 });
   } finally { await rm(pcm, { force: true }); }
   return { originalStart: original.start, generatedStart: generated.start,
-    beforeOffsetMs: Math.round((generated.start - original.start) * 1000), corrected: true, transcriptMatched: true };
+    beforeOffsetMs: Math.round((generated.start - original.start) * 1000), corrected: true,
+    transcriptMatched: comparison.exact, transcriptDifferences: comparison.differences };
 }

@@ -5,7 +5,7 @@ import { createRequestLedger } from '../ai/request-ledger.mjs';
 import { calculateCredits } from '../credits/store.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, DURATIONS, PROMPT } from './provider.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, muteVideo, downloadVideo, serveMedia } from './media.mjs';
-import { createSpeechService, confirmSpeech, normalizeVoice, speechText, VOICE_LIMIT } from './speech.mjs';
+import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
@@ -172,14 +172,17 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const check = await speech.align(generated, aligned, task.speech, timeline, task.actualDuration);
       task.verificationStage = 'aligned'; await save(task);
       const verified = await speech.analyze(aligned, task.actualDuration, { diagnosticsPath: join(folder(task), 'verification-aligned.json') });
-      if (speechText(verified.text) !== speechText(task.speech.text)
+      const rawComparison = compareSpeech(task.speech.text, timeline.text), comparison = compareSpeech(task.speech.text, verified.text);
+      if (!rawComparison.accepted || !comparison.accepted
         || verified.segments.length !== task.speech.segments.length
         || verified.segments.some((segment, index) => Math.abs(segment.start - task.speech.segments[index].start) > 0.1 || Math.abs(segment.end - task.speech.segments[index].end) > 0.1)) {
         throw error('校正后的声音仍未通过台词和时间检查，未交付成片，预留积分将退回。', 422, 'VIDEO_SPEECH_INVALID');
       }
       const metadata = await probe(aligned);
       if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw error('声音校正后的成片无效。', 502, 'VIDEO_RESULT_INVALID');
-      task.audioCheck = { ...check, afterOffsetMs: Math.round((verified.start - task.speech.start) * 1000), lipSync: 'needs_preview' };
+      task.audioCheck = { ...check, transcriptMatched: rawComparison.exact && comparison.exact,
+        transcriptDifferences: Math.max(rawComparison.differences, comparison.differences),
+        afterOffsetMs: Math.round((verified.start - task.speech.start) * 1000), lipSync: 'needs_preview' };
       await rename(aligned, file(task, 'result')); await complete(task);
     }
   }
