@@ -355,28 +355,32 @@ def sync_scores(video, audio, face_track=None, model=None):
 
 
 def choose_delay(rows):
-    if not rows or any(r["confidence"] < 3 or abs(r["delayMs"]) >= 200 for r in rows):
-        raise QualityError("Speech/lip alignment is not reliable enough", "LIPSYNC_ALIGNMENT")
-    delays = [r["delayMs"] for r in rows]
-    if max(delays) - min(delays) > 40:
-        raise QualityError("Lip timing varies between speech sections", "LIPSYNC_ALIGNMENT")
-    # Center the accepted one-frame range to minimize the worst section error;
-    # do not favor a majority window at the expense of the remaining words.
-    return float((max(delays) + min(delays)) / 2)
+    # Uncertain windows are not proof of bad sync. Use a robust consensus to
+    # calibrate the clip; without enough evidence, preserve its existing timing.
+    delays = [r["delayMs"] for r in rows if r["confidence"] >= 3 and abs(r["delayMs"]) < 200]
+    if not delays or len(delays) < len(rows) * 0.6:
+        return None
+    median = float(np.median(delays))
+    agreeing = [d for d in delays if abs(d - median) <= 40]
+    if len(agreeing) < len(delays) * 0.8:
+        return None
+    return float(np.median(agreeing))
 
 
 def align(req):
     started = time.perf_counter()
     video, audio, output = req["videoPath"], req["audioPath"], req["outputPath"]
-    model = load_syncnet()
+    report = {"version": 2, "before": [], "after": [], "warnings": []}
+    info = probe(video)
+    model, data = None, None
     try:
+        model = load_syncnet()
         manifest_path = Path(req["jobDir"]) / "face-manifest.json"
         if manifest_path.exists():
             # Prepare already checked every native source frame. Composite
             # preserves those frames and changes only the registered mouth.
             # Reuse their positions; both complete AV measurements still run.
             manifest = json.loads(manifest_path.read_text())
-            info = probe(video)
             data = np.array(manifest["track"], dtype=float)
             if (manifest["version"] != 1 or data.ndim != 2 or data.shape[1] != 14 or
                     not np.all(np.isfinite(data)) or len(data) < math.floor(info["duration"] * FPS) or
@@ -386,12 +390,18 @@ def align(req):
             data[:, 1::2] *= info["height"] / manifest["source"]["height"]
         else:
             info, data = track(video)
-    except QualityError as error:
-        raise QualityError(str(error), "LIPSYNC_ALIGNMENT") from error
-    report = {"version": 1, "before": sync_scores(video, audio, (info, data), model)}
+        report["before"] = sync_scores(video, audio, (info, data), model)
+    except Exception as error:
+        # Measurement is advisory. Actual media encoding errors below still
+        # propagate; a missing model or ambiguous face must not lose a render.
+        report["warnings"].append(f"Initial measurement unavailable: {error}")
+        data = None
     measured_before = time.perf_counter()
-    (Path(req["jobDir"]) / "face-sync-report.json").write_text(json.dumps(report, indent=2))
     delay = choose_delay(report["before"])
+    report["calibrationStatus"] = "measured" if delay is not None else "unchanged"
+    if delay is None:
+        report["warnings"].append("No reliable global offset; kept original timing")
+        delay = 0
     # Never remove original narration to advance audio: hold the first video
     # frame instead. No speed changes, frame-by-frame time warp or spoken trim.
     video_pad, audio_pad = max(0, -delay / 1000), max(0, delay / 1000)
@@ -404,22 +414,26 @@ def align(req):
     after_info = probe(output)
     encoded = time.perf_counter()
     if (after_info["width"], after_info["height"]) != (info["width"], info["height"]):
-        raise QualityError("Encoded candidate changed frame geometry", "LIPSYNC_ALIGNMENT")
+        raise QualityError("Encoded candidate changed frame geometry", "LIPSYNC_MEDIA")
     # Encoding changes mouth pixels, not face position. Reuse the validated
     # full-clip track with the exact cloned-frame prefix; both SyncNet passes
     # still decode their own video/audio and measure every speech window.
-    padded_data = np.concatenate([np.repeat(data[:1], round(video_pad * FPS), axis=0), data])
-    report.update({"appliedDelayMs": delay, "after": sync_scores(output, output, (after_info, padded_data), model)})
+    if data is not None:
+        try:
+            padded_data = np.concatenate([np.repeat(data[:1], round(video_pad * FPS), axis=0), data])
+            report["after"] = sync_scores(output, output, (after_info, padded_data), model)
+        except Exception as error:
+            report["warnings"].append(f"Final measurement unavailable: {error}")
+    residual = choose_delay(report["after"])
+    report.update({"appliedDelayMs": delay, "residualDelayMs": residual})
+    if residual is None or abs(residual) > 40:
+        report["warnings"].append("Final sync measurement is inconclusive or locally inconsistent")
     measured_after = time.perf_counter()
     report["timingsSeconds"] = {"measureBefore": round(measured_before - started, 3),
                                "encode": round(encoded - measured_before, 3),
                                "measureAfter": round(measured_after - encoded, 3),
                                "total": round(measured_after - started, 3)}
     (Path(req["jobDir"]) / "face-sync-report.json").write_text(json.dumps(report, indent=2))
-    residual = choose_delay(report["after"])
-    if abs(residual) > 40:
-        Path(output).unlink(missing_ok=True)
-        raise QualityError("Alignment check failed after muxing", "LIPSYNC_ALIGNMENT")
     return report
 
 

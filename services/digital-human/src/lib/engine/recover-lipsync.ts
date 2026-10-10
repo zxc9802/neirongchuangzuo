@@ -73,7 +73,7 @@ export function extractPixverseJobId(task: TaskItem): string | null {
 }
 
 export function isRecoverableLipsyncTask(task: TaskItem): boolean {
-  if (isTaskOutputExpired(task) || task.errorCode === "LIPSYNC_ALIGNMENT") return false;
+  if (isTaskOutputExpired(task)) return false;
   if (task.billing?.isExternalUser && task.billing.status === "released") return false;
   if (
     task.status === "completed" &&
@@ -206,7 +206,7 @@ export async function recoverStuckLipsyncTask(
       const task = TaskStore.get(taskId);
       const errorCode = (error as { code?: string })?.code;
       if (task?.billing?.isExternalUser && task.billing.status === "provider_committed" &&
-        (errorCode === "LIPSYNC_ALIGNMENT" || task.billing.source === "workspace" && errorCode === "LIPSYNC_GENERATION_FAILED") && task.userId && task.billing.requestId) {
+        task.billing.source === "workspace" && errorCode === "LIPSYNC_GENERATION_FAILED" && task.userId && task.billing.requestId) {
         await releaseMainAppCredits({ userId: task.userId, requestId: task.billing.requestId, source: task.billing.source, sessionToken });
         TaskStore.update(taskId, { billing: { ...task.billing, status: "released" } });
       }
@@ -223,9 +223,6 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     throw new Error("任务不存在");
   }
   if (isTaskOutputExpired(task)) throw new Error("成品已超过 3 天保留期");
-  if (task.errorCode === "LIPSYNC_ALIGNMENT") {
-    throw Object.assign(new Error("口型未通过检查，恢复同一份成片无法修复"), { code: "LIPSYNC_ALIGNMENT" });
-  }
 
   if (
     task.status === "completed" &&
@@ -351,7 +348,7 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
   await verifyVideoDuration(rawPath, providerDuration);
   const jobId = chunks.map(chunk => chunk.lipsyncId).filter(Boolean).join(",");
 
-  log("正在校准口型并复核最终成片...");
+  log("正在校准口型并合成最终成片...");
   const finalProbe = await finalizeFaceLipsync({ jobDir, renderedPath: rawPath, audioPath,
     outputPath: finalPath, faceWorkflow, onLog: log });
   await verifyVideoDuration(finalPath, audioProbe.durationSeconds);
@@ -367,7 +364,7 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     created_at: new Date().toISOString(),
     recovered: true,
     script_text: task.inputs.scriptText,
-    processing: { status: "completed", recovered: true, lipsync_checked: true },
+    processing: { status: "completed", recovered: true, lipsync_calibration: "best_effort" },
     media: {
       video: {
         final_duration_seconds: finalProbe.durationSeconds,

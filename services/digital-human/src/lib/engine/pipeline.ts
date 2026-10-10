@@ -540,7 +540,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       step: "finalize",
       progress: 85,
     });
-    log("🎧 第五步: 正在校准口型并检查最终成片...", "info", "正在校准口型并检查最终成片");
+    log("🎧 第五步: 正在校准口型并合成最终成片...", "info", "正在校准口型并合成最终成片");
 
     const heygenDownloadedPath = path.join(jobDir, "rendered-source.mp4");
     const finalVideoPath = path.join(jobDir, "final.mp4");
@@ -575,7 +575,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           sha256: sha256Audio,
         },
       },
-      processing: { status: "completed", lipsync_checked: true },
+      processing: { status: "completed", lipsync_calibration: "best_effort" },
     };
 
     const evidencePath = path.join(jobDir, "production-report.json");
@@ -708,7 +708,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       currentTaskData.billing.requestId &&
       (currentTaskData.billing.status === "reserved" ||
         (currentTaskData.billing.status === "provider_committed" &&
-          (err.code === "LIPSYNC_ALIGNMENT" || currentTaskData.billing.source === "workspace" && err.code === "LIPSYNC_GENERATION_FAILED")))
+          currentTaskData.billing.source === "workspace" && err.code === "LIPSYNC_GENERATION_FAILED"))
     ) {
       try {
         await releaseMainAppCredits({

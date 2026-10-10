@@ -350,7 +350,7 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
   try {
-    for (const scenario of ["quality-failure", "success", "unlimited-success", "unlimited-audio", "confirmed-failure", "uncertain", "submit-uncertain", "settlement-pending"]) {
+    for (const scenario of ["quality-uncertain", "success", "unlimited-success", "unlimited-audio", "confirmed-failure", "uncertain", "submit-uncertain", "settlement-pending"]) {
       const userId = `pipeline-${scenario}`;
       const exempt = scenario.startsWith("unlimited-");
       const audioOnly = scenario === "unlimited-audio";
@@ -378,7 +378,7 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
         "./face-lipsync": {
           prepareFaceLipsync: async options => ({videoPath: source, audioPath: options.audioPath, durationSeconds: 30.9}),
           finalizeFaceLipsync: async options => {
-            if (scenario === "quality-failure") throw Object.assign(new Error("low sync confidence"), {code: "LIPSYNC_ALIGNMENT"});
+            if (scenario === "quality-uncertain") options.onLog?.("部分片段测量不确定，成片正常交付");
             fs.writeFileSync(options.outputPath, "fixture"); return probe;
           },
         },
@@ -412,14 +412,14 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
       }, module, module.exports);
       await module.exports.runDigitalHumanPipeline(task.id);
       const wallet = await ledger.snapshot(userId);
-      if (["success", "unlimited-success", "unlimited-audio"].includes(scenario)) {
+      if (["success", "quality-uncertain", "unlimited-success", "unlimited-audio"].includes(scenario)) {
         assert.equal(task.status, "completed");
         assert.equal(task.billing.status, "settled");
         assert.equal(task.results.chargedPoints, exempt ? 0 : 333);
         assert.equal(task.billing.chargedPoints, exempt ? 0 : 333);
         assert.equal(wallet.available, exempt ? 1000 : 667); assert.equal(wallet.held, 0);
         assert.equal(publicData.toPublicTask(task).billing.exempt, exempt);
-      } else if (scenario === "confirmed-failure" || scenario === "quality-failure") {
+      } else if (scenario === "confirmed-failure") {
         assert.equal(task.billing.status, "released");
         assert.equal(wallet.available, 1000); assert.equal(wallet.held, 0);
       } else {

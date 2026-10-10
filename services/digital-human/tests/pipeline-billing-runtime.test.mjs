@@ -36,7 +36,7 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       const generated = spawnSync("ffmpeg", ["-v", "error", ...args], {encoding: "utf8"});
       assert.equal(generated.status, 0, generated.stderr);
     }
-    for (const scenario of ["alignment-failure", "face-input-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
+    for (const scenario of ["alignment-uncertain", "face-input-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
       const audioOnly = scenario.startsWith("audio-");
       const events = [];
       globalThis.fetch = async (url, init) => {
@@ -84,7 +84,7 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
           },
           finalizeFaceLipsync: async options => {
             events.push({stage: "alignment"});
-            if (scenario === "alignment-failure") throw Object.assign(new Error("low sync confidence"), {code: "LIPSYNC_ALIGNMENT"});
+            if (scenario === "alignment-uncertain") options.onLog?.("部分片段测量不确定，成片正常交付");
             fs.writeFileSync(options.outputPath, "fixture");
             return {durationSeconds: duration, width: 160, height: 120, fps: 30};
           },
@@ -120,14 +120,14 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       }, module, module.exports);
       await module.exports.runDigitalHumanPipeline(scenario, "fake");
       if (audioOnly) assert.equal(events.some(e => e.stage === "lipsync"), false, "audio must never submit paid lip-sync");
-      if (scenario === "alignment-failure" || scenario === "face-input-failure") {
+      if (scenario === "face-input-failure") {
         assert.equal(task.status, "failed", `${scenario}: unreliable mouth movement must never be delivered`);
-        assert.equal(task.errorCode, scenario === "alignment-failure" ? "LIPSYNC_ALIGNMENT" : "LIPSYNC_FACE_INPUT");
+        assert.equal(task.errorCode, "LIPSYNC_FACE_INPUT");
         assert.equal(events.some(e => e.action === "settle"), false, "failed quality must not settle success credits");
         assert.equal(isTaskOutputDeliverable(task), false);
         assert.equal(task.results.finalVideoUrl, undefined);
         assert.equal(task.billing.status, "released");
-        assert.equal(events.some(e => e.stage === "lipsync"), scenario === "alignment-failure");
+        assert.equal(events.some(e => e.stage === "lipsync"), false);
       } else if (scenario.endsWith("under-reserved") || scenario === "preserve-failure" || scenario === "setup-failure") {
         assert.equal(events.some(e => e.stage === "lipsync"), false, scenario);
         assert.equal(task.status, "failed", scenario);

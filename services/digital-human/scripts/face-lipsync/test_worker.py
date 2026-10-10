@@ -143,7 +143,7 @@ class FaceWorkflowTests(unittest.TestCase):
             np.testing.assert_array_equal(measured[1][2][1][:2], np.repeat(data[:1], 2, axis=0))
             np.testing.assert_array_equal(measured[1][2][1][2:], data)
 
-    def test_encoded_candidate_alignment_failure_still_removes_deliverable(self):
+    def test_encoded_candidate_uncertainty_does_not_remove_deliverable(self):
         data = np.ones((60, 14))
         info = {"width":640, "height":480, "duration":2}
         with tempfile.TemporaryDirectory() as directory:
@@ -152,9 +152,30 @@ class FaceWorkflowTests(unittest.TestCase):
                  patch("worker.sync_scores", side_effect=[[{"delayMs":0,"confidence":5}], [{"delayMs":80,"confidence":5}]]), \
                  patch("worker.probe", return_value=info), \
                  patch("worker.ffmpeg", side_effect=lambda args:Path(args[-1]).touch()):
-                with self.assertRaises(QualityError):
-                    worker.align({"videoPath":"video.mp4", "audioPath":"voice.wav", "outputPath":output, "jobDir":directory})
-            self.assertFalse(Path(output).exists())
+                report = worker.align({"videoPath":"video.mp4", "audioPath":"voice.wav", "outputPath":output, "jobDir":directory})
+            self.assertTrue(Path(output).exists())
+            self.assertEqual(report["residualDelayMs"],80)
+
+    def test_one_uncertain_window_does_not_block_long_clip_calibration(self):
+        # The reported 63-second job: 62 windows agree on 40 ms, one on 80 ms;
+        # one of the 40 ms windows has confidence 2.35 rather than >= 3.
+        rows = [{"delayMs":40,"confidence":6} for _ in range(63)]
+        rows[1]["confidence"] = 2.35
+        rows[21]["delayMs"] = 80
+        self.assertEqual(choose_delay(rows),40)
+
+    def test_measurement_failure_still_encodes_complete_narration(self):
+        info = {"width":640,"height":480,"duration":2}
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory)/"candidate.mp4")
+            with patch("worker.load_syncnet",side_effect=RuntimeError("model unavailable")), \
+                 patch("worker.probe",return_value=info), \
+                 patch("worker.ffmpeg",side_effect=lambda args:Path(args[-1]).touch()) as encoded:
+                report = worker.align({"videoPath":"video.mp4","audioPath":"voice.wav","outputPath":output,"jobDir":directory})
+            self.assertTrue(Path(output).exists())
+            self.assertEqual(report["appliedDelayMs"],0)
+            self.assertTrue(report["warnings"])
+            self.assertIn("voice.wav",encoded.call_args.args[0])
 
     def test_mouth_roi_matches_full_crop_math_pixel_for_pixel(self):
         rng = np.random.default_rng(37)
@@ -212,7 +233,7 @@ class FaceWorkflowTests(unittest.TestCase):
             self.assertEqual(choose_delay([{"delayMs": value, "confidence": 5}] * 3), value)
         for low, high in [(-40, 0), (0, 40), (80, 120)]:
             rows = [{"delayMs": value, "confidence": 5} for value in [low, high, high]]
-            self.assertEqual(choose_delay(rows), (low + high) / 2)
+            self.assertEqual(choose_delay(rows), high)
 
     def test_frame_registration_uses_one_offset_and_rejects_local_speed_changes(self):
         source = np.random.default_rng(7).uniform(0, 255, (100, 12, 32, 3)).astype(np.float32)
@@ -223,12 +244,11 @@ class FaceWorkflowTests(unittest.TestCase):
         with self.assertRaises(QualityError):
             frame_offset(source, warped, 18)
 
-    def test_local_speed_mismatch_and_uncertain_match_are_not_global_offsets(self):
+    def test_local_speed_mismatch_and_uncertain_match_do_not_guess_global_offsets(self):
         for rows in [[], [{"delayMs": 0, "confidence": 1}],
                      [{"delayMs": 200, "confidence": 8}],
                      [{"delayMs": 0, "confidence": 5}, {"delayMs": 120, "confidence": 6}]]:
-            with self.assertRaises(QualityError):
-                choose_delay(rows)
+            self.assertIsNone(choose_delay(rows))
 
     def test_composite_registers_against_exact_provider_input_not_rescaled_base(self):
         source = np.random.default_rng(9).uniform(0, 255, (60, 12, 32, 3)).astype(np.float32)

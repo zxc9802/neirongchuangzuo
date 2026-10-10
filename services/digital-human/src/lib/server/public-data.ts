@@ -25,7 +25,7 @@ const PUBLIC_ERRORS: Record<string, string> = {
   BILLING_SETTLEMENT_FAILED: "结果已生成，积分结算暂未完成，请稍后恢复任务",
   LIPSYNC_FACE_INPUT: "人脸不够清晰或画面中出现多人，请使用正面、单人、脸部清晰的口播素材",
   LIPSYNC_INPUT_DURATION: "配音过短，无法可靠检查口型，请增加一些文案",
-  LIPSYNC_ALIGNMENT: "口型与配音未通过同步检查，成片未交付，请更换更清晰的正面口播素材",
+  LIPSYNC_ALIGNMENT: "旧版同步检查中断了成片交付，请联系管理员恢复已有结果",
   LIPSYNC_MEDIA: "口型画面时长或位置异常，成片未交付，请联系管理员检查",
   LIPSYNC_RUNTIME: "口型检查服务暂时不可用，请稍后恢复任务或联系管理员",
   MEDIA_FIT_MISMATCH: "素材视频长于配音，请选择智能适配后重试",
@@ -72,7 +72,6 @@ export function toPublicTask(task: TaskItem): PublicTaskItem {
   const deliverable = isTaskOutputDeliverable(task);
   const recoverable = Boolean(
     !deliverable &&
-      task.errorCode !== "LIPSYNC_ALIGNMENT" &&
       !isTaskOutputExpired(task) &&
       task.billing?.status !== "released" &&
       (task.results.finalVideoUrl ||

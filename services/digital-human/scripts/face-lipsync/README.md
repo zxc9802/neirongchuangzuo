@@ -1,7 +1,7 @@
 # VEED face workflow
 
 New VEED video tasks use the source-resolution face workflow. All video
-providers and recovered video tasks must pass the final encoded-output check.
+providers and recovered video tasks use advisory timing calibration.
 MP3-only tasks are unchanged. There is no automatic paid regeneration.
 
 1. Prepare the full-frame 30 fps base as before. Independently track the face in
@@ -18,16 +18,20 @@ MP3-only tasks are unchanged. There is no automatic paid regeneration.
 4. Compare background motion to establish one fixed frame offset. Remove the
    leading context and composite a feathered mouth region into the original
    frame. Reject unstable frame correspondence; never retime individual frames.
-5. Measure AV alignment in overlapping speech windows using SyncNet. A reliable
-   consistent offset may move the audio or pad the video start; original speech
-   is never trimmed or accelerated. Measure the encoded candidate again before
-   renaming it to `final.mp4`. Low confidence, inconsistent section offsets or
-   processing failures leave the task failed and its provider identity intact.
+5. Measure AV alignment in overlapping speech windows using SyncNet. Use the
+   median reliable offset when at least 60% of windows are measurable and 80%
+   of those agree within 40 ms. Move audio or pad the video start; original speech
+   is never trimmed or accelerated. Measure the encoded candidate again for the
+   private report. Uncertain scores never prevent delivery. If calibration is
+   unavailable or inconsistent, retain the existing timing and complete audio.
+   Actual decoding, compositing and encoding failures still require recovery.
 
 The score is an engineering check, not a guarantee of perceptual quality. It
 requires at least 1.2 seconds of narration and has 40 ms temporal resolution,
 a +/-200 ms search range and a confidence floor
-of 3. These conservative limits are validated on the reported short sample;
+of 3. Confidence is used to select calibration evidence, not to reject a clip.
+The 63-second regression had one ambiguous window but a stable 40 ms offset;
+the former all-windows gate incorrectly rejected the entire video.
 larger poses, occlusion, different voices and long/chunked clips need further
 acceptance footage. Existing 90-second provider chunking is unchanged; padding
 is applied to the utterance, not separately to every provider chunk.
@@ -63,11 +67,11 @@ npm run build
 
 `tests/pipeline-billing-runtime.test.mjs` checks that the actual pipeline uses
 the original source for preparation, submits transformed inputs and finalizes
-through compositing/alignment; failures cannot settle or expose a deliverable.
+through compositing/alignment and preserves billing on actual media failures.
 `tests/bug-regressions.test.mjs` checks padded-duration recovery, the shared
 finalizer and preservation of existing provider work without resubmission.
 Python checks cover native crop bounds, rejection of low-resolution input,
-sample-exact PCM padding and constant versus locally inconsistent offsets.
+sample-exact PCM padding, robust offsets and non-blocking uncertainty.
 
 To measure a private video without sending it to a provider, save a JSON file
 with absolute `videoPath` and `audioPath` fields (both may point to the video),

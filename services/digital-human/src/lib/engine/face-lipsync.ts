@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { CosService } from "../cos";
 import { downloadTrustedMediaToFile } from "../server/media-response";
-import { execMediaCommand, probeMedia } from "./ffmpeg";
+import { execMediaCommand, finalizeVideo, probeMedia } from "./ffmpeg";
 
 // Serialize CPU inference in this server process; concurrent tasks must not each
 // allocate a model and starve the web server. The worker streams video frames.
@@ -95,7 +95,7 @@ export async function finalizeFaceLipsync(params: {
   onLog?: (message: string) => void;
   faceWorkflow?: boolean;
 }) {
-  // Publish only after both compositing and the final AV measurement succeed.
+  // Calibration improves timing when measurable; it is not a delivery gate.
   const candidate = path.join(params.jobDir, "face-final-candidate.mp4");
   try {
     let videoPath = params.renderedPath;
@@ -104,12 +104,19 @@ export async function finalizeFaceLipsync(params: {
       params.onLog?.(`嘴部合成完成，用时 ${composite.elapsedSeconds} 秒，正在校准配音时间...`);
       videoPath = path.join(params.jobDir, "face-composited.mp4");
     }
-    const alignment = await runWorker("align", {
-      ...params,
-      videoPath,
-      outputPath: candidate,
-    }, params.jobDir);
-    params.onLog?.(`口型校准通过：初次测量 ${alignment.timingsSeconds.measureBefore} 秒、成片编码 ${alignment.timingsSeconds.encode} 秒、成片复核 ${alignment.timingsSeconds.measureAfter} 秒`);
+    try {
+      const alignment = await runWorker("align", {
+        ...params,
+        videoPath,
+        outputPath: candidate,
+      }, params.jobDir);
+      params.onLog?.(`口型校准完成：调整 ${alignment.appliedDelayMs} 毫秒${alignment.warnings?.length ? "，部分片段测量不确定，成片正常交付" : ""}`);
+    } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code !== "LIPSYNC_ALIGNMENT" && code !== "LIPSYNC_RUNTIME") throw error;
+      params.onLog?.("口型时间测量暂不可用，保留合成画面和完整配音继续交付");
+      await finalizeVideo(videoPath, params.audioPath, candidate);
+    }
     fs.renameSync(candidate, params.outputPath);
     return await probeMedia(params.outputPath);
   } finally {

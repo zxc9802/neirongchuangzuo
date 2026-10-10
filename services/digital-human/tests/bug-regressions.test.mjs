@@ -613,7 +613,7 @@ test("B11: voice fallback handles deleting the last item, another item and a fai
   }
 });
 
-test("lip-sync quality failure cannot be published or bypassed by recovering a cloud final", async () => {
+test("a legacy alignment rejection can recover already rendered video without resubmission", async () => {
   for (const faceWorkflow of [false, true]) {
     const s = sandbox();
     try {
@@ -624,15 +624,15 @@ test("lip-sync quality failure cannot be published or bypassed by recovering a c
         restoreFaceLipsync: async () => {events.push("restore-mapping"); return 3;},
         finalizeFaceLipsync: async options => {
           assert.equal(options.faceWorkflow, faceWorkflow);
-          events.push("quality-check");
-          throw Object.assign(new Error("locally inconsistent mouth timing"), {code: "LIPSYNC_ALIGNMENT"});
+          events.push("calibration");
+          return s.load("src/lib/engine/ffmpeg.ts").finalizeVideo(video,options.audioPath,options.outputPath);
         },
       });
       s.overrides.set("src/lib/cos.ts", { CosService: {
         isConfigured: () => true, saveJsonToCos: async () => {},
         objectExists: async key => {events.push(key); return key.endsWith("final.mp4") || key.endsWith("rendered-source.mp4");},
         getDownloadUrl: async key => `https://storage.example.test/${key}`,
-        uploadFile: async () => assert.fail("failed quality must never upload a final"),
+        uploadFile: async (_file,key) => `https://storage.example.test/${key}`,
       }});
       s.overrides.set("src/lib/server/media-response.ts", {downloadTrustedMediaToFile: async ({source, outputPath}) => {
         if (faceWorkflow) assert.match(source, /\/face-provider\/rendered-source\.mp4$/);
@@ -640,26 +640,24 @@ test("lip-sync quality failure cannot be published or bypassed by recovering a c
       }});
       globalThis.fetch = async (_url, init) => {
         const request = JSON.parse(init.body); events.push(request.action);
-        assert.equal(request.action, "release", "unusable results must not settle success credits");
+        assert.equal(request.action, "settle", "delivered results retain normal settlement");
         return Response.json({success: true, data: {}});
       };
       const { TaskStore } = s.load("src/lib/store/task-store.ts");
-      const task = TaskStore.create({...baseTask(), status: "failed",
+      const task = TaskStore.create({...baseTask(), status: "failed", errorCode: "LIPSYNC_ALIGNMENT",
         billing: {...baseTask().billing, status: "provider_committed"},
         results: {faceWorkflowVersion: faceWorkflow ? 1 : undefined, heygenLipsyncId: "already-paid"}});
       const dir = path.join(s.tmp, ".runtime/jobs", task.id); fs.mkdirSync(dir, {recursive: true});
       fs.copyFileSync(audio, path.join(dir, "voice-track.wav"));
       const recovery = s.load("src/lib/engine/recover-lipsync.ts");
-      await assert.rejects(recovery.recoverStuckLipsyncTask(task.id, "fake"), {code: "LIPSYNC_ALIGNMENT"});
-      const failed = TaskStore.get(task.id);
-      assert.equal(failed.status, "failed"); assert.equal(failed.errorCode, "LIPSYNC_ALIGNMENT");
-      assert.equal(failed.billing.status, "released"); assert.equal(failed.results.finalVideoUrl, undefined);
-      assert.equal(recovery.isRecoverableLipsyncTask(failed), false);
-      const visible = s.load("src/lib/server/public-data.ts").toPublicTask(failed);
-      assert.equal(visible.recoverable, false); assert.equal(visible.results.downloadUrl, undefined);
-      assert.match(visible.error, /口型与配音未通过同步检查/);
-      assert.equal(events.filter(e => e === "quality-check").length, 1);
-      assert.equal(events.filter(e => e === "release").length, 1);
+      assert.equal(recovery.isRecoverableLipsyncTask(task),true);
+      const result = await recovery.recoverStuckLipsyncTask(task.id, "fake");
+      assert.equal(result.status, "completed"); assert.equal(result.errorCode, undefined);
+      assert.equal(result.billing.status, "settled");
+      const visible = s.load("src/lib/server/public-data.ts").toPublicTask(result);
+      assert.equal(visible.recoverable, false); assert.ok(visible.results.downloadUrl);
+      assert.equal(events.filter(e => e === "calibration").length, 1);
+      assert.equal(events.filter(e => e === "settle").length, 1);
       if (faceWorkflow) assert.equal(events.some(e => e.endsWith("/final.mp4")), false,
         "a full-frame final cannot stand in for a provider face crop");
     } finally {s.close();}
