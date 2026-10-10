@@ -34,7 +34,9 @@ export function generationBody(task) {
   const lengthPrompt = task.video?.duration ? `\n视频1实际时长为${task.video.duration.toFixed(3)}秒。动作严格对应原视频时刻，输出超过原视频时长的部分保持末帧静止、闭嘴和无声。` : '';
   const captionPrompt = task.captions?.cues?.length ? `\n台词来自原视频字幕，优先于听辨结果，以下文字是唯一语音文案，不改写、不漏说，数字和价格按原字说：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)}秒：${segment.text}`).join('；')}。${task.voice ? '' : '保留视频1的人声音色。'}保留视频1已有的清晰字幕，不重画字幕，不修改字幕区域的背景；仅在成片未保留字幕时，系统会按原文补字幕。` : '';
   let voicePrompt = '';
-  if (task.voice) {
+  if (task.voice && task.voiceEngine === 'indextts2') {
+    voicePrompt = `\n配音由系统单独生成，视频仅保留视频1的台词、动作、说话节奏和面部情绪，嘴部运动对应原视频同一时刻，不重新设计表演。${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。`;
+  } else if (task.voice) {
     const segments = task.speech.segments;
     const gaps = [];
     let end = 0;
@@ -45,7 +47,7 @@ export function generationBody(task) {
   return { modelId: MODEL, abilityType: 'VIDEO', prompt: PROMPT + lengthPrompt + captionPrompt + voicePrompt,
     payload: { params: { mode: 'fusion_video', resolution: '720p', scale: task.ratio, duration: task.duration, generateAudio: true },
       resources: [`asset://${task.materials.photo.id}`], referVideoUrl: [`asset://${task.materials.video.id}`],
-      ...(task.voice ? { referAudioUrl: [`asset://${task.materials.voice.id}`] } : {}) } };
+      ...(task.voice && task.voiceEngine !== 'indextts2' ? { referAudioUrl: [`asset://${task.materials.voice.id}`] } : {}) } };
 }
 function nestedVideoUrl(value, key = '', depth = 0) {
   if (depth > 6 || !value) return undefined;

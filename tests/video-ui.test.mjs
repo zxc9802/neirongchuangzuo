@@ -138,7 +138,7 @@ test('caption drafts start in one click without a transcript confirmation step',
   assert.equal(task.captions.cues[0].text, '今天吃生腌');
 });
 
-test('replica has no model picker and old drafts submit with the flagship model', async t => {
+test('replica has no video model picker and old drafts submit with the flagship model', async t => {
   const fal = 'minimax/h3-max/reference-to-video', seedance = 'doubao-seedance-2-0-260128';
   let task = { ...speechDraft(), model: fal }; const calls = [];
   const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
@@ -150,7 +150,7 @@ test('replica has no model picker and old drafts submit with the flagship model'
     return Response.json({ task });
   } });
   page.recover(); await page.poll(); page.select(task.id);
-  assert.doesNotMatch(page.html(), /replica-model|<select|复刻模型/);
+  assert.doesNotMatch(page.html(), /replica-model|复刻模型|minimax\/h3-max/);
   assert.match(page.html(), /AI 视频 · 旗舰模型/);
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls.find(call => call.path.endsWith('/tasks')).body.model, seedance);
@@ -160,7 +160,7 @@ test('replica has no model picker and old drafts submit with the flagship model'
   assert.match(page.html(), /极速模型 · .*768p/);
   assert.match(page.html(), /aria-label="人物复刻成片"/);
   page.node('#replica-new').onclick();
-  assert.doesNotMatch(page.html(), /replica-model|<select|极速模型/);
+  assert.doesNotMatch(page.html(), /replica-model|极速模型|minimax\/h3-max/);
 });
 
 test('one click uploads every selected asset then starts once without analysis or confirmation requests', async t => {
@@ -179,6 +179,8 @@ test('one click uploads every selected asset then starts once without analysis o
   page.node('#replica-submit').onclick(); page.node('#replica-submit').onclick(); await page.settle();
   assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', ...['video', 'photo', 'voice', 'start'].map(kind => `/api/video-replica/tasks/${task.id}/${kind}`)]);
   assert.deepEqual(calls.slice(1, 4).map(call => call.body), files);
+  assert.equal(calls[0].body.voiceEngine, 'seedance');
+  assert.equal(calls[4].body.voiceEngine, 'seedance');
   assert.equal(calls[4].body.speechConfirmed, undefined);
   assert.match(page.html(), /id="replica-submit"[^>]*disabled[^>]*>正在自动分析字幕与人声/);
 });
@@ -389,4 +391,82 @@ for (const stalledPart of ['headers', 'body']) test(`a stalled ${stalledPart} re
   assert.equal(page.message(), '');
   assert.equal(calls, 2);
   assert.match(page.html(), /正在替换人物/);
+});
+
+test('reference voice jobs show separate parallel narration and lip-sync stages without invented ASR timing', async t => {
+  const tasks = [
+    { id: 'voice-running', status: 'running', voiceEngine: 'indextts2', narrationProgress: { ready: false } },
+    { id: 'voice-finishing', status: 'verifying', voiceEngine: 'indextts2', narrationProgress: { ready: false } },
+    { id: 'mouth-finishing', status: 'verifying', voiceEngine: 'indextts2', narrationProgress: { ready: true } },
+    { id: 'voice-complete', status: 'completed', voiceEngine: 'indextts2', resultUrl: '/result',
+      audioCheck: { engine: 'indextts2', referenceApplied: true, lipSync: 'processed' } },
+  ];
+  const page = await fixture(t, { tasks }); page.recover(); await page.poll();
+  for (const [id, text] of [['voice-running', '正在替换人物并生成参考配音'], ['voice-finishing', '正在完成参考声音配音'],
+    ['mouth-finishing', '正在同步口型与参考配音'], ['voice-complete', '已使用参考声音配音，并按新配音处理口型']]) {
+    page.select(id); assert.ok(page.html().includes(text));
+  }
+  assert.doesNotMatch(page.html(), /NaN|开口偏差/);
+});
+
+test('voice picker defaults to Seedance and switching to IndexTTS sends the selection through uploads and start', async t => {
+  let task; const calls = [];
+  const page = await fixture(t, { apiFetch: (path, options) => {
+    if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true,
+      voiceEngines: [{ id: 'seedance', enabled: true }, { id: 'indextts2', enabled: true }] });
+    if (!options?.method) return;
+    const body = options.method === 'POST' ? JSON.parse(options.body) : options.body;
+    calls.push({ path, body });
+    if (path.endsWith('/tasks')) task = { id: body.requestId, voiceEngine: body.voiceEngine, status: 'draft', createdAt: Date.now() };
+    for (const kind of ['video', 'photo', 'voice']) if (path.endsWith('/' + kind)) task = { ...task, [kind]: {} };
+    if (path.endsWith('/start')) task = { ...task, voiceEngine: body.voiceEngine, status: 'running' };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll();
+  assert.match(page.html(), /value="seedance" selected/);
+  page.node('#replica-voice-engine').onchange({ target: { value: 'indextts2' } });
+  await page.poll(); page.ctx.refresh();
+  assert.match(page.html(), /value="indextts2" selected/);
+  for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(calls[0].body.voiceEngine, 'indextts2'); assert.equal(calls.at(-1).body.voiceEngine, 'indextts2');
+  assert.match(page.html(), /id="replica-voice-engine" disabled/);
+  assert.match(page.html(), /IndexTTS2 配音/);
+  page.node('#replica-voice-engine').onchange({ target: { value: 'seedance' } });
+  assert.match(page.html(), /value="indextts2" selected/);
+  page.node('#replica-new').onclick();
+  assert.match(page.html(), /value="seedance" selected/);
+});
+
+test('reopening an IndexTTS draft restores its choice and a Seedance override survives old draft responses', async t => {
+  let task = { ...speechDraft(), voiceEngine: 'indextts2' }; const calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true,
+      voiceEngines: [{ id: 'indextts2', enabled: true }] });
+    if (options?.method !== 'POST') return;
+    const body = JSON.parse(options.body); calls.push({ path, body });
+    if (path.endsWith('/start')) task = { ...task, voiceEngine: body.voiceEngine, status: 'preparing' };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /value="indextts2" selected/);
+  assert.doesNotMatch(page.html().match(/<select[^>]+>/)[0], /disabled/);
+  page.node('#replica-voice-engine').onchange({ target: { value: 'seedance' } });
+  await page.poll();
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(calls[0].body.voiceEngine, 'seedance'); assert.equal(calls[1].body.voiceEngine, 'seedance');
+  assert.match(page.html(), /value="seedance" selected/);
+  assert.match(page.html(), /Seedance 2.0 配音/);
+});
+
+test('IndexTTS asks for the required voice input before making any paid task request', async t => {
+  const task = { ...speechDraft(), voice: undefined }; const calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true, voiceEngines: [{ id: 'indextts2', enabled: true }] });
+    if (options?.method) calls.push(path);
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  page.node('#replica-voice-engine').onchange({ target: { value: 'indextts2' } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(page.message(), '使用 IndexTTS2 请先上传声音参考。'); assert.deepEqual(calls, []);
 });

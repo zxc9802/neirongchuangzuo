@@ -8,6 +8,8 @@ import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, downloadVideo, se
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createCaptionService, captionSpeech } from './captions.mjs';
+import { createNarrationService } from './narration.mjs';
+import { createLipsyncService } from './lipsync.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
@@ -17,7 +19,7 @@ const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'submitting', 'ru
 const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const error = (message, status = 400, code) => new VideoError(message, status, code);
 const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' }); res.end(JSON.stringify(value)); };
-export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo|voice)$/.test(path);
+export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo|voice|generated|narration|emotion-\d{1,2})$/.test(path);
 
 async function readBody(req, limit) {
   if (Number(req.headers['content-length']) > limit) throw error('文件过大，请压缩后重试。', 413, 'VIDEO_UPLOAD_TOO_LARGE');
@@ -36,10 +38,17 @@ async function readJSON(req) {
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), falProvider = createFalVideoProvider(config), probe = probeVideo,
-  photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env),
+  narration = createNarrationService(env), lipsync = createLipsyncService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const models = [{ id: MODEL, name: '旗舰模型', resolution: '720p', enabled: Boolean(config.enabled) }];
+  const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
+    { id: 'indextts2', name: 'IndexTTS2', enabled: Boolean(narration?.enabled && lipsync?.enabled) }];
   const enabled = models.some(model => model.enabled);
+  function selectedVoiceEngine(id = 'seedance') {
+    if (!voiceEngines.some(engine => engine.id === id)) throw error('配音模型无效，请刷新页面后重新选择。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
+    return id;
+  }
   function selectedModel(id = MODEL) {
     const model = models.find(model => model.id === id);
     if (!model) throw error('当前仅支持旗舰模型，请刷新页面后重新提交。', 400, 'VIDEO_MODEL_INVALID');
@@ -60,12 +69,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return pending;
   }
   async function save(task) {
-    try {
-      await mkdir(folder(task), { recursive: true });
-      const temporary = join(folder(task), 'task.json.tmp');
-      await writeFile(temporary, JSON.stringify(task), { mode: 0o600 });
-      await rename(temporary, join(folder(task), 'task.json'));
-    } catch { fatal = true; throw error('任务存储暂时不可用，已暂停新的生成。', 503, 'VIDEO_STORAGE_UNAVAILABLE'); }
+    return serialize(`save:${task.id}`, async () => {
+      try {
+        await mkdir(folder(task), { recursive: true });
+        const temporary = join(folder(task), 'task.json.tmp');
+        await writeFile(temporary, JSON.stringify(task), { mode: 0o600 });
+        await rename(temporary, join(folder(task), 'task.json'));
+      } catch { fatal = true; throw error('任务存储暂时不可用，已暂停新的生成。', 503, 'VIDEO_STORAGE_UNAVAILABLE'); }
+    });
   }
   function view(task) {
     const settled = !credits || task.billing?.status === 'settled';
@@ -75,6 +86,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
       captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
+      voiceEngine: task.voiceEngine || (task.model === FAL_MODEL ? undefined : 'seedance'), narrationProgress: task.narration && { ready: task.narration.ready,
+        completed: task.narration.segments.filter(segment => segment.status === 'ready').length, total: task.narration.segments.length },
       model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : '旗舰模型',
       resolution: task.model === FAL_MODEL ? '768p' : '720p',
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
@@ -158,7 +171,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     await save(task);
   }
-  async function processTask(task) {
+  async function processVideoTask(task) {
     if (closing || fatal) return;
     // Retain the provider only to finish tasks submitted before H3 Max was removed.
     const taskProvider = task.model === FAL_MODEL ? falProvider : provider;
@@ -169,6 +182,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await reconcile(task);
       if (!task.cleaned) {
         for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
+        await rm(join(folder(task), 'narration'), { recursive: true, force: true });
+        for (const name of ['narration.wav', 'narration.wav.pcm', 'narration.wav.tmp.wav', 'lipsync.mp4', 'lipsync.mp4.download.json']) await rm(join(folder(task), name), { force: true });
         task.cleaned = true; await save(task);
       }
       return;
@@ -177,10 +192,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!ACTIVE.has(task.status)) return;
     if (task.status === 'preparing') {
       await analyzeSource(task);
+      if (task.voiceEngine === 'indextts2' && !task.narration) {
+        task.narration = await narration.prepare(task, folder(task)); await save(task);
+      }
       task.status = 'reviewing'; await save(task);
+      if (task.voiceEngine === 'indextts2') return;
     }
     if (task.status === 'reviewing') {
-      for (const kind of ['photo', 'video', ...(task.voice ? ['voice'] : [])]) {
+      for (const kind of ['photo', 'video', ...(task.voice && task.voiceEngine !== 'indextts2' ? ['voice'] : [])]) {
         if (!task.materials[kind]) { task.materials[kind] = await taskProvider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
         const material = task.materials[kind];
         if (material.status !== 2) {
@@ -222,7 +241,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         } });
       } finally { await progressWrites; }
       const metadata = await probe(temporary);
-      if (metadata.duration > task.duration + 1 || metadata.duration < 1 || !metadata.audio) throw error('成片缺少声音或时长不符合要求，预留积分将退回。', 502, 'VIDEO_RESULT_INVALID');
+      if (metadata.duration > task.duration + 1 || metadata.duration < 1 || !metadata.audio && task.voiceEngine !== 'indextts2'
+        || task.voiceEngine === 'indextts2' && metadata.duration < task.speech.end) throw error('成片缺少声音或时长不符合要求，预留积分将退回。', 502, 'VIDEO_RESULT_INVALID');
       await rename(temporary, task.voice || task.captions ? join(folder(task), 'generated.mp4') : file(task, 'result'));
       task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
       if (task.voice || task.captions) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
@@ -230,7 +250,24 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     if (task.status === 'verifying') {
       const generated = join(folder(task), 'generated.mp4'), aligned = join(folder(task), 'result.tmp');
-      if (!task.voice) await copyFile(generated, aligned);
+      if (task.voiceEngine === 'indextts2') {
+        if (!task.narration.ready) return;
+        if (!task.lipsync) {
+          task.lipsync = { submitting: true }; await save(task);
+          task.lipsync = await lipsync.submit(sourceUrl(task, 'generated'), sourceUrl(task, 'narration')); await save(task); return;
+        }
+        if (task.lipsync.submitting) throw error('口型提交确认中断，未自动重复生成，请核对原口型任务。', 502, 'VIDEO_LIPSYNC_UNCERTAIN');
+        if (!task.lipsync.url) {
+          const url = await lipsync.query(task.lipsync); if (!url) return;
+          task.lipsync.url = url; await save(task);
+        }
+        const mouth = join(folder(task), 'lipsync.mp4');
+        await download(task.lipsync.url, mouth);
+        const metadata = await probe(mouth);
+        if (Math.abs(metadata.duration - task.actualDuration) > 0.1) throw error('口型视频时长与配音不一致。', 502, 'VIDEO_RESULT_INVALID');
+        await narration.mux(mouth, join(folder(task), 'narration.wav'), aligned, task.actualDuration);
+        task.audioCheck = { engine: 'indextts2', referenceApplied: true, emotionSource: task.narration.emotionSource, lipSync: 'processed' };
+      } else if (!task.voice) await copyFile(generated, aligned);
       else try {
         task.verificationStage = 'generated'; await save(task);
         const timeline = await speech.analyze(generated, task.actualDuration, { diagnosticsPath: join(folder(task), 'verification-generated.json') });
@@ -260,6 +297,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await rename(aligned, file(task, 'result')); await complete(task);
     }
   }
+  async function processTask(task) {
+    if (task.voiceEngine !== 'indextts2' || !task.narration || !ACTIVE.has(task.status) || closing || fatal) return processVideoTask(task);
+    const replies = await Promise.allSettled([processVideoTask(task),
+      narration.advance(task, folder(task), kind => sourceUrl(task, kind), () => save(task))]);
+    const rejected = replies.find(reply => reply.status === 'rejected');
+    if (rejected) throw rejected.reason;
+  }
   async function complete(task) {
       task.status = 'completed'; task.error = ''; delete task.code;
       task.completedAt = now();
@@ -274,14 +318,18 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       try { await processTask(task); }
       catch (cause) {
         if (fatal) return;
+        if (['VIDEO_NARRATION_FAILED', 'VIDEO_NARRATION_UNCERTAIN', 'VIDEO_LIPSYNC_FAILED', 'VIDEO_LIPSYNC_UNCERTAIN'].includes(cause.code)) {
+          await fail(task, cause.message, cause.code); return;
+        }
         if (task.status === 'preparing') { await fail(task, cause instanceof VideoError ? cause.message : '素材自动处理未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
-        if (task.status === 'verifying') { await fail(task, cause instanceof VideoError ? cause.message : '成片声音检查未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
+        if (task.status === 'verifying' && !['VIDEO_NARRATION_PENDING', 'VIDEO_LIPSYNC_PENDING'].includes(cause.code)) { await fail(task, cause instanceof VideoError ? cause.message : '成片声音检查未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
         if (task.status === 'reviewing' && cause instanceof VideoError && ['VIDEO_PROVIDER_IP_DENIED', 'VIDEO_PROVIDER_REJECTED', 'VIDEO_MATERIAL_INVALID'].includes(cause.code)) {
           await fail(task, cause.message, cause.code); return;
         }
         if (cause.code === 'VIDEO_RESULT_INVALID') { await fail(task, cause.message, cause.code); return; }
         // Queries and result downloads can be retried without another paid generation call.
-        task.error = task.status === 'downloading' ? '成片正在保存，将自动重试下载。' : '模型服务暂时不可用，正在查询原任务。';
+        task.error = ['VIDEO_NARRATION_PENDING', 'VIDEO_LIPSYNC_PENDING'].includes(cause.code) ? cause.message
+          : task.status === 'downloading' ? '成片正在保存，将自动重试下载。' : '模型服务暂时不可用，正在查询原任务。';
         task.code = 'VIDEO_QUERY_PENDING'; await save(task);
       }
       });
@@ -310,17 +358,20 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     try {
       await ready;
       const url = new URL(req.url, 'http://localhost'), path = url.pathname;
-      const source = /^\/api\/video-replica\/source\/([a-f0-9-]{36})\/(video|photo|voice)$/.exec(path);
+      const source = /^\/api\/video-replica\/source\/([a-f0-9-]{36})\/(video|photo|voice|generated|narration|emotion-\d{1,2})$/.exec(path);
       if (source) {
         const task = jobs.get(source[1]), expires = Number(url.searchParams.get('expires')), supplied = url.searchParams.get('signature') || '';
         const valid = config.signingSecret && /^\d{13}$/.test(url.searchParams.get('expires') || '') && /^[a-f0-9]{64}$/.test(supplied)
           && timingSafeEqual(Buffer.from(supplied), Buffer.from(signature(source[1], source[2], expires)));
         // Keep the original signed URL usable while its generation is still active.
         if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || (expires <= now() && !ACTIVE.has(task.status)) || expires !== task.startedAt + DAY || task.status === 'expired') throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
-        if (!task[source[2]]) throw error('素材尚未上传。', 404, 'VIDEO_NOT_FOUND');
-        const input = source[2] === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4')
+        const kind = source[2], emotion = /^emotion-(\d{1,2})$/.exec(kind);
+        if (emotion ? !task.video?.audio || !task.narration?.segments[Number(emotion[1])]
+          : kind === 'generated' ? !task.rawReady : kind === 'narration' ? !task.narration?.ready : !task[kind]) throw error('素材尚未准备好。', 404, 'VIDEO_NOT_FOUND');
+        const input = emotion ? join(folder(task), 'narration', `${kind}.wav`) : kind === 'generated' ? join(folder(task), 'generated.mp4')
+          : kind === 'narration' ? join(folder(task), 'narration.wav') : kind === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4')
           : source[2] === 'video' && task.videoCaptionsRemoved ? join(folder(task), 'source-clean.mp4') : file(task, source[2]);
-        await serveMedia(req, res, input, mime(source[2])); return;
+        await serveMedia(req, res, input, emotion || kind === 'narration' ? 'audio/wav' : mime(kind)); return;
       }
       const userId = req.authenticatedUserId;
       if (!userId) throw error('请先登录后继续。', 401, 'UNAUTHENTICATED');
@@ -329,7 +380,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers.origin && req.headers.origin !== expected) throw error('请求来源无效。', 403, 'VIDEO_ORIGIN_REJECTED');
         if (closing || fatal) throw error('视频服务暂时不可用，请稍后查询原任务。', 503, 'VIDEO_UNAVAILABLE');
       }
-      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled, models, voiceEnabled: speech.enabled, model: models.find(model => model.enabled)?.id || MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return; }
+      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled, models, voiceEnabled: speech.enabled, voiceEngines, voiceEngine: 'seedance', model: models.find(model => model.enabled)?.id || MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return; }
       if (path === `${PREFIX}/tasks` && req.method === 'GET') {
         const tasks = [...jobs.values()].filter(task => task.userId === userId).sort((a, b) => b.createdAt - a.createdAt).map(view);
         json(res, 200, { tasks: url.searchParams.get('completed') === 'true' ? tasks.filter(task => task.status === 'completed') : tasks.slice(0, 50) }); return;
@@ -341,7 +392,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         await serialize('create', async () => {
           const existing = jobs.get(body.requestId);
           if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
-          const task = { id: body.requestId, userId, model: selectedModel(body.model), status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
+          const task = { id: body.requestId, userId, model: selectedModel(body.model), voiceEngine: selectedVoiceEngine(body.voiceEngine), status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
@@ -443,7 +494,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const body = await readJSON(req);
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
+          const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine);
+          if (voiceEngine === 'indextts2') {
+            if (!task.voice) throw error('使用 IndexTTS2 请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
+            if (!narration?.enabled || !lipsync?.enabled) throw error('参考声音配音或口型服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
+          }
           task.model = selectedModel(body.model);
+          task.voiceEngine = voiceEngine;
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           try {
             if (credits) {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile, readFile, realpath, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile, readFile, realpath, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -27,7 +27,7 @@ async function fixture(t, options = {}) {
   const provider = {
     async createMaterial(url, kind) { state.creates.push({ url, kind }); return { id: kind + '-id', status: state.review }; },
     async queryMaterial(id) { return options.queryMaterial ? options.queryMaterial(id) : state.review; },
-    async generate(task) { state.generations++; state.body = generationBody(task); if (options.uncertain) throw new Error('Network disconnected'); return { taskId: 'provider-1' }; },
+    async generate(task) { state.generations++; state.body = generationBody(task); if (options.uncertain) throw new Error('Network disconnected'); return options.generate ? options.generate(task) : { taskId: 'provider-1' }; },
     async query() { state.queries++; if (options.query) return options.query(); return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; },
   };
   let app, handler, base;
@@ -35,6 +35,7 @@ async function fixture(t, options = {}) {
     handler = createVideoHandler({ storageDir: join(root, 'video'), config: CONFIG, provider, credits: wallet,
       photo: async () => Buffer.from('photo'), probe: async () => META, download: async (_url, path) => writeFile(path, VIDEO),
       captions: { extract: async () => null },
+      narration: null, lipsync: null,
       pollIntervalMs: 15, ...options, ...overrides });
     await handler.ready;
     app = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-owner'] || 'alice'; void handler(req, res); });
@@ -990,7 +991,8 @@ test('three-day expiry removes media while keeping deduplication and billing rec
   await app.until(id, task => task.status === 'completed');
   time += 3 * 86400_000 + 1;
   assert.equal((await app.call(`/tasks/${id}/result`)).status, 410);
-  await delay(50);
+  const cleanupDeadline = performance.now() + 15_000;
+  while (!JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8')).cleaned && performance.now() < cleanupDeadline) await delay(50);
   await assert.rejects(readFile(join(app.root, 'video', id, 'result.mp4')), { code: 'ENOENT' });
   assert.equal((await app.current(id)).status, 'expired');
   assert.equal((await app.wallet.snapshot('alice')).available, 955);
@@ -1017,8 +1019,12 @@ test('three-day expiry erases private voice, ASR, VAD and download artifacts whi
   const privateArtifacts = ['photo.jpg', 'source.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4',
     'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json',
     'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm',
-    'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm'];
+    'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm',
+    'narration.wav', 'narration.wav.pcm', 'narration.wav.tmp.wav', 'lipsync.mp4', 'lipsync.mp4.download.json'];
   await Promise.all(privateArtifacts.map(name => writeFile(join(taskFolder, name), `private material: ${name}`)));
+  await mkdir(join(taskFolder, 'narration'));
+  await writeFile(join(taskFolder, 'narration', 'emotion-0.wav'), 'private emotion');
+  await writeFile(join(taskFolder, 'narration', '0.wav'), 'private narration');
   time += 3 * 86400_000 + 1;
   for (const kind of ['photo', 'video', 'voice', 'result']) assert.equal((await app.call(`/tasks/${id}/${kind}`)).status, 410);
   let expired;
@@ -1052,4 +1058,147 @@ test('result download rejects private addresses and non-HTTP URLs before writing
   for (const url of ['http://127.0.0.1/video.mp4', 'https://10.0.0.1/video.mp4', 'file:///etc/passwd', 'https://example.com:8443/video.mp4']) {
     await assert.rejects(downloadVideo(url, '/not-written.mp4'));
   }
+});
+
+function fakeNarration(overrides = {}) {
+  return { enabled: true,
+    prepare: async task => ({ engine: 'indextts2', emotionSource: 'original-video', ready: false,
+      segments: task.speech.segments.map(segment => ({ ...segment })) }),
+    advance: async (task, folder, _urls, save) => {
+      if (!task.narration.ready) {
+        await writeFile(join(folder, 'narration.wav'), 'INDEXTTS_AUDIO');
+        task.narration.ready = true; task.narration.segments.forEach(segment => segment.status = 'ready'); await save();
+      }
+    },
+    mux: async (_video, audio, output) => writeFile(output, await readFile(audio)), ...overrides };
+}
+const fakeLipsync = overrides => ({ enabled: true,
+  submit: async () => ({ id: 'mouth-job', statusUrl: 'https://queue.fal.run/veed/lipsync/requests/mouth-job/status' }),
+  query: async () => 'https://cdn.example/mouth.mp4', ...overrides });
+
+test('Seedance is the default voice engine and never calls separate TTS or lip-sync', async t => {
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration({ prepare: async () => assert.fail('Seedance must not prepare IndexTTS'), advance: async () => assert.fail('Seedance must not synthesize IndexTTS') }),
+    lipsync: fakeLipsync({ submit: async () => assert.fail('Seedance must not submit a lip-sync job') }) });
+  const config = await (await app.call('/config')).json();
+  assert.equal(config.voiceEngine, 'seedance'); assert.equal(config.voiceEngines.find(engine => engine.id === 'indextts2').enabled, true);
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  const started = (await (await app.call(`/tasks/${id}/start`, { body: {} })).json()).task;
+  assert.equal(started.voiceEngine, 'seedance');
+  await app.until(id, task => task.status === 'running');
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+  app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.narrationProgress, undefined); assert.equal(app.state.generations, 1);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+});
+
+test('a draft can switch back to Seedance without requiring IndexTTS credentials and locks its choice after start', async t => {
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration({ enabled: false, prepare: async () => assert.fail('IndexTTS is not selected') }), lipsync: fakeLipsync({ enabled: false }) });
+  const id = randomUUID();
+  assert.equal((await app.call('/tasks', { body: { requestId: id, voiceEngine: 'indextts2' } })).status, 201);
+  await app.upload(id); await uploadVoice(app, id);
+  assert.equal((await app.current(id)).voiceEngine, 'indextts2');
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'seedance' } })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  assert.equal((await app.current(id)).voiceEngine, 'seedance'); assert.equal(app.state.generations, 1);
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+});
+
+test('a saved IndexTTS draft retains its voice engine across restart and starts without repeating the selection', async t => {
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration(), lipsync: fakeLipsync() });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, voiceEngine: 'indextts2' } });
+  await app.upload(id); await uploadVoice(app, id); await app.close(); await app.open();
+  assert.equal((await app.current(id)).voiceEngine, 'indextts2');
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.voiceEngine, 'indextts2'); assert.equal('referAudioUrl' in app.state.body.payload, false);
+});
+
+test('invalid voice selection and IndexTTS without a voice fail before any credit reservation or generation', async t => {
+  const app = await fixture(t, { narration: fakeNarration(), lipsync: fakeLipsync() });
+  const rejected = await app.call('/tasks', { body: { requestId: randomUUID(), voiceEngine: 'unknown' } });
+  assert.equal(rejected.status, 400); assert.equal((await rejected.json()).code, 'VIDEO_VOICE_ENGINE_INVALID');
+  const id = await app.init(); await app.upload(id);
+  for (const [voiceEngine, code] of [['unknown', 'VIDEO_VOICE_ENGINE_INVALID'], ['indextts2', 'VIDEO_VOICE_REQUIRED']]) {
+    const response = await app.call(`/tasks/${id}/start`, { body: { voiceEngine } });
+    assert.equal(response.status, 400); assert.equal((await response.json()).code, code);
+    assert.equal((await app.current(id)).status, 'draft');
+    assert.equal(await app.wallet.reservation('alice', id), null);
+  }
+  assert.equal(app.state.generations, 0);
+});
+
+test('IndexTTS and Seedance start in parallel, and new audio waits for real lip-sync before delivery', async t => {
+  let releaseTTS, voiceStarted = new Promise(resolve => releaseTTS = resolve), voiceReady = false, mouthSubmits = 0;
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (input, output) => { await writeFile(output, await readFile(input)); return { duration: 5, ready: true }; },
+    generate: async () => { await voiceStarted; return { taskId: 'parallel-video' }; },
+    narration: fakeNarration({ advance: async (task, folder, urls, save) => {
+      releaseTTS();
+      assert.match(urls('voice'), /\/voice\?/);
+      if (voiceReady && !task.narration.ready) {
+        await writeFile(join(folder, 'narration.wav'), 'INDEXTTS_AUDIO');
+        task.narration.ready = true; task.narration.segments[0].status = 'ready'; await save();
+      }
+    } }),
+    lipsync: fakeLipsync({ submit: async (video, audio) => {
+      mouthSubmits++;
+      for (const [url, expected] of [[video, VIDEO], [audio, Buffer.from('INDEXTTS_AUDIO')]]) {
+        const signed = new URL(url);
+        const response = await fetch(app.base + signed.pathname + signed.search);
+        assert.equal(response.status, 200); assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
+        assert.equal((await fetch(app.base + signed.pathname)).status, 403);
+      }
+      return { id: 'mouth-job' };
+    } }),
+  });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.voiceEngine, 'indextts2'); assert.equal(running.narrationProgress.ready, false);
+  assert.equal(app.state.creates.some(material => material.kind === 'voice'), false);
+  assert.equal('referAudioUrl' in app.state.body.payload, false);
+  app.state.done = true; await app.until(id, task => task.status === 'verifying');
+  assert.equal(mouthSubmits, 0); assert.equal((await app.call(`/tasks/${id}/result`)).status, 409);
+  voiceReady = true;
+  const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(mouthSubmits, 1); assert.equal(app.state.generations, 1);
+  assert.deepEqual(completed.audioCheck, { engine: 'indextts2', referenceApplied: true, emotionSource: 'original-video', lipSync: 'processed' });
+  assert.equal(await (await app.call(`/tasks/${id}/result`)).text(), 'INDEXTTS_AUDIO');
+});
+
+test('pending lip-sync survives service restart without submitting a second paid job', async t => {
+  let submits = 0, mouthReady = false;
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration(), lipsync: fakeLipsync({
+      submit: async () => { submits++; return { id: 'persisted-mouth' }; },
+      query: async job => { assert.equal(job.id, 'persisted-mouth'); if (!mouthReady) throw new VideoError('正在查询原口型任务。', 502, 'VIDEO_LIPSYNC_PENDING'); return 'https://cdn.example/mouth.mp4'; },
+    }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  await app.until(id, task => task.status === 'verifying' && task.code === 'VIDEO_QUERY_PENDING');
+  await app.close(); await app.open();
+  mouthReady = true; await app.until(id, task => task.status === 'completed');
+  assert.equal(submits, 1); assert.equal(app.state.generations, 1);
+});
+
+test('failed IndexTTS cannot silently deliver the original or Seedance voice', async t => {
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration({ advance: async () => { throw new VideoError('配音失败', 502, 'VIDEO_NARRATION_FAILED'); } }), lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
+  assert.equal(failed.code, 'VIDEO_NARRATION_FAILED'); assert.equal(failed.resultUrl, null);
+  assert.equal(app.state.generations, 1);
+});
+
+test('missing reference voice or lip-sync configuration fails before reserving credits or generating video', async t => {
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration({ enabled: false }), lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  const response = await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  assert.equal(response.status, 503); assert.equal((await response.json()).code, 'VIDEO_VOICE_NOT_CONFIGURED');
+  assert.equal((await app.current(id)).status, 'draft'); assert.equal(app.state.generations, 0);
 });
