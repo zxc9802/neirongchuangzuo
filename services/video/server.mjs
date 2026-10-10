@@ -12,7 +12,7 @@ import { createCaptionService, captionSpeech } from './captions.mjs';
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
 const DAY = 86400_000;
-const ACTIVE = new Set(['reserving', 'reviewing', 'submitting', 'running', 'downloading', 'verifying']);
+const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'verifying']);
 const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const error = (message, status = 400, code) => new VideoError(message, status, code);
 const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' }); res.end(JSON.stringify(value)); };
@@ -174,6 +174,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     if (['completed', 'failed', 'expired'].includes(task.status)) { await reconcile(task); return; }
     if (!ACTIVE.has(task.status)) return;
+    if (task.status === 'preparing') {
+      await analyzeSource(task);
+      if (task.voice && !task.videoAudioRemoved) {
+        await mute(file(task, 'video'), join(folder(task), 'source-silent.mp4'));
+        task.videoAudioRemoved = true;
+      }
+      task.status = 'reviewing'; await save(task);
+    }
     if (task.status === 'reviewing') {
       for (const kind of ['photo', 'video', ...(task.voice ? ['voice'] : [])]) {
         if (!task.materials[kind]) { task.materials[kind] = await taskProvider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
@@ -257,6 +265,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       try { await processTask(task); }
       catch (cause) {
         if (fatal) return;
+        if (task.status === 'preparing') { await fail(task, cause instanceof VideoError ? cause.message : '素材自动处理未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
         if (task.status === 'verifying') { await fail(task, cause instanceof VideoError ? cause.message : '成片声音检查未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
         if (task.status === 'reviewing' && cause instanceof VideoError && ['VIDEO_PROVIDER_IP_DENIED', 'VIDEO_PROVIDER_REJECTED', 'VIDEO_MATERIAL_INVALID'].includes(cause.code)) {
           await fail(task, cause.message, cause.code); return;
@@ -425,26 +434,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const body = await readJSON(req);
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
-          if (task.voice && (!task.speech || body.speechConfirmed !== true)) throw error('请先分析并确认原视频的台词与开口时间。', 409, 'VIDEO_SPEECH_CONFIRM_REQUIRED');
-          await analyzeSource(task);
           task.model = selectedModel(body.model);
-          if (task.captions?.kind === 'burned' && !task.videoCaptionsRemoved) {
-            try {
-              await captions.clean(file(task, 'video'), join(folder(task), 'source-clean.mp4'), task.captions);
-              task.videoCaptionsRemoved = true;
-            } catch { task.captionCheck = { warning: '原字幕已用于台词，成片生成后将重新合成字幕。' }; }
-          }
-          if (task.voice && !task.videoAudioRemoved) {
-            await mute(task.videoCaptionsRemoved ? join(folder(task), 'source-clean.mp4') : file(task, 'video'), join(folder(task), 'source-silent.mp4'));
-            task.videoAudioRemoved = true;
-          }
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           try {
             if (credits) {
               const record = await credits.reserve({ userId, taskId: task.id, kind: 'video', units: task.duration });
               task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true };
             }
-            task.status = 'reviewing'; await save(task);
+            task.status = 'preparing'; await save(task);
           } catch (cause) {
             if (fatal) throw cause;
             await fail(task, cause.code === 'INSUFFICIENT_POINTS' ? '积分不足，未开始生成。' : '积分预留失败，未开始生成。', cause.code || 'CREDITS_UNAVAILABLE');

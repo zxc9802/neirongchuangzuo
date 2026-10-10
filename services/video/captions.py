@@ -61,12 +61,20 @@ def extract(path):
     from rapidocr_onnxruntime import RapidOCR
     ocr = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
     tracks = []
+    frame_index = 0
     for index in range(math.ceil(duration / STEP)):
         at = index * STEP
-        cap.set(cv2.CAP_PROP_POS_MSEC, at * 1000)
+        target = round(at * fps)
+        if target < frame_index:
+            continue
+        while frame_index < target:
+            if not cap.grab():
+                break
+            frame_index += 1
         ok, frame = cap.read()
         if not ok:
             break
+        frame_index += 1
         results, _ = ocr(frame, use_cls=False)
         lines = []
         for points, text, confidence in results or []:
@@ -142,8 +150,18 @@ def erase(frame, cue, captions):
     # Work only on the subtitle neighborhood, keeping the rest of the scene intact.
     left, top, right, bottom = max(0, x1 - pad * 4), max(0, y1 - pad * 4), min(width, x2 + pad * 4), min(height, y2 + pad * 4)
     region = frame[top:bottom, left:right]
-    mask = np.zeros(region.shape[:2], dtype=np.uint8)
-    mask[y1 - top:y2 - top, x1 - left:x2 - left] = 255
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    # Target white subtitle strokes with dark outlines, never the whole text box.
+    light = (region.min(axis=2) >= 170) & (region.max(axis=2).astype(np.int16) - region.min(axis=2) < 75)
+    dark = (gray < 110).astype(np.uint8)
+    radius = max(2, round((y2 - y1) * .06))
+    kernel = np.ones((radius * 2 + 1, radius * 2 + 1), dtype=np.uint8)
+    strokes = light & (cv2.dilate(dark, kernel) > 0)
+    bounds = np.zeros(region.shape[:2], dtype=np.uint8)
+    bounds[y1 - top:y2 - top, x1 - left:x2 - left] = 1
+    mask = cv2.dilate((strokes & (bounds > 0)).astype(np.uint8), kernel) * 255
+    if not mask.any():
+        return
     frame[top:bottom, left:right] = cv2.inpaint(region, mask, 3, cv2.INPAINT_TELEA)
 
 

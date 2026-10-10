@@ -2,11 +2,11 @@ import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorksp
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
-const labels = { draft: '等待提交', reserving: '正在预留积分', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成未完成', expired: '已过期' };
+const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成未完成', expired: '已过期' };
 const pending = task => task && !['draft', 'completed', 'failed', 'expired'].includes(task.status);
 let state = { owner: null, config: null, tasks: [], current: null, files: {}, urls: {}, speechEdits: null, busy: false, error: '', pollError: '', loading: true };
 let context, timer, polling = false, unsubscribeCredits;
-function resetFiles() { for (const url of Object.values(state.urls)) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; state.uploaded = false; state.speechEdits = null; }
+function resetFiles() { for (const url of Object.values(state.urls)) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; state.speechEdits = null; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
   if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, files: {}, urls: {}, speechEdits: null, busy: false, error: '', pollError: '', loading: true }; }
@@ -63,7 +63,7 @@ function result(ctx) {
   if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p><span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
   const message = task.status === 'failed' ? failureMessage(task) : task.error;
-  return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${labels[task.status] || '正在处理'}</h3><p>${ctx.esc(message || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击开始人物复刻。' : '请重新上传素材创建任务。'))}</p></div>`;
+  return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${labels[task.status] || '正在处理'}</h3><p>${ctx.esc(message || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击一键生成。' : '请重新上传素材创建任务。'))}</p></div>`;
 }
 function progress(ctx) {
   const task = state.current;
@@ -86,25 +86,25 @@ function summary(ctx) {
 }
 function dialogueSegments(task) { return task.captions?.cues || task.speech.segments; }
 function speechTexts(task) { return state.speechEdits?.taskId === task.id ? state.speechEdits.texts : dialogueSegments(task).map(segment => segment.text); }
-function canEditSpeech(task) { return task?.status === 'draft' || task?.status === 'failed' && task.canRecheck === true; }
+function canEditSpeech(task) { return task?.status === 'failed' && task.canRecheck === true; }
 function speechPreview(ctx) {
   const task = state.current;
-  if (!task?.speech || state.files.video || state.files.voice) return '';
+  if (!task?.speech || task.status === 'draft' || state.files.video || state.files.voice) return '';
   const editable = canEditSpeech(task), texts = speechTexts(task);
-  return `<section id="replica-speech" class="replica-speech" aria-label="原视频台词"><h3>原视频台词</h3>${task.captions ? '<p>来自原视频字幕 · 同时用于语音文案和成片字幕</p>' : ''}${editable ? `<p>${task.status === 'draft' ? '可修改错字，确认后开始复刻。' : '可修改错字，重新检查成片。'}</p>` : ''}${task.speech.warning ? `<p>${ctx.esc(task.speech.warning)}</p>` : ''}<ol>${dialogueSegments(task).map((segment, index) => `<li><time>${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒</time>${editable ? `<textarea data-replica-segment="${index}" aria-label="第 ${index + 1} 段台词" rows="3" maxlength="2000" ${state.busy ? 'disabled' : ''}>${ctx.esc(texts[index])}</textarea>` : `<span>${ctx.esc(segment.text)}</span>`}</li>`).join('')}</ol>${task.video?.audio !== false ? '<button type="button" id="replica-listen" class="textbutton">试听原视频</button>' : ''}</section>`;
+  return `<section id="replica-speech" class="replica-speech" aria-label="原视频台词"><h3>原视频台词</h3>${task.captions ? '<p>来自原视频字幕 · 同时用于语音文案和成片字幕</p>' : ''}${editable ? '<p>可修改错字，重新检查成片。</p>' : ''}${task.speech.warning ? `<p>${ctx.esc(task.speech.warning)}</p>` : ''}<ol>${dialogueSegments(task).map((segment, index) => `<li><time>${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒</time>${editable ? `<textarea data-replica-segment="${index}" aria-label="第 ${index + 1} 段台词" rows="3" maxlength="2000" ${state.busy ? 'disabled' : ''}>${ctx.esc(texts[index])}</textarea>` : `<span>${ctx.esc(segment.text)}</span>`}</li>`).join('')}</ol>${task.video?.audio !== false ? '<button type="button" id="replica-listen" class="textbutton">试听原视频</button>' : ''}</section>`;
 }
 export function renderVideoReplica(ctx) {
   account(); context = ctx;
   const task = state.current, finished = task && ['completed', 'failed', 'expired'].includes(task.status);
   const unlimited = workspaceCreditsState().snapshot?.unlimited === true, exempt = task?.billing?.exempt === true;
   const cost = unlimited ? `${creditEstimateText(task?.estimatedPoints)}${task?.duration ? ` · ${task.duration} 秒` : ''}`
-    : exempt ? task?.duration ? `${task.duration} 秒` : '上传后确认时长。'
-      : task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '上传后确认时长和积分；失败退回预留积分。';
+    : exempt ? task?.duration ? `${task.duration} 秒` : '上传后自动识别时长。'
+      : task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '按视频时长预留积分；失败退回预留积分。';
   return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · 旗舰模型</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${speechPreview(ctx)}
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
       <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(actionMessage())}</p>
-        <button type="button" id="replica-submit" class="primary" ${finished ? 'hidden' : ''} ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传、分析与提交…' : pending(task) ? labels[task.status] : state.uploaded || (task?.photo && task?.video && !Object.keys(state.files).length && (!task.voice || task.speech)) ? task?.speech ? '确认台词，开始人物复刻' : '开始人物复刻' : state.files.voice || task?.voice ? '上传素材，分析字幕与人声' : unlimited || exempt ? '上传素材，确认时长' : '上传素材，查看费用'}</button>
+        <button type="button" id="replica-submit" class="primary" ${finished ? 'hidden' : ''} ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传并提交…' : pending(task) ? labels[task.status] : '一键生成'}</button>
         ${task?.status === 'failed' && task.canRecheck === true ? `<button type="button" id="replica-recheck" class="primary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在提交复核…' : '重新检查成片'}</button>` : ''}<button type="button" id="replica-new" class="textbutton" ${state.busy ? 'disabled' : ''}>新建复刻</button></div></section>
       <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
@@ -114,12 +114,11 @@ async function selectFile(kind, file) {
   if (file.size > limit * 1024 * 1024) { state.error = `文件过大，${kind === 'video' ? '视频' : kind === 'voice' ? '声音参考' : '照片'}不能超过 ${limit} MB。`; refresh(); return; }
   if (state.urls[kind]) URL.revokeObjectURL(state.urls[kind]);
   if (kind === 'video' || kind === 'voice') state.speechEdits = null;
-  state.uploaded = false; state.files[kind] = file; state.urls[kind] = URL.createObjectURL(file); state.error = ''; refresh();
+  state.files[kind] = file; state.urls[kind] = URL.createObjectURL(file); state.error = ''; refresh();
 }
 async function submit() {
   if (state.busy || pending(state.current) || state.current && state.current.status !== 'draft') return;
   if ((!state.files.video && !state.current?.video) || (!state.files.photo && !state.current?.photo)) { state.error = '请先上传一段参考视频和一张人物照片。'; refresh(); return; }
-  if (state.current?.speech && !state.files.video && !state.files.voice && speechTexts(state.current).some(text => !text.trim())) { state.error = '每段台词不能为空。'; refresh(); return; }
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
@@ -127,23 +126,13 @@ async function submit() {
     // Keep the request ID before networking so an uncertain response can be retried safely.
     if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now() };
     remember((await request('/tasks', jsonPost({ requestId: id, model }))).task);
-    if (state.current.status === 'draft' && !state.uploaded && Object.keys(state.files).length) {
+    if (state.current.status === 'draft') {
       for (const kind of ['video', 'photo', 'voice']) {
         if (!state.files[kind]) continue;
         remember((await request(`/tasks/${id}/${kind}`, { method: 'PUT', headers: { 'Content-Type': state.files[kind].type || 'application/octet-stream' }, body: state.files[kind] })).task);
       }
-      remember((await request(`/tasks/${id}/analyze`, jsonPost())).task);
-      resetFiles(); state.uploaded = true;
-    } else if (state.current.status === 'draft') {
-      if (!state.current.captionsChecked || state.current.voice && !state.current.speech) { remember((await request(`/tasks/${id}/analyze`, jsonPost())).task); state.uploaded = true; }
-      else {
-        if (state.current.speech) {
-          const segments = speechTexts(state.current).map(text => ({ text: text.trim() }));
-          remember((await request(`/tasks/${id}/speech`, jsonPost({ segments }))).task);
-          state.speechEdits = null;
-        }
-        remember((await request(`/tasks/${id}/start`, jsonPost({ speechConfirmed: Boolean(state.current.speech), model }))).task);
-      }
+      resetFiles();
+      remember((await request(`/tasks/${id}/start`, jsonPost({ model }))).task);
     }
     void refreshWorkspaceCredits();
   } catch (cause) { state.error = cause.message; }

@@ -115,7 +115,7 @@ function speechDraft() {
     speech: { start: 0, end: 2, segments: [{ start: 0, end: 1, text: '薄饼' }, { start: 1.3, end: 2, text: '真的超好吃' }] } };
 }
 
-test('caption scripts are editable without a voice reference and keep every cue in confirmation', async t => {
+test('caption drafts start in one click without a transcript confirmation step', async t => {
   let task = { ...speechDraft(), voice: undefined, captions: { cues: [
     { start: .1, end: .6, text: '今天吃生腌' }, { start: .6, end: 1.2, text: '只要9.9元' },
     { start: 1.3, end: 2, text: '真的超好吃' },
@@ -124,18 +124,18 @@ test('caption scripts are editable without a voice reference and keep every cue 
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
     if (options?.method !== 'POST') return;
     const body = JSON.parse(options.body); calls.push({ path, body });
-    if (path.endsWith('/speech')) task = { ...task, captions: { cues: task.captions.cues.map((cue, i) => ({ ...cue, text: body.segments[i].text })) } };
-    if (path.endsWith('/start')) task = { ...task, status: 'running' };
+    if (path.endsWith('/start')) task = { ...task, status: 'preparing' };
     return Response.json({ task });
   } });
   page.recover(); await page.poll(); page.select(task.id);
-  assert.match(page.html(), /来自原视频字幕 · 同时用于语音文案和成片字幕/);
-  assert.match(page.html(), /第 3 段台词/); assert.match(page.html(), /0\.100–0\.600 秒/);
-  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '2' }, value: '确实超好吃' } });
+  assert.match(page.html(), /id="replica-submit"[^>]*>一键生成/);
+  assert.doesNotMatch(page.html(), /replica-speech|textarea|确认台词/);
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.deepEqual(calls.find(call => call.path.endsWith('/speech')).body.segments,
-    [{ text: '今天吃生腌' }, { text: '只要9.9元' }, { text: '确实超好吃' }]);
-  assert.equal(calls.filter(call => call.path.endsWith('/start')).length, 1);
+  assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', '/api/video-replica/tasks/editable-task/start']);
+  assert.equal(calls[1].body.speechConfirmed, undefined);
+  assert.match(page.html(), /正在自动分析字幕与人声/);
+  assert.match(page.html(), /来自原视频字幕 · 同时用于语音文案和成片字幕/);
+  assert.doesNotMatch(page.html(), /textarea/);
 });
 
 test('replica has no model picker and old drafts submit with the flagship model', async t => {
@@ -163,43 +163,50 @@ test('replica has no model picker and old drafts submit with the flagship model'
   assert.doesNotMatch(page.html(), /replica-model|<select|极速模型/);
 });
 
-test('draft corrections survive refresh and are saved with original timings before one generation starts', async t => {
-  let task = speechDraft();
+test('one click uploads every selected asset then starts once without analysis or confirmation requests', async t => {
+  let task; const calls = [];
+  const page = await fixture(t, { apiFetch: (path, options) => {
+    if (!options?.method) return;
+    calls.push({ path, method: options.method, body: options.method === 'POST' ? JSON.parse(options.body) : options.body });
+    if (path.endsWith('/tasks')) task = { id: JSON.parse(options.body).requestId, status: 'draft', createdAt: Date.now() };
+    for (const kind of ['video', 'photo', 'voice']) if (path.endsWith('/' + kind)) task = { ...task, [kind]: {} };
+    if (path.endsWith('/start')) task = { ...task, status: 'preparing' };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll();
+  const files = ['video', 'photo', 'voice'].map(kind => new File(['data'], kind + '.mp4', { type: 'application/octet-stream' }));
+  for (const [i, kind] of ['video', 'photo', 'voice'].entries()) page.node('#replica-' + kind).onchange({ target: { files: [files[i]] } });
+  page.node('#replica-submit').onclick(); page.node('#replica-submit').onclick(); await page.settle();
+  assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', ...['video', 'photo', 'voice', 'start'].map(kind => `/api/video-replica/tasks/${task.id}/${kind}`)]);
+  assert.deepEqual(calls.slice(1, 4).map(call => call.body), files);
+  assert.equal(calls[4].body.speechConfirmed, undefined);
+  assert.match(page.html(), /id="replica-submit"[^>]*disabled[^>]*>正在自动分析字幕与人声/);
+});
+
+test('an uncertain start response retries the same task without reuploading or dispatching twice', async t => {
+  let task = { ...speechDraft(), speech: undefined, captionsChecked: undefined }, starts = 0, failResponse = true;
   const calls = [];
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
     if (options?.method !== 'POST') return;
     calls.push({ path, body: JSON.parse(options.body) });
-    if (path.endsWith('/speech')) task = { ...task, speech: { ...task.speech, segments: task.speech.segments.map((segment, i) => ({ ...segment, text: JSON.parse(options.body).segments[i].text })) } };
-    if (path.endsWith('/start')) task = { ...task, status: 'running' };
+    if (path.endsWith('/start')) {
+      starts++; task = { ...task, status: 'preparing' };
+      if (failResponse) { failResponse = false; throw new Error('连接中断'); }
+    }
     return Response.json({ task });
   } });
   page.recover(); await page.poll(); page.select(task.id);
-  assert.match(page.html(), /textarea[^>]*aria-label="第 1 段台词"/);
-  assert.match(page.html(), /旗舰模型/);
-  assert.doesNotMatch(page.html(), /SEEDANCE/);
-  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
-  await page.poll(); page.ctx.refresh();
-  assert.match(page.html(), />博主<\/textarea>/);
-  page.node('#replica-submit').onclick(); page.node('#replica-submit').onclick(); await page.settle();
-  assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', '/api/video-replica/tasks/editable-task/speech', '/api/video-replica/tasks/editable-task/start']);
-  assert.deepEqual(calls[1].body, { segments: [{ text: '博主' }, { text: '真的超好吃' }] });
-  assert.deepEqual(task.speech.segments.map(segment => [segment.start, segment.end]), [[0, 1], [1.3, 2]]);
-  assert.equal(calls[2].body.speechConfirmed, true);
-  assert.doesNotMatch(page.html(), /textarea[^>]*data-replica-segment/);
-});
-
-test('blank corrected segments do not save or start a task', async t => {
-  const task = speechDraft(), calls = [];
-  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => { if (options?.method) calls.push(path); } });
-  page.recover(); await page.poll(); page.select(task.id);
-  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '1' }, value: '  ' } });
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(page.message(), '每段台词不能为空。');
-  assert.deepEqual(calls, []);
+  assert.equal(page.message(), '连接中断');
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', '/api/video-replica/tasks/editable-task/start', '/api/video-replica/tasks']);
+  assert.equal(starts, 1);
+  assert.equal(calls[0].body.requestId, calls[2].body.requestId);
+  assert.match(page.html(), /正在自动分析字幕与人声/);
 });
 
 test('failed correction save preserves edits and never submits generation', async t => {
-  const task = speechDraft(), calls = [];
+  const task = { ...speechDraft(), status: 'failed', canRecheck: true }, calls = [];
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
     if (options?.method !== 'POST') return;
     calls.push(path);
@@ -207,10 +214,10 @@ test('failed correction save preserves edits and never submits generation', asyn
   } });
   page.recover(); await page.poll(); page.select(task.id);
   page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
-  page.node('#replica-submit').onclick(); await page.settle();
+  page.node('#replica-recheck').onclick(); await page.settle();
   assert.equal(page.message(), '台词保存失败，请重试。');
   assert.match(page.html(), />博主<\/textarea>/);
-  assert.deepEqual(calls, ['/api/video-replica/tasks', '/api/video-replica/tasks/editable-task/speech']);
+  assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/speech']);
 });
 
 test('completed and failed tasks cannot submit or edit speech', async t => {
@@ -309,11 +316,11 @@ test('server unlimited credits replace freeze and refund copy before and after u
   const page = await fixture(t, { tasks: [task] });
   await page.wallet({ ...finiteWallet(), available: 0, total: 0, unlimited: true });
   assert.equal(page.cost(), '无限积分');
-  assert.match(page.html(), /上传素材，确认时长/);
+  assert.match(page.html(), /id="replica-submit"[^>]*>一键生成/);
   assert.doesNotMatch(page.cost(), /预计冻结|失败退回|积分不足/);
   page.recover(); await page.poll(); page.select(task.id);
   assert.equal(page.cost(), '无限积分 · 10 秒');
-  assert.match(page.html(), /开始人物复刻/);
+  assert.match(page.html(), /id="replica-submit"[^>]*>一键生成/);
   assert.doesNotMatch(page.cost(), /预计冻结|失败退回|结算/);
 });
 
@@ -323,8 +330,8 @@ test('finite credits retain the normal freeze quote and refund message regardles
   globalThis.workspaceUser.account = 'zxc9911';
   globalThis.workspaceUser.unlimited = true;
   await page.wallet(finiteWallet());
-  assert.equal(page.cost(), '上传后确认时长和积分；失败退回预留积分。');
-  assert.match(page.html(), /上传素材，查看费用/);
+  assert.equal(page.cost(), '按视频时长预留积分；失败退回预留积分。');
+  assert.match(page.html(), /id="replica-submit"[^>]*>一键生成/);
   page.recover(); await page.poll(); page.select(task.id);
   assert.equal(page.cost(), '预计冻结 112 积分 · 10 秒 · 成功后按成片时长结算，不超过预估');
   assert.doesNotMatch(page.cost(), /无限积分/);

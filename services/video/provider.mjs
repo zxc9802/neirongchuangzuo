@@ -40,7 +40,7 @@ export function generationBody(task) {
     let end = 0;
     for (const segment of segments) { if (segment.start > end) gaps.push(`${end.toFixed(3)}–${segment.start.toFixed(3)}秒`); end = segment.end; }
     if (task.duration > end) gaps.push(`${end.toFixed(3)}秒至成片结束`);
-    voicePrompt = `\n仅替换视频1的人声音色，以下用户确认的台词是唯一台词依据。视频1提供原表演和节奏，音频1仅提供音色，不使用音频1的台词，也不同时播放音频1。全片只有图片1中的一个人物说话，使用音频1的同一音色，不保留或混入原视频的人声，不添加旁白或第二个人声。原视频人声从第 ${task.speech.start.toFixed(3)} 秒开始，此前人物不得说话。严格按以下原视频时间线说话：${segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。每段仅说一次，严格按顺序，价格、数字、单位按原字说，不改写、不补全、不重复。只在列出的台词区间说话，${gaps.length ? `${gaps.join('；')}必须保持静音。` : ''}最后一段结束后不得补说或复读。`;
+    voicePrompt = `\n仅替换视频1的人声音色，以下从原视频提取的台词是唯一台词依据。视频1提供原表演和节奏，音频1仅提供音色，不使用音频1的台词，也不同时播放音频1。全片只有图片1中的一个人物说话，使用音频1的同一音色，不保留或混入原视频的人声，不添加旁白或第二个人声。原视频人声从第 ${task.speech.start.toFixed(3)} 秒开始，此前人物不得说话。严格按以下原视频时间线说话：${segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。每段仅说一次，严格按顺序，价格、数字、单位按原字说，不改写、不补全、不重复。只在列出的台词区间说话，${gaps.length ? `${gaps.join('；')}必须保持静音。` : ''}最后一段结束后不得补说或复读。`;
   }
   return { modelId: MODEL, abilityType: 'VIDEO', prompt: PROMPT + lengthPrompt + captionPrompt + voicePrompt,
     payload: { params: { mode: 'fusion_video', resolution: '720p', scale: task.ratio, duration: task.duration, generateAudio: true },

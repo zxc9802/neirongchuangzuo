@@ -13,6 +13,35 @@ const run = promisify(execFile);
 const python = process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN || 'python3';
 const available = await run(python, ['-c', 'import rapidocr_onnxruntime, cv2, PIL']).then(() => true, () => false);
 
+test('subtitle removal preserves textured background between and around the letters', { skip: !available }, async () => {
+  const { stdout } = await run(python, ['-c', `
+import importlib.util, json
+from pathlib import Path
+import cv2, numpy as np
+from PIL import Image, ImageDraw, ImageFont
+spec = importlib.util.spec_from_file_location('captions', 'services/video/captions.py')
+worker = importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
+y, x = np.indices((180, 640))
+frame = np.stack([90 + x % 80, 80 + y % 90, 70 + (x + y) % 90], axis=2).astype(np.uint8)
+base = frame.copy()
+font_path = next(p for p in ['/System/Library/Fonts/PingFang.ttc', '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'] if Path(p).is_file())
+image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+ImageDraw.Draw(image).text((130, 70), '花了290', font=ImageFont.truetype(font_path, 36), anchor='lt', fill='white', stroke_width=2, stroke_fill='black')
+frame = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+ink = np.any(frame != base, axis=2).astype(np.uint8)
+surrounding = cv2.dilate(ink, np.ones((9, 9), np.uint8)) == 0
+before = frame.copy()
+worker.erase(frame, {'box': [120, 65, 400, 115]}, {'width': 640, 'height': 180})
+changed_background = np.count_nonzero(np.any(frame != before, axis=2) & surrounding)
+white_before = np.count_nonzero(np.min(before, axis=2) > 220)
+white_after = np.count_nonzero(np.min(frame, axis=2) > 220)
+print(json.dumps({'changedBackground': int(changed_background), 'remainingText': white_after / white_before}))
+`]);
+  const result = JSON.parse(stdout);
+  assert.equal(result.changedBackground, 0, 'Removing a subtitle must not smear the entire caption rectangle');
+  assert.ok(result.remainingText < .1, 'The glyphs must actually be removed');
+});
+
 test('caption wording overrides misheard speech while retaining VAD openings and pauses', () => {
   const captions = { engine: 'rapidocr', cues: [
     { start: .1, end: 1, text: '因为姐妹想看我吃生腌' }, { start: 1, end: 2, text: '有寄生虫的' },
