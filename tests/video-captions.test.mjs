@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
@@ -13,33 +13,21 @@ const run = promisify(execFile);
 const python = process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN || 'python3';
 const available = await run(python, ['-c', 'import rapidocr_onnxruntime, cv2, PIL']).then(() => true, () => false);
 
-test('subtitle removal preserves textured background between and around the letters', { skip: !available }, async () => {
-  const { stdout } = await run(python, ['-c', `
-import importlib.util, json
-from pathlib import Path
-import cv2, numpy as np
-from PIL import Image, ImageDraw, ImageFont
-spec = importlib.util.spec_from_file_location('captions', 'services/video/captions.py')
-worker = importlib.util.module_from_spec(spec); spec.loader.exec_module(worker)
-y, x = np.indices((180, 640))
-frame = np.stack([90 + x % 80, 80 + y % 90, 70 + (x + y) % 90], axis=2).astype(np.uint8)
-base = frame.copy()
-font_path = next(p for p in ['/System/Library/Fonts/PingFang.ttc', '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/System/Library/Fonts/Supplemental/Arial Unicode.ttf'] if Path(p).is_file())
-image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-ImageDraw.Draw(image).text((130, 70), '花了290', font=ImageFont.truetype(font_path, 36), anchor='lt', fill='white', stroke_width=2, stroke_fill='black')
-frame = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-ink = np.any(frame != base, axis=2).astype(np.uint8)
-surrounding = cv2.dilate(ink, np.ones((9, 9), np.uint8)) == 0
-before = frame.copy()
-worker.erase(frame, {'box': [120, 65, 400, 115]}, {'width': 640, 'height': 180})
-changed_background = np.count_nonzero(np.any(frame != before, axis=2) & surrounding)
-white_before = np.count_nonzero(np.min(before, axis=2) > 220)
-white_after = np.count_nonzero(np.min(frame, axis=2) > 220)
-print(json.dumps({'changedBackground': int(changed_background), 'remainingText': white_after / white_before}))
-`]);
-  const result = JSON.parse(stdout);
-  assert.equal(result.changedBackground, 0, 'Removing a subtitle must not smear the entire caption rectangle');
-  assert.ok(result.remainingText < .1, 'The glyphs must actually be removed');
+test('existing burned subtitles remain byte-for-byte intact without erasure or duplicate overlay', { skip: !available }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'video-caption-preserve-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const base = join(root, 'base.mp4'), burned = join(root, 'burned.mp4'), output = join(root, 'output.mp4');
+  await run('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=512x768:r=15:d=2',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=2', '-c:v', 'libx264', '-threads', '2', '-pix_fmt', 'yuv420p', '-c:a', 'aac', base]);
+  const captions = { kind: 'embedded', width: 512, height: 768,
+    cues: [{ start: .1, end: 1.8, text: '花了290', box: [80, 550, 430, 590] }] };
+  const service = createCaptionService({ VIDEO_PYTHON_BIN: python });
+  await service.render(base, burned, captions);
+  assert.equal((await service.extract(burned)).kind, 'burned');
+  const result = await service.render(burned, output, captions);
+  const hash = async path => createHash('sha256').update(await readFile(path)).digest('hex');
+  assert.equal(await hash(output), await hash(burned), 'Existing caption pixels and scene details must not be erased or re-encoded');
+  assert.equal(result.preserved, true); assert.equal(result.rendered, false);
 });
 
 test('caption wording overrides misheard speech while retaining VAD openings and pauses', () => {
@@ -54,6 +42,8 @@ test('caption wording overrides misheard speech while retaining VAD openings and
     materials: { photo: { id: 'photo' }, video: { id: 'video' } } });
   assert.match(prompt, /台词来自原视频字幕，优先于听辨结果/); assert.match(prompt, /只要9.9元/);
   assert.doesNotMatch(prompt, /生烟/); assert.equal('referAudioUrl' in payload, false);
+  assert.match(prompt, /保留.*字幕/);
+  assert.doesNotMatch(prompt, /去除画面叠加的字幕|原字幕将由系统在成片中按原时间线合成/);
 });
 
 test('embedded and burned captions preserve text, prices and cue times without changing audio', { skip: !available }, async t => {
@@ -78,12 +68,9 @@ test('embedded and burned captions preserve text, prices and cue times without c
     assert.ok(Math.abs(extracted.cues[i].start - embedded.cues[i].start) <= .11);
     assert.ok(Math.abs(extracted.cues[i].end - embedded.cues[i].end) <= .11);
   }
-  const clean = join(root, 'clean.mp4');
-  await service.clean(burned, clean, extracted);
-  assert.equal(await service.extract(clean), null);
   const corrected = { ...embedded, cues: embedded.cues.map((cue, i) => ({ ...cue, text: i ? '只要8.8元' : cue.text })) };
   const final = join(root, 'final.mp4');
-  await service.render(burned, final, corrected);
+  await service.render(base, final, corrected);
   const output = await service.extract(final);
   assert.deepEqual(output.cues.map(cue => cue.text), ['因为姐妹想看我吃生腌', '只要8.8元']);
   async function audioHash(path) {

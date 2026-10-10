@@ -131,11 +131,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!task.captions?.cues?.length) return;
     const output = join(folder(task), 'result-caption.tmp');
     try {
-      await captions.render(input, output, task.captions);
+      const captionCheck = await captions.render(input, output, task.captions);
       const metadata = await probe(output);
       if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw new Error('Invalid caption render');
       await rename(output, input);
-      task.captionCheck = { rendered: true, source: 'subtitles', cueCount: task.captions.cues.length };
+      task.captionCheck = captionCheck || { rendered: true, source: 'subtitles', cueCount: task.captions.cues.length };
     } catch {
       // Caption processing must never discard a playable model result.
       await rm(output, { force: true });

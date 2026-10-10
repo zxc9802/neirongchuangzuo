@@ -143,6 +143,22 @@ test('captions with no source audio still provide narration and changing the sou
   assert.equal(replaced.captions, undefined); assert.equal(replaced.speech, undefined); assert.equal(replaced.captionsChecked, undefined);
 });
 
+test('preserved model subtitles retain their delivery metadata and playable media', async t => {
+  const check = { rendered: false, preserved: true, source: 'model', cueCount: 2 };
+  const app = await fixture(t, { speech: fakeSpeech(), captions: {
+    extract: async () => structuredClone(CAPTIONS),
+    render: async (input, output) => { await writeFile(output, await readFile(input)); return check; },
+  } });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.deepEqual(completed.captionCheck, check);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+  assert.equal(completed.speech.text, '生腌真好吃只要9.9元');
+  assert.equal(app.state.generations, 1);
+});
+
 test('caption extraction and rendering failures deliver the playable model result without extra generation', async t => {
   for (const stage of ['extract', 'render']) await t.test(stage, async t => {
     const app = await fixture(t, { captions: {

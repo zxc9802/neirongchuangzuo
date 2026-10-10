@@ -142,42 +142,18 @@ def scaled_box(cue, captions, width, height):
             round(x2 * width / captions['width']), round(y2 * height / captions['height'])]
 
 
-def erase(frame, cue, captions):
-    height, width = frame.shape[:2]
-    x1, y1, x2, y2 = scaled_box(cue, captions, width, height)
-    pad = max(3, round(height * .004))
-    x1, y1, x2, y2 = max(0, x1 - pad), max(0, y1 - pad), min(width, x2 + pad), min(height, y2 + pad)
-    # Work only on the subtitle neighborhood, keeping the rest of the scene intact.
-    left, top, right, bottom = max(0, x1 - pad * 4), max(0, y1 - pad * 4), min(width, x2 + pad * 4), min(height, y2 + pad * 4)
-    region = frame[top:bottom, left:right]
-    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    # Target white subtitle strokes with dark outlines, never the whole text box.
-    light = (region.min(axis=2) >= 170) & (region.max(axis=2).astype(np.int16) - region.min(axis=2) < 75)
-    dark = (gray < 110).astype(np.uint8)
-    radius = max(2, round((y2 - y1) * .06))
-    kernel = np.ones((radius * 2 + 1, radius * 2 + 1), dtype=np.uint8)
-    strokes = light & (cv2.dilate(dark, kernel) > 0)
-    bounds = np.zeros(region.shape[:2], dtype=np.uint8)
-    bounds[y1 - top:y2 - top, x1 - left:x2 - left] = 1
-    mask = cv2.dilate((strokes & (bounds > 0)).astype(np.uint8), kernel) * 255
-    if not mask.any():
-        return
-    frame[top:bottom, left:right] = cv2.inpaint(region, mask, 3, cv2.INPAINT_TELEA)
-
-
-def process(mode, path, output, captions):
+def render(path, output, captions):
     from PIL import Image, ImageDraw, ImageFont
-    generated = extract(path) if mode == 'render' else captions
     cap = cv2.VideoCapture(path)
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     fonts = ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/System/Library/Fonts/PingFang.ttc',
              '/System/Library/Fonts/Supplemental/Arial Unicode.ttf']
     font_path = next((font for font in fonts if os.path.isfile(font)), None)
-    if mode == 'render' and not font_path:
+    if not font_path:
         raise ValueError('Chinese caption font unavailable')
     layouts = []
-    for cue in captions['cues'] if mode == 'render' else []:
+    for cue in captions['cues']:
         x1, y1, x2, y2 = scaled_box(cue, captions, width, height)
         lines = cue['text'].splitlines()
         size = max(12, round((y2 - y1) / len(lines)))
@@ -198,10 +174,6 @@ def process(mode, path, output, captions):
             if not ok:
                 break
             at = index / fps
-            if generated and generated['kind'] == 'burned':
-                for cue in generated['cues']:
-                    if cue['start'] - STEP <= at < cue['end'] + STEP:
-                        erase(frame, cue, generated)
             active = [layout for layout in layouts if layout[0]['start'] <= at < layout[0]['end']]
             if active:
                 image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -229,6 +201,8 @@ if __name__ == '__main__':
     mode, path = sys.argv[1:3]
     if mode == 'extract':
         print(json.dumps(extract(path), ensure_ascii=False))
-    else:
+    elif mode == 'render':
         with open(sys.argv[4], encoding='utf-8') as source:
-            process(mode, path, sys.argv[3], json.load(source))
+            render(path, sys.argv[3], json.load(source))
+    else:
+        raise ValueError('Unsupported caption operation')

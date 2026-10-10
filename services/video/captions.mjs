@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { writeFile, rm } from 'node:fs/promises';
+import { writeFile, rm, copyFile } from 'node:fs/promises';
 
 const run = promisify(execFile);
 const worker = fileURLToPath(new URL('./captions.py', import.meta.url));
@@ -28,13 +28,18 @@ export function createCaptionService(env = {}) {
     const { stdout } = await run(python, [worker, 'extract', path], { maxBuffer: 2 * 1024 * 1024 });
     return JSON.parse(stdout);
   }
-  async function process(mode, input, output, captions) {
+  async function render(input, output, captions) {
+    const existing = await extract(input);
+    if (existing?.kind === 'burned' && existing.cues.length) {
+      await copyFile(input, output);
+      return { rendered: false, preserved: true, source: 'model', cueCount: existing.cues.length };
+    }
     const metadata = output + '.captions.json';
     try {
       await writeFile(metadata, JSON.stringify(captions), { mode: 0o600 });
-      await run(python, [worker, mode, input, output, metadata], { maxBuffer: 2 * 1024 * 1024 });
+      await run(python, [worker, 'render', input, output, metadata], { maxBuffer: 2 * 1024 * 1024 });
+      return { rendered: true, source: 'subtitles', cueCount: captions.cues.length };
     } finally { await rm(metadata, { force: true }); }
   }
-  return { extract, clean: (input, output, captions) => process('clean', input, output, captions),
-    render: (input, output, captions) => process('render', input, output, captions) };
+  return { extract, render };
 }
