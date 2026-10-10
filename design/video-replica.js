@@ -104,7 +104,7 @@ export function renderVideoReplica(ctx) {
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
       <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(actionMessage())}</p>
         <button type="button" id="replica-submit" class="primary" ${finished ? 'hidden' : ''} ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传、分析与提交…' : pending(task) ? labels[task.status] : state.uploaded || (task?.photo && task?.video && !Object.keys(state.files).length && (!task.voice || task.speech)) ? task?.voice ? '确认台词，开始人物复刻' : '开始人物复刻' : state.files.voice || task?.voice ? '上传素材，分析人声' : unlimited || exempt ? '上传素材，确认时长' : '上传素材，查看费用'}</button>
-        ${task?.status === 'failed' && task.canRecheck === true ? `<button type="button" id="replica-recheck" class="primary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在提交复核…' : '重新检查成片'}</button>` : ''}<button type="button" id="replica-new" class="textbutton" ${state.busy || pending(task) ? 'disabled' : ''}>新建复刻</button></div></section>
+        ${task?.status === 'failed' && task.canRecheck === true ? `<button type="button" id="replica-recheck" class="primary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在提交复核…' : '重新检查成片'}</button>` : ''}<button type="button" id="replica-new" class="textbutton" ${state.busy ? 'disabled' : ''}>新建复刻</button></div></section>
       <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
 async function selectFile(kind, file) {
@@ -174,8 +174,8 @@ async function poll() {
     const previous = state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }), firstLoad = state.loading;
     state.config = config; state.tasks = data.tasks; state.loading = false; state.pollError = '';
     if (state.current) state.current = data.tasks.find(item => item.id === state.current.id) || state.current;
-    else if (!Object.keys(state.files).length) state.current = data.tasks.find(pending)
-      || (firstLoad ? data.tasks.find(task => task.resultUrl || task.status === 'failed') : null) || null;
+    else if (firstLoad && !Object.keys(state.files).length) state.current = data.tasks.find(pending)
+      || data.tasks.find(task => task.resultUrl || task.status === 'failed') || null;
     for (const task of data.tasks) observeCreditTask(task);
     if (!document.querySelector('#replica-submit')) return;
     if (firstLoad || previous !== (state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }))) refresh();

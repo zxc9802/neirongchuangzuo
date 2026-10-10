@@ -67,6 +67,23 @@ test('reopening the page previews the latest completed task without reopening it
   assert.match(page.html(), /成片在这里预览/);
 });
 
+test('New Replica stays available during generation and polling preserves the new form', async t => {
+  const task = { id: 'running-task', status: 'running', createdAt: Date.now(), video: {}, photo: {} };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll();
+  const button = page.html().match(/<button[^>]*id="replica-new"[^>]*>/)[0];
+  assert.doesNotMatch(button, /disabled/);
+  page.node('#replica-new').onclick();
+  for (let i = 0; i < 2; i++) {
+    await page.poll(); page.ctx.refresh();
+    assert.match(page.html(), /成片在这里预览/);
+    assert.doesNotMatch(page.html().match(/<input[^>]*id="replica-video"[^>]*>/)[0], /disabled/);
+    assert.match(page.html(), /data-replica-task="running-task"/);
+  }
+  page.select(task.id);
+  assert.match(page.html(), /replica-working/);
+});
+
 test('minor transcript differences still preview and download with an honest review message', async t => {
   const task = { id: 'minor-task', status: 'completed', createdAt: Date.now(),
     resultUrl: '/api/video-replica/tasks/minor-task/result', audioCheck: { transcriptMatched: false, transcriptDifferences: 2, afterOffsetMs: 16 } };
