@@ -532,6 +532,103 @@ test('two materials, signed source access, playable range response and exactly-o
   assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
 });
 
+test('the same account can keep more than five unsubmitted replica drafts', async t => {
+  const app = await fixture(t);
+  const ids = [];
+  for (let i = 0; i < 8; i++) ids.push(await app.init());
+  const tasks = (await (await app.call('/tasks')).json()).tasks;
+  assert.equal(tasks.length, ids.length);
+  assert.ok(tasks.every(task => task.status === 'draft'));
+  assert.equal(app.state.generations, 0);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
+test('the same account can generate separate replicas concurrently without duplicate submissions', async t => {
+  const app = await fixture(t);
+  const ids = [await app.init(), await app.init()];
+  for (const id of ids) await app.upload(id);
+  const responses = await Promise.all(ids.map(id => app.call(`/tasks/${id}/start`, { body: {} })));
+  assert.deepEqual(responses.map(response => response.status), [202, 202]);
+  for (const id of ids) await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.generations, 2);
+  assert.equal((await app.wallet.snapshot('alice')).held, 90);
+  for (const id of ids) assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
+  app.state.done = true;
+  for (const id of ids) await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 2);
+  assert.equal((await app.wallet.snapshot('alice')).available, 910);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
+test('an existing replica can be rechecked while another task runs for the same account', async t => {
+  let valid = false;
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ align: async (_source, output) => {
+      if (!valid) throw new Error('FFmpeg failed');
+      await writeFile(output, VIDEO); return { transcriptMatched: true };
+    } }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  app.state.done = false; valid = true;
+  const other = await app.init(); await app.upload(other);
+  await app.call(`/tasks/${other}/start`, { body: {} });
+  await app.until(other, task => task.status === 'running');
+  assert.equal((await app.call(`/tasks/${id}/recheck`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'completed');
+  assert.equal((await app.current(other)).status, 'running');
+  assert.equal(app.state.generations, 2);
+  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  assert.equal((await app.wallet.snapshot('alice')).available, 910);
+});
+
+test('material review keeps waiting beyond three minutes and the active asset retention window', async t => {
+  let time = Date.now(); const app = await fixture(t, { now: () => time });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  for (let i = 0; i < 100 && app.state.creates.length < 2; i++) await delay(10);
+  assert.equal(app.state.creates.length, 2);
+  for (const advance of [181_000, 4 * 86400_000]) {
+    time += advance; await delay(60);
+    assert.equal((await app.current(id)).status, 'reviewing');
+    assert.equal((await app.wallet.snapshot('alice')).held, 45);
+    assert.equal((await app.call(`/tasks/${id}/video`)).status, 200);
+    for (const material of app.state.creates) {
+      const source = new URL(material.url);
+      assert.equal((await fetch(app.base + source.pathname + source.search)).status, 200);
+    }
+  }
+  app.state.review = 2; app.state.done = true;
+  await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 1);
+});
+
+test('running replicas survive a day-long wait and restart after the active asset retention window', async t => {
+  let time = Date.now(); const app = await fixture(t, { now: () => time });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running');
+  time += 25 * 3600_000; await delay(60);
+  assert.equal((await app.current(id)).status, 'running');
+  time += 3 * 86400_000;
+  await app.close(); await app.open(); await delay(60);
+  assert.equal((await app.current(id)).status, 'running');
+  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  assert.equal((await app.call(`/tasks/${id}/video`)).status, 200);
+  const source = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  assert.equal((await fetch(app.base + source.pathname + source.search)).status, 200);
+  assert.equal((await fetch(app.base + source.pathname)).status, 403);
+  app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.expiresAt, time + 3 * 86400_000);
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
+  assert.equal((await fetch(app.base + source.pathname + source.search)).status, 403);
+  assert.equal(app.state.generations, 1);
+  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+});
+
 test('provider completion accepts message URLs without a video extension', async () => {
   const url = 'https://cdn.example/download/result?token=test';
   const config = { video: { base: 'https://provider.example' } };
