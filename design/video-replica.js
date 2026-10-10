@@ -2,6 +2,7 @@ import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorksp
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
+const DEFAULT_VOICE_ENGINE = 'indextts2';
 const VOICE_ENGINES = [{ id: 'seedance', name: 'Seedance 2.0' }, { id: 'indextts2', name: 'IndexTTS2' }];
 const voiceName = task => task.voiceEngine ? `${task.voiceEngine === 'indextts2' ? 'IndexTTS2' : 'Seedance 2.0'} 配音` : '';
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成未完成', expired: '已过期' };
@@ -10,12 +11,12 @@ const taskLabel = task => task.voiceEngine === 'indextts2' && task.status === 'v
   : task.voiceEngine === 'indextts2' && task.status === 'running' && !task.narrationProgress?.ready
     ? '正在替换人物并生成参考配音' : labels[task.status] || '正在处理';
 const pending = task => task && !['draft', 'completed', 'failed', 'expired'].includes(task.status);
-let state = { owner: null, config: null, tasks: [], current: null, voiceEngine: 'seedance', files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
+let state = { owner: null, config: null, tasks: [], current: null, voiceEngine: DEFAULT_VOICE_ENGINE, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
 let context, timer, polling = false, unsubscribeCredits;
 function resetFiles() { for (const url of Object.values(state.urls)) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
-  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, voiceEngine: 'seedance', files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
+  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, voiceEngine: DEFAULT_VOICE_ENGINE, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
 }
 async function request(path, options = {}) {
   const signal = options.method ? undefined : AbortSignal.timeout(15_000);
@@ -58,13 +59,14 @@ function voicePicker(ctx) {
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind];
   const saved = state.current?.[kind];
+  const voiceRequired = voice && (state.current && state.current.status !== 'draft' ? state.current.voiceEngine : state.voiceEngine) === 'indextts2';
   const disabled = state.busy || pending(state.current) || state.current && state.current.status !== 'draft' || voice && !state.config?.voiceEnabled;
   const source = state.urls[kind] || state.current?.[video ? 'sourceVideoUrl' : voice ? 'sourceVoiceUrl' : 'sourcePhotoUrl'];
   const preview = source ? video
     ? `<video src="${ctx.esc(source)}" controls playsinline preload="metadata" aria-label="参考视频预览"></video>`
     : voice ? `<audio src="${ctx.esc(source)}" controls preload="metadata" aria-label="声音参考试听"></audio>`
       : `<img src="${ctx.esc(source)}" alt="目标人物照片预览">` : `<div class="replica-upload-symbol">${ctx.icon(video ? 'video' : voice ? 'audio' : 'image')}</div>`;
-  return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title"><span>${video ? '01' : voice ? '03' : '02'}</span><h3>${title}${voice ? '<small>选填 · 更换音色</small>' : ''}</h3></div>
+  return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title"><span>${video ? '01' : voice ? '03' : '02'}</span><h3>${title}${voice ? `<small>${voiceRequired ? '必填' : '选填'} · 更换音色</small>` : ''}</h3></div>
     ${voice ? voicePicker(ctx) : ''}<div class="replica-input-preview">${preview}</div>
     <strong class="replica-file-name">${ctx.esc(selected?.name || (saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : '上传你想替换成的人物'))}</strong>
     <p>${video ? '单个人物 · 2–15 秒 · MP4 / MOV · 最大 50 MB' : voice ? state.config && !state.config.voiceEnabled ? '声音分析服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
@@ -186,7 +188,7 @@ export function bindVideoReplica(ctx) {
     state.voiceEngine = event.target.value; state.error = ''; refresh();
   };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
-  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.voiceEngine = 'seedance'; state.error = ''; refresh(); };
+  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.voiceEngine = DEFAULT_VOICE_ENGINE; state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };
   document.querySelector('#replica-history').onclick = event => {
     const button = event.target.closest('[data-replica-task]'); if (!button || state.busy) return;

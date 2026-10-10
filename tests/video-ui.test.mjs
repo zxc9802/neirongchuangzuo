@@ -179,8 +179,8 @@ test('one click uploads every selected asset then starts once without analysis o
   page.node('#replica-submit').onclick(); page.node('#replica-submit').onclick(); await page.settle();
   assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', ...['video', 'photo', 'voice', 'start'].map(kind => `/api/video-replica/tasks/${task.id}/${kind}`)]);
   assert.deepEqual(calls.slice(1, 4).map(call => call.body), files);
-  assert.equal(calls[0].body.voiceEngine, 'seedance');
-  assert.equal(calls[4].body.voiceEngine, 'seedance');
+  assert.equal(calls[0].body.voiceEngine, 'indextts2');
+  assert.equal(calls[4].body.voiceEngine, 'indextts2');
   assert.equal(calls[4].body.speechConfirmed, undefined);
   assert.match(page.html(), /id="replica-submit"[^>]*disabled[^>]*>正在自动分析字幕与人声/);
 });
@@ -409,7 +409,7 @@ test('reference voice jobs show separate parallel narration and lip-sync stages 
   assert.doesNotMatch(page.html(), /NaN|开口偏差/);
 });
 
-test('voice picker defaults to Seedance and switching to IndexTTS sends the selection through uploads and start', async t => {
+test('voice picker defaults to IndexTTS and sends that default through uploads and start', async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true,
@@ -423,10 +423,8 @@ test('voice picker defaults to Seedance and switching to IndexTTS sends the sele
     return Response.json({ task });
   } });
   page.recover(); await page.poll();
-  assert.match(page.html(), /value="seedance" selected/);
-  page.node('#replica-voice-engine').onchange({ target: { value: 'indextts2' } });
-  await page.poll(); page.ctx.refresh();
   assert.match(page.html(), /value="indextts2" selected/);
+  assert.match(page.html(), /声音参考<small>必填/);
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls[0].body.voiceEngine, 'indextts2'); assert.equal(calls.at(-1).body.voiceEngine, 'indextts2');
@@ -435,7 +433,12 @@ test('voice picker defaults to Seedance and switching to IndexTTS sends the sele
   page.node('#replica-voice-engine').onchange({ target: { value: 'seedance' } });
   assert.match(page.html(), /value="indextts2" selected/);
   page.node('#replica-new').onclick();
+  assert.match(page.html(), /value="indextts2" selected/);
+  page.node('#replica-voice-engine').onchange({ target: { value: 'seedance' } });
   assert.match(page.html(), /value="seedance" selected/);
+  assert.match(page.html(), /声音参考<small>选填/);
+  page.node('#replica-new').onclick();
+  assert.match(page.html(), /value="indextts2" selected/);
 });
 
 test('reopening an IndexTTS draft restores its choice and a Seedance override survives old draft responses', async t => {
