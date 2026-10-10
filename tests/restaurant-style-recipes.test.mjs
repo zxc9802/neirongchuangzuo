@@ -61,7 +61,8 @@ test('website regenerates nine without store details, corrects style, enhances t
     },
     async reviewStylePhoto(input) {
       reviews.push(input); assert.equal(input.photos.length, 3);
-      return reviews.length === 1 ? { status: 'needs_revision', styleScore: 50, issues: ['暖琥珀色被改成了冷色'] } : { status: 'passed', styleScore: 95, issues: [] };
+      return input.sourceImageId === 'photo-1' && reviews.filter(r => r.sourceImageId === 'photo-1').length === 1
+        ? { status: 'needs_revision', styleScore: 50, issues: ['暖琥珀色被改成了冷色'] } : { status: 'passed', styleScore: 95, issues: [] };
     },
     async write() { assert.fail('Image-only tasks must not invent store details to write copy'); },
     async usage() { return {}; }, async close() {},
@@ -88,8 +89,9 @@ test('website regenerates nine without store details, corrects style, enhances t
   assert.deepEqual(task.profileSnapshot, {}); assert.equal(task.copyStatus, 'not_requested');
   assert.equal(task.galleryStoryboard.source, 'approved-style'); assert.equal(task.outputCount, 9);
   assert.equal(task.styleRecipe, undefined); assert.equal(calls.length, 9); assert.equal(reviews.length, 9);
-  assert.equal(calls[1].attempt, 1); assert.deepEqual(calls[1].corrections, ['暖琥珀色被改成了冷色']);
-  assert.equal(task.imageReviews[0].status, 'needs_revision'); assert.equal(task.imageReviews[1].status, 'passed');
+  const corrected = calls.find(call => call.recipeId === 'bar-01' && call.attempt === 1);
+  assert.deepEqual(corrected.corrections, ['暖琥珀色被改成了冷色']);
+  assert.deepEqual(task.imageReviews.filter(r => r.imageId === 'shot-01').map(r => r.status), ['needs_revision', 'passed']);
   assert.equal(task.files.filter(f => /^image\//.test(f.mime)).length, 9);
   assert.ok(!calls.some(c => c.recipeId === 'bar-07'));
   assert.equal((await api(`/tasks/${id}/confirm`, { confirmWarnings: true })).status, 200);

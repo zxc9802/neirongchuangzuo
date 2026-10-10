@@ -128,6 +128,87 @@ test('promotional processing failure retries locally and releases held credits w
 const foodAppearance={description:'圆碗中的食物',portion:'一碗',arrangement:'食物在碗内',vessel:'圆碗',colors:['浅色'],visibleComponents:['条状食物'],texture:['可见纹理'],distinctiveFeatures:['圆碗'],uncertainDetails:[],dishCount:1,pieceCount:null};
 const foodReview={status:'passed',identityMatch:true,sceneMatch:true,shotMatch:true,compositionUsable:true,errors:[],warnings:[]};
 
+async function waitUntil(check) {
+  const deadline = performance.now() + 15_000;
+  while (!await check()) { assert.ok(performance.now() < deadline, 'concurrent gallery did not reach the expected state'); await new Promise(resolve => setTimeout(resolve, 10)); }
+}
+function heldFoodModel(t, { failShot = 0 } = {}) {
+  const started = [], gates = new Map();
+  let active = 0, peak = 0, released = false, identities = 0;
+  t.after(() => { released = true; for (const gate of gates.values()) gate(); });
+  const model = mockModel({ async identifyFood() { identities++; return foodAppearance; },
+    async renderFood(input) {
+      const key = input.taskId + ':' + input.imageId, shot = Number(/shot-(\d+)/.exec(input.imageId)[1]);
+      started.push({ key, shot, taskId: input.taskId }); active++; peak = Math.max(peak, active);
+      try {
+        if (!released) await new Promise(resolve => gates.set(key, resolve));
+        if (shot === failShot) throw Object.assign(Error('explicit rejection'), { code: 'PROVIDER_ERROR' });
+        return { bytes: await sharp(input.photo.bytes).resize(1080, 1440).jpeg().toBuffer(), requestId: `request-${shot}` };
+      } finally { active--; }
+    }, async reviewFoodRender() { return foodReview; } });
+  return { model, started, release: entry => gates.get(entry.key)?.(), releaseAll() { released = true; for (const gate of gates.values()) gate(); },
+    get peak() { return peak; }, get active() { return active; }, get identities() { return identities; } };
+}
+
+test('three gallery images run concurrently, retain all out-of-order checkpoints and deliver in planned order once', async t => {
+  const held = heldFoodModel(t), app = await setup(t, { model: held.model, withCredits: true });
+  const id = randomUUID();
+  await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 6 });
+  await waitUntil(() => held.started.length === 3); assert.equal(held.peak, 3);
+  for (const shot of [3, 4, 5, 6, 2]) {
+    await waitUntil(() => held.started.some(entry => entry.shot === shot));
+    held.release(held.started.find(entry => entry.shot === shot));
+    await waitUntil(async () => (await app.handler.store.getTask('owner', id)).galleryCheckpoints?.some(c => c.imageId === `shot-${String(shot).padStart(2, '0')}` && c.status === 'ready'));
+  }
+  const pending = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(pending.status, 'generating'); assert.equal(pending.progress.current, 5);
+  assert.match(pending.progress.message, /已完成 5 \/ 6/);
+  assert.equal(pending.files.length, 0); assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
+  assert.equal((await app.credits.snapshot('owner')).held, 300);
+  held.release(held.started.find(entry => entry.shot === 1));
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(held.started.length, 6);
+  assert.equal(held.identities, 2, 'concurrent shots share one identification per source');
+  assert.deepEqual(task.files.filter(f => f.role === 'image').map(f => f.composition.imageRequestId), [1, 2, 3, 4, 5, 6].map(n => `request-${n}`));
+  assert.equal((await app.handler.store.getTask('owner', id)).galleryCheckpoints.filter(c => c.status === 'ready').length, 6);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 200);
+  await app.api(`/tasks/${id}/generate`, { workflow: 'store-gallery-v1', directionId: task.selection.directionId, imageMode: 'promotional', outputCount: 6 });
+  assert.equal(held.started.length, 6); assert.equal((await app.credits.snapshot('owner')).balance, 700);
+});
+
+test('a failed concurrent shot stops queued work and waits for dispatched images before releasing credits', async t => {
+  const held = heldFoodModel(t, { failShot: 1 }), app = await setup(t, { model: held.model, withCredits: true });
+  const id = randomUUID();
+  await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 6 });
+  await waitUntil(() => held.started.length === 3);
+  held.release(held.started.find(entry => entry.shot === 1));
+  await waitUntil(() => held.active === 2);
+  const running = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(running.status, 'generating'); assert.equal((await app.credits.snapshot('owner')).held, 300);
+  held.releaseAll(); const failed = await app.wait(id, ['failed']);
+  assert.equal(failed.code, 'PROVIDER_ERROR'); assert.equal(held.started.length, 3); assert.equal(held.active, 0);
+  const saved = await app.handler.store.getTask('owner', id);
+  assert.equal(saved.galleryCheckpoints.filter(c => c.status === 'ready').length, 2);
+  assert.equal(failed.files.length, 0);
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000); assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('the three-image concurrency cap is shared across different merchants and tasks', async t => {
+  const held = heldFoodModel(t), app = await setup(t, { model: held.model });
+  const id = randomUUID(), otherId = randomUUID(), inputs = await photos(3);
+  await app.api('/tasks', { requestId: id, images: inputs, rightsConfirmed: true, autoGenerate: true, outputCount: 6 });
+  await waitUntil(() => held.started.length === 3);
+  await app.api('/tasks', { requestId: otherId, images: inputs, rightsConfirmed: true, autoGenerate: true, outputCount: 3 }, 'other-owner');
+  await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'generating');
+  assert.equal(held.started.length, 3); assert.equal(held.peak, 3);
+  held.release(held.started[0]);
+  await waitUntil(() => held.started.some(entry => entry.taskId.startsWith(otherId)));
+  assert.equal(held.peak, 3);
+  held.releaseAll(); assert.equal((await app.wait(id, ['completed', 'failed'])).status, 'completed');
+  await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'completed');
+  assert.equal(held.started.length, 9); assert.equal(held.peak, 3);
+});
+
 test('new food photos generate with empty or partial store details without requesting optional copy', async t => {
   let renders = 0;
   const model = mockModel({ async identifyFood() { return foodAppearance; },
