@@ -21,7 +21,7 @@ const invalid = message => new VideoError(message, 422, 'VIDEO_SPEECH_INVALID');
 export function compareSpeech(expectedText, actualText) {
   const expected = Array.from(speechText(expectedText)), actual = Array.from(speechText(actualText));
   if (expected.join('') === actual.join('')) return { exact: true, accepted: true, differences: 0, mapping: expected.map((_, index) => index) };
-  const limit = Math.min(2, Math.floor(expected.length * 0.05));
+  const limit = Math.min(5, Math.floor(expected.length * 0.10));
   const numbers = characters => characters.join('').match(/[+-]?(?:\d+(?:\.\d+)?|[两十百千万亿]+)[\d两十百千万亿块元角分钱%倍年月日秒斤克]*/g) || [];
   if (Math.abs(expected.length - actual.length) > limit || JSON.stringify(numbers(expected)) !== JSON.stringify(numbers(actual))) {
     return { exact: false, accepted: false, differences: null };

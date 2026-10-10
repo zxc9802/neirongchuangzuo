@@ -134,8 +134,8 @@ test('a replacement video invalidates voice analysis and failed result verificat
 });
 
 test('minor ASR differences deliver a real result and settle once without concealing either verification stage', async t => {
-  const text = '这款饼干又薄又脆打开包装就能闻到浓浓的香味吃起来清爽可口适合大家分享真的超级好吃';
-  const minor = text.replace('包装', '包妆').replace('香味', '香卫');
+  const text = '这款饼干又薄又脆打开包装就能闻到浓浓的香味吃起来清爽可口适合大家分享真的超级好吃香酥美味全家都爱分享';
+  const minor = text.replace('包装', '包妆').replace('香味', '香卫').replace('可口', '可扣').replace('大家', '大加').replace('分享', '分响');
   const timeline = value => ({ ...SPEECH, text: value, segments: [{ ...SPEECH.segments[0], text: value,
     words: [{ word: value, start: 1.25, end: 3.5 }] }] });
   for (const [raw, aligned] of [[minor, text], [text, minor], [minor, minor]]) await t.test(`${raw === text ? 'exact' : 'minor'} raw, ${aligned === text ? 'exact' : 'minor'} aligned`, async t => {
@@ -147,7 +147,7 @@ test('minor ASR differences deliver a real result and settle once without concea
     await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
     const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
     assert.equal(completed.audioCheck.transcriptMatched, false);
-    assert.equal(completed.audioCheck.transcriptDifferences, 2);
+    assert.equal(completed.audioCheck.transcriptDifferences, 5);
     assert.equal(completed.audioCheck.afterOffsetMs, 0);
     assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
     assert.equal(completed.billing.chargedPoints, 45);

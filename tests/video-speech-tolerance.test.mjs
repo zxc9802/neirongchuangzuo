@@ -10,14 +10,17 @@ function timeline(parts) {
   return { text: parts.join(''), start: 0, end: segments.at(-1).end, segments };
 }
 
-test('minor differences require both at most two characters and at most five percent', () => {
-  const expected = first + second;
-  assert.equal(expected.length, 40);
+test('minor differences require both at most five characters and at most ten percent', () => {
+  const expected = first + second + '香酥美味全家都爱分享';
+  const changed = (text, count) => '甲'.repeat(count) + text.slice(count);
+  assert.equal(expected.length, 50);
   assert.deepEqual(compareSpeech(expected, expected).differences, 0);
-  assert.equal(compareSpeech(expected, expected.replace('包装', '包妆')).accepted, true);
-  assert.equal(compareSpeech(expected, expected.replace('包装', '包妆').replace('香味', '香卫')).differences, 2);
-  assert.equal(compareSpeech(expected, expected.replace('包装', '包妆').replace('香味', '香卫').replace('可口', '可扣')).accepted, false);
-  assert.equal(compareSpeech(first, first.replace('包装', '包妆').replace('香味', '香卫')).accepted, false);
+  assert.equal(compareSpeech(expected, changed(expected, 5)).accepted, true);
+  assert.equal(compareSpeech(expected, changed(expected, 5)).differences, 5);
+  assert.equal(compareSpeech(expected.repeat(2), changed(expected.repeat(2), 6)).accepted, false);
+  const shorter = expected.slice(0, -1);
+  assert.equal(compareSpeech(shorter, changed(shorter, 4)).accepted, true);
+  assert.equal(compareSpeech(shorter, changed(shorter, 5)).accepted, false);
   assert.equal(compareSpeech('真的好吃', '真的好喝').accepted, false);
 });
 
