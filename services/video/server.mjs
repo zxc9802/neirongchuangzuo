@@ -12,6 +12,7 @@ import { createCaptionService, captionSpeech } from './captions.mjs';
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
 const DAY = 86400_000;
+const MATERIAL_QUERY_RETRIES = 5;
 const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'verifying']);
 const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const error = (message, status = 400, code) => new VideoError(message, status, code);
@@ -182,7 +183,19 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       for (const kind of ['photo', 'video', ...(task.voice ? ['voice'] : [])]) {
         if (!task.materials[kind]) { task.materials[kind] = await taskProvider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
         const material = task.materials[kind];
-        if (material.status !== 2) material.status = await taskProvider.queryMaterial(material.id);
+        if (material.status !== 2) {
+          try { material.status = await taskProvider.queryMaterial(material.id); }
+          catch {
+            material.queryFailures = (material.queryFailures || 0) + 1;
+            if (material.queryFailures > MATERIAL_QUERY_RETRIES) {
+              await fail(task, `素材审核状态查询已重试 ${MATERIAL_QUERY_RETRIES} 次仍未成功，请稍后新建复刻。`, 'VIDEO_MATERIAL_QUERY_FAILED'); return;
+            }
+            task.error = `素材审核状态查询暂时失败，正在重试（${material.queryFailures}/${MATERIAL_QUERY_RETRIES}）。`;
+            task.code = 'VIDEO_MATERIAL_QUERY_RETRYING'; await save(task); return;
+          }
+          delete material.queryFailures;
+          if (task.code === 'VIDEO_MATERIAL_QUERY_RETRYING') { task.error = ''; delete task.code; }
+        }
         if (material.status === 3) { await fail(task, `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : '参考视频'}未通过素材审核，请更换清晰、符合要求的素材。`, 'VIDEO_REVIEW_REJECTED'); return; }
         await save(task);
       }

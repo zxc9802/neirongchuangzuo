@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
-import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT } from '../services/video/provider.mjs';
+import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError } from '../services/video/provider.mjs';
 import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
@@ -26,7 +26,7 @@ async function fixture(t, options = {}) {
   const state = { creates: [], queries: 0, generations: 0, done: false, failed: false, review: 2, source: null };
   const provider = {
     async createMaterial(url, kind) { state.creates.push({ url, kind }); return { id: kind + '-id', status: state.review }; },
-    async queryMaterial() { return state.review; },
+    async queryMaterial(id) { return options.queryMaterial ? options.queryMaterial(id) : state.review; },
     async generate(task) { state.generations++; state.body = generationBody(task); if (options.uncertain) throw new Error('Network disconnected'); return { taskId: 'provider-1' }; },
     async query() { state.queries++; if (options.query) return options.query(); return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; },
   };
@@ -746,6 +746,68 @@ test('an existing replica can be rechecked while another task runs for the same 
   assert.equal(app.state.generations, 2);
   assert.equal((await app.wallet.snapshot('alice')).held, 45);
   assert.equal((await app.wallet.snapshot('alice')).available, 910);
+});
+
+test('material queries recover on the fifth retry without recreating assets or replaying generation', async t => {
+  let queries = 0;
+  const app = await fixture(t, { queryMaterial: async id => {
+    if (id === 'photo-id' && ++queries <= 5) throw new VideoError('Temporary provider failure', 502,
+      queries % 2 ? 'VIDEO_PROVIDER_REJECTED' : 'VIDEO_PROVIDER_UNAVAILABLE');
+    return 2;
+  } });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const running = await app.until(id, task => ['running', 'failed'].includes(task.status));
+  assert.equal(running.status, 'running', running.error); assert.equal(queries, 6);
+  assert.equal(running.error, ''); assert.equal(running.code, undefined);
+  assert.deepEqual(app.state.creates.map(material => material.kind), ['photo', 'video']);
+  assert.equal(app.state.generations, 1);
+  app.state.done = true; await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+});
+
+test('material queries stop after five retries and release the hold without starting generation', async t => {
+  let queries = 0;
+  const app = await fixture(t, { queryMaterial: async () => {
+    queries++; throw new VideoError('Temporary provider refusal', 502, 'VIDEO_PROVIDER_REJECTED');
+  } });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
+  assert.equal(queries, 6); assert.equal(failed.code, 'VIDEO_MATERIAL_QUERY_FAILED');
+  assert.match(failed.error, /重试 5 次/);
+  assert.equal(app.state.creates.length, 1); assert.equal(app.state.generations, 0);
+  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  await delay(60); assert.equal(queries, 6);
+});
+
+test('material query retry counts survive a restart', async t => {
+  let queries = 0;
+  const app = await fixture(t, { pollIntervalMs: 1000, queryMaterial: async () => {
+    queries++; throw new VideoError('Temporary provider refusal', 502, 'VIDEO_PROVIDER_REJECTED');
+  } });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const pending = await app.until(id, task => task.code === 'VIDEO_MATERIAL_QUERY_RETRYING' || task.status === 'failed');
+  assert.equal(pending.status, 'reviewing'); assert.equal(queries, 1);
+  assert.match(pending.error, /1\/5/);
+  await app.close(); await app.open({ pollIntervalMs: 15 });
+  await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
+  assert.equal(queries, 6); assert.equal(app.state.creates.length, 1); assert.equal(app.state.generations, 0);
+});
+
+test('an explicit rejected material review fails immediately without query retries', async t => {
+  let queries = 0;
+  const app = await fixture(t, { queryMaterial: async () => { queries++; return 3; } });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
+  assert.equal(queries, 1); assert.equal(failed.code, 'VIDEO_REVIEW_REJECTED');
+  assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).available, 1000);
 });
 
 test('material review keeps waiting beyond three minutes and the active asset retention window', async t => {
