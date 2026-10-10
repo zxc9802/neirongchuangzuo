@@ -1,5 +1,7 @@
-export function createGalleryQueue(limit = 3) {
-  if (!Number.isInteger(limit) || limit < 1 || limit > 3) throw new Error('Gallery concurrency must be between 1 and 3.');
+export const GALLERY_CONCURRENCY = 10;
+
+export function createGalleryQueue(limit = GALLERY_CONCURRENCY) {
+  if (!Number.isInteger(limit) || limit < 1 || limit > GALLERY_CONCURRENCY) throw new Error('Gallery concurrency must be between 1 and 10.');
   const waiting = [];
   let active = 0;
   function pump() {

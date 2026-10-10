@@ -4,7 +4,7 @@ const listeners = new Set();
 const observedTasks = new Map();
 let pending = null;
 let refreshAgain = false;
-const owner = () => globalThis.workspaceUser?.id || null;
+const owner = () => globalThis.workspaceUser?.id || globalThis.workspaceCreditOwner || null;
 const whole = value => Number.isSafeInteger(value) && value >= 0;
 
 export function normalizeCredits(value) {

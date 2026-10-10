@@ -7,8 +7,9 @@ import { renderDigitalHuman } from '../design/digital-human.js';
 const balance = (available = 1000, held = 0, pricing = {}) => ({ initialPoints: 1000, available, balance: available, held, total: available + held, pricing: { initialPoints: 1000, imagePerUnit: 50, videoPoints: 333, videoSeconds: 30, version: '2026-10-08', ...pricing } });
 const freshModule = () => import(`../design/workspace-credits.js?credits-test-${crypto.randomUUID()}`);
 function workspace(t, fetch) {
-  const saved = Object.fromEntries(['workspaceUser', 'fetch'].map(key => [key, globalThis[key]]));
+  const saved = Object.fromEntries(['workspaceUser', 'workspaceCreditOwner', 'fetch'].map(key => [key, globalThis[key]]));
   globalThis.workspaceUser = { id: crypto.randomUUID() };
+  delete globalThis.workspaceCreditOwner;
   globalThis.fetch = fetch;
   t.after(() => { for (const [key, value] of Object.entries(saved)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value; });
 }
@@ -55,6 +56,22 @@ test('an account name or browser user flag cannot grant unlimited points', async
   assert.equal(module.workspaceCreditsState().snapshot.unlimited, false);
   assert.match(module.creditInsufficiency(module.imagePoints(1)), /积分不足/);
   assert.equal(module.creditEstimateText(module.imagePoints(1)), '预计 50 积分');
+});
+
+test('local preview reads the server wallet without a login and clears it when an authenticated account takes over', async t => {
+  let local = true, calls = 0;
+  workspace(t, async () => { calls++; return Response.json({ ...balance(local ? 0 : 300), unlimited: local }); });
+  globalThis.workspaceUser = null; globalThis.workspaceCreditOwner = 'local-dev';
+  const module = await freshModule();
+  await module.refreshWorkspaceCredits();
+  assert.equal(calls, 1); assert.equal(module.workspaceCreditsState().owner, 'local-dev');
+  assert.equal(module.creditEstimateText(module.imagePoints(15)), '无限积分');
+  local = false; globalThis.workspaceUser = { id: 'account_owner' };
+  assert.equal(module.workspaceCreditsState().snapshot, null);
+  await module.refreshWorkspaceCredits();
+  assert.equal(module.workspaceCreditsState().owner, 'account_owner');
+  assert.equal(module.workspaceCreditsState().snapshot.unlimited, false);
+  assert.match(module.creditInsufficiency(module.imagePoints(15)), /积分不足/);
 });
 
 test('incomplete, negative and fractional account balances never turn into a default balance', () => {

@@ -74,15 +74,18 @@ function safeError(res, status, code, message, close = false) {
   res.end(JSON.stringify({ error: message, code }));
 }
 
-export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, aiOptions, restaurantOptions, mixOptions, videoOptions, credits: injectedCredits, creditsOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, createVideo = createVideoHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
+export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, localUnlimitedCredits = false, aiOptions, restaurantOptions, mixOptions, videoOptions, credits: injectedCredits, creditsOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, createVideo = createVideoHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
  const backend = new URL(backendUrl);
  const externalOrigin = publicOrigin ? new URL(publicOrigin) : undefined;
  if (backend.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(backend.hostname)) throw new Error('The development backend must use loopback HTTP.');
  const runtimeSettings = loadWorkspaceSettings();
  const dataRoot = workspaceDataRoot(runtimeSettings);
- const credits = injectedCredits ?? (authRequired || creditsOptions ? createCreditsLedger({
-   databaseUrl: authRequired ? runtimeSettings.AUTH_DATABASE_URL || process.env.AUTH_DATABASE_URL : undefined,
+ const unlimitedLocal = localUnlimitedCredits === true && !authRequired && process.env.NODE_ENV !== 'production';
+ const credits = injectedCredits ?? (authRequired || creditsOptions || unlimitedLocal ? createCreditsLedger({
+   databaseUrl: authRequired ? runtimeSettings.AUTH_DATABASE_URL || process.env.AUTH_DATABASE_URL : null,
    storageDir: join(dataRoot, 'credits'), ...creditsOptions }) : null);
+ const creditsReady = Promise.resolve(credits?.ready).then(() => unlimitedLocal ? credits.setUnlimited('local-dev', true) : undefined);
+ creditsReady.catch(() => {});
  const handleAI = createAI({ storageDir: join(dataRoot, 'ai'), credits, ...aiOptions });
  let handleRestaurant;
  let handleMix;
@@ -96,7 +99,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
    packageDailyLimit: Number(runtimeSettings.RESTAURANT_PACKAGE_DAILY_LIMIT || 20),
    mediaEnv: runtimeSettings, providerLedger: handleAI.callLedger, credits, ...restaurantOptions });
  const initializeVideo = videoOptions?.initialize || process.env.NODE_ENV === 'production' && videoConfig(runtimeSettings, externalOrigin?.origin).enabled;
- const ready = Promise.all([Promise.resolve(handleAI.ready), ...(credits ? [credits.ready] : []), ...(restaurantOptions?.initialize ? [restaurant().ready] : []), ...(initializeVideo ? [video().ready] : [])]);
+ const ready = Promise.all([Promise.resolve(handleAI.ready), creditsReady, ...(restaurantOptions?.initialize ? [restaurant().ready] : []), ...(initializeVideo ? [video().ready] : [])]);
  ready.catch(() => {});
  let closing = false;
  let shutdownPromise;
@@ -134,7 +137,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       }
       if (!credits) { safeError(res, 503, 'CREDITS_NOT_CONFIGURED', '积分服务尚未启用。'); return; }
       try {
-        await credits.ready;
+        await creditsReady;
         const wallet = await credits.snapshot(user?.id || 'local-dev');
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' });
         res.end(JSON.stringify(wallet));
@@ -143,7 +146,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
     }
     if (path === '/api/workspace/session') {
       res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ required: authRequired, user })); return;
+      res.end(JSON.stringify({ required: authRequired, user, ...(unlimitedLocal ? { localCredits: true } : {}) })); return;
     }
   }
   if (videoPath) {
@@ -264,7 +267,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
- const server = createPreviewServer({ authRequired: workspaceAuthRequired() });
+ const server = createPreviewServer({ authRequired: workspaceAuthRequired(), localUnlimitedCredits: loadWorkspaceSettings().WORKSPACE_LOCAL_UNLIMITED_CREDITS === '1' });
  let stopping = false;
  const stop = async (code = 0) => {
    stopping = true;

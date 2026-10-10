@@ -151,7 +151,7 @@ function heldFoodModel(t, { failShot = 0 } = {}) {
 }
 
 test('three gallery images run concurrently, retain all out-of-order checkpoints and deliver in planned order once', async t => {
-  const held = heldFoodModel(t), app = await setup(t, { model: held.model, withCredits: true });
+  const held = heldFoodModel(t), app = await setup(t, { model: held.model, withCredits: true, galleryConcurrency: 3 });
   const id = randomUUID();
   await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 6 });
   await waitUntil(() => held.started.length === 3); assert.equal(held.peak, 3);
@@ -179,22 +179,22 @@ test('three gallery images run concurrently, retain all out-of-order checkpoints
 test('a failed concurrent shot stops queued work and waits for dispatched images before releasing credits', async t => {
   const held = heldFoodModel(t, { failShot: 1 }), app = await setup(t, { model: held.model, withCredits: true });
   const id = randomUUID();
-  await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 6 });
-  await waitUntil(() => held.started.length === 3);
+  await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 15 });
+  await waitUntil(() => held.started.length === 10);
   held.release(held.started.find(entry => entry.shot === 1));
-  await waitUntil(() => held.active === 2);
+  await waitUntil(() => held.active === 9);
   const running = (await app.api(`/tasks/${id}`)).body.task;
-  assert.equal(running.status, 'generating'); assert.equal((await app.credits.snapshot('owner')).held, 300);
+  assert.equal(running.status, 'generating'); assert.equal((await app.credits.snapshot('owner')).held, 750);
   held.releaseAll(); const failed = await app.wait(id, ['failed']);
-  assert.equal(failed.code, 'PROVIDER_ERROR'); assert.equal(held.started.length, 3); assert.equal(held.active, 0);
+  assert.equal(failed.code, 'PROVIDER_ERROR'); assert.equal(held.started.length, 10); assert.equal(held.peak, 10); assert.equal(held.active, 0);
   const saved = await app.handler.store.getTask('owner', id);
-  assert.equal(saved.galleryCheckpoints.filter(c => c.status === 'ready').length, 2);
+  assert.equal(saved.galleryCheckpoints.filter(c => c.status === 'ready').length, 9);
   assert.equal(failed.files.length, 0);
   assert.equal((await app.credits.snapshot('owner')).balance, 1000); assert.equal((await app.credits.snapshot('owner')).held, 0);
 });
 
 test('the three-image concurrency cap is shared across different merchants and tasks', async t => {
-  const held = heldFoodModel(t), app = await setup(t, { model: held.model });
+  const held = heldFoodModel(t), app = await setup(t, { model: held.model, galleryConcurrency: 3 });
   const id = randomUUID(), otherId = randomUUID(), inputs = await photos(3);
   await app.api('/tasks', { requestId: id, images: inputs, rightsConfirmed: true, autoGenerate: true, outputCount: 6 });
   await waitUntil(() => held.started.length === 3);
@@ -207,6 +207,33 @@ test('the three-image concurrency cap is shared across different merchants and t
   held.releaseAll(); assert.equal((await app.wait(id, ['completed', 'failed'])).status, 'completed');
   await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'completed');
   assert.equal(held.started.length, 9); assert.equal(held.peak, 3);
+});
+
+test('default gallery concurrency allows ten images across merchants and queues the rest without losing results or charges', async t => {
+  const held = heldFoodModel(t), app = await setup(t, { model: held.model, withCredits: true });
+  const id = randomUUID(), otherId = randomUUID();
+  assert.equal((await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 15 })).status, 202);
+  await waitUntil(() => held.started.length === 10);
+  assert.equal(held.active, 10); assert.equal(held.peak, 10);
+  assert.equal((await app.api('/tasks', { requestId: otherId, images: await photos(3), rightsConfirmed: true, autoGenerate: true, outputCount: 3 }, 'other-owner')).status, 202);
+  await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'generating');
+  assert.equal(held.started.length, 10);
+  held.release(held.started.find(entry => entry.shot === 10));
+  await waitUntil(() => held.started.some(entry => entry.taskId.startsWith(otherId)));
+  assert.equal(held.peak, 10); assert.equal(held.active, 10);
+  held.releaseAll();
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'completed');
+  assert.equal(held.started.length, 18); assert.equal(held.peak, 10);
+  assert.deepEqual(task.files.filter(file => file.role === 'image').map(file => file.composition.imageRequestId), Array.from({ length: 15 }, (_, i) => `request-${i + 1}`));
+  assert.equal((await app.handler.store.getTask('owner', id)).galleryCheckpoints.filter(item => item.status === 'ready').length, 15);
+  const zip = await app.api(`/tasks/${id}/files/package.zip`);
+  assert.equal(zip.status, 200); assert.equal(Object.keys(unzipSync(zip.body)).filter(name => /\.jpg$/.test(name)).length, 15);
+  assert.equal((await app.credits.snapshot('owner')).balance, 250); assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.equal((await app.credits.snapshot('other-owner')).balance, 850);
+  await app.api(`/tasks/${id}/generate`, { workflow: 'store-gallery-v1', directionId: task.selection.directionId, imageMode: 'promotional', outputCount: 15 });
+  assert.equal(held.started.length, 18); assert.equal((await app.credits.snapshot('owner')).balance, 250);
 });
 
 test('new food photos generate with empty or partial store details without requesting optional copy', async t => {
@@ -367,7 +394,7 @@ test('gallery persists approved frames privately and a known failure retries onl
     if(++renders===3)throw Object.assign(Error('explicit provider rejection'),{code:'PROVIDER_ERROR'});
     return {bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};
   },async reviewFoodRender(){return foodReview;},async write(){throw Error('optional copy unavailable');}});
-  const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});
+  const app=await setup(t,{model,withCredits:true,galleryConcurrency:3});await app.api('/profile',{profile});
   const id=randomUUID();await app.api('/tasks',{requestId:id,images:await photos(2),rightsConfirmed:true,autoGenerate:true,outputCount:6});
   const failed=await app.wait(id,['failed']);assert.equal(failed.code,'PROVIDER_ERROR');
   const saved=await app.handler.store.getTask('owner',id);assert.equal(saved.galleryCheckpoints.filter(x=>x.status==='ready').length,2);
@@ -385,7 +412,7 @@ test('an explicitly requested new gallery reuses known frames from an uncertain 
     if(++renders===3)throw Object.assign(Error('unknown result'),{code:'PROVIDER_UNCERTAIN'});
     return {bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};
   },async reviewFoodRender(){return foodReview;},async write(){throw Error('optional copy unavailable');}});
-  const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});
+  const app=await setup(t,{model,withCredits:true,galleryConcurrency:3});await app.api('/profile',{profile});
   const id=randomUUID();await app.api('/tasks',{requestId:id,images:await photos(2),rightsConfirmed:true,autoGenerate:true,outputCount:6});
   await app.wait(id,['failed']);assert.equal((await app.api(`/tasks/${id}/retry`,{})).status,409);assert.equal(renders,3);
   const next=randomUUID();await app.api(`/tasks/${id}/fork`,{requestId:next,reuseCompletedImages:true});

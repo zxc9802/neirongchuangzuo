@@ -19,7 +19,7 @@ async function workspace(t) {
   });
   const handler = async (req, res) => { res.end(JSON.stringify({ userId: req.authenticatedUserId })); return true; };
   handler.ready = Promise.resolve(); handler.shutdown = async () => {};
-  const preview = createPreviewServer({ backendUrl: await listen(backend), authRequired: true, createAI: () => handler });
+  const preview = createPreviewServer({ backendUrl: await listen(backend), authRequired: true, credits: { ready: Promise.resolve() }, createAI: () => handler });
   const base = await listen(preview);
   t.after(async () => { await preview.shutdown(); backend.closeAllConnections(); await new Promise(resolve => backend.close(resolve)); });
   return { base, offline: () => { offline = true; } };

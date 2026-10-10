@@ -9,7 +9,7 @@ import { foodScene, foodPhotoPlan } from './scenes.mjs';
 import { createSubjectMasker } from './subject-mask.mjs';
 import { createRestaurantModel } from './model.mjs';
 import { createStyleRecipes } from './style-recipes.mjs';
-import { createGalleryQueue } from './gallery-queue.mjs';
+import { createGalleryQueue, GALLERY_CONCURRENCY } from './gallery-queue.mjs';
 import { displayModelName } from '../../design/model-labels.js';
 import { inspectCopyQuality } from './copy-quality.mjs';
 import { GALLERY_WORKFLOW, galleryDirection, createGalleryPlan, validateGalleryStoryboard, storeSceneContext, galleryShot, enhanceStorePhoto, prepareGalleryReference, isolateDishReference } from './gallery.mjs';
@@ -48,7 +48,7 @@ function decodeUploads(value, max = 9, startIndex = 0) {
 
 export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'), databaseUrl = process.env.RESTAURANT_DATABASE_URL || process.env.AUTH_DATABASE_URL, config = loadAIConfig(), fetchImpl = fetch, now = Date.now,
   store: injectedStore, media: injectedMedia, model: injectedModel, providerLedger, credits, mediaEnv = process.env, imageProcessor = images, promotionalProcessor = promotion, subjectMasker: injectedMasker, packageDailyLimit = Number(process.env.RESTAURANT_PACKAGE_DAILY_LIMIT || 20), cleanupIntervalMs = 60_000,
-  requireAuth = process.env.NODE_ENV === 'production', logger = console, styleRecipes = createStyleRecipes(), galleryConcurrency = 3 } = {}) {
+  requireAuth = process.env.NODE_ENV === 'production', logger = console, styleRecipes = createStyleRecipes(), galleryConcurrency = GALLERY_CONCURRENCY } = {}) {
   const galleryQueue = createGalleryQueue(galleryConcurrency);
   const store = injectedStore ?? createRestaurantStore({ dataDir, databaseUrl, now, packageDailyLimit });
   const rawMedia = injectedMedia ?? createRestaurantMedia({ dataDir, now, env: mediaEnv });

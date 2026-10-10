@@ -76,9 +76,10 @@ test('production persistence check accepts mounted data and rejects a container 
 test('local restaurant configuration is restricted and production ignores developer files', async t => {
   const root = await mkdtemp(join(tmpdir(), 'restaurant-env-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  await writeFile(join(root, '.env.local'), 'RESTAURANT_PACKAGE_DAILY_LIMIT=12\nWORKSPACE_DATA_DIR=.local-data\nCOS_BUCKET=test\nAUTH_DATABASE_URL=do-not-load\nPERSISTENT_STORAGE_CONFIRMED=1\n');
+  await writeFile(join(root, '.env.local'), 'RESTAURANT_PACKAGE_DAILY_LIMIT=12\nWORKSPACE_DATA_DIR=.local-data\nWORKSPACE_LOCAL_UNLIMITED_CREDITS=1\nCOS_BUCKET=test\nAUTH_DATABASE_URL=do-not-load\nPERSISTENT_STORAGE_CONFIRMED=1\n');
   const local = loadWorkspaceSettings({ root, env: { COS_BUCKET: 'env-wins' } });
   assert.equal(local.RESTAURANT_PACKAGE_DAILY_LIMIT, '12');
+  assert.equal(local.WORKSPACE_LOCAL_UNLIMITED_CREDITS, '1');
   assert.equal(local.COS_BUCKET, 'env-wins');
   assert.equal(local.AUTH_DATABASE_URL, undefined);
   assert.equal(local.PERSISTENT_STORAGE_CONFIRMED, undefined);
