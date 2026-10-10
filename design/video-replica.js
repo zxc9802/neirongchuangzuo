@@ -164,8 +164,6 @@ async function poll() {
     const previous = state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }), firstLoad = state.loading;
     state.config = config; state.tasks = data.tasks; state.loading = false; state.pollError = '';
     if (state.current) state.current = data.tasks.find(item => item.id === state.current.id) || state.current;
-    else if (firstLoad && !Object.keys(state.files).length) state.current = data.tasks.find(pending)
-      || data.tasks.find(task => task.resultUrl || task.status === 'failed') || null;
     for (const task of data.tasks) observeCreditTask(task);
     if (!document.querySelector('#replica-submit')) return;
     if (firstLoad || previous !== (state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }))) refresh();
