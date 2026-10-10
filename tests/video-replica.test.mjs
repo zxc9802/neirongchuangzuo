@@ -13,6 +13,7 @@ import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROM
 import { normalizePhoto, downloadVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
+import { createFalVideoProvider, FAL_MODEL } from '../services/video/fal.mjs';
 
 const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(100)]);
 const CONFIG = { enabled: true, publicOrigin: 'https://workspace.example', signingSecret: 'test-secret-not-for-production' };
@@ -118,6 +119,48 @@ test('voice reference requires analysis confirmation and reaches the provider as
   const completed = await app.until(id, task => task.status === 'completed');
   assert.equal(completed.audioCheck.afterOffsetMs, 0); assert.equal(completed.audioCheck.lipSync, 'needs_preview');
   assert.equal(app.state.generations, 1);
+});
+
+test('selecting H3 Max persists its queue through restart and never uses the default provider', async t => {
+  let app; const requests = [];
+  const falProvider = createFalVideoProvider({ falKey: 'private-fal-key' }, async (url, options) => {
+    requests.push({ url: String(url), ...options });
+    if (options.method === 'POST') return Response.json({ request_id: 'fal-live-test',
+      status_url: 'https://queue.fal.run/minimax/h3-max/requests/fal-live-test/status', response_url: 'https://queue.fal.run/minimax/h3-max/requests/fal-live-test' });
+    return Response.json(String(url).endsWith('/status') ? { status: app.state.done ? 'COMPLETED' : 'IN_PROGRESS' } : { video: { url: 'https://v3.fal.media/result.mp4' } });
+  });
+  app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' }, falProvider,
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
+  const config = await (await app.call('/config')).json();
+  assert.deepEqual(config.models.map(model => [model.name, model.enabled]), [['Max模型', true], ['MiniMax H3 Max', true]]);
+  assert.ok(!JSON.stringify(config).includes('private-fal-key'));
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { model: FAL_MODEL, speechConfirmed: true } });
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.model, FAL_MODEL); assert.equal(running.modelName, 'MiniMax H3 Max');
+  const body = JSON.parse(requests.find(request => request.method === 'POST').body);
+  assert.equal(body.reference_image_urls.length, 1); assert.equal(body.reference_audio_urls.length, 1);
+  const signed = new URL(body.reference_video_urls[0]);
+  assert.equal(await (await fetch(app.base + signed.pathname + signed.search)).text(), 'silent-video');
+  await app.call(`/tasks/${id}/start`, { body: { model: 'doubao-seedance-2-0-260128' } });
+  assert.equal((await app.current(id)).model, FAL_MODEL);
+  await app.close(); await app.open(); app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(completed.model, FAL_MODEL); assert.equal(completed.resolution, '768p');
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+  assert.equal(requests.filter(request => request.method === 'POST').length, 1);
+  assert.equal(app.state.generations, 0); assert.equal(app.state.creates.length, 0);
+  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+});
+
+test('unsupported and unconfigured replica models cannot start or reserve points', async t => {
+  const app = await fixture(t);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: FAL_MODEL } })).status, 503);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: 'unknown' } })).status, 400);
+  const id = await app.init(); await app.upload(id);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: { model: FAL_MODEL } })).status, 503);
+  assert.equal((await app.current(id)).status, 'draft');
+  assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
 test('a replacement video invalidates voice analysis and a broken audio processor refunds credits', async t => {

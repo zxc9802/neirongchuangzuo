@@ -98,6 +98,31 @@ function speechDraft() {
     speech: { start: 0, end: 2, segments: [{ start: 0, end: 1, text: '薄饼' }, { start: 1.3, end: 2, text: '真的超好吃' }] } };
 }
 
+test('model choice survives polling, reaches start and is fixed on completed history', async t => {
+  const fal = 'minimax/h3-max/reference-to-video', seedance = 'doubao-seedance-2-0-260128';
+  let task = speechDraft(); const calls = [];
+  const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
+    if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true, model: seedance,
+      models: [{ id: seedance, name: 'Max模型', enabled: true }, { id: fal, name: 'MiniMax H3 Max', enabled: true }] });
+    if (options?.method !== 'POST') return;
+    const body = JSON.parse(options.body); calls.push({ path, body });
+    if (path.endsWith('/start')) task = { ...task, model: body.model, status: 'running' };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll();
+  page.select(task.id); page.node('#replica-model').onchange({ target: { value: fal } });
+  await page.poll();
+  assert.match(page.html(), /value="minimax\/h3-max\/reference-to-video" selected/);
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(calls.find(call => call.path.endsWith('/start')).body.model, fal);
+  task = { ...task, status: 'completed', modelName: 'MiniMax H3 Max', resolution: '768p', resultUrl: '/api/video-replica/tasks/editable-task/result' };
+  await page.poll(); page.select(task.id);
+  assert.match(page.html(), /aria-label="复刻模型" disabled/);
+  assert.match(page.html(), /MiniMax H3 Max · .*768p/);
+  page.node('#replica-new').onclick();
+  assert.match(page.html(), /value="doubao-seedance-2-0-260128" selected/);
+});
+
 test('draft corrections survive refresh and are saved with original timings before one generation starts', async t => {
   let task = speechDraft();
   const calls = [];

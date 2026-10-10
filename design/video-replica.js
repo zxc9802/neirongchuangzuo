@@ -1,6 +1,7 @@
 import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 
 const API = '/api/video-replica';
+const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
 const labels = { draft: '等待提交', reserving: '正在预留积分', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成未完成', expired: '已过期' };
 const pending = task => task && !['draft', 'completed', 'failed', 'expired'].includes(task.status);
 let state = { owner: null, config: null, tasks: [], current: null, files: {}, urls: {}, speechEdits: null, busy: false, error: '', pollError: '', loading: true };
@@ -31,6 +32,11 @@ function remember(task) {
   observeCreditTask(task);
 }
 function refresh() { if (context && document.body.dataset.page === 'video') context.refresh(); }
+function modelId() { return state.current && state.current.status !== 'draft' ? state.current.model || DEFAULT_MODEL : state.selectedModel || state.current?.model || state.config?.model || DEFAULT_MODEL; }
+function modelOptions() { return state.config?.models || [{ id: DEFAULT_MODEL, name: 'Max模型', enabled: state.config?.enabled }]; }
+function modelPicker(ctx) {
+  return `<label class="replica-model-picker">复刻模型<select id="replica-model" aria-label="复刻模型" ${state.busy || state.current && state.current.status !== 'draft' ? 'disabled' : ''}>${modelOptions().map(model => `<option value="${ctx.esc(model.id)}" ${model.id === modelId() ? 'selected' : ''} ${!model.enabled ? 'disabled' : ''}>${ctx.esc(model.name)}${!model.enabled ? ' · 未配置' : ''}</option>`).join('')}</select></label>`;
+}
 function failureMessage(task) {
   return task?.canRecheck ? task.error?.replace('请核对素材后重新生成。', '请核对台词后重新检查。') : task?.error;
 }
@@ -81,7 +87,7 @@ function history(ctx) {
 }
 function summary(ctx) {
   const task = state.current;
-  return task ? `<div><strong>${labels[task.status] || '正在处理'}</strong><span>${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · 720p${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${task.audioCheck ? `<span>${task.audioCheck.warning ? ctx.esc(task.audioCheck.warning) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
+  return task ? `<div><strong>${labels[task.status] || '正在处理'}</strong><span>${ctx.esc(task.modelName || 'Max模型')} · ${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${task.audioCheck ? `<span>${task.audioCheck.warning ? ctx.esc(task.audioCheck.warning) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
 }
 function speechTexts(task) { return state.speechEdits?.taskId === task.id ? state.speechEdits.texts : task.speech.segments.map(segment => segment.text); }
 function canEditSpeech(task) { return task?.status === 'draft' || task?.status === 'failed' && task.canRecheck === true; }
@@ -98,8 +104,8 @@ export function renderVideoReplica(ctx) {
   const cost = unlimited ? `${creditEstimateText(task?.estimatedPoints)}${task?.duration ? ` · ${task.duration} 秒` : ''}`
     : exempt ? task?.duration ? `${task.duration} 秒` : '上传后确认时长。'
       : task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '上传后确认时长和积分；失败退回预留积分。';
-  return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · Max模型</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
-    <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${speechPreview(ctx)}
+  return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · ${ctx.esc(modelOptions().find(model => model.id === modelId())?.name || 'Max模型')}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
+    <div class="replica-layout"><section class="replica-form">${modelPicker(ctx)}<div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${speechPreview(ctx)}
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
       <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(actionMessage())}</p>
         <button type="button" id="replica-submit" class="primary" ${finished ? 'hidden' : ''} ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传、分析与提交…' : pending(task) ? labels[task.status] : state.uploaded || (task?.photo && task?.video && !Object.keys(state.files).length && (!task.voice || task.speech)) ? task?.voice ? '确认台词，开始人物复刻' : '开始人物复刻' : state.files.voice || task?.voice ? '上传素材，分析人声' : unlimited || exempt ? '上传素材，确认时长' : '上传素材，查看费用'}</button>
@@ -121,9 +127,10 @@ async function submit() {
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
+    const model = modelId();
     // Keep the request ID before networking so an uncertain response can be retried safely.
     if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now() };
-    remember((await request('/tasks', jsonPost({ requestId: id }))).task);
+    remember((await request('/tasks', jsonPost({ requestId: id, model }))).task);
     if (state.current.status === 'draft' && !state.uploaded && Object.keys(state.files).length) {
       for (const kind of ['video', 'photo', 'voice']) {
         if (!state.files[kind]) continue;
@@ -139,7 +146,7 @@ async function submit() {
           remember((await request(`/tasks/${id}/speech`, jsonPost({ segments }))).task);
           state.speechEdits = null;
         }
-        remember((await request(`/tasks/${id}/start`, jsonPost({ speechConfirmed: Boolean(state.current.speech) }))).task);
+        remember((await request(`/tasks/${id}/start`, jsonPost({ speechConfirmed: Boolean(state.current.speech), model }))).task);
       }
     }
     void refreshWorkspaceCredits();
@@ -188,6 +195,10 @@ async function poll() {
 export function bindVideoReplica(ctx) {
   context = ctx;
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refresh);
+  document.querySelector('#replica-model').onchange = event => {
+    if (state.busy || state.current && state.current.status !== 'draft' || !modelOptions().some(model => model.id === event.target.value && model.enabled)) return;
+    state.selectedModel = event.target.value; state.error = ''; refresh();
+  };
   for (const kind of ['video', 'photo', 'voice']) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
   const listen = document.querySelector('#replica-listen');
   if (listen) listen.onclick = () => { const video = document.querySelector('[aria-label="参考视频预览"]'); if (video) { video.currentTime = Math.max(0, state.current.speech.start - 0.3); void video.play().catch(() => { state.error = '请点击参考视频的播放按钮试听。'; refresh(); }); } };
@@ -201,11 +212,11 @@ export function bindVideoReplica(ctx) {
   };
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
-  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.error = ''; refresh(); };
+  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.selectedModel = null; state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };
   document.querySelector('#replica-history').onclick = event => {
     const button = event.target.closest('[data-replica-task]'); if (!button || state.busy) return;
-    resetFiles(); state.current = state.tasks.find(task => task.id === button.dataset.replicaTask); state.error = ''; refresh();
+    resetFiles(); state.selectedModel = null; state.current = state.tasks.find(task => task.id === button.dataset.replicaTask); state.error = ''; refresh();
   };
   if (!timer) { void poll(); timer = setInterval(() => { void poll(); }, 5000); }
 }

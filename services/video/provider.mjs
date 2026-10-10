@@ -10,13 +10,18 @@ export function videoConfig(env = {}, publicOrigin) {
     access: env[`${prefix}_ACCESS_KEY`] || env.VIDEO_ACCESS_KEY, secret: env[`${prefix}_SECRET_KEY`] || env.VIDEO_SECRET_KEY });
   const config = { video: credentials('VIDEO'), material: credentials('MATERIAL'),
     publicOrigin: env.VIDEO_PUBLIC_BASE_URL || publicOrigin || env.AUTH_PUBLIC_URL,
-    signingSecret: env.TEMP_ASSET_SIGNING_SECRET };
+    signingSecret: env.TEMP_ASSET_SIGNING_SECRET, falKey: env.VIDEO_FAL_KEY };
   config.enabled = Boolean(config.publicOrigin && config.signingSecret && Object.values(config.video).every(Boolean) && Object.values(config.material).every(Boolean));
-  if (config.enabled) {
+  config.falEnabled = Boolean(config.publicOrigin && config.signingSecret && config.falKey);
+  if (config.enabled || config.falEnabled) {
     try {
       const origin = new URL(config.publicOrigin);
       if (origin.protocol !== 'https:' || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash) throw new Error();
       config.publicOrigin = origin.origin;
+    } catch { config.enabled = false; config.falEnabled = false; }
+  }
+  if (config.enabled) {
+    try {
       for (const value of [config.video, config.material]) {
         const target = new URL(value.base);
         if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) throw new Error();

@@ -6,6 +6,7 @@ import { calculateCredits } from '../credits/store.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, DURATIONS, PROMPT } from './provider.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, muteVideo, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
+import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
@@ -32,9 +33,18 @@ async function readJSON(req) {
 }
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
-  config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), probe = probeVideo,
+  config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), falProvider = createFalVideoProvider(config), probe = probeVideo,
   photo = normalizePhoto, mute = muteVideo, voice = normalizeVoice, speech = createSpeechService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
+  const models = [{ id: MODEL, name: 'Max模型', resolution: '720p', enabled: Boolean(config.enabled) },
+    { id: FAL_MODEL, name: 'MiniMax H3 Max', resolution: '768p', enabled: Boolean(config.falEnabled) }];
+  const enabled = models.some(model => model.enabled);
+  function selectedModel(id = MODEL) {
+    const model = models.find(model => model.id === id);
+    if (!model) throw error('请选择支持的复刻模型。', 400, 'VIDEO_MODEL_INVALID');
+    if (!model.enabled) throw error(`${model.name}尚未配置，请选择其他模型。`, 503, 'VIDEO_NOT_CONFIGURED');
+    return model.id;
+  }
   // Share the existing durable single-writer lock implementation, in a separate directory.
   const instance = createRequestLedger({ storageDir });
   let closing = false, fatal = false, timer, shutdownPromise;
@@ -62,6 +72,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
+      model: task.model || MODEL, modelName: models.find(model => model.id === (task.model || MODEL))?.name,
+      resolution: task.model === FAL_MODEL ? '768p' : '720p',
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
       sourcePhotoUrl: !expired && task.photo ? `${PREFIX}/tasks/${task.id}/photo` : null,
       sourceVoiceUrl: !expired && task.voice ? `${PREFIX}/tasks/${task.id}/voice` : null,
@@ -100,6 +112,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     task.lastCheckedAt = now();
     if (result.failed) { await fail(task, '视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。', 'VIDEO_GENERATION_FAILED'); return; }
     if (result.taskId) task.providerId = result.taskId;
+    if (result.falQueue) task.falQueue = result.falQueue;
     if (result.url) { task.resultSource = result.url; task.status = 'downloading'; }
     else if (task.providerId) task.status = 'running';
     else { await fail(task, '模型未返回任务编号，未自动重试。请核对模型服务记录后再创建任务。', 'VIDEO_SUBMISSION_UNCERTAIN'); return; }
@@ -112,6 +125,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   async function processTask(task) {
     if (closing || fatal) return;
+    const taskProvider = task.model === FAL_MODEL ? falProvider : provider;
     if (task.expiresAt <= now()) {
       if (task.status !== 'expired') {
         task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; await save(task);
@@ -129,21 +143,21 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (task.status === 'reviewing') {
       if (now() - task.startedAt > 180_000) { await fail(task, '素材审核超时，请检查人物照片和参考视频后重试。', 'VIDEO_REVIEW_TIMEOUT'); return; }
       for (const kind of ['photo', 'video', ...(task.voice ? ['voice'] : [])]) {
-        if (!task.materials[kind]) { task.materials[kind] = await provider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
+        if (!task.materials[kind]) { task.materials[kind] = await taskProvider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
         const material = task.materials[kind];
-        if (material.status !== 2) material.status = await provider.queryMaterial(material.id);
+        if (material.status !== 2) material.status = await taskProvider.queryMaterial(material.id);
         if (material.status === 3) { await fail(task, `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : '参考视频'}未通过素材审核，请更换清晰、符合要求的素材。`, 'VIDEO_REVIEW_REJECTED'); return; }
         await save(task);
       }
       if (Object.values(task.materials).some(value => value.status !== 2)) return;
       // Persist the dispatch boundary before making the paid call. Never replay it after a restart.
       task.status = 'submitting'; await save(task);
-      try { await acceptResult(task, await provider.generate(task)); }
+      try { await acceptResult(task, await taskProvider.generate(task)); }
       catch (cause) {
         if (fatal) throw cause;
-        await fail(task, '提交未获得确认，未自动重复生成。请核对模型服务记录后再创建任务，预留积分将退回。', 'VIDEO_SUBMISSION_UNCERTAIN');
+        await fail(task, cause instanceof VideoError && cause.code === 'VIDEO_PROVIDER_REJECTED' ? cause.message : '提交未获得确认，未自动重复生成。请核对模型服务记录后再创建任务，预留积分将退回。', cause.code === 'VIDEO_PROVIDER_REJECTED' ? cause.code : 'VIDEO_SUBMISSION_UNCERTAIN');
       }
-    } else if (task.status === 'running') await acceptResult(task, await provider.query(task.providerId));
+    } else if (task.status === 'running') await acceptResult(task, await taskProvider.query(task.providerId, task));
     if (task.status === 'downloading') {
       const temporary = join(folder(task), 'result.tmp');
       let savedAt = 0;
@@ -260,13 +274,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers.origin && req.headers.origin !== expected) throw error('请求来源无效。', 403, 'VIDEO_ORIGIN_REJECTED');
         if (closing || fatal) throw error('视频服务暂时不可用，请稍后查询原任务。', 503, 'VIDEO_UNAVAILABLE');
       }
-      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled: config.enabled, voiceEnabled: speech.enabled, model: MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return; }
+      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled, models, voiceEnabled: speech.enabled, model: models.find(model => model.enabled)?.id || MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return; }
       if (path === `${PREFIX}/tasks` && req.method === 'GET') {
         const tasks = [...jobs.values()].filter(task => task.userId === userId).sort((a, b) => b.createdAt - a.createdAt).map(view);
         json(res, 200, { tasks: url.searchParams.get('completed') === 'true' ? tasks.filter(task => task.status === 'completed') : tasks.slice(0, 50) }); return;
       }
       if (path === `${PREFIX}/tasks` && req.method === 'POST') {
-        if (!config.enabled) throw error('人物复刻服务尚未配置，请联系管理员。', 503, 'VIDEO_NOT_CONFIGURED');
+        if (!enabled) throw error('人物复刻服务尚未配置，请联系管理员。', 503, 'VIDEO_NOT_CONFIGURED');
         const body = await readJSON(req);
         if (!UUID.test(body?.requestId)) throw error('任务编号无效。');
         await serialize('create', async () => {
@@ -274,7 +288,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
           const drafts = [...jobs.values()].filter(task => task.userId === userId && task.status === 'draft' && task.expiresAt > now());
           if (drafts.length >= 5) throw error('尚有未提交的素材，请先完成现有任务。', 429, 'VIDEO_DRAFT_LIMIT');
-          const task = { id: body.requestId, userId, status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
+          const task = { id: body.requestId, userId, model: selectedModel(body.model), status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
@@ -371,7 +385,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
           if (task.voice && (!task.speech || body.speechConfirmed !== true)) throw error('请先分析并确认原视频的台词与开口时间。', 409, 'VIDEO_SPEECH_CONFIRM_REQUIRED');
-          if (!config.enabled) throw error('人物复刻服务尚未配置。', 503, 'VIDEO_NOT_CONFIGURED');
+          task.model = selectedModel(body.model ?? task.model);
           if ([...jobs.values()].some(item => item.userId === userId && ACTIVE.has(item.status))) throw error('当前有视频正在生成，请完成后再提交。', 409, 'VIDEO_BUSY');
           if (task.voice && !task.videoAudioRemoved) {
             await mute(file(task, 'video'), join(folder(task), 'source-silent.mp4'));
