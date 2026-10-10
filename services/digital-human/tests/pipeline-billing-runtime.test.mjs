@@ -95,6 +95,7 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
             return {durationSeconds: duration, width: 160, height: 120, fps: 30};
           },
         },
+        "./video-preview": {createVideoPreview: async () => undefined},
         "./ffmpeg": {...media, prepareSourceVideo: async (...args) => {
           if (scenario === "media-prep-failure") throw new Error("normalization failed");
           return media.prepareSourceVideo(...args);

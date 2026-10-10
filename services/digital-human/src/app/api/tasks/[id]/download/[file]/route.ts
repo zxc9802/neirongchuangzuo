@@ -1,3 +1,4 @@
+import { taskOutputExpiresAt } from "@/lib/task-output-retention";
 import { NextRequest, NextResponse } from "next/server";
 import { TaskStore } from "@/lib/store/task-store";
 import { isTrustedTaskOutputSource, servePrivateMedia } from "@/lib/server/media-response";
@@ -33,7 +34,7 @@ export async function GET(
     }
     return servePrivateMedia(req, task.results.finalVideoUrl, {
       contentType: "video/mp4",
-      downloadName: "digital-human-video.mp4",
+      downloadName: "digital-human-video.mp4", direct: true, expiresAt: taskOutputExpiresAt(task),
     });
   }
   if (file === "voice-track.wav") {

@@ -1,3 +1,4 @@
+import { createVideoPreview } from "./video-preview";
 import fs from "fs";
 import path from "path";
 import { CosService } from "../cos";
@@ -398,9 +399,11 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     evidenceJsonUrl = await CosService.uploadFile(evidencePath, `jobs/${taskId}/production-report.json`);
   }
 
+  const previewVideoUrl = await createVideoPreview(finalPath);
   return markCompleted(
     taskId,
     {
+      previewVideoUrl,
       originalVideoUrl: task.inputs.videoUrl || task.results.originalVideoUrl,
       finalVideoUrl,
       exactAudioUrl,

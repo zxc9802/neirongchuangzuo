@@ -382,6 +382,7 @@ test("workspace pipeline settles lip-sync but releases holds for clearly labelle
             fs.writeFileSync(options.outputPath, "fixture"); return probe;
           },
         },
+        "./video-preview": {createVideoPreview: async () => undefined},
         "./ffmpeg": { execMediaCommand: async (_cmd, args) => { fs.writeFileSync(args.at(-1), "fallback fixture"); }, probeMedia: async () => probe, sha256File: async () => "fixture-hash",
           encodeMp3: async (_input, output) => { fs.writeFileSync(output, "fixture"); },
           prepareSourceVideo: async (_input, _seconds, output) => { fs.writeFileSync(output, "fixture"); return { duration: 30, width: 160, height: 120 }; },
@@ -486,7 +487,8 @@ test("MP3 settlement outages preserve a recoverable file and recovery probes and
       "../server/safe-log": {logServerError: () => undefined},
       path, fs, crypto, "../store/task-store": { TaskStore }, "../config": { getAppConfig: () => config },
       "./task-execution": { withTaskExecution: async (_id, action) => action() },
-      "./face-lipsync": {}, "./ffmpeg": media, "../cos": { CosService: { isConfigured: () => false } },
+      "./face-lipsync": {}, "./video-preview": {createVideoPreview: async () => undefined},
+      "./ffmpeg": media, "../cos": { CosService: { isConfigured: () => false } },
       "./fal-veed-lipsync": { FalVeedLipsyncAdapter: { execute: () => assert.fail("audio recovery must never call lip-sync") } },
       "./openlux-lipsync": { OpenLuxLipsyncAdapter: {} }, "../lipsync-provider": { resolveLipsyncProvider: () => "veed" },
     };
@@ -521,6 +523,7 @@ test("MP3 settlement outages preserve a recoverable file and recovery probes and
     const download = loadSource("../src/app/api/tasks/[id]/download/[file]/route.ts", {
       "next/server": { NextRequest, NextResponse }, "@/lib/store/task-store": { TaskStore },
       "@/lib/server/public-data": publicData, "@/lib/access-control": access,
+      "@/lib/task-output-retention": {},
       "@/lib/server/media-response": { isTrustedTaskOutputSource: () => true,
         servePrivateMedia: () => { downloads++; return new NextResponse("fixture"); } },
     });

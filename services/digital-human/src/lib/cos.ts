@@ -14,7 +14,7 @@ const DIRECT_PART_BYTES = 8 * 1024 * 1024;
 function isManagedMediaKey(key: string): boolean {
   return (
     /^uploads\/users\/[a-zA-Z0-9_-]+\/(?:videos|voices|thumbnails)\/[^/]+$/.test(key) ||
-    /^jobs\/[a-zA-Z0-9_-]+\/(?:source-video\.mp4|face-input\.mp4|(?:face-provider\/)?(?:rendered-source\.mp4|lipsync-chunks\/result-\d+\.mp4)|voice-track\.(?:wav|mp3)|final\.mp4|production-report\.json|exact-final-indextts\.wav|evidence\.json)$/.test(key)
+    /^jobs\/[a-zA-Z0-9_-]+\/(?:source-video\.mp4|face-input\.mp4|(?:face-provider\/)?(?:rendered-source\.mp4|lipsync-chunks\/result-\d+\.mp4)|voice-track\.(?:wav|mp3)|final\.mp4|preview\.mp4|production-report\.json|exact-final-indextts\.wav|evidence\.json)$/.test(key)
   );
 }
 
@@ -105,7 +105,8 @@ export const CosService = {
     );
   },
 
-  async getDownloadUrl(key: string, filename?: string, expires = 3600): Promise<string> {
+  async getDownloadUrl(key: string, filename?: string, expires = 3600,
+    options: { inline?: boolean; contentType?: string; method?: "GET" | "HEAD" } = {}): Promise<string> {
     const config = getAppConfig();
     const cos = getCosClient();
     const cleanKey = key.replace(/^\/+/, "");
@@ -119,11 +120,14 @@ export const CosService = {
           Bucket: config.cosBucket,
           Region: config.cosRegion,
           Key: cleanKey,
-          Method: "GET",
+          Protocol: "https:",
+          // The SDK signs arbitrary HTTP methods; its Method type omits HEAD.
+          Method: (options.method || "GET") as COS.Method,
           Sign: true,
           Expires: expires,
           Query: {
-            "response-content-disposition": `attachment; filename="${downloadName}"`,
+            "response-content-disposition": `${options.inline ? "inline" : "attachment"}; filename="${downloadName}"`,
+            ...(options.contentType ? { "response-content-type": options.contentType } : {}),
           },
         },
         (err, data) => {

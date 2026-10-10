@@ -1,3 +1,4 @@
+import { createVideoPreview } from "./video-preview";
 import fs from "fs";
 import path from "path";
 import { getAppConfig } from "../config";
@@ -99,9 +100,11 @@ export async function deliverNarrationFallback(taskId: string, sessionToken?: st
       }
     }
     if (TaskStore.isDeleted(taskId)) return null;
+    const previewVideoUrl = await createVideoPreview(finalPath);
+    if (TaskStore.isDeleted(taskId)) return null;
     const updated = TaskStore.update(taskId, { status: "completed", step: "done", progress: 100,
       error: undefined, errorCode: undefined, failedStep: undefined,
-      results: { deliveryMode: "narration_fallback", finalVideoUrl, exactAudioUrl, evidenceJsonUrl,
+      results: { deliveryMode: "narration_fallback", finalVideoUrl, previewVideoUrl, exactAudioUrl, evidenceJsonUrl,
         chargedPoints: 0, costCny: 0, videoDuration: probe.durationSeconds, audioDuration: audio.durationSeconds,
         resolution: `${probe.width}x${probe.height}`, fps: probe.fps, sha256Video, sha256Audio },
     });

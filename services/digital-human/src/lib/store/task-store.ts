@@ -89,6 +89,7 @@ export interface TaskItem {
     deliveryMode?: "narration_fallback";
     originalVideoUrl?: string;
     finalVideoUrl?: string;
+    previewVideoUrl?: string;
     exactAudioUrl?: string;
     audioFormat?: "wav" | "mp3";
     evidenceJsonUrl?: string;

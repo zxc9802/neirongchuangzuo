@@ -1,3 +1,4 @@
+import { createVideoPreview } from "./video-preview";
 import { logServerError } from "../server/safe-log";
 import path from "path";
 import fs from "fs";
@@ -669,6 +670,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       }
     }
 
+    const previewVideoUrl = await createVideoPreview(finalVideoPath);
+
     // Done!
     currentStep = "done";
     ensureTaskActive();
@@ -693,6 +696,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           task.inputs.videoUrl ||
           task.inputs.videoPath,
         finalVideoUrl,
+        previewVideoUrl,
         exactAudioUrl,
         evidenceJsonUrl,
         heygenLipsyncId: heygenResult.lipsyncId,
