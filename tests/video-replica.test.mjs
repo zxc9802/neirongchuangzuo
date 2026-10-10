@@ -132,12 +132,12 @@ test('selecting H3 Max persists its queue through restart and never uses the def
   app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' }, falProvider,
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
   const config = await (await app.call('/config')).json();
-  assert.deepEqual(config.models.map(model => [model.name, model.enabled]), [['Max模型', true], ['MiniMax H3 Max', true]]);
+  assert.deepEqual(config.models.map(model => [model.name, model.enabled]), [['旗舰模型', true], ['极速模型', true]]);
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
   await app.call(`/tasks/${id}/start`, { body: { model: FAL_MODEL, speechConfirmed: true } });
   const running = await app.until(id, task => task.status === 'running');
-  assert.equal(running.model, FAL_MODEL); assert.equal(running.modelName, 'MiniMax H3 Max');
+  assert.equal(running.model, FAL_MODEL); assert.equal(running.modelName, '极速模型');
   const body = JSON.parse(requests.find(request => request.method === 'POST').body);
   assert.equal(body.reference_image_urls.length, 1); assert.equal(body.reference_audio_urls.length, 1);
   const signed = new URL(body.reference_video_urls[0]);

@@ -103,7 +103,7 @@ test('model choice survives polling, reaches start and is fixed on completed his
   let task = speechDraft(); const calls = [];
   const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
     if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true, model: seedance,
-      models: [{ id: seedance, name: 'Max模型', enabled: true }, { id: fal, name: 'MiniMax H3 Max', enabled: true }] });
+      models: [{ id: seedance, name: '旗舰模型', enabled: true }, { id: fal, name: '极速模型', enabled: true }] });
     if (options?.method !== 'POST') return;
     const body = JSON.parse(options.body); calls.push({ path, body });
     if (path.endsWith('/start')) task = { ...task, model: body.model, status: 'running' };
@@ -115,10 +115,10 @@ test('model choice survives polling, reaches start and is fixed on completed his
   assert.match(page.html(), /value="minimax\/h3-max\/reference-to-video" selected/);
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls.find(call => call.path.endsWith('/start')).body.model, fal);
-  task = { ...task, status: 'completed', modelName: 'MiniMax H3 Max', resolution: '768p', resultUrl: '/api/video-replica/tasks/editable-task/result' };
+  task = { ...task, status: 'completed', modelName: '极速模型', resolution: '768p', resultUrl: '/api/video-replica/tasks/editable-task/result' };
   await page.poll(); page.select(task.id);
   assert.match(page.html(), /aria-label="复刻模型" disabled/);
-  assert.match(page.html(), /MiniMax H3 Max · .*768p/);
+  assert.match(page.html(), /极速模型 · .*768p/);
   page.node('#replica-new').onclick();
   assert.match(page.html(), /value="doubao-seedance-2-0-260128" selected/);
 });
@@ -135,7 +135,7 @@ test('draft corrections survive refresh and are saved with original timings befo
   } });
   page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /textarea[^>]*aria-label="第 1 段台词"/);
-  assert.match(page.html(), /Max模型/);
+  assert.match(page.html(), /旗舰模型/);
   assert.doesNotMatch(page.html(), /SEEDANCE/);
   page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
   await page.poll(); page.ctx.refresh();

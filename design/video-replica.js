@@ -33,7 +33,7 @@ function remember(task) {
 }
 function refresh() { if (context && document.body.dataset.page === 'video') context.refresh(); }
 function modelId() { return state.current && state.current.status !== 'draft' ? state.current.model || DEFAULT_MODEL : state.selectedModel || state.current?.model || state.config?.model || DEFAULT_MODEL; }
-function modelOptions() { return state.config?.models || [{ id: DEFAULT_MODEL, name: 'Max模型', enabled: state.config?.enabled }]; }
+function modelOptions() { return state.config?.models || [{ id: DEFAULT_MODEL, name: '旗舰模型', enabled: state.config?.enabled }]; }
 function modelPicker(ctx) {
   return `<label class="replica-model-picker">复刻模型<select id="replica-model" aria-label="复刻模型" ${state.busy || state.current && state.current.status !== 'draft' ? 'disabled' : ''}>${modelOptions().map(model => `<option value="${ctx.esc(model.id)}" ${model.id === modelId() ? 'selected' : ''} ${!model.enabled ? 'disabled' : ''}>${ctx.esc(model.name)}${!model.enabled ? ' · 未配置' : ''}</option>`).join('')}</select></label>`;
 }
@@ -87,7 +87,7 @@ function history(ctx) {
 }
 function summary(ctx) {
   const task = state.current;
-  return task ? `<div><strong>${labels[task.status] || '正在处理'}</strong><span>${ctx.esc(task.modelName || 'Max模型')} · ${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${task.audioCheck ? `<span>${task.audioCheck.warning ? ctx.esc(task.audioCheck.warning) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
+  return task ? `<div><strong>${labels[task.status] || '正在处理'}</strong><span>${ctx.esc(task.modelName || '旗舰模型')} · ${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${task.audioCheck ? `<span>${task.audioCheck.warning ? ctx.esc(task.audioCheck.warning) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
 }
 function speechTexts(task) { return state.speechEdits?.taskId === task.id ? state.speechEdits.texts : task.speech.segments.map(segment => segment.text); }
 function canEditSpeech(task) { return task?.status === 'draft' || task?.status === 'failed' && task.canRecheck === true; }
@@ -104,7 +104,7 @@ export function renderVideoReplica(ctx) {
   const cost = unlimited ? `${creditEstimateText(task?.estimatedPoints)}${task?.duration ? ` · ${task.duration} 秒` : ''}`
     : exempt ? task?.duration ? `${task.duration} 秒` : '上传后确认时长。'
       : task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '上传后确认时长和积分；失败退回预留积分。';
-  return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · ${ctx.esc(modelOptions().find(model => model.id === modelId())?.name || 'Max模型')}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
+  return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · ${ctx.esc(modelOptions().find(model => model.id === modelId())?.name || '旗舰模型')}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-layout"><section class="replica-form">${modelPicker(ctx)}<div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${speechPreview(ctx)}
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
       <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(actionMessage())}</p>

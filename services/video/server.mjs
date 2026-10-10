@@ -36,8 +36,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), falProvider = createFalVideoProvider(config), probe = probeVideo,
   photo = normalizePhoto, mute = muteVideo, voice = normalizeVoice, speech = createSpeechService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
-  const models = [{ id: MODEL, name: 'Max模型', resolution: '720p', enabled: Boolean(config.enabled) },
-    { id: FAL_MODEL, name: 'MiniMax H3 Max', resolution: '768p', enabled: Boolean(config.falEnabled) }];
+  const models = [{ id: MODEL, name: '旗舰模型', resolution: '720p', enabled: Boolean(config.enabled) },
+    { id: FAL_MODEL, name: '极速模型', resolution: '768p', enabled: Boolean(config.falEnabled) }];
   const enabled = models.some(model => model.enabled);
   function selectedModel(id = MODEL) {
     const model = models.find(model => model.id === id);
