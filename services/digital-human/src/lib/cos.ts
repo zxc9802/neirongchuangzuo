@@ -45,7 +45,7 @@ export const CosService = {
     const config = getAppConfig();
     const cos = getCosClient();
     if (!cos || !config.cosBucket || !config.cosRegion) throw new Error("云端存储未配置");
-    await this.ensureBucketPrivateAndCors();
+    await this.ensureBucketPrivate();
     const target = { Bucket: config.cosBucket, Region: config.cosRegion, Key: key };
     const { UploadId } = await cos.multipartInit({ ...target, ContentType: contentType, ACL: "private" });
     try {
@@ -254,7 +254,7 @@ export const CosService = {
     }
 
     const cleanKey = targetKey.replace(/^\/+/, "");
-    await this.ensureBucketPrivateAndCors();
+    await this.ensureBucketPrivate();
 
     return new Promise((resolve, reject) => {
       cos.getObjectUrl(
@@ -301,7 +301,7 @@ export const CosService = {
     }
 
     const cleanKey = targetKey.replace(/^\/+/, "");
-    await this.ensureBucketPrivateAndCors();
+    await this.ensureBucketPrivate();
 
     return new Promise((resolve, reject) => {
       cos.sliceUploadFile(
@@ -590,7 +590,7 @@ export const CosService = {
     });
   },
 
-  async ensureBucketPrivateAndCors(): Promise<void> {
+  async ensureBucketPrivate(): Promise<void> {
     const config = getAppConfig();
     const cos = getCosClient();
     if (!cos || !config.cosBucket || !config.cosRegion) return;
@@ -602,47 +602,17 @@ export const CosService = {
     }
 
     if (!storagePolicyPromise) {
-      const allowedOrigins = new Set<string>();
-      for (const value of [process.env.PUBLIC_APP_URL, config.publicBaseUrl, process.env.AUTH_DESKTOP_URL]) {
-        if (!value) continue;
-        try {
-          allowedOrigins.add(new URL(value).origin);
-        } catch {}
-      }
-      if (process.env.NODE_ENV !== "production") {
-        allowedOrigins.add("http://localhost:3000");
-      }
-
-      storagePolicyPromise = Promise.all([
-        new Promise<void>((resolve, reject) => {
-          cos.putBucketAcl(
-            {
-              Bucket: config.cosBucket,
-              Region: config.cosRegion,
-              ACL: "private",
-            } as any,
-            (err) => (err ? reject(err) : resolve())
-          );
-        }),
-        new Promise<void>((resolve, reject) => {
-          cos.putBucketCors(
-            {
-              Bucket: config.cosBucket,
-              Region: config.cosRegion,
-              CORSRules: [
-                {
-                  AllowedOrigin: Array.from(allowedOrigins),
-                  AllowedMethod: ["GET", "PUT", "HEAD"],
-                  AllowedHeader: ["content-type", "content-length"],
-                  ExposeHeader: ["etag"],
-                  MaxAgeSeconds: 600,
-                },
-              ] as any,
-            },
-            (err) => (err ? reject(err) : resolve())
-          );
-        }),
-      ]).then(() => undefined).catch((error) => {
+      // CORS is managed on the bucket; uploads must not overwrite other apps' rules.
+      storagePolicyPromise = new Promise<void>((resolve, reject) => {
+        cos.putBucketAcl(
+          {
+            Bucket: config.cosBucket,
+            Region: config.cosRegion,
+            ACL: "private",
+          } as any,
+          (err) => (err ? reject(err) : resolve())
+        );
+      }).catch((error) => {
         storagePolicyPromise = null;
         throw error;
       });
