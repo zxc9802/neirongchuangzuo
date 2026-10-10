@@ -28,13 +28,14 @@ export async function GET(
     return taskNotFoundResponse();
   }
 
-  if (file === "final.mp4") {
+  if (file === "final.mp4" || file === "preview.mp4") {
     if (!isTrustedTaskOutputSource(task.results.finalVideoUrl, id, ["final.mp4"])) {
       return taskNotFoundResponse();
     }
-    return servePrivateMedia(req, task.results.finalVideoUrl, {
+    const small = file === "preview.mp4" && isTrustedTaskOutputSource(task.results.previewVideoUrl, id, ["preview.mp4"]);
+    return servePrivateMedia(req, small ? task.results.previewVideoUrl : task.results.finalVideoUrl, {
       contentType: "video/mp4",
-      downloadName: "digital-human-video.mp4", direct: true, expiresAt: taskOutputExpiresAt(task),
+      downloadName: small ? "digital-human-video-small.mp4" : "digital-human-video.mp4", direct: true, expiresAt: taskOutputExpiresAt(task),
     });
   }
   if (file === "voice-track.wav") {

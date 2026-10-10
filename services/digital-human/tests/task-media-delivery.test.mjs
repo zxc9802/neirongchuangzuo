@@ -40,8 +40,8 @@ function setup(t, overrides = {}) {
   t.mock.method(globalThis, 'fetch', async () => { fetches++; return new Response('large original bytes'); });
   return { task, signed, fetches: () => fetches };
 }
-const request = (handler, headers = {}) => handler(new NextRequest(`http://localhost/api/tasks/${id}/media/final`, {headers}),
-  {params: Promise.resolve({id, kind: 'final', file: 'final.mp4'})});
+const request = (handler, headers = {}, file = 'final.mp4') => handler(new NextRequest(`http://localhost/api/tasks/${id}/media/final`, {headers}),
+  {params: Promise.resolve({id, kind: 'final', file})});
 
 test('preview uses a smaller rendition without proxying bytes through the app', async t => {
   const ctx = setup(t);
@@ -93,4 +93,14 @@ test('authorization precedes redirects and signatures cannot outlive retention',
   try { assert.equal((await request(preview)).status, 401); }
   finally { process.env.NODE_ENV = 'development'; }
   assert.equal(ctx.signed.length, 1);
+});
+
+test('small-file download uses the preview and falls back to the original for legacy tasks', async t => {
+  const ctx = setup(t);
+  assert.match((await request(download, {}, 'preview.mp4')).headers.get('location'), /preview\.mp4/);
+  assert.equal(ctx.signed[0][1], 'digital-human-video-small.mp4');
+  ctx.task.results.previewVideoUrl = undefined;
+  assert.match((await request(download, {}, 'preview.mp4')).headers.get('location'), /final\.mp4/);
+  ctx.task.status = 'processing';
+  assert.equal((await request(download, {}, 'preview.mp4')).status, 404);
 });
