@@ -235,8 +235,31 @@ export async function alignSpeech(video, output, original, generated, duration) 
       stdout.copy(track, offset, 0, length);
     }
     await writeFile(pcm, track, { mode: 0o600 });
+    // Retiming only audio leaves generated captions and mouth movements behind.
+    // Map picture timestamps through the same speech parts and intervening pauses.
+    const spans = [];
+    let sourceTime = 0, targetTime = 0;
+    const advance = (sourceEnd, targetEnd) => {
+      if (sourceEnd > sourceTime) spans.push({ start: sourceTime, end: sourceEnd, target: targetTime,
+        rate: (targetEnd - targetTime) / (sourceEnd - sourceTime) });
+      sourceTime = sourceEnd; targetTime = targetEnd;
+    };
+    for (const segment of segments) {
+      advance(segment.start, segment.targetStart);
+      const parts = segment.parts || [segment];
+      for (const [index, part] of parts.entries()) {
+        advance(part.start, targetTime);
+        advance(part.end, index === parts.length - 1 ? segment.targetEnd : targetTime + (part.end - part.start) / segment.rate);
+      }
+    }
+    advance(duration, duration);
+    const timestamps = spans.reduceRight((next, span) =>
+      `if(lt(T,${span.end}),${span.target}+(T-${span.start})*${span.rate},${next})`, String(duration));
+    const picture = `setpts=PTS-STARTPTS,setpts='(${timestamps})/TB',fps=30:start_time=0,`
+      + `tpad=stop_mode=clone:stop_duration=${duration},trim=duration=${duration},setpts=PTS-STARTPTS`;
     await run('ffmpeg', ['-v', 'error', '-y', '-i', video, '-f', 'f32le', '-ar', String(rate), '-ac', '1', '-i', pcm,
-      '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-f', 'mp4', output], { timeout: 60_000 });
+      '-map', '0:v:0', '-map', '1:a:0', '-vf', picture, '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-threads', '2',
+      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-f', 'mp4', output], { timeout: 60_000 });
   } finally { await rm(pcm, { force: true }); }
   return { originalStart: original.start, generatedStart: generated.start,
     beforeOffsetMs: Math.round((generated.start - original.start) * 1000), corrected: true,
