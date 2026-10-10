@@ -339,7 +339,7 @@ test("billing guard coordinates separate Node workers and detects a terminated e
   } finally { process.chdir(cwd); }
 });
 
-test("workspace pipeline settles probed duration, refunds confirmed failures and keeps uncertain work frozen", async () => {
+test("workspace pipeline settles lip-sync but releases holds for clearly labelled narration fallbacks", async () => {
   const savedCwd = process.cwd();
   process.chdir(temp);
   const source = path.join(temp, "source.mp4");
@@ -350,7 +350,7 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
   try {
-    for (const scenario of ["success", "unlimited-success", "unlimited-audio", "confirmed-failure", "uncertain", "submit-uncertain", "settlement-pending"]) {
+    for (const scenario of ["quality-uncertain", "success", "unlimited-success", "unlimited-audio", "confirmed-failure", "uncertain", "submit-uncertain", "settlement-pending"]) {
       const userId = `pipeline-${scenario}`;
       const exempt = scenario.startsWith("unlimited-");
       const audioOnly = scenario === "unlimited-audio";
@@ -375,7 +375,15 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
           const file = path.join(options.outDir, "voice-track.wav"); fs.writeFileSync(file, "fixture");
           return { finalWavPath: file, rawDuration: 30, selectedDuration: 30 };
         } },
-        "./ffmpeg": { probeMedia: async () => probe, sha256File: async () => "fixture-hash",
+        "./face-lipsync": {
+          prepareFaceLipsync: async options => ({videoPath: source, audioPath: options.audioPath, durationSeconds: 30.9}),
+          finalizeFaceLipsync: async options => {
+            if (scenario === "quality-uncertain") options.onLog?.("部分片段测量不确定，成片正常交付");
+            fs.writeFileSync(options.outputPath, "fixture"); return probe;
+          },
+        },
+        "./video-preview": {createVideoPreview: async () => undefined},
+        "./ffmpeg": { execMediaCommand: async (_cmd, args) => { fs.writeFileSync(args.at(-1), "fallback fixture"); }, probeMedia: async () => probe, sha256File: async () => "fixture-hash",
           encodeMp3: async (_input, output) => { fs.writeFileSync(output, "fixture"); },
           prepareSourceVideo: async (_input, _seconds, output) => { fs.writeFileSync(output, "fixture"); return { duration: 30, width: 160, height: 120 }; },
           finalizeVideo: async (_video, _audio, output) => { fs.writeFileSync(output, "fixture"); return probe; } },
@@ -399,20 +407,25 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
         "../main-app-billing": scenario === "settlement-pending" ? { ...billing,
           settleMainAppCredits: async () => { throw new billing.MainAppBillingError("ledger timeout", 503, "BILLING_SETTLEMENT_FAILED"); } } : billing,
       };
+      deps["../task-output-retention"] = await import("../src/lib/task-output-retention.ts");
+      deps["./narration-fallback"] = loadSource("../src/lib/engine/narration-fallback.ts", deps);
       const module = { exports: {} };
       new Function("require", "module", "exports", compiled)(name => {
         assert.ok(name in deps, name); return deps[name];
       }, module, module.exports);
       await module.exports.runDigitalHumanPipeline(task.id);
       const wallet = await ledger.snapshot(userId);
-      if (["success", "unlimited-success", "unlimited-audio"].includes(scenario)) {
+      if (["success", "quality-uncertain", "unlimited-success", "unlimited-audio"].includes(scenario)) {
         assert.equal(task.status, "completed");
         assert.equal(task.billing.status, "settled");
         assert.equal(task.results.chargedPoints, exempt ? 0 : 333);
         assert.equal(task.billing.chargedPoints, exempt ? 0 : 333);
         assert.equal(wallet.available, exempt ? 1000 : 667); assert.equal(wallet.held, 0);
         assert.equal(publicData.toPublicTask(task).billing.exempt, exempt);
-      } else if (scenario === "confirmed-failure") {
+      } else if (["confirmed-failure", "uncertain", "submit-uncertain"].includes(scenario)) {
+        assert.equal(task.status, "completed");
+        assert.equal(task.results.deliveryMode, "narration_fallback");
+        assert.equal(publicData.isTaskOutputDeliverable(task), true);
         assert.equal(task.billing.status, "released");
         assert.equal(wallet.available, 1000); assert.equal(wallet.held, 0);
       } else {
@@ -470,8 +483,11 @@ test("MP3 settlement outages preserve a recoverable file and recovery probes and
     let ttsCalls = 0, settlements = 0, downloads = 0;
     const config = { storageDir: path.join(temp, "jobs"), publicBaseUrl: "https://example.test", indexttsSpeakerAudioUrl: speaker };
     const baseDeps = {
+      "./narration-fallback": {deliverNarrationFallback: () => assert.fail("MP3 settlement must not become free narration video")},
+      "../server/safe-log": {logServerError: () => undefined},
       path, fs, crypto, "../store/task-store": { TaskStore }, "../config": { getAppConfig: () => config },
       "./task-execution": { withTaskExecution: async (_id, action) => action() },
+      "./face-lipsync": {}, "./video-preview": {createVideoPreview: async () => undefined},
       "./ffmpeg": media, "../cos": { CosService: { isConfigured: () => false } },
       "./fal-veed-lipsync": { FalVeedLipsyncAdapter: { execute: () => assert.fail("audio recovery must never call lip-sync") } },
       "./openlux-lipsync": { OpenLuxLipsyncAdapter: {} }, "../lipsync-provider": { resolveLipsyncProvider: () => "veed" },
@@ -507,6 +523,7 @@ test("MP3 settlement outages preserve a recoverable file and recovery probes and
     const download = loadSource("../src/app/api/tasks/[id]/download/[file]/route.ts", {
       "next/server": { NextRequest, NextResponse }, "@/lib/store/task-store": { TaskStore },
       "@/lib/server/public-data": publicData, "@/lib/access-control": access,
+      "@/lib/task-output-retention": {},
       "@/lib/server/media-response": { isTrustedTaskOutputSource: () => true,
         servePrivateMedia: () => { downloads++; return new NextResponse("fixture"); } },
     });

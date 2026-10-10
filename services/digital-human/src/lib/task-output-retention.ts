@@ -22,7 +22,7 @@ export function isTaskOutputExpired(task: TaskItem, now = Date.now()): boolean {
 }
 
 const GENERATED_FILES = new Set([
-  "final.mp4", "rendered-source.mp4", "voice-track.wav", "voice-track.mp3",
+  "final.mp4", "preview.mp4", "rendered-source.mp4", "voice-track.wav", "voice-track.mp3",
   "voice-raw.wav", "exact-final-indextts.wav", "production-report.json", "evidence.json",
 ]);
 

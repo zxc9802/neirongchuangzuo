@@ -86,8 +86,10 @@ export interface TaskItem {
     lipsyncProvider?: LipsyncProvider;
   };
   results: {
+    deliveryMode?: "narration_fallback";
     originalVideoUrl?: string;
     finalVideoUrl?: string;
+    previewVideoUrl?: string;
     exactAudioUrl?: string;
     audioFormat?: "wav" | "mp3";
     evidenceJsonUrl?: string;
@@ -100,6 +102,7 @@ export interface TaskItem {
     chargedPoints?: number;
     costCny?: number;
     billingDuration?: number;
+    faceWorkflowVersion?: 1;
     lipsyncChunks?: {
       index: number;
       lipsyncId?: string;

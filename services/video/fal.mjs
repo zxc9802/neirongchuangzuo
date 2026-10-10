@@ -13,11 +13,11 @@ function queueUrl(value) {
     const url = new URL(value);
     if (url.origin !== origin || url.username || url.password || !url.pathname.startsWith('/minimax/h3-max/')) throw new Error();
     return url.href;
-  } catch { throw new VideoError('MiniMax 任务队列地址无效。', 502, 'VIDEO_PROVIDER_UNAVAILABLE'); }
+  } catch { throw new VideoError('极速模型任务队列地址无效。', 502, 'VIDEO_PROVIDER_UNAVAILABLE'); }
 }
 export function createFalVideoProvider(config, fetchImpl = fetch) {
   async function call(url, body) {
-    if (!config.falKey) throw new VideoError('MiniMax H3 Max 尚未配置。', 503, 'VIDEO_NOT_CONFIGURED');
+    if (!config.falKey) throw new VideoError('极速模型尚未配置。', 503, 'VIDEO_NOT_CONFIGURED');
     try {
       const response = await fetchImpl(queueUrl(url), { method: body ? 'POST' : 'GET', redirect: 'error',
         headers: { Authorization: `Key ${config.falKey}`, 'Content-Type': 'application/json' },
@@ -25,13 +25,13 @@ export function createFalVideoProvider(config, fetchImpl = fetch) {
       const chunks = []; let size = 0;
       for await (const chunk of response.body) { size += chunk.length; if (size > 1024 * 1024) throw new Error(); chunks.push(chunk); }
       if (!response.ok) {
-        if ([400, 401, 402, 403, 422].includes(response.status)) throw new VideoError('MiniMax 服务拒绝请求，请检查 fal 余额、密钥权限或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED');
+        if ([400, 401, 402, 403, 422].includes(response.status)) throw new VideoError('极速模型服务拒绝请求，请检查 fal 余额、密钥权限或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED');
         throw new Error();
       }
       return JSON.parse(Buffer.concat(chunks).toString());
     } catch (cause) {
       if (cause instanceof VideoError) throw cause;
-      throw new VideoError('MiniMax 服务暂时无法连接，正在查询原任务。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+      throw new VideoError('极速模型服务暂时无法连接，正在查询原任务。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
     }
   }
   return {
@@ -40,7 +40,7 @@ export function createFalVideoProvider(config, fetchImpl = fetch) {
     async queryMaterial() { return 2; },
     async generate(task) {
       const data = await call(`${origin}/${FAL_MODEL}`, falGenerationBody(task));
-      if (!data.request_id || !data.status_url || !data.response_url) throw new VideoError('MiniMax 未返回完整任务编号，未自动重新提交。', 502, 'VIDEO_SUBMISSION_UNCERTAIN');
+      if (!data.request_id || !data.status_url || !data.response_url) throw new VideoError('极速模型未返回完整任务编号，未自动重新提交。', 502, 'VIDEO_SUBMISSION_UNCERTAIN');
       return { taskId: String(data.request_id), falQueue: { status: queueUrl(data.status_url), result: queueUrl(data.response_url) } };
     },
     async query(id, task) {

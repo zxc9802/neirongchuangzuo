@@ -1,6 +1,6 @@
 export const MODEL = 'doubao-seedance-2-0-260128';
 export const DURATIONS = [4, 5, 6, 8, 10, 12, 15];
-export const PROMPT = '严格编辑视频1，在原视频上做人物替换，不创作全新视频。仅将视频1中的唯一人物改为图片1的人物形象，严格保持图片1中的五官、脸型、发型、外观和服饰，不新增图片1中不存在的服饰文字或装饰。保留视频1的动作、镜头、场景、商品与说话内容，逐时刻保持动作和镜头顺序，不增加动作、不重复片段、不延伸表演。表情和情绪跟随视频1原表演，自然不僵硬。去除画面叠加的字幕，不生成新的字幕；保留真实商品包装与场景标识。';
+export const PROMPT = '严格编辑视频1，在原视频上做人物替换，不创作全新视频。仅将视频1中的唯一人物改为图片1的人物形象，严格保持图片1中的五官、脸型、发型、外观和服饰，不新增图片1中不存在的服饰文字或装饰。保留视频1的动作、镜头、场景、商品与说话内容，逐时刻保持动作和镜头顺序，不增加动作、不重复片段、不延伸表演。表情和情绪跟随视频1原表演，自然不僵硬。保留视频1已有字幕的原文、位置、排版和出现时间，字幕清晰完整，不新增字幕；禁止擦除、涂抹、打码或模糊字幕区域。保留真实商品包装与场景标识。';
 export class VideoError extends Error {
   constructor(message, status = 400, code = 'VIDEO_INVALID_INPUT') { super(message); this.status = status; this.code = code; }
 }
@@ -32,6 +32,7 @@ export function videoConfig(env = {}, publicOrigin) {
 }
 export function generationBody(task) {
   const lengthPrompt = task.video?.duration ? `\n视频1实际时长为${task.video.duration.toFixed(3)}秒。动作严格对应原视频时刻，输出超过原视频时长的部分保持末帧静止、闭嘴和无声。` : '';
+  const captionPrompt = task.captions?.cues?.length ? `\n台词来自原视频字幕，优先于听辨结果，以下文字是唯一语音文案，不改写、不漏说，数字和价格按原字说：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)}秒：${segment.text}`).join('；')}。${task.voice ? '' : '保留视频1的人声音色。'}保留视频1已有的清晰字幕，不重画字幕，不修改字幕区域的背景；仅在成片未保留字幕时，系统会按原文补字幕。` : '';
   let voicePrompt = '';
   if (task.voice) {
     const segments = task.speech.segments;
@@ -39,9 +40,9 @@ export function generationBody(task) {
     let end = 0;
     for (const segment of segments) { if (segment.start > end) gaps.push(`${end.toFixed(3)}–${segment.start.toFixed(3)}秒`); end = segment.end; }
     if (task.duration > end) gaps.push(`${end.toFixed(3)}秒至成片结束`);
-    voicePrompt = `\n仅替换视频1的人声音色，以下用户确认的台词是唯一台词依据。视频1提供原表演和节奏，音频1仅提供音色，不使用音频1的台词，也不同时播放音频1。全片只有图片1中的一个人物说话，使用音频1的同一音色，不保留或混入原视频的人声，不添加旁白或第二个人声。原视频人声从第 ${task.speech.start.toFixed(3)} 秒开始，此前人物不得说话。严格按以下原视频时间线说话：${segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。每段仅说一次，严格按顺序，价格、数字、单位按原字说，不改写、不补全、不重复。只在列出的台词区间说话，${gaps.length ? `${gaps.join('；')}必须保持静音。` : ''}最后一段结束后不得补说或复读。`;
+    voicePrompt = `\n仅替换视频1的人声音色，以下从原视频提取的台词是唯一台词依据。直接编辑视频1的声音，仅更换音色，不重新设计配音表演。视频1原声提供完整的说话情绪，逐句保留原声的语速、重音、语调、停顿、气口和情绪起伏，包括兴奋、惊讶、强调和自然口语感，不把原声改成平直的朗读。音频1仅提供音色，不使用音频1的台词，也不同时播放音频1，不沿用音频1的平淡语气或情绪。全片只有图片1中的一个人物说话，使用音频1的同一音色，不保留或混入原视频的人声，不添加旁白或第二个人声。原视频人声从第 ${task.speech.start.toFixed(3)} 秒开始，此前人物不得说话。严格按以下原视频时间线说话：${segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。每段仅说一次，严格按顺序，价格、数字、单位按原字说，不改写、不补全、不重复。只在列出的台词区间说话，${gaps.length ? `${gaps.join('；')}必须保持静音。` : ''}最后一段结束后不得补说或复读。`;
   }
-  return { modelId: MODEL, abilityType: 'VIDEO', prompt: PROMPT + lengthPrompt + voicePrompt,
+  return { modelId: MODEL, abilityType: 'VIDEO', prompt: PROMPT + lengthPrompt + captionPrompt + voicePrompt,
     payload: { params: { mode: 'fusion_video', resolution: '720p', scale: task.ratio, duration: task.duration, generateAudio: true },
       resources: [`asset://${task.materials.photo.id}`], referVideoUrl: [`asset://${task.materials.video.id}`],
       ...(task.voice ? { referAudioUrl: [`asset://${task.materials.voice.id}`] } : {}) } };

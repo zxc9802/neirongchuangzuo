@@ -1,3 +1,4 @@
+import { createVideoPreview } from "./video-preview";
 import { logServerError } from "../server/safe-log";
 import path from "path";
 import fs from "fs";
@@ -7,10 +8,11 @@ import { startTaskHeartbeat, withTaskBillingGuard } from "../server/task-worker"
 import { TaskStore, TaskItem, TaskStep } from "../store/task-store";
 import { getAppConfig } from "../config";
 import { generateIndexTTS } from "./indextts";
+import { prepareFaceLipsync, finalizeFaceLipsync } from "./face-lipsync";
+import { deliverNarrationFallback } from "./narration-fallback";
 import {
   probeMedia,
   prepareSourceVideo,
-  finalizeVideo,
   sha256File,
   encodeMp3,
   type MediaProbeInfo,
@@ -310,7 +312,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       localVideoPath,
       ttsResult.selectedDuration,
       preparedVideoPath,
-      task.inputs.videoFit
+      "smart"
     );
     ensureTaskActive();
 
@@ -347,6 +349,25 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       progress: 50,
     });
 
+    let providerVideoPath = preparedVideoPath;
+    let providerAudioPath = ttsResult.finalWavPath;
+    let faceWorkflow = false;
+    if (lipsyncProvider === "veed") {
+      log("正在准备口型画面...", "info");
+      try {
+        const face = await prepareFaceLipsync({ inputVideoPath: localVideoPath,
+          audioPath: ttsResult.finalWavPath, durationSeconds: ttsResult.selectedDuration, jobDir, taskId });
+        providerVideoPath = face.videoPath;
+        providerAudioPath = face.audioPath;
+        faceWorkflow = true;
+      } catch (error) {
+        logServerError("pipeline.face_preparation_fallback", error, "warn");
+        log("局部口型画面准备未完成，自动使用完整画面继续生成", "warn");
+      }
+      ensureTaskActive();
+      TaskStore.update(taskId, { results: { faceWorkflowVersion: faceWorkflow ? 1 : undefined } });
+    }
+
     // Submission title based on hashes for idempotency
     const submissionTitle = `lipsync_${sha256Video.slice(0, 8)}_${sha256Audio.slice(
       0,
@@ -354,21 +375,28 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     )}`;
 
     // Create short-lived, unguessable provider inputs. They are removed in finally.
-    fs.copyFileSync(preparedVideoPath, path.join(providerInputDir, "source-video.mp4"));
-    fs.copyFileSync(ttsResult.finalWavPath, path.join(providerInputDir, "voice-track.wav"));
+    fs.copyFileSync(providerVideoPath, path.join(providerInputDir, "source-video.mp4"));
+    fs.copyFileSync(providerAudioPath, path.join(providerInputDir, "voice-track.wav"));
     let publicVideoUrl = `${baseUrl}/jobs/input/${providerToken}/source-video.mp4`;
     let publicAudioUrl = `${baseUrl}/jobs/input/${providerToken}/voice-track.wav`;
 
     // If cloud object storage is configured, upload prepared video & audio to COS for 100% reachable public access
     if (CosService.isConfigured()) {
+      if (!faceWorkflow) {
+        const saved = await Promise.allSettled([
+          CosService.uploadFile(preparedVideoPath, `jobs/${taskId}/source-video.mp4`),
+          CosService.uploadFile(ttsResult.finalWavPath, `jobs/${taskId}/voice-track.wav`),
+        ]);
+        if (saved.some(item => item.status === "rejected")) log("恢复素材暂未保存到云端，继续使用本地素材生成", "warn");
+      }
       try {
         ensureTaskActive();
         log("☁️ 正在将预处理音画直链同步至云端高速分发...", "info");
         const providerVideoKey = `provider-input/${providerToken}/source-video.mp4`;
         const providerAudioKey = `provider-input/${providerToken}/voice-track.wav`;
-        await CosService.uploadFile(preparedVideoPath, providerVideoKey);
+        await CosService.uploadFile(providerVideoPath, providerVideoKey);
         providerCosKeys.push(providerVideoKey);
-        await CosService.uploadFile(ttsResult.finalWavPath, providerAudioKey);
+        await CosService.uploadFile(providerAudioPath, providerAudioKey);
         providerCosKeys.push(providerAudioKey);
         publicVideoUrl = await CosService.getDownloadUrl(providerVideoKey, undefined, 6 * 60 * 60);
         publicAudioUrl = await CosService.getDownloadUrl(providerAudioKey, undefined, 6 * 60 * 60);
@@ -402,8 +430,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
       heygenResult = await OpenLuxLipsyncAdapter.execute(
         {
-          videoPath: preparedVideoPath,
-          audioPath: ttsResult.finalWavPath,
+          videoPath: providerVideoPath,
+          audioPath: providerAudioPath,
           videoUrl: publicVideoUrl,
           audioUrl: publicAudioUrl,
           existingChunks: TaskStore.get(taskId)?.results.lipsyncChunks,
@@ -450,11 +478,11 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
       heygenResult = await FalVeedLipsyncAdapter.execute(
         {
-          videoPath: preparedVideoPath,
-          audioPath: ttsResult.finalWavPath,
+          videoPath: providerVideoPath,
+          audioPath: providerAudioPath,
           videoUrl: publicVideoUrl,
           audioUrl: publicAudioUrl,
-          objectKeyPrefix: `jobs/${taskId}`,
+          objectKeyPrefix: faceWorkflow ? `jobs/${taskId}/face-provider` : `jobs/${taskId}`,
           onLog: logProvider,
           onChunkProgress: recordChunk,
           onProviderAccepted: markProviderCommitted,
@@ -528,16 +556,14 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       step: "finalize",
       progress: 85,
     });
-    log("🎧 第五步: 正在将生成的对口型视频与原声 WAV 音轨无损混流封装...");
+    log("🎧 第五步: 正在校准口型并合成最终成片...", "info", "正在校准口型并合成最终成片");
 
     const heygenDownloadedPath = path.join(jobDir, "rendered-source.mp4");
     const finalVideoPath = path.join(jobDir, "final.mp4");
 
-    const finalProbe = await finalizeVideo(
-      heygenDownloadedPath,
-      ttsResult.finalWavPath,
-      finalVideoPath
-    );
+    const finalProbe = await finalizeFaceLipsync({ jobDir, renderedPath: heygenDownloadedPath,
+      audioPath: ttsResult.finalWavPath, outputPath: finalVideoPath,
+      faceWorkflow, onLog: log });
     ensureTaskActive();
 
     // 6. Generate an implementation-neutral production report
@@ -565,7 +591,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           sha256: sha256Audio,
         },
       },
-      processing: { status: "completed" },
+      processing: { status: "completed", lipsync_calibration: "best_effort" },
     };
 
     const evidencePath = path.join(jobDir, "production-report.json");
@@ -644,6 +670,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       }
     }
 
+    const previewVideoUrl = await createVideoPreview(finalVideoPath);
+
     // Done!
     currentStep = "done";
     ensureTaskActive();
@@ -668,6 +696,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           task.inputs.videoUrl ||
           task.inputs.videoPath,
         finalVideoUrl,
+        previewVideoUrl,
         exactAudioUrl,
         evidenceJsonUrl,
         heygenLipsyncId: heygenResult.lipsyncId,
@@ -689,6 +718,16 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
   } catch (err: any) {
     const errorMsg = err.message || "未知流水线异常";
     logServerError("pipeline.failed", err);
+    // Quality/provider/media failures are not delivery gates. Never turn an
+    // authorization or settlement failure into a free alternative output.
+    if (!audioOnly && ["media_prep", "mcp_preflight", "mcp_lipsync_submit", "mcp_lipsync_polling", "finalize"].includes(currentStep) &&
+      !/^(BILLING_|INSUFFICIENT_|NETWORK_ERROR)/.test(err.code || "")) {
+      try {
+        if (await deliverNarrationFallback(taskId, sessionToken)) return;
+      } catch (fallbackError) {
+        logServerError("pipeline.narration_fallback_failed", fallbackError);
+      }
+    }
     log(`❌ 流程发生错误: ${errorMsg}`, "error", "处理失败，请稍后重试");
 
     // Release reserved billing credits on failure
@@ -697,7 +736,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       currentTaskData.billing?.isExternalUser &&
       currentTaskData.billing.requestId &&
       (currentTaskData.billing.status === "reserved" ||
-        (currentTaskData.billing.source === "workspace" && currentTaskData.billing.status === "provider_committed" && err.code === "LIPSYNC_GENERATION_FAILED"))
+        (currentTaskData.billing.status === "provider_committed" &&
+          currentTaskData.billing.source === "workspace" && err.code === "LIPSYNC_GENERATION_FAILED"))
     ) {
       try {
         await releaseMainAppCredits({

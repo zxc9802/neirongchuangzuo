@@ -23,6 +23,11 @@ const PUBLIC_ERRORS: Record<string, string> = {
   TASK_RESTARTED_AFTER_SUBMISSION: "任务被重启中断，积分仍在核对，请恢复原任务或联系管理员",
   BILLING_RESERVATION_TOO_SMALL: "实际配音超出预留额度，请缩短文案后重试",
   BILLING_SETTLEMENT_FAILED: "结果已生成，积分结算暂未完成，请稍后恢复任务",
+  LIPSYNC_FACE_INPUT: "人脸不够清晰或画面中出现多人，请使用正面、单人、脸部清晰的口播素材",
+  LIPSYNC_INPUT_DURATION: "配音过短，无法可靠检查口型，请增加一些文案",
+  LIPSYNC_ALIGNMENT: "旧版同步检查中断了成片交付，请联系管理员恢复已有结果",
+  LIPSYNC_MEDIA: "口型画面时长或位置异常，成片未交付，请联系管理员检查",
+  LIPSYNC_RUNTIME: "口型检查服务暂时不可用，请稍后恢复任务或联系管理员",
   MEDIA_FIT_MISMATCH: "素材视频长于配音，请选择智能适配后重试",
 };
 
@@ -35,7 +40,8 @@ const PUBLIC_LOG_FALLBACK = {
 
 export function isTaskOutputDeliverable(task: TaskItem): boolean {
   if (task.status !== "completed" || isTaskOutputExpired(task)) return false;
-  return !task.billing?.isExternalUser || task.billing.status === "settled";
+  return !task.billing?.isExternalUser || task.billing.status === "settled" ||
+    task.results.deliveryMode === "narration_fallback" && task.billing.status === "released";
 }
 
 export function resolvePrivateEngine(engine: unknown): LipsyncProvider {
@@ -119,6 +125,7 @@ export function toPublicTask(task: TaskItem): PublicTaskItem {
       engine: toPublicEngine(provider),
     },
     results: {
+      deliveryMode: task.results.deliveryMode,
       downloadUrl: deliverable
         ? task.results.finalVideoUrl
           ? `/api/tasks/${encodeURIComponent(task.id)}/download/final.mp4`

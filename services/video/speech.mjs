@@ -77,11 +77,23 @@ export async function normalizeVoice(input, output) {
   } catch { throw new VideoError('声音参考需为可播放的 MP3 / WAV，时长 2–15 秒。', 400, 'VIDEO_VOICE_INVALID'); }
 }
 export function speechTimeline(data, intervals, duration) {
-  if (!Number.isFinite(duration) || duration <= 0 || intervals.some((interval, index) =>
+  if (!Number.isFinite(duration) || duration <= 0) throw invalid('视频时长无效，无法准备台词时间范围。');
+  if (intervals.some((interval, index) =>
     !Number.isFinite(interval.start) || !Number.isFinite(interval.end) || interval.start < 0
     || interval.end <= interval.start || interval.end > duration + 0.1
     || index && interval.start < intervals[index - 1].end)) {
-    throw invalid('人声检测区间无效，请重新检查素材。');
+    intervals = [];
+  }
+  const rawWords = (data.words || []).filter(word => speechText(word.word));
+  function fallback() {
+    const timed = rawWords.filter(word => Number.isFinite(word.start) && Number.isFinite(word.end)
+      && word.start >= 0 && word.end > word.start && word.end <= duration);
+    const start = intervals[0]?.start ?? (timed.length ? Math.min(...timed.map(word => word.start)) : 0);
+    const end = Math.min(duration, intervals.at(-1)?.end ?? (timed.length ? Math.max(...timed.map(word => word.end)) : duration));
+    const text = String(data.text || rawWords.map(word => word.word).join('')).trim();
+    return { engine: 'silero-vad+whisper-1', timingSource: intervals.length ? 'vad' : timed.length ? 'asr' : 'manual',
+      start, end, text, segments: [{ start, end, text, words: [] }],
+      warning: '人声识别已放宽校验，请核对台词和开口时间；未识别到文字时可手动填写。' };
   }
   const words = [];
   let pending = '';
@@ -89,7 +101,7 @@ export function speechTimeline(data, intervals, duration) {
   for (const word of data.words || []) {
     if (!speechText(word.word)) continue;
     if (!Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start
-      || word.end > duration + 0.1 || word.start < previous - 0.1) throw invalid('台词时间戳无效，暂时无法精确对齐。');
+      || word.end > duration + 0.1 || word.start < previous - 0.1) return fallback();
     previous = word.start;
     // Chinese ASR can put adjacent characters at the same instant. Retain the
     // untimed character with its following word rather than inventing a time.
@@ -97,7 +109,7 @@ export function speechTimeline(data, intervals, duration) {
     words.push({ ...word, word: pending + word.word }); pending = '';
   }
   if (pending && words.length) words.at(-1).word += pending;
-  if (!intervals.length) throw invalid('未识别到清晰的人声和台词，请更换口播素材。');
+  if (!intervals.length || !words.length) return fallback();
   const segments = intervals.map(interval => ({ ...interval, text: '', words: [] }));
   for (const word of words) {
     const center = (word.start + word.end) / 2;
@@ -105,7 +117,7 @@ export function speechTimeline(data, intervals, duration) {
       const distance = value => Math.max(value.start - center, center - value.end, 0);
       return distance(segment) < distance(best) ? segment : best;
     });
-    if (Math.max(nearest.start - center, center - nearest.end, 0) > 0.4) throw invalid('语音识别与人声检测结果不一致，请检查背景音乐或多人说话。');
+    if (Math.max(nearest.start - center, center - nearest.end, 0) > 0.4) return fallback();
     // VAD measures speech boundaries; ASR word timestamps must not extend them
     // across a pause. Keep every recognized word, including zero-length Chinese tokens.
     const clamp = value => Math.max(nearest.start, Math.min(nearest.end, value));
@@ -125,11 +137,7 @@ export function speechTimeline(data, intervals, duration) {
       previous.words.at(-1).end = Math.min(tail.end, segment.end);
     } else spoken.push(segment);
   }
-  const unmatchedVadIntervals = spoken.filter(segment => !segment.words.length).map(({ start, end }) => ({ start, end }));
-  if (unmatchedVadIntervals.length) {
-    throw Object.assign(invalid('台词识别不完整，请核对素材后重新分析。'), { unmatchedVadIntervals });
-  }
-  if (!spoken.length || spoken.length > 30) throw invalid('人声分段不符合单人口播要求。');
+  if (spoken.some(segment => !segment.words.length) || spoken.length > 30) return fallback();
   return { engine: 'silero-vad+whisper-1', timingSource: 'vad', start: spoken[0].start, end: spoken.at(-1).end,
     text: words.map(word => word.word).join(''), segments: spoken };
 }
@@ -153,8 +161,10 @@ export function createSpeechService(env = {}, fetchImpl = fetch) {
   const config = speechConfig(env);
   async function analyze(path, duration, { diagnosticsPath } = {}) {
     if (!config.key) throw new VideoError('声音参考的语音识别服务尚未配置。', 503, 'VIDEO_SPEECH_NOT_CONFIGURED');
-    const intervals = await detectSpeech(path, config);
-    if (!intervals.length) throw invalid('素材中未检测到人声，请上传清晰的单人口播。');
+    const intervals = await detectSpeech(path, config).catch(cause => {
+      if (cause.code !== 'VIDEO_SPEECH_INVALID') throw cause;
+      return [];
+    });
     const audio = path + '.asr.wav';
     try {
       await run('ffmpeg', ['-v', 'error', '-y', '-protocol_whitelist', 'file,pipe', '-i', path,
@@ -225,8 +235,31 @@ export async function alignSpeech(video, output, original, generated, duration) 
       stdout.copy(track, offset, 0, length);
     }
     await writeFile(pcm, track, { mode: 0o600 });
+    // Retiming only audio leaves generated captions and mouth movements behind.
+    // Map picture timestamps through the same speech parts and intervening pauses.
+    const spans = [];
+    let sourceTime = 0, targetTime = 0;
+    const advance = (sourceEnd, targetEnd) => {
+      if (sourceEnd > sourceTime) spans.push({ start: sourceTime, end: sourceEnd, target: targetTime,
+        rate: (targetEnd - targetTime) / (sourceEnd - sourceTime) });
+      sourceTime = sourceEnd; targetTime = targetEnd;
+    };
+    for (const segment of segments) {
+      advance(segment.start, segment.targetStart);
+      const parts = segment.parts || [segment];
+      for (const [index, part] of parts.entries()) {
+        advance(part.start, targetTime);
+        advance(part.end, index === parts.length - 1 ? segment.targetEnd : targetTime + (part.end - part.start) / segment.rate);
+      }
+    }
+    advance(duration, duration);
+    const timestamps = spans.reduceRight((next, span) =>
+      `if(lt(T,${span.end}),${span.target}+(T-${span.start})*${span.rate},${next})`, String(duration));
+    const picture = `setpts=PTS-STARTPTS,setpts='(${timestamps})/TB',fps=30:start_time=0,`
+      + `tpad=stop_mode=clone:stop_duration=${duration},trim=duration=${duration},setpts=PTS-STARTPTS`;
     await run('ffmpeg', ['-v', 'error', '-y', '-i', video, '-f', 'f32le', '-ar', String(rate), '-ac', '1', '-i', pcm,
-      '-map', '0:v:0', '-map', '1:a:0', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-f', 'mp4', output], { timeout: 60_000 });
+      '-map', '0:v:0', '-map', '1:a:0', '-vf', picture, '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-threads', '2',
+      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-f', 'mp4', output], { timeout: 60_000 });
   } finally { await rm(pcm, { force: true }); }
   return { originalStart: original.start, generatedStart: generated.start,
     beforeOffsetMs: Math.round((generated.start - original.start) * 1000), corrected: true,

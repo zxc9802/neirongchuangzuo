@@ -150,6 +150,7 @@ test('media and download routes reject expired or foreign outputs before opening
     'next/server': {NextRequest, NextResponse},
     '@/lib/store/task-store': {TaskStore: {getAsync: async () => task}},
     '@/lib/server/public-data': publicData,
+    '@/lib/task-output-retention': retention,
     '@/lib/server/media-response': {isTrustedTaskOutputSource: () => true, servePrivateMedia: () => {served++; return new Response('video');}},
     '@/lib/server/upload-policy': {}, '@/lib/store/avatar-store': {},
     '@/lib/access-control': {

@@ -1,9 +1,13 @@
+import { createVideoPreview } from "./video-preview";
 import fs from "fs";
 import path from "path";
 import { CosService } from "../cos";
 import { resolveLipsyncProvider } from "../lipsync-provider";
 import { TaskItem, TaskStore } from "../store/task-store";
-import { concatVideos, finalizeVideo, probeMedia, sha256File } from "./ffmpeg";
+import { concatVideos, probeMedia, sha256File } from "./ffmpeg";
+import { restoreFaceLipsync, finalizeFaceLipsync } from "./face-lipsync";
+import { deliverNarrationFallback } from "./narration-fallback";
+import { logServerError } from "../server/safe-log";
 import { planLipsyncChunks } from "./lipsync-chunks";
 import { withTaskExecution } from "./task-execution";
 import { downloadFileToDisk } from "./download-file";
@@ -203,13 +207,22 @@ export async function recoverStuckLipsyncTask(
       return await recoverTask(taskId, sessionToken);
     } catch (error) {
       const task = TaskStore.get(taskId);
-      if (task?.billing?.source === "workspace" && task.billing.status === "provider_committed" &&
-        (error as { code?: string })?.code === "LIPSYNC_GENERATION_FAILED" && task.userId && task.billing.requestId) {
-        await releaseMainAppCredits({ userId: task.userId, requestId: task.billing.requestId, source: "workspace" });
+      const errorCode = (error as { code?: string })?.code;
+      if (!/^(BILLING_|INSUFFICIENT_|NETWORK_ERROR)/.test(errorCode || "")) {
+        try {
+          const fallback = await deliverNarrationFallback(taskId, sessionToken);
+          if (fallback) return fallback;
+        } catch (fallbackError) {
+          logServerError("recovery.narration_fallback_failed", fallbackError);
+        }
+      }
+      if (task?.billing?.isExternalUser && task.billing.status === "provider_committed" &&
+        task.billing.source === "workspace" && errorCode === "LIPSYNC_GENERATION_FAILED" && task.userId && task.billing.requestId) {
+        await releaseMainAppCredits({ userId: task.userId, requestId: task.billing.requestId, source: task.billing.source, sessionToken });
         TaskStore.update(taskId, { billing: { ...task.billing, status: "released" } });
       }
       TaskStore.update(taskId, { status: "failed", step: "error", failedStep: "finalize",
-        error: "成片恢复未完成，请稍后重试" });
+        error: "成片恢复未完成，请稍后重试", errorCode });
       throw error;
     }
   });
@@ -225,7 +238,8 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
   if (
     task.status === "completed" &&
     (task.results?.finalVideoUrl || task.inputs.outputType === "audio" && task.results?.exactAudioUrl) &&
-    (!task.billing?.isExternalUser || task.billing.status === "settled")
+    (!task.billing?.isExternalUser || task.billing.status === "settled" ||
+      task.results.deliveryMode === "narration_fallback" && task.billing.status === "released")
   ) {
     return task;
   }
@@ -270,20 +284,23 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     onLog: log,
   });
   const audioProbe = await probeMedia(audioPath);
+  const faceWorkflow = task.results.faceWorkflowVersion === 1;
+  const providerDuration = faceWorkflow ? await restoreFaceLipsync(jobDir, taskId) : audioProbe.durationSeconds;
+  const providerPrefix = faceWorkflow ? `jobs/${taskId}/face-provider` : `jobs/${taskId}`;
   const plan = provider === "heygen"
-    ? [{ index: 0, durationSeconds: audioProbe.durationSeconds }]
-    : planLipsyncChunks(audioProbe.durationSeconds);
+    ? [{ index: 0, durationSeconds: providerDuration }]
+    : planLipsyncChunks(providerDuration);
   const chunks = savedChunks(task);
   // Even a cloud final must be probed; container metadata or a missing report
   // must never stand in for the duration of the actual picture and narration.
   let rawReady = false;
   if (fs.existsSync(rawPath)) {
-    try { await verifyVideoDuration(rawPath, audioProbe.durationSeconds); rawReady = true; } catch {}
+    try { await verifyVideoDuration(rawPath, providerDuration); rawReady = true; } catch {}
   }
-  if (!rawReady && CosService.isConfigured() && await CosService.objectExists(`jobs/${taskId}/final.mp4`)) {
+  if (!faceWorkflow && !rawReady && CosService.isConfigured() && await CosService.objectExists(`jobs/${taskId}/final.mp4`)) {
     const url = await CosService.getDownloadUrl(`jobs/${taskId}/final.mp4`, "final.mp4");
     await downloadTrustedMediaToFile({ source: url, outputPath: rawPath });
-    try { await verifyVideoDuration(rawPath, audioProbe.durationSeconds); rawReady = true; } catch {}
+    try { await verifyVideoDuration(rawPath, providerDuration); rawReady = true; } catch {}
   }
   const rendered: string[] = [];
   let creditsUsed = task.results.lipsyncCredits;
@@ -297,8 +314,8 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     if (fs.existsSync(outputPath)) {
       try { await verifyVideoDuration(outputPath, part.durationSeconds); ready = true; } catch {}
     }
-    if (!ready && CosService.isConfigured() && await CosService.objectExists(`jobs/${taskId}/${outputName}`)) {
-      const url = await CosService.getDownloadUrl(`jobs/${taskId}/${outputName}`, path.basename(outputPath));
+    if (!ready && CosService.isConfigured() && await CosService.objectExists(`${providerPrefix}/${outputName}`)) {
+      const url = await CosService.getDownloadUrl(`${providerPrefix}/${outputName}`, path.basename(outputPath));
       await downloadTrustedMediaToFile({ source: url, outputPath });
       await verifyVideoDuration(outputPath, part.durationSeconds);
       ready = true;
@@ -339,12 +356,13 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     else currentChunks.push(completedChunk);
     TaskStore.update(taskId, { results: { lipsyncChunks: currentChunks } });
   }
-  if (!rawReady && plan.length > 1) await concatVideos(rendered, rawPath);
-  await verifyVideoDuration(rawPath, audioProbe.durationSeconds);
+  if (!rawReady && plan.length > 1) await concatVideos(rendered, rawPath, faceWorkflow ? plan.map(part => part.durationSeconds) : undefined);
+  await verifyVideoDuration(rawPath, providerDuration);
   const jobId = chunks.map(chunk => chunk.lipsyncId).filter(Boolean).join(",");
 
-  log("正在将成片与原声音轨混流封装...");
-  const finalProbe = await finalizeVideo(rawPath, audioPath, finalPath);
+  log("正在校准口型并合成最终成片...");
+  const finalProbe = await finalizeFaceLipsync({ jobDir, renderedPath: rawPath, audioPath,
+    outputPath: finalPath, faceWorkflow, onLog: log });
   await verifyVideoDuration(finalPath, audioProbe.durationSeconds);
   const sha256Video = await sha256File(finalPath);
   const sha256Audio = await sha256File(audioPath);
@@ -358,7 +376,7 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     created_at: new Date().toISOString(),
     recovered: true,
     script_text: task.inputs.scriptText,
-    processing: { status: "completed", recovered: true },
+    processing: { status: "completed", recovered: true, lipsync_calibration: "best_effort" },
     media: {
       video: {
         final_duration_seconds: finalProbe.durationSeconds,
@@ -381,9 +399,11 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     evidenceJsonUrl = await CosService.uploadFile(evidencePath, `jobs/${taskId}/production-report.json`);
   }
 
+  const previewVideoUrl = await createVideoPreview(finalPath);
   return markCompleted(
     taskId,
     {
+      previewVideoUrl,
       originalVideoUrl: task.inputs.videoUrl || task.results.originalVideoUrl,
       finalVideoUrl,
       exactAudioUrl,

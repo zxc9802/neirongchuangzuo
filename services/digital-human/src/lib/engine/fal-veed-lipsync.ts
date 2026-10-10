@@ -519,7 +519,7 @@ export class FalVeedLipsyncAdapter {
     }
 
     onLog(`[VEED] ${chunks.length} 段已完成，正在拼接成完整画面...`);
-    await concatVideos(rendered, rawVideoPath);
+    await concatVideos(rendered, rawVideoPath, chunks.map(chunk => chunk.durationSeconds));
 
     return {
       lipsyncId: jobIds.join(","),

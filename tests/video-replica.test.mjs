@@ -6,11 +6,12 @@ import { mkdtemp, rm, writeFile, readFile, realpath, readdir } from 'node:fs/pro
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
-import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT } from '../services/video/provider.mjs';
-import { normalizePhoto, downloadVideo } from '../services/video/media.mjs';
+import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError } from '../services/video/provider.mjs';
+import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
 import { createFalVideoProvider, FAL_MODEL } from '../services/video/fal.mjs';
@@ -25,7 +26,7 @@ async function fixture(t, options = {}) {
   const state = { creates: [], queries: 0, generations: 0, done: false, failed: false, review: 2, source: null };
   const provider = {
     async createMaterial(url, kind) { state.creates.push({ url, kind }); return { id: kind + '-id', status: state.review }; },
-    async queryMaterial() { return state.review; },
+    async queryMaterial(id) { return options.queryMaterial ? options.queryMaterial(id) : state.review; },
     async generate(task) { state.generations++; state.body = generationBody(task); if (options.uncertain) throw new Error('Network disconnected'); return { taskId: 'provider-1' }; },
     async query() { state.queries++; if (options.query) return options.query(); return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; },
   };
@@ -33,7 +34,7 @@ async function fixture(t, options = {}) {
   async function open(overrides = {}) {
     handler = createVideoHandler({ storageDir: join(root, 'video'), config: CONFIG, provider, credits: wallet,
       photo: async () => Buffer.from('photo'), probe: async () => META, download: async (_url, path) => writeFile(path, VIDEO),
-      mute: async (_input, output) => writeFile(output, Buffer.from('silent-video')),
+      captions: { extract: async () => null },
       pollIntervalMs: 15, ...options, ...overrides });
     await handler.ready;
     app = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-owner'] || 'alice'; void handler(req, res); });
@@ -95,17 +96,148 @@ async function uploadVoice(app, id) {
   assert.equal(response.status, 200, await response.text());
 }
 
-test('voice reference requires analysis confirmation and reaches the provider as an audio material', async t => {
+const CAPTIONS = { engine: 'rapidocr', kind: 'burned', width: 512, height: 768, cues: [
+  { start: 0.3, end: 1.5, text: '生腌真好吃', box: [100, 550, 412, 600] },
+  { start: 2, end: 3.5, text: '只要9.9元', box: [100, 550, 412, 600] },
+] };
+
+test('original captions supply the script and final subtitles even without a reference voice', async t => {
+  let extracts = 0, cleaned = 0, rendered;
+  const app = await fixture(t, { speech: fakeSpeech({ detect: async () => [{ start: 0.16, end: 1.4 }, { start: 2.1, end: 3.4 }],
+    analyze: async () => { assert.fail('Caption text must not come from ASR'); } }), captions: {
+    extract: async () => { extracts++; return structuredClone(CAPTIONS); },
+    clean: async (_input, output) => { cleaned++; await writeFile(output, Buffer.from('clean-video')); },
+    render: async (_input, output, captions) => { rendered = captions; await writeFile(output, VIDEO); },
+  } });
+  const id = await app.init(); await app.upload(id);
+  const analyzed = (await (await app.call(`/tasks/${id}/analyze`, { body: {} })).json()).task;
+  assert.equal(analyzed.speech.source, 'subtitles'); assert.equal(analyzed.speech.start, 0.16);
+  assert.equal(analyzed.speech.text, '生腌真好吃只要9.9元'); assert.deepEqual(analyzed.captions, CAPTIONS);
+  const edited = (await (await app.call(`/tasks/${id}/speech`, { body: { segments: [{ text: '生腌特别好吃' }, { text: '只要9.9元' }] } })).json()).task;
+  assert.equal(edited.speech.text, '生腌特别好吃只要9.9元');
+  assert.deepEqual(edited.speech.segments.map(segment => [segment.start, segment.end]), [[0.16, 1.4], [2.1, 3.4]]);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.match(app.state.body.prompt, /台词来自原视频字幕/); assert.match(app.state.body.prompt, /生腌特别好吃/);
+  assert.equal('referAudioUrl' in app.state.body.payload, false);
+  const signed = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  assert.deepEqual(Buffer.from(await (await fetch(app.base + signed.pathname + signed.search)).arrayBuffer()), VIDEO);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
+  app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.captionCheck.rendered, true); assert.equal(completed.captionCheck.cueCount, 2);
+  assert.equal(rendered.cues[0].text, '生腌特别好吃'); assert.equal(rendered.cues[0].start, .3);
+  assert.equal(extracts, 1); assert.equal(cleaned, 0); assert.equal(app.state.generations, 1);
+  assert.equal(completed.billing.status, 'settled');
+});
+
+test('captions with no source audio still provide narration and changing the source invalidates them', async t => {
+  const app = await fixture(t, { probe: async () => ({ ...META, audio: false }),
+    captions: { extract: async () => structuredClone(CAPTIONS) },
+    speech: fakeSpeech({ analyze: async () => assert.fail('No ASR needed'), detect: async () => assert.fail('No audio') }) });
+  const id = await app.init(); await app.upload(id);
+  const analyzed = (await (await app.call(`/tasks/${id}/analyze`, { body: {} })).json()).task;
+  assert.equal(analyzed.speech.text, '生腌真好吃只要9.9元'); assert.equal(analyzed.speech.start, .3);
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  const replaced = await app.current(id);
+  assert.equal(replaced.captions, undefined); assert.equal(replaced.speech, undefined); assert.equal(replaced.captionsChecked, undefined);
+});
+
+test('preserved model subtitles retain their delivery metadata and playable media', async t => {
+  const check = { rendered: false, preserved: true, source: 'model', cueCount: 2 };
+  const app = await fixture(t, { speech: fakeSpeech(), captions: {
+    extract: async () => structuredClone(CAPTIONS),
+    render: async (input, output) => { await writeFile(output, await readFile(input)); return check; },
+  } });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.deepEqual(completed.captionCheck, check);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+  assert.equal(completed.speech.text, '生腌真好吃只要9.9元');
+  assert.equal(app.state.generations, 1);
+});
+
+test('caption extraction and rendering failures deliver the playable model result without extra generation', async t => {
+  for (const stage of ['extract', 'render']) await t.test(stage, async t => {
+    const app = await fixture(t, { captions: {
+      extract: async () => { if (stage === 'extract') throw new Error('OCR unavailable'); return structuredClone(CAPTIONS); },
+      render: async (_input, output) => { if (stage === 'render') throw new Error('Renderer unavailable'); await writeFile(output, VIDEO); },
+    } });
+    const id = await app.init(); await app.upload(id);
+    assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+    await app.until(id, task => task.status === 'running'); app.state.done = true;
+    const completed = await app.until(id, task => task.status === 'completed');
+    assert.equal(app.state.generations, 1); assert.equal(completed.billing.status, 'settled');
+    assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+    if (stage === 'render') assert.equal(completed.captionCheck.rendered, false);
+    assert.match(completed.captionCheck.warning, /字幕/);
+  });
+});
+
+test('uploaded voice uses caption words and preserves the original emotional audio and subtitle pixels', async t => {
+  let alignmentReference;
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ detect: async () => [{ start: .16, end: 3.5 }],
+      align: async (_input, output, original) => { alignmentReference = original; await writeFile(output, VIDEO); return {}; } }),
+    captions: { extract: async () => structuredClone(CAPTIONS), clean: async () => assert.fail('Do not inpaint the model input'),
+      render: async (_input, output) => writeFile(output, VIDEO) } });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.speech.source, 'subtitles');
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+  assert.match(app.state.body.prompt, /生腌真好吃只要9.9元/);
+  const signed = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  assert.deepEqual(Buffer.from(await (await fetch(app.base + signed.pathname + signed.search)).arrayBuffer()), VIDEO);
+  app.state.done = true; const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(alignmentReference.text, '生腌真好吃只要9.9元'); assert.equal(completed.captionCheck.rendered, true);
+});
+
+test('direct voice replacement gives the model the complete unmodified original emotional audio track', async t => {
+  const app = await fixture(t, { probe: probeVideo,
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
+  const source = join(app.root, 'emotional-source.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x480:r=25:d=4',
+    '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4', '-af', 'volume=0.3:enable=between(t\\,1\\,2)',
+    '-c:v', 'libx264', '-threads', '2', '-c:a', 'aac', source]);
+  const input = await readFile(source), id = await app.init();
+  for (const [kind, bytes] of [['video', input], ['photo', VIDEO]]) {
+    const response = await fetch(app.base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: bytes });
+    assert.equal(response.status, 200);
+  }
+  await uploadVoice(app, id); await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running');
+  const signed = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  const supplied = Buffer.from(await (await fetch(app.base + signed.pathname + signed.search)).arrayBuffer());
+  assert.deepEqual(supplied, input, 'The model must receive the original audio and picture bytes');
+  const copy = join(app.root, 'supplied.mp4'); await writeFile(copy, supplied);
+  assert.equal((await probeVideo(copy)).audio, true);
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+  assert.equal(app.state.generations, 1);
+});
+
+test('reference voice detection no longer rejects empty or short speech detection', async t => {
+  for (const intervals of [[], [{ start: 0.2, end: 0.3 }]]) await t.test(JSON.stringify(intervals), async t => {
+    const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+      speech: fakeSpeech({ detect: async () => intervals }) });
+    const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+    assert.equal((await app.call(`/tasks/${id}/analyze`, { body: {} })).status, 200);
+    assert.equal((await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } })).status, 202);
+    await app.until(id, task => task.status === 'running'); assert.equal(app.state.generations, 1);
+  });
+});
+
+test('one-click voice generation analyzes automatically and reaches the provider as an audio material', async t => {
   const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   assert.equal((await app.call(`/tasks/${id}/voice`, { owner: 'bob' })).status, 404);
-  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 409);
-  assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).held, 0);
-  const analyzed = await app.call(`/tasks/${id}/analyze`, { body: {} });
-  assert.equal(analyzed.status, 200); assert.equal((await analyzed.json()).task.speech.start, 1.25);
-  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 409);
-  assert.equal((await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } })).status, 202);
-  await app.until(id, task => task.status === 'running');
+  assert.equal((await app.current(id)).speech, undefined);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.speech.start, 1.25);
   assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
   assert.match(app.state.body.prompt, /1\.250 秒/); assert.match(app.state.body.prompt, /你好世界/);
   const signed = new URL(app.state.creates.find(item => item.kind === 'voice').url);
@@ -113,7 +245,7 @@ test('voice reference requires analysis confirmation and reaches the provider as
   assert.equal(response.headers.get('content-type'), 'audio/wav'); assert.equal(response.status, 200);
   const signedVideo = new URL(app.state.creates.find(item => item.kind === 'video').url);
   const providerVideo = await fetch(app.base + signedVideo.pathname + signedVideo.search);
-  assert.equal(await providerVideo.text(), 'silent-video');
+  assert.deepEqual(Buffer.from(await providerVideo.arrayBuffer()), VIDEO);
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
   app.state.done = true;
   const completed = await app.until(id, task => task.status === 'completed');
@@ -121,46 +253,103 @@ test('voice reference requires analysis confirmation and reaches the provider as
   assert.equal(app.state.generations, 1);
 });
 
-test('selecting H3 Max persists its queue through restart and never uses the default provider', async t => {
-  let app; const requests = [];
+test('start returns before slow caption analysis and repeated starts generate only once', async t => {
+  let release, entered;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const analyzing = new Promise(resolve => { entered = resolve; });
+  let extracts = 0;
+  t.after(release);
+  const app = await fixture(t, { captions: { extract: async () => { extracts++; entered(); await waiting; return null; } } });
+  const id = await app.init(); await app.upload(id);
+  const response = await app.call(`/tasks/${id}/start`, { body: {} });
+  assert.equal(response.status, 202); assert.equal((await response.json()).task.status, 'preparing');
+  await analyzing;
+  assert.equal((await app.current(id)).status, 'preparing'); assert.equal(app.state.generations, 0);
+  const duplicate = app.call(`/tasks/${id}/start`, { body: {} });
+  release(); assert.equal((await duplicate).status, 200);
+  await app.until(id, task => task.status === 'running');
+  assert.equal(extracts, 1); assert.equal(app.state.generations, 1);
+});
+
+test('a restart resumes automatic preparation and retains one reservation and one generation', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.close();
+  const path = join(app.root, 'video', id, 'task.json');
+  const task = JSON.parse(await readFile(path, 'utf8'));
+  task.billing = await app.wallet.reserve({ userId: 'alice', taskId: id, kind: 'video', units: task.duration });
+  task.status = 'preparing'; task.startedAt = Date.now();
+  await writeFile(path, JSON.stringify(task)); await app.open();
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.speech.start, 1.25); assert.equal(app.state.generations, 1);
+  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+  app.state.done = true; await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+});
+
+test('failed automatic voice preparation releases the hold without a model dispatch', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async () => { throw Object.assign(new Error('ASR unavailable'), { code: 'VIDEO_SPEECH_FAILED' }); } }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  assert.equal(failed.code, 'VIDEO_SPEECH_FAILED'); assert.equal(app.state.generations, 0);
+  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+});
+
+test('previously submitted H3 Max tasks can still finish without creating another generation', async t => {
+  const requests = [];
   const falProvider = createFalVideoProvider({ falKey: 'private-fal-key' }, async (url, options) => {
     requests.push({ url: String(url), ...options });
-    if (options.method === 'POST') return Response.json({ request_id: 'fal-live-test',
-      status_url: 'https://queue.fal.run/minimax/h3-max/requests/fal-live-test/status', response_url: 'https://queue.fal.run/minimax/h3-max/requests/fal-live-test' });
-    return Response.json(String(url).endsWith('/status') ? { status: app.state.done ? 'COMPLETED' : 'IN_PROGRESS' } : { video: { url: 'https://v3.fal.media/result.mp4' } });
+    assert.equal(options.method, 'GET');
+    return Response.json(String(url).endsWith('/status') ? { status: 'COMPLETED' } : { video: { url: 'https://v3.fal.media/result.mp4' } });
   });
-  app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' }, falProvider,
-    voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
-  const config = await (await app.call('/config')).json();
-  assert.deepEqual(config.models.map(model => [model.name, model.enabled]), [['Max模型', true], ['MiniMax H3 Max', true]]);
-  assert.ok(!JSON.stringify(config).includes('private-fal-key'));
-  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
-  await app.call(`/tasks/${id}/start`, { body: { model: FAL_MODEL, speechConfirmed: true } });
-  const running = await app.until(id, task => task.status === 'running');
-  assert.equal(running.model, FAL_MODEL); assert.equal(running.modelName, 'MiniMax H3 Max');
-  const body = JSON.parse(requests.find(request => request.method === 'POST').body);
-  assert.equal(body.reference_image_urls.length, 1); assert.equal(body.reference_audio_urls.length, 1);
-  const signed = new URL(body.reference_video_urls[0]);
-  assert.equal(await (await fetch(app.base + signed.pathname + signed.search)).text(), 'silent-video');
-  await app.call(`/tasks/${id}/start`, { body: { model: 'doubao-seedance-2-0-260128' } });
-  assert.equal((await app.current(id)).model, FAL_MODEL);
-  await app.close(); await app.open(); app.state.done = true;
+  const app = await fixture(t, { config: { ...CONFIG, falKey: 'private-fal-key' }, falProvider });
+  const id = await app.init(); await app.upload(id); await app.close();
+  const path = join(app.root, 'video', id, 'task.json');
+  const task = JSON.parse(await readFile(path, 'utf8'));
+  const reservation = await app.wallet.reserve({ userId: 'alice', taskId: id, kind: 'video', units: task.duration });
+  Object.assign(task, { model: FAL_MODEL, status: 'running', startedAt: Date.now(), providerId: 'fal-live-test',
+    falQueue: { status: 'https://queue.fal.run/minimax/h3-max/requests/fal-live-test/status', result: 'https://queue.fal.run/minimax/h3-max/requests/fal-live-test' },
+    billing: { status: reservation.status, reservedPoints: reservation.reservedPoints, chargedPoints: reservation.chargedPoints } });
+  await writeFile(path, JSON.stringify(task)); await app.open();
   const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
-  assert.equal(completed.model, FAL_MODEL); assert.equal(completed.resolution, '768p');
+  assert.equal(completed.model, FAL_MODEL); assert.equal(completed.modelName, '极速模型'); assert.equal(completed.resolution, '768p');
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
-  assert.equal(requests.filter(request => request.method === 'POST').length, 1);
+  assert.ok(requests.length >= 2); assert.ok(requests.every(request => request.method === 'GET'));
   assert.equal(app.state.generations, 0); assert.equal(app.state.creates.length, 0);
   assert.equal((await app.wallet.snapshot('alice')).available, 955);
 });
 
-test('unsupported and unconfigured replica models cannot start or reserve points', async t => {
-  const app = await fixture(t);
-  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: FAL_MODEL } })).status, 503);
+test('only the flagship is offered and removed models cannot start or reserve points even with a fal key', async t => {
+  const app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
+  const config = await (await app.call('/config')).json();
+  assert.deepEqual(config.models.map(model => [model.name, model.enabled]), [['旗舰模型', true]]);
+  assert.equal(config.model, 'doubao-seedance-2-0-260128');
+  assert.ok(!JSON.stringify(config).includes('private-fal-key'));
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: FAL_MODEL } })).status, 400);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: 'unknown' } })).status, 400);
   const id = await app.init(); await app.upload(id);
-  assert.equal((await app.call(`/tasks/${id}/start`, { body: { model: FAL_MODEL } })).status, 503);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: { model: FAL_MODEL } })).status, 400);
   assert.equal((await app.current(id)).status, 'draft');
   assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
+test('a fal key alone no longer enables new replica tasks', async t => {
+  const app = await fixture(t, { config: { ...CONFIG, enabled: false, falEnabled: true, falKey: 'private-fal-key' } });
+  assert.equal((await (await app.call('/config')).json()).enabled, false);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID() } })).status, 503);
+});
+
+test('an old H3 Max draft uses the flagship when started without a model choice', async t => {
+  const app = await fixture(t);
+  const id = await app.init(); await app.upload(id); await app.close();
+  const path = join(app.root, 'video', id, 'task.json');
+  const task = JSON.parse(await readFile(path, 'utf8'));
+  task.model = FAL_MODEL; await writeFile(path, JSON.stringify(task)); await app.open();
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.model, 'doubao-seedance-2-0-260128'); assert.equal(app.state.generations, 1);
 });
 
 test('a replacement video invalidates voice analysis and a broken audio processor refunds credits', async t => {
@@ -168,9 +357,9 @@ test('a replacement video invalidates voice analysis and a broken audio processo
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
   await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
   assert.equal((await app.current(id)).speech, undefined);
-  assert.equal((await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } })).status, 409);
-  await app.call(`/tasks/${id}/analyze`, { body: {} });
-  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.speech.start, 1.25); app.state.done = true;
   const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
   assert.equal(failed.code, 'VIDEO_SPEECH_FAILED'); assert.equal(failed.resultUrl, null);
   assert.equal((await app.wallet.snapshot('alice')).available, 1000); assert.equal(app.state.generations, 1);
@@ -251,9 +440,12 @@ test('minor ASR differences deliver a real result and settle once without concea
   });
 });
 
-test('voice analysis rejects silence, unaligned words, rewritten scripts and excessive speed changes', () => {
-  assert.throws(() => speechTimeline({ words: SPEECH.segments[0].words }, [], 4), /未识别/);
-  assert.throws(() => speechTimeline({ words: [{ word: '你好', start: 1, end: 0 }] }, [{ start: 1, end: 2 }], 4), /时间戳/);
+test('voice analysis tolerates missing detection and unreliable ASR times while alignment stays conservative', () => {
+  const undetected = speechTimeline({ words: SPEECH.segments[0].words }, [], 4);
+  assert.equal(undetected.text, '你好世界'); assert.equal(undetected.start, 1.25); assert.equal(undetected.end, 3.5);
+  assert.equal(undetected.timingSource, 'asr');
+  const untimed = speechTimeline({ words: [{ word: '你好', start: 1, end: 0 }] }, [{ start: 1, end: 2 }], 4);
+  assert.equal(untimed.text, '你好'); assert.match(untimed.warning, /核对/);
   const zeroCharacter = speechTimeline({ words: [{ word: '欢', start: 1, end: 1 }, { word: '迎', start: 1, end: 1.5 }] }, [{ start: 1, end: 1.5 }], 2);
   assert.equal(zeroCharacter.text, '欢迎'); assert.equal(zeroCharacter.segments[0].words[0].start, 1);
   assert.throws(() => alignmentSegments(SPEECH, { ...SPEECH, text: '台词改变' }), /台词/);
@@ -285,18 +477,30 @@ test('ASR words crossing a real pause cannot expand VAD intervals into artificia
   assert.deepEqual(result.segments.map(segment => segment.words[0]), [
     { word: '你好', start: 0, end: 1 }, { word: '世界', start: 1.5, end: 2.2 },
   ]);
-  assert.throws(() => speechTimeline({ words: SPEECH.segments[0].words }, [{ start: 0, end: 2 }, { start: 1.5, end: 3 }], 4), /检测区间无效/);
-  assert.throws(() => speechTimeline({ words: [{ word: '不匹配', start: 2.5, end: 3 }] }, [{ start: 0, end: 1 }], 4), /不一致/);
+  const overlapping = speechTimeline({ words: SPEECH.segments[0].words }, [{ start: 0, end: 2 }, { start: 1.5, end: 3 }], 4);
+  assert.equal(overlapping.text, '你好世界'); assert.equal(overlapping.timingSource, 'asr');
+  const mismatched = speechTimeline({ words: [{ word: '不匹配', start: 2.5, end: 3 }] }, [{ start: 0, end: 1 }], 4);
+  assert.equal(mismatched.text, '不匹配'); assert.match(mismatched.warning, /核对/);
 });
 
-test('an untranscribed short closing phrase cannot disappear from the speech timeline', () => {
+test('untranscribed closing speech allows editable confirmation without discarding its time range', () => {
   const intervals = [{ start: 0, end: 9.28 }, { start: 11.232, end: 12.282 }];
-  assert.throws(() => speechTimeline({ words: [{ word: '又薄又脆', start: 8, end: 9.28 }] }, intervals, 12.3), cause => {
-    assert.equal(cause.code, 'VIDEO_SPEECH_INVALID');
-    assert.match(cause.message, /台词识别不完整/);
-    assert.deepEqual(cause.unmatchedVadIntervals, [intervals[1]]);
-    return true;
-  });
+  const result = speechTimeline({ words: [{ word: '又薄又脆', start: 8, end: 9.28 }] }, intervals, 12.3);
+  assert.equal(result.text, '又薄又脆'); assert.equal(result.end, 12.282);
+  assert.equal(result.segments.length, 1); assert.match(result.warning, /核对/);
+  const confirmed = confirmSpeech(result, [{ text: '又薄又脆真的超好吃' }]);
+  assert.equal(confirmed.text, '又薄又脆真的超好吃'); assert.equal(confirmed.end, 12.282);
+});
+
+test('empty recognition and many VAD intervals do not reject the analysis result', () => {
+  const empty = speechTimeline({ text: '', words: [] }, [], 4);
+  assert.equal(empty.segments.length, 1); assert.equal(empty.start, 0); assert.equal(empty.end, 4);
+  assert.equal(empty.text, ''); assert.equal(empty.timingSource, 'manual');
+  const confirmed = confirmSpeech(empty, [{ text: '手动填写原台词' }]);
+  assert.equal(confirmed.text, '手动填写原台词');
+  const intervals = Array.from({ length: 31 }, (_, i) => ({ start: i * 0.1, end: i * 0.1 + 0.05 }));
+  const many = speechTimeline({ text: '你好' }, intervals, 4);
+  assert.equal(many.text, '你好'); assert.equal(many.segments.length, 1);
 });
 
 test('a split consonant tail stays with its transcribed word without hiding another phrase', () => {
@@ -307,7 +511,8 @@ test('a split consonant tail stays with its transcribed word without hiding anot
   assert.deepEqual(result.segments.map(({ start, end }) => ({ start, end })), [
     { start: 5.056, end: 12.96 }, { start: 14.08, end: 15.104 },
   ]);
-  assert.throws(() => speechTimeline({ words }, [intervals[0], { start: 13.1, end: 13.228 }, intervals[2]], 15.104), /台词识别不完整/);
+  const unmatched = speechTimeline({ words }, [intervals[0], { start: 13.1, end: 13.228 }, intervals[2]], 15.104);
+  assert.equal(unmatched.text, '又薄又脆真的超好吃'); assert.equal(unmatched.end, 15.104); assert.match(unmatched.warning, /核对/);
 });
 
 test('confirmed speech changes text while retaining measured boundaries and original word timestamps', () => {
@@ -490,6 +695,165 @@ test('two materials, signed source access, playable range response and exactly-o
   assert.equal((await app.call(`/tasks/${id}/result`, { owner: 'bob' })).status, 404);
   for (let i = 0; i < 3; i++) assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
   assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+});
+
+test('the same account can keep more than five unsubmitted replica drafts', async t => {
+  const app = await fixture(t);
+  const ids = [];
+  for (let i = 0; i < 8; i++) ids.push(await app.init());
+  const tasks = (await (await app.call('/tasks')).json()).tasks;
+  assert.equal(tasks.length, ids.length);
+  assert.ok(tasks.every(task => task.status === 'draft'));
+  assert.equal(app.state.generations, 0);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
+test('the same account can generate separate replicas concurrently without duplicate submissions', async t => {
+  const app = await fixture(t);
+  const ids = [await app.init(), await app.init()];
+  for (const id of ids) await app.upload(id);
+  const responses = await Promise.all(ids.map(id => app.call(`/tasks/${id}/start`, { body: {} })));
+  assert.deepEqual(responses.map(response => response.status), [202, 202]);
+  for (const id of ids) await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.generations, 2);
+  assert.equal((await app.wallet.snapshot('alice')).held, 90);
+  for (const id of ids) assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
+  app.state.done = true;
+  for (const id of ids) await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 2);
+  assert.equal((await app.wallet.snapshot('alice')).available, 910);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
+test('an existing replica can be rechecked while another task runs for the same account', async t => {
+  let valid = false;
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ align: async (_source, output) => {
+      if (!valid) throw new Error('FFmpeg failed');
+      await writeFile(output, VIDEO); return { transcriptMatched: true };
+    } }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+  app.state.done = false; valid = true;
+  const other = await app.init(); await app.upload(other);
+  await app.call(`/tasks/${other}/start`, { body: {} });
+  await app.until(other, task => task.status === 'running');
+  assert.equal((await app.call(`/tasks/${id}/recheck`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'completed');
+  assert.equal((await app.current(other)).status, 'running');
+  assert.equal(app.state.generations, 2);
+  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  assert.equal((await app.wallet.snapshot('alice')).available, 910);
+});
+
+test('material queries recover on the fifth retry without recreating assets or replaying generation', async t => {
+  let queries = 0;
+  const app = await fixture(t, { queryMaterial: async id => {
+    if (id === 'photo-id' && ++queries <= 5) throw new VideoError('Temporary provider failure', 502,
+      queries % 2 ? 'VIDEO_PROVIDER_REJECTED' : 'VIDEO_PROVIDER_UNAVAILABLE');
+    return 2;
+  } });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const running = await app.until(id, task => ['running', 'failed'].includes(task.status));
+  assert.equal(running.status, 'running', running.error); assert.equal(queries, 6);
+  assert.equal(running.error, ''); assert.equal(running.code, undefined);
+  assert.deepEqual(app.state.creates.map(material => material.kind), ['photo', 'video']);
+  assert.equal(app.state.generations, 1);
+  app.state.done = true; await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+});
+
+test('material queries stop after five retries and release the hold without starting generation', async t => {
+  let queries = 0;
+  const app = await fixture(t, { queryMaterial: async () => {
+    queries++; throw new VideoError('Temporary provider refusal', 502, 'VIDEO_PROVIDER_REJECTED');
+  } });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
+  assert.equal(queries, 6); assert.equal(failed.code, 'VIDEO_MATERIAL_QUERY_FAILED');
+  assert.match(failed.error, /重试 5 次/);
+  assert.equal(app.state.creates.length, 1); assert.equal(app.state.generations, 0);
+  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  await delay(60); assert.equal(queries, 6);
+});
+
+test('material query retry counts survive a restart', async t => {
+  let queries = 0;
+  const app = await fixture(t, { pollIntervalMs: 1000, queryMaterial: async () => {
+    queries++; throw new VideoError('Temporary provider refusal', 502, 'VIDEO_PROVIDER_REJECTED');
+  } });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const pending = await app.until(id, task => task.code === 'VIDEO_MATERIAL_QUERY_RETRYING' || task.status === 'failed');
+  assert.equal(pending.status, 'reviewing'); assert.equal(queries, 1);
+  assert.match(pending.error, /1\/5/);
+  await app.close(); await app.open({ pollIntervalMs: 15 });
+  await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
+  assert.equal(queries, 6); assert.equal(app.state.creates.length, 1); assert.equal(app.state.generations, 0);
+});
+
+test('an explicit rejected material review fails immediately without query retries', async t => {
+  let queries = 0;
+  const app = await fixture(t, { queryMaterial: async () => { queries++; return 3; } });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
+  assert.equal(queries, 1); assert.equal(failed.code, 'VIDEO_REVIEW_REJECTED');
+  assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+});
+
+test('material review keeps waiting beyond three minutes and the active asset retention window', async t => {
+  let time = Date.now(); const app = await fixture(t, { now: () => time });
+  app.state.review = 1;
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  for (let i = 0; i < 100 && app.state.creates.length < 2; i++) await delay(10);
+  assert.equal(app.state.creates.length, 2);
+  for (const advance of [181_000, 4 * 86400_000]) {
+    time += advance; await delay(60);
+    assert.equal((await app.current(id)).status, 'reviewing');
+    assert.equal((await app.wallet.snapshot('alice')).held, 45);
+    assert.equal((await app.call(`/tasks/${id}/video`)).status, 200);
+    for (const material of app.state.creates) {
+      const source = new URL(material.url);
+      assert.equal((await fetch(app.base + source.pathname + source.search)).status, 200);
+    }
+  }
+  app.state.review = 2; app.state.done = true;
+  await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 1);
+});
+
+test('running replicas survive a day-long wait and restart after the active asset retention window', async t => {
+  let time = Date.now(); const app = await fixture(t, { now: () => time });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running');
+  time += 25 * 3600_000; await delay(60);
+  assert.equal((await app.current(id)).status, 'running');
+  time += 3 * 86400_000;
+  await app.close(); await app.open(); await delay(60);
+  assert.equal((await app.current(id)).status, 'running');
+  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  assert.equal((await app.call(`/tasks/${id}/video`)).status, 200);
+  const source = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  assert.equal((await fetch(app.base + source.pathname + source.search)).status, 200);
+  assert.equal((await fetch(app.base + source.pathname)).status, 403);
+  app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.expiresAt, time + 3 * 86400_000);
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
+  assert.equal((await fetch(app.base + source.pathname + source.search)).status, 403);
+  assert.equal(app.state.generations, 1);
+  assert.equal((await app.wallet.snapshot('alice')).available, 955);
 });
 
 test('provider completion accepts message URLs without a video extension', async () => {

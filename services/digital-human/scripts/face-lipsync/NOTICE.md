@@ -1,0 +1,33 @@
+SyncNet v2 model and architecture: Joon Son Chung and Andrew Zisserman,
+“Out of time: automated lip sync in the wild”, ACCV workshop, 2016.
+https://www.robots.ox.ac.uk/~vgg/software/lipsync/
+https://github.com/joonson/syncnet_python
+The Oxford download page links Creative Commons Attribution 4.0:
+https://creativecommons.org/licenses/by/4.0/
+This integration uses a rewritten inference-only architecture, CPU execution,
+YuNet face detection, streaming frames and per-section alignment checks.
+
+YuNet face_detection_yunet_2023mar.onnx:
+https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
+
+MIT License
+
+Copyright (c) 2020 Shiqi Yu <shiqi.yu@gmail.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

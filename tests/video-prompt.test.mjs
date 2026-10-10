@@ -50,11 +50,25 @@ test('rounded-up video duration freezes the end frame without removing real pack
   assert.match(prompt, /视频1实际时长为12\.300秒/);
   assert.match(prompt, /输出超过原视频时长的部分保持末帧静止、闭嘴和无声/);
   assert.match(prompt, /不增加动作、不重复片段、不延伸表演/);
-  assert.match(prompt, /去除画面叠加的字幕/);
+  assert.match(prompt, /保留视频1已有字幕/);
+  assert.doesNotMatch(prompt, /去除画面叠加的字幕/);
   assert.match(prompt, /保留真实商品包装与场景标识/);
   assert.doesNotMatch(prompt, /原视频人声从第|唯一台词依据/);
   assert.equal(payload.params.duration, 15);
   assert.equal('referAudioUrl' in payload, false);
+});
+
+test('direct voice replacement follows original speech emotion rather than the timbre sample performance', () => {
+  const request = generationBody(task({
+    voice: { duration: 11.35 },
+    speech: { start: .16, segments: [{ start: .16, end: 9.28, text: '真的超好吃。' }] },
+  }));
+  assert.deepEqual(request.payload.referAudioUrl, ['asset://voice-1']);
+  assert.match(request.prompt, /视频1原声提供完整的说话情绪/);
+  assert.match(request.prompt, /重音、语调、停顿、气口和情绪起伏/);
+  assert.match(request.prompt, /不沿用音频1的平淡语气/);
+  assert.match(request.prompt, /音频1仅提供音色/);
+  assert.match(request.prompt, /不保留或混入原视频的人声/);
 });
 
 test('person replacement explicitly edits the numbered video instead of requesting reference generation', () => {

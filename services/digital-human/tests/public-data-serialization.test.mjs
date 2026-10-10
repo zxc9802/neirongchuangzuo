@@ -419,3 +419,16 @@ test("public engine codes round-trip to exactly one private provider each", () =
   assert.equal(resolveLipsyncProvider(undefined, "pixverse"), "pixverse");
   assert.equal(isLipsyncProvider(null), false);
 });
+
+
+test("free narration fallback is downloadable only after completion and refund", () => {
+  for (const status of ["reserved", "provider_committed", "settle_pending", "released"]) {
+    const task = makeTask({status: "completed", billing: {...makeTask().billing, status},
+      results: {...makeTask().results, deliveryMode: "narration_fallback"}});
+    const visible = toPublicTask(task);
+    assert.equal(Boolean(visible.results.finalVideoUrl), status === "released");
+    assert.equal(visible.results.deliveryMode, "narration_fallback");
+    assert.equal(toPublicTask({...task, status: "failed"}).results.finalVideoUrl, undefined);
+    assert.equal(toPublicTask({...task, completedAt: Date.now() - 4 * 86400000}).results.finalVideoUrl, undefined);
+  }
+});

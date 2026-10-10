@@ -4,14 +4,16 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createRequestLedger } from '../ai/request-ledger.mjs';
 import { calculateCredits } from '../credits/store.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, DURATIONS, PROMPT } from './provider.mjs';
-import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, muteVideo, downloadVideo, serveMedia } from './media.mjs';
+import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
+import { createCaptionService, captionSpeech } from './captions.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
 const DAY = 86400_000;
-const ACTIVE = new Set(['reserving', 'reviewing', 'submitting', 'running', 'downloading', 'verifying']);
+const MATERIAL_QUERY_RETRIES = 5;
+const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'verifying']);
 const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const error = (message, status = 400, code) => new VideoError(message, status, code);
 const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' }); res.end(JSON.stringify(value)); };
@@ -34,15 +36,14 @@ async function readJSON(req) {
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), falProvider = createFalVideoProvider(config), probe = probeVideo,
-  photo = normalizePhoto, mute = muteVideo, voice = normalizeVoice, speech = createSpeechService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
-  const models = [{ id: MODEL, name: 'Max模型', resolution: '720p', enabled: Boolean(config.enabled) },
-    { id: FAL_MODEL, name: 'MiniMax H3 Max', resolution: '768p', enabled: Boolean(config.falEnabled) }];
+  const models = [{ id: MODEL, name: '旗舰模型', resolution: '720p', enabled: Boolean(config.enabled) }];
   const enabled = models.some(model => model.enabled);
   function selectedModel(id = MODEL) {
     const model = models.find(model => model.id === id);
-    if (!model) throw error('请选择支持的复刻模型。', 400, 'VIDEO_MODEL_INVALID');
-    if (!model.enabled) throw error(`${model.name}尚未配置，请选择其他模型。`, 503, 'VIDEO_NOT_CONFIGURED');
+    if (!model) throw error('当前仅支持旗舰模型，请刷新页面后重新提交。', 400, 'VIDEO_MODEL_INVALID');
+    if (!model.enabled) throw error(`${model.name}尚未配置，请联系管理员。`, 503, 'VIDEO_NOT_CONFIGURED');
     return model.id;
   }
   // Share the existing durable single-writer lock implementation, in a separate directory.
@@ -51,6 +52,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   const folder = task => join(storageDir, task.id);
   const file = (task, kind) => join(folder(task), kind === 'photo' ? 'photo.jpg' : kind === 'video' ? 'source.mp4' : kind === 'voice' ? 'reference.wav' : 'result.mp4');
   const mime = kind => kind === 'photo' ? 'image/jpeg' : kind === 'voice' ? 'audio/wav' : 'video/mp4';
+  const isExpired = task => !ACTIVE.has(task.status) && task.expiresAt <= now();
   function serialize(key, action) {
     const pending = (locks.get(key) || Promise.resolve()).catch(() => {}).then(action);
     locks.set(key, pending);
@@ -67,12 +69,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   function view(task) {
     const settled = !credits || task.billing?.status === 'settled';
-    const expired = task.expiresAt <= now();
+    const expired = isExpired(task);
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
-      ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
-      model: task.model || MODEL, modelName: models.find(model => model.id === (task.model || MODEL))?.name,
+      ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
+      captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
+      model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : '旗舰模型',
       resolution: task.model === FAL_MODEL ? '768p' : '720p',
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
       sourcePhotoUrl: !expired && task.photo ? `${PREFIX}/tasks/${task.id}/photo` : null,
@@ -108,6 +111,38 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const expires = task.startedAt + DAY;
     return `${config.publicOrigin}${PREFIX}/source/${task.id}/${kind}?expires=${expires}&signature=${signature(task.id, kind, expires)}`;
   }
+  async function analyzeSource(task) {
+    if (!task.captionsChecked) {
+      try { task.captions = await captions.extract(file(task, 'video')); }
+      catch { task.captionCheck = { warning: '原视频字幕未能提取，将继续使用原视频人声。' }; }
+      task.captionsChecked = true;
+    }
+    if ((!task.speech || task.speech.source !== 'subtitles') && task.captions?.cues?.length) {
+      const intervals = task.video.audio ? await speech.detect(file(task, 'video')).catch(() => []) : [];
+      task.speech = captionSpeech(task.captions, intervals);
+      task.originalSpeech = structuredClone(task.speech);
+    } else if (!task.speech && task.voice) {
+      if (!task.video.audio) throw error('参考视频没有音轨，无法保留原台词。', 422, 'VIDEO_SPEECH_INVALID');
+      task.speech = await speech.analyze(file(task, 'video'), task.video.duration, { diagnosticsPath: join(folder(task), 'verification-source.json') });
+      task.originalSpeech = structuredClone(task.speech);
+    }
+    await save(task);
+  }
+  async function renderCaptions(task, input) {
+    if (!task.captions?.cues?.length) return;
+    const output = join(folder(task), 'result-caption.tmp');
+    try {
+      const captionCheck = await captions.render(input, output, task.captions);
+      const metadata = await probe(output);
+      if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw new Error('Invalid caption render');
+      await rename(output, input);
+      task.captionCheck = captionCheck || { rendered: true, source: 'subtitles', cueCount: task.captions.cues.length };
+    } catch {
+      // Caption processing must never discard a playable model result.
+      await rm(output, { force: true });
+      task.captionCheck = { rendered: false, warning: '原字幕合成未完成，已保留可播放成片，请预览核对字幕。' };
+    }
+  }
   async function acceptResult(task, result) {
     task.lastCheckedAt = now();
     if (result.failed) { await fail(task, '视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。', 'VIDEO_GENERATION_FAILED'); return; }
@@ -125,27 +160,42 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   async function processTask(task) {
     if (closing || fatal) return;
+    // Retain the provider only to finish tasks submitted before H3 Max was removed.
     const taskProvider = task.model === FAL_MODEL ? falProvider : provider;
-    if (task.expiresAt <= now()) {
+    if (isExpired(task)) {
       if (task.status !== 'expired') {
         task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; await save(task);
       }
       await reconcile(task);
       if (!task.cleaned) {
-        for (const name of ['photo.jpg', 'source.mp4', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
+        for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         task.cleaned = true; await save(task);
       }
       return;
     }
     if (['completed', 'failed', 'expired'].includes(task.status)) { await reconcile(task); return; }
     if (!ACTIVE.has(task.status)) return;
-    if (now() - (task.recheckStartedAt || task.startedAt) > DAY) { await fail(task, '模型任务超时，预留积分将退回。未自动重新生成。', 'VIDEO_TIMEOUT'); return; }
+    if (task.status === 'preparing') {
+      await analyzeSource(task);
+      task.status = 'reviewing'; await save(task);
+    }
     if (task.status === 'reviewing') {
-      if (now() - task.startedAt > 180_000) { await fail(task, '素材审核超时，请检查人物照片和参考视频后重试。', 'VIDEO_REVIEW_TIMEOUT'); return; }
       for (const kind of ['photo', 'video', ...(task.voice ? ['voice'] : [])]) {
         if (!task.materials[kind]) { task.materials[kind] = await taskProvider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
         const material = task.materials[kind];
-        if (material.status !== 2) material.status = await taskProvider.queryMaterial(material.id);
+        if (material.status !== 2) {
+          try { material.status = await taskProvider.queryMaterial(material.id); }
+          catch {
+            material.queryFailures = (material.queryFailures || 0) + 1;
+            if (material.queryFailures > MATERIAL_QUERY_RETRIES) {
+              await fail(task, `素材审核状态查询已重试 ${MATERIAL_QUERY_RETRIES} 次仍未成功，请稍后新建复刻。`, 'VIDEO_MATERIAL_QUERY_FAILED'); return;
+            }
+            task.error = `素材审核状态查询暂时失败，正在重试（${material.queryFailures}/${MATERIAL_QUERY_RETRIES}）。`;
+            task.code = 'VIDEO_MATERIAL_QUERY_RETRYING'; await save(task); return;
+          }
+          delete material.queryFailures;
+          if (task.code === 'VIDEO_MATERIAL_QUERY_RETRYING') { task.error = ''; delete task.code; }
+        }
         if (material.status === 3) { await fail(task, `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : '参考视频'}未通过素材审核，请更换清晰、符合要求的素材。`, 'VIDEO_REVIEW_REJECTED'); return; }
         await save(task);
       }
@@ -173,14 +223,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       } finally { await progressWrites; }
       const metadata = await probe(temporary);
       if (metadata.duration > task.duration + 1 || metadata.duration < 1 || !metadata.audio) throw error('成片缺少声音或时长不符合要求，预留积分将退回。', 502, 'VIDEO_RESULT_INVALID');
-      await rename(temporary, task.voice ? join(folder(task), 'generated.mp4') : file(task, 'result'));
+      await rename(temporary, task.voice || task.captions ? join(folder(task), 'generated.mp4') : file(task, 'result'));
       task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
-      if (task.voice) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
+      if (task.voice || task.captions) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
       else { await complete(task); }
     }
     if (task.status === 'verifying') {
       const generated = join(folder(task), 'generated.mp4'), aligned = join(folder(task), 'result.tmp');
-      try {
+      if (!task.voice) await copyFile(generated, aligned);
+      else try {
         task.verificationStage = 'generated'; await save(task);
         const timeline = await speech.analyze(generated, task.actualDuration, { diagnosticsPath: join(folder(task), 'verification-generated.json') });
         task.verificationStage = 'aligning'; await save(task);
@@ -205,6 +256,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       const metadata = await probe(aligned);
       if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw error('声音校正后的成片无效。', 502, 'VIDEO_RESULT_INVALID');
+      await renderCaptions(task, aligned);
       await rename(aligned, file(task, 'result')); await complete(task);
     }
   }
@@ -222,6 +274,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       try { await processTask(task); }
       catch (cause) {
         if (fatal) return;
+        if (task.status === 'preparing') { await fail(task, cause instanceof VideoError ? cause.message : '素材自动处理未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
         if (task.status === 'verifying') { await fail(task, cause instanceof VideoError ? cause.message : '成片声音检查未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
         if (task.status === 'reviewing' && cause instanceof VideoError && ['VIDEO_PROVIDER_IP_DENIED', 'VIDEO_PROVIDER_REJECTED', 'VIDEO_MATERIAL_INVALID'].includes(cause.code)) {
           await fail(task, cause.message, cause.code); return;
@@ -262,9 +315,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         const task = jobs.get(source[1]), expires = Number(url.searchParams.get('expires')), supplied = url.searchParams.get('signature') || '';
         const valid = config.signingSecret && /^\d{13}$/.test(url.searchParams.get('expires') || '') && /^[a-f0-9]{64}$/.test(supplied)
           && timingSafeEqual(Buffer.from(supplied), Buffer.from(signature(source[1], source[2], expires)));
-        if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || expires <= now() || expires !== task.startedAt + DAY || task.status === 'expired') throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
+        // Keep the original signed URL usable while its generation is still active.
+        if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || (expires <= now() && !ACTIVE.has(task.status)) || expires !== task.startedAt + DAY || task.status === 'expired') throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
         if (!task[source[2]]) throw error('素材尚未上传。', 404, 'VIDEO_NOT_FOUND');
-        const input = source[2] === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4') : file(task, source[2]);
+        const input = source[2] === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4')
+          : source[2] === 'video' && task.videoCaptionsRemoved ? join(folder(task), 'source-clean.mp4') : file(task, source[2]);
         await serveMedia(req, res, input, mime(source[2])); return;
       }
       const userId = req.authenticatedUserId;
@@ -286,8 +341,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         await serialize('create', async () => {
           const existing = jobs.get(body.requestId);
           if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
-          const drafts = [...jobs.values()].filter(task => task.userId === userId && task.status === 'draft' && task.expiresAt > now());
-          if (drafts.length >= 5) throw error('尚有未提交的素材，请先完成现有任务。', 429, 'VIDEO_DRAFT_LIMIT');
           const task = { id: body.requestId, userId, model: selectedModel(body.model), status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
@@ -296,7 +349,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const task = match && jobs.get(match[1]);
       if (!task || task.userId !== userId) throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
       if (!match[2] && req.method === 'GET') { json(res, 200, { task: view(task) }); return; }
-      if (task.expiresAt <= now()) throw error('素材或成片已过期，请重新上传。', 410, 'VIDEO_EXPIRED');
+      if (isExpired(task)) throw error('素材或成片已过期，请重新上传。', 410, 'VIDEO_EXPIRED');
       if (['video', 'photo', 'voice'].includes(match[2]) && ['GET', 'HEAD'].includes(req.method)) {
         if (!task[match[2]]) throw error('素材尚未上传。', 404, 'VIDEO_NOT_FOUND');
         await serveMedia(req, res, file(task, match[2]), mime(match[2])); return;
@@ -318,9 +371,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             await writeFile(temporary, bytes, { mode: 0o600 });
             const normalized = join(folder(task), 'voice.tmp.wav');
             const metadata = await voice(temporary, normalized);
-            const intervals = await speech.detect(normalized);
-            if (!intervals.length || intervals.reduce((sum, interval) => sum + interval.end - interval.start, 0) < 0.5) throw error('声音参考中未检测到足够的人声，请使用清晰的单人声音。', 422, 'VIDEO_VOICE_INVALID');
-            await rename(normalized, file(task, 'voice')); task.voice = { ...metadata, speechStart: intervals[0].start }; delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt;
+            const intervals = await speech.detect(normalized).catch(cause => {
+              if (cause.code !== 'VIDEO_SPEECH_INVALID') throw cause;
+              return [];
+            });
+            await rename(normalized, file(task, 'voice')); task.voice = { ...metadata, speechStart: intervals[0]?.start ?? null }; delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt;
             await save(task); json(res, 200, { task: view(task) }); return;
           } else {
             if (bytes.length < 12 || bytes.toString('ascii', 4, 8) !== 'ftyp') throw error('请上传 MP4 或 MOV 视频。');
@@ -329,6 +384,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             if (metadata.duration < 2 || metadata.duration > 15 || metadata.width < 300 || metadata.height < 300) throw error('参考视频需为 2–15 秒，宽高至少 300 像素。');
             task.video = metadata;
             delete task.videoAudioRemoved;
+            delete task.videoCaptionsRemoved; delete task.captions; delete task.captionsChecked; delete task.captionCheck;
             delete task.speech;
             delete task.originalSpeech; delete task.speechConfirmedAt;
             task.duration = DURATIONS.find(value => value >= Math.ceil(metadata.duration - 0.05)) || 15;
@@ -341,17 +397,21 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         }
         if (match[2] === 'analyze' && req.method === 'POST') {
           await readJSON(req);
-          if (task.status !== 'draft' || !task.video || !task.voice) throw error('请先上传参考视频和声音参考，再分析人声。', 409);
-          if (!task.video.audio) throw error('参考视频没有音轨，无法保留原台词。', 422, 'VIDEO_SPEECH_INVALID');
-          if (!task.speech) { task.speech = await speech.analyze(file(task, 'video'), task.video.duration, { diagnosticsPath: join(folder(task), 'verification-source.json') }); task.originalSpeech = structuredClone(task.speech); await save(task); }
+          if (task.status !== 'draft' || !task.video) throw error('请先上传参考视频，再分析台词。', 409);
+          await analyzeSource(task);
           json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'speech' && req.method === 'POST') {
           const body = await readJSON(req);
           if (task.status !== 'draft' && !view(task).canRecheck) throw error('当前任务不能修改台词。', 409);
-          if (!task.voice || !task.speech) throw error('请先分析原视频台词。', 409);
+          if (!task.speech) throw error('请先分析原视频台词。', 409);
           const original = task.originalSpeech || structuredClone(task.speech);
-          const confirmed = confirmSpeech(original, body.segments);
+          let confirmed;
+          if (task.captions) {
+            const edited = confirmSpeech({ segments: task.captions.cues }, body.segments);
+            task.captions.cues = edited.segments;
+            confirmed = captionSpeech(task.captions, original.segments);
+          } else confirmed = confirmSpeech(original, body.segments);
           task.originalSpeech = original; task.speech = confirmed; task.speechConfirmedAt = now();
           await save(task); json(res, 200, { task: view(task) }); return;
         }
@@ -360,7 +420,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (task.status !== 'failed') { json(res, 200, { task: view(task) }); return; }
           await reconcile(task);
           if (!view(task).canRecheck || !(await stat(join(folder(task), 'generated.mp4')).catch(() => null))?.isFile()) throw error('没有可复核的成片，请重新上传素材。', 409);
-          if ([...jobs.values()].some(item => item.userId === userId && ACTIVE.has(item.status))) throw error('当前有视频正在处理。', 409, 'VIDEO_BUSY');
           // A refunded reservation is immutable. A separate recovery reservation
           // keeps the original refund auditable and can settle this delivery once.
           task.recheckAttempt = (task.recheckAttempt || 0) + 1;
@@ -384,20 +443,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const body = await readJSON(req);
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
-          if (task.voice && (!task.speech || body.speechConfirmed !== true)) throw error('请先分析并确认原视频的台词与开口时间。', 409, 'VIDEO_SPEECH_CONFIRM_REQUIRED');
-          task.model = selectedModel(body.model ?? task.model);
-          if ([...jobs.values()].some(item => item.userId === userId && ACTIVE.has(item.status))) throw error('当前有视频正在生成，请完成后再提交。', 409, 'VIDEO_BUSY');
-          if (task.voice && !task.videoAudioRemoved) {
-            await mute(file(task, 'video'), join(folder(task), 'source-silent.mp4'));
-            task.videoAudioRemoved = true;
-          }
+          task.model = selectedModel(body.model);
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           try {
             if (credits) {
               const record = await credits.reserve({ userId, taskId: task.id, kind: 'video', units: task.duration });
               task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true };
             }
-            task.status = 'reviewing'; await save(task);
+            task.status = 'preparing'; await save(task);
           } catch (cause) {
             if (fatal) throw cause;
             await fail(task, cause.code === 'INSUFFICIENT_POINTS' ? '积分不足，未开始生成。' : '积分预留失败，未开始生成。', cause.code || 'CREDITS_UNAVAILABLE');

@@ -19,7 +19,7 @@
     "test:restaurant": "node --test tests/restaurant-*.test.mjs",
     "check:mix": "node --check design/browser-materials.js && node --check design/material-repair.js && node --check design/mix-materials.js && node --check services/mix/server.mjs && node --check services/mix/credits-bridge.mjs",
     "check:credits": "node --check services/credits/store.mjs && node --check design/workspace-credits.js && node --check design/workspace-account.js && node --check scripts/account-credits.mjs",
-    "check:video": "node --check services/video/server.mjs && node --check services/video/provider.mjs && node --check services/video/media.mjs && node --check services/video/speech.mjs && node --check design/video-replica.js",
+    "check:video": "node --check services/video/server.mjs && node --check services/video/provider.mjs && node --check services/video/media.mjs && node --check services/video/speech.mjs && node --check services/video/captions.mjs && node --check design/video-replica.js",
     "test:video": "node --test tests/video-*.test.mjs",
     "setup:restaurant": "node scripts/setup-restaurant-model.mjs"
   },

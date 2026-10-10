@@ -284,3 +284,17 @@ test("localUploadPath never escapes the private runtime upload root", () => {
     assert.throws(() => upload.localUploadPath(key), /Invalid upload path/, key);
   }
 });
+
+
+test("face recovery media is trusted only in the configured task namespace", () => {
+  const config = getAppConfig();
+  const host = `${config.cosBucket}.cos.${config.cosRegion}.myqcloud.com`;
+  for (const file of ["face-input.mp4", "face-provider/rendered-source.mp4", "face-provider/lipsync-chunks/result-0.mp4"]) {
+    const key = `jobs/task-one/${file}`;
+    assert.equal(CosService.getManagedObjectKey(`https://${host}/${key}`), key);
+    assert.equal(CosService.getManagedObjectKey(`https://foreign.example/${key}`), null);
+  }
+  for (const file of ["face-manifest.json", "face-sync-report.json", "face-provider/arbitrary.mp4", "face-provider/../../private.mp4"]) {
+    assert.equal(CosService.getManagedObjectKey(`https://${host}/jobs/task-one/${file}`), null);
+  }
+});
