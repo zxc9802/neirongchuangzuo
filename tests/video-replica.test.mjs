@@ -181,6 +181,17 @@ test('an untranscribed short closing phrase cannot disappear from the speech tim
   });
 });
 
+test('a split consonant tail stays with its transcribed word without hiding another phrase', () => {
+  const words = [{ word: '又薄又脆', start: 11.58, end: 12.8 }, { word: '真的超好吃', start: 13.88, end: 14.86 }];
+  const intervals = [{ start: 5.056, end: 12.544 }, { start: 12.832, end: 12.96 }, { start: 14.08, end: 15.104 }];
+  const result = speechTimeline({ words }, intervals, 15.104);
+  assert.equal(result.text, '又薄又脆真的超好吃');
+  assert.deepEqual(result.segments.map(({ start, end }) => ({ start, end })), [
+    { start: 5.056, end: 12.96 }, { start: 14.08, end: 15.104 },
+  ]);
+  assert.throws(() => speechTimeline({ words }, [intervals[0], { start: 13.1, end: 13.228 }, intervals[2]], 15.104), /台词识别不完整/);
+});
+
 test('confirmed speech changes text while retaining measured boundaries and original word timestamps', () => {
   const corrected = confirmSpeech(SPEECH, [{ text: '你好老板', start: 0, end: 99 }]);
   assert.equal(corrected.text, '你好老板');

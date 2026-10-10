@@ -130,7 +130,7 @@ test('eligible failed output rechecks the same task once without generating agai
   } });
   page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /id="replica-recheck"[^>]*>重新检查成片/);
-  assert.match(page.html(), /成片未通过语音检查，请核对台词后重新检查。/);
+  assert.match(page.html(), /成片台词与原视频不一致，未交付成片；请核对台词后重新检查。/);
   assert.doesNotMatch(page.html(), /请核对素材后重新生成/);
   assert.match(page.html(), /textarea[^>]*aria-label="第 1 段台词"/);
   page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
@@ -147,6 +147,27 @@ test('blank corrected segments block rechecking an existing output', async t => 
   page.node('#replica-recheck').onclick(); await page.settle();
   assert.equal(page.message(), '每段台词不能为空。');
   assert.deepEqual(calls, []);
+});
+
+test('recheck shows immediate progress and keeps the failure reason next to the action after polling', async t => {
+  let task = { ...speechDraft(), status: 'failed', canRecheck: true, code: 'VIDEO_SPEECH_INVALID', error: '台词识别不完整，请核对素材后重新分析。' };
+  let release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: async (path, options) => {
+    if (options?.method !== 'POST') return;
+    if (path.endsWith('/recheck')) { await waiting; task = { ...task, status: 'verifying', canRecheck: false, startedAt: Date.now(), error: '' }; }
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  page.node('#replica-recheck').onclick(); await page.settle();
+  assert.match(page.html(), /id="replica-recheck"[^>]*disabled[^>]*>正在提交复核/);
+  release(); await page.settle();
+  assert.match(page.message(), /正在核对已有成片/);
+  task = { ...task, status: 'failed', canRecheck: true, error: '台词识别不完整，请核对素材后重新分析。' };
+  await page.poll();
+  assert.equal(page.message(), task.error);
+  await page.poll();
+  assert.equal(page.message(), task.error);
 });
 
 test('tasks without recoverable output do not request recheck', async t => {

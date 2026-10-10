@@ -85,11 +85,23 @@ export function speechTimeline(data, intervals, duration) {
     nearest.words.push({ start: clamp(word.start), end: clamp(word.end), word: word.word });
     nearest.text += word.word;
   }
-  const unmatchedVadIntervals = segments.filter(segment => !segment.words.length).map(({ start, end }) => ({ start, end }));
+  const spoken = [];
+  for (const segment of segments) {
+    const previous = spoken.at(-1);
+    // A short detached consonant can fall just after the ASR end of the same
+    // word. Retain that VAD tail with its word; never discard untranscribed speech.
+    const tail = !segment.words.length && previous?.words.length && segment.end - segment.start <= 0.2
+      && segment.start - previous.end <= 0.4 && words.find(word => word.word === previous.words.at(-1).word
+        && word.start < previous.end && Math.abs(word.end - segment.start) <= 0.1);
+    if (tail) {
+      previous.end = segment.end;
+      previous.words.at(-1).end = Math.min(tail.end, segment.end);
+    } else spoken.push(segment);
+  }
+  const unmatchedVadIntervals = spoken.filter(segment => !segment.words.length).map(({ start, end }) => ({ start, end }));
   if (unmatchedVadIntervals.length) {
     throw Object.assign(invalid('台词识别不完整，请核对素材后重新分析。'), { unmatchedVadIntervals });
   }
-  const spoken = segments;
   if (!spoken.length || spoken.length > 30) throw invalid('人声分段不符合单人口播要求。');
   return { engine: 'silero-vad+whisper-1', timingSource: 'vad', start: spoken[0].start, end: spoken.at(-1).end,
     text: words.map(word => word.word).join(''), segments: spoken };

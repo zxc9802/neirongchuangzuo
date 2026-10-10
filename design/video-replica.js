@@ -31,6 +31,16 @@ function remember(task) {
   observeCreditTask(task);
 }
 function refresh() { if (context && document.body.dataset.page === 'video') context.refresh(); }
+function failureMessage(task) {
+  return task?.canRecheck ? task.error?.replace('请核对素材后重新生成。', '请核对台词后重新检查。') : task?.error;
+}
+function actionMessage() {
+  if (state.error || state.pollError) return state.error || state.pollError;
+  if (state.busy) return '';
+  if (state.current?.status === 'verifying') return '正在核对已有成片的台词与开口时间，请稍候。';
+  if (state.current?.status === 'failed') return failureMessage(state.current);
+  return !state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : '';
+}
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind];
   const saved = state.current?.[kind];
@@ -51,8 +61,7 @@ function result(ctx) {
   const task = state.current;
   if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p><span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
-  const message = task.status === 'failed' && task.canRecheck === true && task.code === 'VIDEO_SPEECH_INVALID'
-    ? '成片未通过语音检查，请核对台词后重新检查。' : task.error;
+  const message = task.status === 'failed' ? failureMessage(task) : task.error;
   return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${labels[task.status] || '正在处理'}</h3><p>${ctx.esc(message || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击开始人物复刻。' : '请重新上传素材创建任务。'))}</p></div>`;
 }
 function progress(ctx) {
@@ -92,9 +101,9 @@ export function renderVideoReplica(ctx) {
   return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · Max模型</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${speechPreview(ctx)}
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
-      <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(state.error || state.pollError || (!state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : ''))}</p>
+      <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(actionMessage())}</p>
         <button type="button" id="replica-submit" class="primary" ${finished ? 'hidden' : ''} ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传、分析与提交…' : pending(task) ? labels[task.status] : state.uploaded || (task?.photo && task?.video && !Object.keys(state.files).length && (!task.voice || task.speech)) ? task?.voice ? '确认台词，开始人物复刻' : '开始人物复刻' : state.files.voice || task?.voice ? '上传素材，分析人声' : unlimited || exempt ? '上传素材，确认时长' : '上传素材，查看费用'}</button>
-        ${task?.status === 'failed' && task.canRecheck === true ? `<button type="button" id="replica-recheck" class="primary" ${state.busy ? 'disabled' : ''}>重新检查成片</button>` : ''}<button type="button" id="replica-new" class="textbutton" ${state.busy || pending(task) ? 'disabled' : ''}>新建复刻</button></div></section>
+        ${task?.status === 'failed' && task.canRecheck === true ? `<button type="button" id="replica-recheck" class="primary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在提交复核…' : '重新检查成片'}</button>` : ''}<button type="button" id="replica-new" class="textbutton" ${state.busy || pending(task) ? 'disabled' : ''}>新建复刻</button></div></section>
       <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
 async function selectFile(kind, file) {
@@ -167,11 +176,11 @@ async function poll() {
     for (const task of data.tasks) observeCreditTask(task);
     if (!document.querySelector('#replica-submit')) return;
     if (firstLoad || previous !== (state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }))) refresh();
-    else { document.querySelector('#replica-history').innerHTML = history(context); document.querySelector('#replica-error').textContent = state.error || (!config.enabled ? '人物复刻服务尚未配置，请联系管理员。' : ''); }
+    else { document.querySelector('#replica-history').innerHTML = history(context); document.querySelector('#replica-error').textContent = actionMessage(); }
     const details = document.querySelector('#replica-progress'); if (details) details.innerHTML = progress(context);
   } catch (cause) {
     state.pollError = cause.message;
-    const message = document.querySelector('#replica-error'); if (message) message.textContent = state.error || state.pollError;
+    const message = document.querySelector('#replica-error'); if (message) message.textContent = actionMessage();
     const details = document.querySelector('#replica-progress'); if (details && context) details.innerHTML = progress(context);
   } finally { polling = false; }
 }
