@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, rename, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, readdir, rm, stat, copyFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createRequestLedger } from '../ai/request-ledger.mjs';
@@ -166,23 +166,31 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     if (task.status === 'verifying') {
       const generated = join(folder(task), 'generated.mp4'), aligned = join(folder(task), 'result.tmp');
-      task.verificationStage = 'generated'; await save(task);
-      const timeline = await speech.analyze(generated, task.actualDuration, { diagnosticsPath: join(folder(task), 'verification-generated.json') });
-      task.verificationStage = 'aligning'; await save(task);
-      const check = await speech.align(generated, aligned, task.speech, timeline, task.actualDuration);
-      task.verificationStage = 'aligned'; await save(task);
-      const verified = await speech.analyze(aligned, task.actualDuration, { diagnosticsPath: join(folder(task), 'verification-aligned.json') });
-      const rawComparison = compareSpeech(task.speech.text, timeline.text), comparison = compareSpeech(task.speech.text, verified.text);
-      if (!rawComparison.accepted || !comparison.accepted
-        || verified.segments.length !== task.speech.segments.length
-        || verified.segments.some((segment, index) => Math.abs(segment.start - task.speech.segments[index].start) > 0.1 || Math.abs(segment.end - task.speech.segments[index].end) > 0.1)) {
-        throw error('校正后的声音仍未通过台词和时间检查，未交付成片，预留积分将退回。', 422, 'VIDEO_SPEECH_INVALID');
+      try {
+        task.verificationStage = 'generated'; await save(task);
+        const timeline = await speech.analyze(generated, task.actualDuration, { diagnosticsPath: join(folder(task), 'verification-generated.json') });
+        task.verificationStage = 'aligning'; await save(task);
+        const check = await speech.align(generated, aligned, task.speech, timeline, task.actualDuration);
+        task.verificationStage = 'aligned'; await save(task);
+        const verified = await speech.analyze(aligned, task.actualDuration, { diagnosticsPath: join(folder(task), 'verification-aligned.json') });
+        const rawComparison = compareSpeech(task.speech.text, timeline.text), comparison = compareSpeech(task.speech.text, verified.text);
+        if (!rawComparison.accepted || !comparison.accepted
+          || verified.segments.length !== task.speech.segments.length
+          || verified.segments.some((segment, index) => Math.abs(segment.start - task.speech.segments[index].start) > 0.1 || Math.abs(segment.end - task.speech.segments[index].end) > 0.1)) {
+          throw error('声音无法可靠校正，保留模型生成的声音。', 422, 'VIDEO_SPEECH_INVALID');
+        }
+        task.audioCheck = { ...check, transcriptMatched: rawComparison.exact && comparison.exact,
+          transcriptDifferences: Math.max(rawComparison.differences, comparison.differences),
+          afterOffsetMs: Math.round((verified.start - task.speech.start) * 1000), lipSync: 'needs_preview' };
+      } catch (cause) {
+        if (cause.code !== 'VIDEO_SPEECH_INVALID') throw cause;
+        // Transcript/timing checks decide whether correction is safe, never whether to deliver.
+        await copyFile(generated, aligned);
+        task.audioCheck = { corrected: false, transcriptMatched: null, transcriptDifferences: null, afterOffsetMs: null,
+          warning: '已保留模型生成的声音，请预览核对台词、音色与开口时间。', lipSync: 'needs_preview' };
       }
       const metadata = await probe(aligned);
       if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw error('声音校正后的成片无效。', 502, 'VIDEO_RESULT_INVALID');
-      task.audioCheck = { ...check, transcriptMatched: rawComparison.exact && comparison.exact,
-        transcriptDifferences: Math.max(rawComparison.differences, comparison.differences),
-        afterOffsetMs: Math.round((verified.start - task.speech.start) * 1000), lipSync: 'needs_preview' };
       await rename(aligned, file(task, 'result')); await complete(task);
     }
   }

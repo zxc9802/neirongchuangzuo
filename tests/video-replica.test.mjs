@@ -120,8 +120,8 @@ test('voice reference requires analysis confirmation and reaches the provider as
   assert.equal(app.state.generations, 1);
 });
 
-test('a replacement video invalidates voice analysis and failed result verification refunds credits', async t => {
-  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错误台词' } }) });
+test('a replacement video invalidates voice analysis and a broken audio processor refunds credits', async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech({ align: async () => { throw new Error('FFmpeg failed'); } }) });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
   await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
   assert.equal((await app.current(id)).speech, undefined);
@@ -129,8 +129,58 @@ test('a replacement video invalidates voice analysis and failed result verificat
   await app.call(`/tasks/${id}/analyze`, { body: {} });
   await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
   const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
-  assert.equal(failed.code, 'VIDEO_SPEECH_INVALID'); assert.equal(failed.resultUrl, null);
+  assert.equal(failed.code, 'VIDEO_SPEECH_FAILED'); assert.equal(failed.resultUrl, null);
   assert.equal((await app.wallet.snapshot('alice')).available, 1000); assert.equal(app.state.generations, 1);
+});
+
+test('transcript differences never block delivery and preserve generated audio when alignment is unsafe', async t => {
+  const timeline = text => ({ ...SPEECH, text, segments: [{ ...SPEECH.segments[0], text,
+    words: [{ word: text, start: 1.25, end: 3.5 }] }] });
+  const source = timeline('现在九块九，欢迎大家购买。真的好吃');
+  for (const [name, raw, aligned, failedStage] of [
+    ['rewritten script', timeline('完全不同的台词重复好多内容'.repeat(10)), source],
+    ['changed price', timeline('现在九十九，欢迎大家购买。真的好吃'), source],
+    ['missing phrase', timeline('现在九块九'), source],
+    ['aligned difference', source, timeline('已经变成完全不同的台词')],
+    ['unrecognized generated speech', source, source, 'generated.mp4'],
+    ['unrecognized aligned speech', source, source, 'result.tmp'],
+    ['unmatched timing', source, { ...source, segments: [{ ...source.segments[0], start: 2 }] }],
+  ]) await t.test(name, async t => {
+    const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+      speech: fakeSpeech({ analyze: async path => {
+        if (failedStage && path.endsWith(failedStage)) throw Object.assign(new Error('台词识别不完整'), { code: 'VIDEO_SPEECH_INVALID' });
+        return path.endsWith('source.mp4') ? source : path.endsWith('generated.mp4') ? raw : aligned;
+      }, align: async (_source, output, original, generated) => {
+        alignmentSegments(original, generated); await writeFile(output, Buffer.from('altered-audio')); return { transcriptMatched: true };
+      } }) });
+    const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+    await app.call(`/tasks/${id}/analyze`, { body: {} });
+    await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+    const completed = await app.until(id, task => ['completed', 'failed'].includes(task.status) && ['settled', 'released'].includes(task.billing.status));
+    assert.equal(completed.status, 'completed', completed.error);
+    assert.equal(completed.audioCheck.corrected, false);
+    assert.equal(completed.audioCheck.transcriptMatched, null);
+    assert.equal(completed.audioCheck.afterOffsetMs, null);
+    assert.match(completed.audioCheck.warning, /保留.*生成.*声音/);
+    assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+    assert.equal(completed.billing.chargedPoints, 45);
+    await app.close(); await app.open();
+    assert.equal((await app.current(id)).status, 'completed');
+    assert.equal((await app.wallet.snapshot('alice')).available, 955);
+    assert.equal(app.state.generations, 1);
+  });
+});
+
+test('advisory transcript checks still reject invalid result files', async t => {
+  let resultProbes = 0;
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    probe: async path => ({ ...META, audio: !path.endsWith('result.tmp') || ++resultProbes === 1 }),
+    speech: fakeSpeech({ align: async () => { throw Object.assign(new Error('台词差异'), { code: 'VIDEO_SPEECH_INVALID' }); } }) });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+  const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
+  assert.equal(failed.code, 'VIDEO_RESULT_INVALID'); assert.equal(failed.resultUrl, null);
+  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
 });
 
 test('minor ASR differences deliver a real result and settle once without concealing either verification stage', async t => {
@@ -253,8 +303,10 @@ test('draft correction is persisted and the supplier receives the confirmed rath
 test('a failed voice check can recheck the existing media after restart and settle exactly one delivery', async t => {
   let valid = false;
   const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
-    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') || valid ? SPEECH : { ...SPEECH, text: '错词' },
-      align: async (_source, output, original, generated) => { alignmentSegments(original, generated); await writeFile(output, VIDEO); return { transcriptMatched: true }; } }) });
+    speech: fakeSpeech({ align: async (_source, output) => {
+      if (!valid) throw new Error('FFmpeg failed');
+      await writeFile(output, VIDEO); return { transcriptMatched: true };
+    } }) });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
   await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
   const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
@@ -279,8 +331,7 @@ test('a failed voice check can recheck the existing media after restart and sett
 
 test('failed rechecks release each recovery hold without another video generation or premature asset', async t => {
   const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
-    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错词' },
-      align: async (_source, _output, original, generated) => alignmentSegments(original, generated) }) });
+    speech: fakeSpeech({ align: async () => { throw new Error('FFmpeg failed'); } }) });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
   await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
   await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
@@ -295,8 +346,7 @@ test('failed rechecks release each recovery hold without another video generatio
 
 test('a lost recovery reservation acknowledgement is refunded before a second attempt can start', async t => {
   const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
-    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错词' },
-      align: async (_source, _output, original, generated) => alignmentSegments(original, generated) }) });
+    speech: fakeSpeech({ align: async () => { throw new Error('FFmpeg failed'); } }) });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
   await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
   await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
@@ -313,8 +363,7 @@ test('a lost recovery reservation acknowledgement is refunded before a second at
 
 test('a pending refund blocks recheck and keeps the original hold addressable', async t => {
   const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
-    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错词' },
-      align: async (_source, _output, original, generated) => alignmentSegments(original, generated) }) });
+    speech: fakeSpeech({ align: async () => { throw new Error('FFmpeg failed'); } }) });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
   await app.close();
   await app.open({ credits: { ...app.wallet, release: async () => { throw new Error('Refund unavailable'); } } });
@@ -333,8 +382,7 @@ test('a pending refund blocks recheck and keeps the original hold addressable', 
 
 test('restart refunds a committed recovery hold from its persisted reserve-pending journal without replaying generation', async t => {
   const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
-    speech: fakeSpeech({ analyze: async path => path.endsWith('source.mp4') ? SPEECH : { ...SPEECH, text: '错词' },
-      align: async (_source, _output, original, generated) => alignmentSegments(original, generated) }) });
+    speech: fakeSpeech({ align: async () => { throw new Error('FFmpeg failed'); } }) });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
   await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
   await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');

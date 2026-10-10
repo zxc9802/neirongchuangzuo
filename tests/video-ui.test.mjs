@@ -80,6 +80,19 @@ test('minor transcript differences still preview and download with an honest rev
   assert.doesNotMatch(page.html(), /台词一致/);
 });
 
+test('uncorrected generated audio stays playable without claiming matching words or zero timing error', async t => {
+  const task = { id: 'advisory-task', status: 'completed', createdAt: Date.now(),
+    resultUrl: '/api/video-replica/tasks/advisory-task/result', audioCheck: { corrected: false,
+      transcriptMatched: null, transcriptDifferences: null, afterOffsetMs: null,
+      warning: '已保留模型生成的声音，请预览核对台词、音色与开口时间。' } };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll();
+  assert.match(page.html(), /已保留模型生成的声音/);
+  assert.match(page.html(), /aria-label="人物复刻成片"/);
+  assert.match(page.html(), /href="\/api\/video-replica\/tasks\/advisory-task\/result\?download=1"/);
+  assert.doesNotMatch(page.html(), /台词一致|开口偏差|NaN/);
+});
+
 function speechDraft() {
   return { id: 'editable-task', status: 'draft', createdAt: Date.now(), video: {}, photo: {}, voice: {},
     speech: { start: 0, end: 2, segments: [{ start: 0, end: 1, text: '薄饼' }, { start: 1.3, end: 2, text: '真的超好吃' }] } };
