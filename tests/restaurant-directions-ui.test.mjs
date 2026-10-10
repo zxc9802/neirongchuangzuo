@@ -75,13 +75,13 @@ test('direction cards show all twelve usable photos and the real output range', 
   const analysis = photos(12);
   const current = { ...direction(analysis.map(item => item.imageId), ['photo-1', 'photo-2']), imageRoles: [{ imageId: 'photo-1', role: 'cover', reason: '呈现真实菜品' }, { imageId: 'photo-12', role: 'context', reason: '补充门店氛围' }] };
   const app = await renderTask(t, analysis, [current]);
-  assert.match(app.cards()[0], /12 张可用素材 · 可生成 6—12 张/);
+  assert.match(app.cards()[0], /12 张可用素材 · 可生成 12 张/);
   assert.match(app.cards()[0], /相关素材：照片 1、照片 2、照片 3/);
   assert.match(app.cards()[0], /照片 12/);
   assert.doesNotMatch(app.html(), /根据当前可用照片推荐，可生成张数以该方向相关素材为准/);
   assert.ok(!app.html().includes('无需再做筛选'));
-  assert.match(app.html(), /<option value="9" selected>9 张<\/option>/);
-  assert.match(app.html(), /<option value="12" >12 张<\/option>/);
+  assert.match(app.html(), /<option value="12" selected>12 张<\/option>/);
+  assert.match(app.html(), /<option value="6" >6 张<\/option>/);
   assert.equal(app.calls.filter(call => call.method !== 'GET').length, 0);
   assert.match(app.html(), /value="promotional" checked/);
   assert.match(app.html(), /宣传套图/);
@@ -92,15 +92,15 @@ test('shared supporting photos count independently when switching between direct
   const first = direction(analysis.map(item => item.imageId), ['photo-1', 'photo-2']);
   const second = { ...direction(analysis.slice(0, 8).map(item => item.imageId), ['photo-1']), id: 'lunch', label: '附近上班族午餐' };
   const app = await renderTask(t, analysis, [first, second]);
-  assert.match(app.cards()[0], /12 张可用素材 · 可生成 6—12 张/);
-  assert.match(app.cards()[1], /8 张可用素材 · 可生成 6—8 张/);
+  assert.match(app.cards()[0], /12 张可用素材 · 可生成 12 张/);
+  assert.match(app.cards()[1], /8 张可用素材 · 可生成 8 张/);
   assert.match(app.cards()[0], /相关素材：照片 1、/);
   assert.match(app.cards()[1], /相关素材：照片 1、/);
   app.module.handleRestaurantAction('rest-select', { dataset: { id: first.id } }, app.ctx);
-  assert.match(app.html(), /<option value="12" >12 张<\/option>/);
+  assert.match(app.html(), /<option value="6" >6 张<\/option>/);
   app.module.handleRestaurantAction('rest-select', { dataset: { id: second.id } }, app.ctx);
   assert.match(app.html(), /<option value="8" selected>8 张<\/option>/);
-  assert.ok(!app.html().includes('<option value="12"'));
+  assert.ok(app.html().includes('<option value="30"'));
 });
 
 test('restored task selections keep their saved image mode instead of switching to promotional', async t => {
@@ -116,7 +116,7 @@ test('legacy directions show related material without an invented core label', a
   assert.match(app.cards()[0], /1 张可用素材 · 可生成 1 张/);
   assert.ok(!app.cards()[0].includes('核心依据'));
   assert.match(app.cards()[0], /相关素材：照片 1/);
-  assert.match(app.html(), /简版图文 · 1 张真实照片/);
+  assert.match(app.html(), /套图张数/);
 });
 
 test('direction counts exclude unusable sources and all descriptive HTML remains escaped', async t => {
@@ -125,7 +125,7 @@ test('direction counts exclude unusable sources and all descriptive HTML remains
   const current = { ...direction(analysis.map(item => item.imageId), ['photo-1', 'photo-2']), id: 'daily" onmouseover="alert(1)', label: '<img src=x onerror=alert(1)>', targetCustomer: '<script>顾客</script>', consumptionScene: '<b>消费场景</b>', recommendationReason: '<svg onload=alert(1)>', expectedAction: '<a href=javascript:alert(1)>到店</a>' };
   const app = await renderTask(t, analysis, [current]);
   const card = app.cards()[0];
-  assert.match(card, /11 张可用素材 · 可生成 6—11 张/);
+  assert.match(card, /11 张可用素材 · 可生成 11 张/);
   assert.match(card, /照片 12/);
   assert.match(card, /data-id="daily&quot; onmouseover=&quot;alert\(1\)"/);
   assert.match(card, /&lt;img src=x onerror=alert\(1\)&gt;/);
@@ -142,10 +142,10 @@ test('recommending twice quickly sends one UUID request without uploading and cl
   const current = { ...direction(analysis.map(item => item.imageId), ['photo-1', 'photo-2']), missingFacts: [{ field: 'dishName', requiredForGeneration: false, reason: '可确认菜名' }] };
   const app = await renderTask(t, analysis, [current]);
   app.factInput.value = '旧方向已填写菜名'; app.listeners['fact:input']();
-  app.listeners['count:change']({ target: { value: '12' } });
+  app.listeners['count:change']({ target: { value: '6' } });
   const before = app.module.renderRestaurant(app.ctx);
   assert.match(before, /value="旧方向已填写菜名"/);
-  assert.match(before, /<option value="12" selected>/);
+  assert.match(before, /<option value="6" selected>/);
   const originalFetch = globalThis.fetch;
   let finish;
   globalThis.fetch = (url, options = {}) => {

@@ -280,8 +280,9 @@ test('restaurant exempt failures do not promise to refund frozen points', async 
   assert.doesNotMatch(view.html(), /冻结积分|扣积分/);
 });
 
-test('a sparse two-photo restaurant package costs two image units and never the uploaded or fixed package count', async t => {
+test('a sparse two-photo promotional gallery prices the selected new outputs rather than the uploaded photo count', async t => {
   const view = await restaurantView(t, { photos: 2, count: 2 });
   assert.match(view.html(), /预计 100 积分/);
-  assert.doesNotMatch(view.html(), /预计 200 积分|扣 1 次/);
+  view.count(6); assert.match(view.html(), /预计 300 积分/);
+  assert.doesNotMatch(view.html(), /预计 100 积分|扣 1 次/);
 });

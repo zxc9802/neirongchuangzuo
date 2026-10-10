@@ -42,6 +42,12 @@ test('food-copy editing instructions cannot leak into the public body', () => {
   assert.equal(result.passed,false);assert.ok(result.issues.some(issue=>/内部|报告/.test(issue)));
 });
 
+test('clinical color-patch descriptions do not become public food copy', () => {
+  const result = inspect({ ...goodCopy(), body: goodBody + '\n食品表面有浅金色斑块和棕色斑块。' });
+  assert.equal(result.passed, false);
+  assert.ok(result.issues.some(issue => /分析描述/.test(issue)));
+});
+
 const actualHotpotBody = `想和朋友约一顿火锅时，围着一口锅慢慢聊，是很自然的聚餐选择。桃园火锅，想把这张围桌火锅的画面分享给你：圆锅在桌面中央，周围摆着多只盘碗，聚餐的主题就落在这一桌上。
 
 铜色圆锅里可见红褐色汤汁和红色长条状食材；周边几盘薄片状食材铺开摆放，旁边还有叶片状、浅色片状和菌菇状食材。锅在中间、菜盘围在四周，视觉上层次很丰富，也让人容易想到把不同选择摆上桌，和朋友边吃边聊。

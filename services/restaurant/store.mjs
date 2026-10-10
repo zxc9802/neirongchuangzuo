@@ -30,7 +30,7 @@ function checkedPatch(patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw problem('invalid_task', '任务数据无效。', 400);
   const result = copy(patch);
   for (const field of ['id', 'userId', 'createdAt', 'updatedAt', 'textExpiresAt', '__proto__', 'constructor', 'prototype']) delete result[field];
-  for (const field of ['files', 'sourceImages']) {
+  for (const field of ['files', 'sourceImages', 'galleryCheckpoints']) {
     if (result[field] === undefined) continue;
     if (!Array.isArray(result[field]) || result[field].length > 30 || result[field].some(file =>
       !file || !validMediaKey(file.key) || !Number.isFinite(file.expiresAt))) {
@@ -295,7 +295,7 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
               }
               // Keep only the financial reference until cleanup is confirmed, even after the 30-day task record is removed.
               if (unsettledCredits && (expiredTask || task.status === 'failed')) state.pendingCreditCleanup[task.billing.taskId] = { userId, taskId: task.id, creditId: task.billing.taskId };
-              for (const item of [...(task.files || []), ...(task.sourceImages || []), ...(task.pendingUpload?.sourceImages || [])]) {
+              for (const item of [...(task.files || []), ...(task.sourceImages || []), ...(task.galleryCheckpoints || []), ...(task.pendingUpload?.sourceImages || [])]) {
                 if (item.expired || (!expiredTask && item.expiresAt > now())) continue;
                 if (validMediaKey(item.key) && !state.garbage.some(file => file.key === item.key)) state.garbage.push({ userId, taskId: task.id, key: item.key });
                 item.expired = true;

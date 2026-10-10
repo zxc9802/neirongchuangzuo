@@ -44,6 +44,14 @@ test('uncertain food requests are recorded and never retried as local image-proc
   await assert.rejects(app.generate(input),{code:'FOOD_RENDER_ALREADY_SENT'});assert.equal(attempts,1);
 });
 
+test('store environment references accompany the food reference as separate edit inputs and enter the durable fingerprint', async t => {
+  let form;
+  const app=await harness(t,async(_url,options)=>{ form=options.body;return Response.json({data:[{b64_json:reference.toString('base64')}]}); });
+  const storeReferences=[{id:'interior-1',bytes:reference,mime:'image/jpeg'},{id:'exterior-1',bytes:reference,mime:'image/jpeg'}];
+  await app.generate({...input,storeReferences,scene:{...input.scene,storeContext:{sourceImageIds:storeReferences.map(item=>item.id),evidence:[{visibleObjects:['深灰墙','木纹桌面']}],look:'统一暖白'}}});
+  assert.equal(form.getAll('image').length,3); assert.match(form.get('prompt'),/深灰墙/); assert.match(form.get('prompt'),/同一商家实际门店/);
+});
+
 test('only unsent rate-limited food calls wait, and provider errors are not automatically resent',async t=>{
   let attempts=0,reserves=0,waits=0;
   const ledger={async reserve(){if(++reserves===1)throw Object.assign(Error('busy'),{code:'RATE_LIMITED'});return {created:true};},async markDispatched(){},async finish(){}};

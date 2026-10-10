@@ -122,6 +122,16 @@ test('batch upload drafts and pending object intents survive restart and expire 
   assert.equal((await reopened.getTask('alice', 'draft')).code, 'FILES_EXPIRED'); assert.equal((await reopened.usage('alice')).used, 0);
 });
 
+test('private gallery checkpoints survive reopening and join the same three-day deletion queue',async t=>{
+  const f=await fixture(t),expiresAt=f.now()+FILES_TTL_MS;
+  await f.store.createTask('alice',{id:'gallery',status:'failed',galleryCheckpoints:[{key:'alice/gallery/working/shot-01.jpg',expiresAt,status:'ready'}]});
+  await f.store.close();const reopened=f.make();await reopened.ready;
+  assert.equal((await reopened.getTask('alice','gallery')).galleryCheckpoints[0].status,'ready');
+  f.advance(FILES_TTL_MS+1);const result=await reopened.sweep();
+  assert.ok(result.expiredFiles.some(item=>item.key==='alice/gallery/working/shot-01.jpg'));
+  assert.equal((await reopened.getTask('alice','gallery')).galleryCheckpoints[0].expired,true);
+});
+
 test('files expire after three days while text lasts thirty; failed deletion remains retryable after task expiry', async t => {
   const f = await fixture(t);
   const expiresAt = f.now() + FILES_TTL_MS;

@@ -128,6 +128,172 @@ test('promotional processing failure retries locally and releases held credits w
 const foodAppearance={description:'圆碗中的食物',portion:'一碗',arrangement:'食物在碗内',vessel:'圆碗',colors:['浅色'],visibleComponents:['条状食物'],texture:['可见纹理'],distinctiveFeatures:['圆碗'],uncertainDetails:[],dishCount:1,pieceCount:null};
 const foodReview={status:'passed',identityMatch:true,sceneMatch:true,shotMatch:true,compositionUsable:true,errors:[],warnings:[]};
 
+test('one-click gallery analyses the whole upload, expands two food references to six new frames, and delivers without optional copy', async t => {
+  let renders = 0, copies = 0;
+  const plans = [];
+  const model = mockModel({ async identifyFood() { return foodAppearance; },
+    async renderFood(input) { renders++; plans.push(input.plan.angle); return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId }; },
+    async reviewFoodRender() { return foodReview; }, async write() { copies++; throw Object.assign(Error('copy result uncertain'), { code: 'PROVIDER_UNCERTAIN' }); } });
+  const app = await setup(t, { model, withCredits: true }); await app.api('/profile', { profile });
+  const id = randomUUID(), inputs = await photos(2);
+  assert.equal((await app.api('/tasks', { requestId: id, imageCount: 2, rightsConfirmed: true, autoGenerate: true, outputCount: 6 })).status, 202);
+  await app.api(`/tasks/${id}/photos`, { startIndex: 0, images: inputs }); await app.api(`/tasks/${id}/analyse`, {});
+  const task = await app.wait(id, ['completed','failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(task.selection.workflow, 'store-gallery-v1');
+  assert.equal(task.analysis.length, 2); assert.equal(task.files.filter(file => file.role === 'image').length, 6);
+  assert.equal(renders, 6); assert.equal(new Set(plans).size, 4); assert.equal(copies, 1); assert.equal(model.counts.recommend, 0);
+  assert.equal(task.billing.chargedPoints, 300); assert.equal(task.copyStatus, 'unavailable');
+  assert.equal((await app.credits.snapshot('owner')).balance, 700);
+  const zipped = await app.api(`/tasks/${id}/files/package.zip`);
+  assert.equal(zipped.status, 200); assert.equal(Object.keys(unzipSync(zipped.body)).length, 6);
+  const again = await app.api(`/tasks/${id}/generate`, { directionId: task.selection.directionId, imageMode: 'promotional', workflow: 'store-gallery-v1', outputCount: 6 });
+  assert.equal(again.body.task.id, id); assert.equal(renders, 6); assert.equal((await app.credits.snapshot('owner')).balance, 700);
+});
+
+test('gallery sends real store environment alongside food and previews nine finished frames before one final settlement', async t => {
+  const references = [];
+  const types = ['food','interior','exterior','preparation','food'];
+  const model = mockModel({ async analyse(photos) { return analysis(photos).map(item => ({ ...item, imageType: types[Number(item.imageId.split('-')[1])-1],
+    textRisk: 'warning', riskReasons: ['请核对公开招牌文字'] })); }, async identifyFood() { return foodAppearance; },
+    async renderFood(input) { references.push(input.storeReferences.map(item => item.id)); return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId }; },
+    async reviewFoodRender(input) { assert.equal(input.photos.length, 4); return foodReview; } });
+  const app = await setup(t, { model, withCredits: true }); await app.api('/profile', { profile });
+  const id = randomUUID(), inputs = await photos(5);
+  await app.api('/tasks', { requestId:id,imageCount:5,rightsConfirmed:true,autoGenerate:true,outputCount:9 });
+  for (let startIndex=0;startIndex<5;startIndex+=3) await app.api(`/tasks/${id}/photos`, {startIndex,images:inputs.slice(startIndex,startIndex+3)});
+  await app.api(`/tasks/${id}/analyse`,{});
+  const task=await app.wait(id,['awaiting_confirmation','completed','failed']);
+  assert.equal(task.status,'awaiting_confirmation',task.error); assert.equal(task.files.filter(file=>file.role==='image').length,9);
+  assert.equal(references.length,6); assert.ok(references.every(ids=>ids.join() === 'photo-2,photo-3'));
+  assert.equal((await app.api(`/tasks/${id}/files/01.jpg`)).status,200);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status,404);
+  assert.equal((await app.api(`/tasks/${id}/files/01.jpg`,undefined,'another-owner')).status,404);
+  assert.equal(task.billing.reservedPoints,450); assert.equal(task.billing.chargedPoints,0);
+  const confirmed=await app.api(`/tasks/${id}/confirm`,{confirmWarnings:true}); assert.equal(confirmed.body.task.billing.chargedPoints,450);
+  await app.api(`/tasks/${id}/confirm`,{confirmWarnings:true}); assert.equal((await app.credits.snapshot('owner')).balance,550);
+});
+
+test('the website plans a varied single-dish story from all uploads once and executes that exact storyboard', async t => {
+  let plans=0,renders=0;
+  const types=['food','food','exterior','interior',...Array(9).fill('preparation'),'staff'];
+  const names=['食品主视觉','加料摊盘','淋酱出餐','菜品质感','门店外观','蒸制工作','用餐环境','食品上桌','员工工作'];
+  const ids=['photo-1','photo-5','photo-6','photo-2','photo-3','photo-7','photo-4','photo-1','photo-14'];
+  const model=mockModel({async analyse(photos){return analysis(photos).map(item=>({...item,imageType:types[Number(item.imageId.split('-')[1])-1]}));},
+    async planGallery(input){plans++;assert.equal(input.analysis.length,14);assert.equal(input.outputCount,9);assert.equal(input.photos.length,4);
+      return {theme:'一盘面食从制作到上桌',foodGroups:[{id:'same-dish',label:'同一碗面食',imageIds:['photo-1','photo-2']}],shots:ids.map((id,index)=>{
+        const kind=types[Number(id.split('-')[1])-1]==='food'?'food':'scene';return {sourceImageId:id,kind,foodGroupId:kind==='food'?'same-dish':'',
+          name:names[index],purpose:'展示实际菜品或门店过程',focus:'完整面食',angle:index%2?'overhead':'oblique',camera:'按实际主体调整机位与景别',lighting:'明亮自然光'};})};},
+    async identifyFood(){return foodAppearance;},async renderFood(input){renders++;return{bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};},
+    async reviewFoodRender(){return foodReview;}});
+  const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});const id=randomUUID(),inputs=await photos(14);
+  await app.api('/tasks',{requestId:id,imageCount:14,rightsConfirmed:true,autoGenerate:true,outputCount:9});
+  for(let startIndex=0;startIndex<14;startIndex+=3)await app.api(`/tasks/${id}/photos`,{startIndex,images:inputs.slice(startIndex,startIndex+3)});
+  await app.api(`/tasks/${id}/analyse`,{});const task=await app.wait(id,['completed','failed']);
+  assert.equal(task.status,'completed',task.error);assert.equal(plans,1);assert.equal(renders,3);
+  assert.equal(task.galleryStoryboard.source,'ai');assert.equal(task.galleryStoryboard.foodGroups.length,1);
+  assert.deepEqual(task.selection.shots.map(shot=>shot.name),names);assert.equal(task.files.filter(file=>file.role==='image').length,9);
+  assert.equal(task.billing.chargedPoints,450);
+  const repeated=await app.api(`/tasks/${id}/generate`,{directionId:'store-gallery',workflow:'store-gallery-v1',imageMode:'promotional',outputCount:9});
+  assert.equal(repeated.body.task.id,id);assert.equal(plans,1);assert.equal(renders,3);assert.equal((await app.credits.snapshot('owner')).balance,550);
+  const fresh=await app.api(`/tasks/${id}/fork`,{requestId:randomUUID()});
+  assert.equal(fresh.body.task.galleryStoryboard,undefined,'a new direction must get a fresh composition rather than retaining the old one');
+  assert.equal((await app.api(`/tasks/${id}`)).body.task.galleryStoryboard.source,'ai');
+});
+
+test('an uncertain optional planning call is not replayed and the fallback retains varied real scenes',async t=>{
+  let plans=0;
+  const model=mockModel({async analyse(photos){return analysis(photos).map(item=>({...item,imageType:item.imageId==='photo-1'?'food':'preparation'}));},
+    async planGallery(){plans++;throw Object.assign(Error('response lost'),{code:'PROVIDER_UNCERTAIN'});},async identifyFood(){return foodAppearance;},
+    async renderFood(input){return{bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};},async reviewFoodRender(){return foodReview;}});
+  const app=await setup(t,{model});await app.api('/profile',{profile});const id=randomUUID(),inputs=await photos(9);
+  await app.api('/tasks',{requestId:id,imageCount:9,rightsConfirmed:true,autoGenerate:true,outputCount:9});
+  for(let startIndex=0;startIndex<9;startIndex+=3)await app.api(`/tasks/${id}/photos`,{startIndex,images:inputs.slice(startIndex,startIndex+3)});
+  await app.api(`/tasks/${id}/analyse`,{});const task=await app.wait(id,['completed','failed']);
+  assert.equal(task.status,'completed',task.error);assert.equal(plans,1);assert.equal(task.galleryStoryboard.source,'rules');
+  assert.equal(task.selection.shots.filter(shot=>shot.kind==='food').length,3);
+  assert.equal(new Set(task.selection.shots.filter(shot=>shot.kind==='scene').map(shot=>shot.sourceImageId)).size,6);
+});
+
+test('auto gallery rejects invalid frame counts before creating a paid task', async t => {
+  const app=await setup(t,{withCredits:true}); await app.api('/profile',{profile});
+  for(const outputCount of [0,-1,31,1.5,'9']) assert.equal((await app.api('/tasks',{requestId:randomUUID(),imageCount:2,rightsConfirmed:true,autoGenerate:true,outputCount})).body.code,'INVALID_OUTPUT_COUNT');
+  assert.equal((await app.credits.snapshot('owner')).balance,1000); assert.equal(app.model.counts.analyse,0);
+});
+
+test('gallery renders and audits the identical cropped primary dish, keeping the complete original for task evidence', async t => {
+  let renders = 0, audits = 0;
+  const renderedReferences = new Map(), fullSizes = new Map();
+  const model = mockModel({ async identifyFood(input) { fullSizes.set(input.analysis.imageId, await sharp(input.photos[0].bytes).metadata()); return { ...foodAppearance, identityScope: 'dish', subjectBox: { left: .2, top: .2, width: .6, height: .6 }, subjectConfidence: .95 }; },
+    async renderFood(input) {
+      renders++;
+      const meta = await sharp(input.photo.bytes).metadata();
+      const full = fullSizes.get(input.photo.id);
+      assert.ok(meta.width < full.width && meta.height < full.height);
+      renderedReferences.set(input.photo.id, input.photo.bytes);
+      return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId };
+    }, async reviewFoodRender(input) {
+      audits++; assert.deepEqual(input.photos[0].bytes, renderedReferences.get(input.sourceImageId)); return foodReview;
+    } });
+  const app = await setup(t, { model }); await app.api('/profile', { profile });
+  const id = randomUUID(), inputs = await photos(2);
+  await app.api('/tasks', { requestId:id, images:inputs, rightsConfirmed:true, autoGenerate:true, outputCount:6 });
+  const task = await app.wait(id, ['completed','failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(renders,6); assert.equal(audits,6);
+  assert.equal(task.sourceImages.length,2);
+  assert.ok(task.files.filter(file=>file.role==='image').every(file=>file.composition.subjectBox?.width===.6));
+});
+
+test('hotpot gallery keeps the complete spread even when vision selects a foreground side dish', async t => {
+  let fullReference, renders = 0;
+  const model = mockModel({ async identifyFood(input) {
+    assert.equal(input.subjectScope, 'spread'); fullReference = input.photos[0].bytes;
+    return { ...foodAppearance, identityScope: 'dish', subjectBox: { left: .2, top: .2, width: .6, height: .6 }, subjectConfidence: .95 };
+  }, async renderFood(input) {
+    renders++; assert.deepEqual(input.photo.bytes, fullReference); assert.equal(input.appearance.identityScope, 'spread');
+    assert.equal(input.appearance.subjectBox, undefined);
+    return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId };
+  }, async reviewFoodRender(input) { assert.deepEqual(input.photos[0].bytes, fullReference); return foodReview; } });
+  const app = await setup(t, { model }); await app.api('/profile', { profile: { ...profile, category: '火锅' } });
+  const id = randomUUID(); await app.api('/tasks', { requestId: id, images: await photos(1), rightsConfirmed: true, autoGenerate: true, outputCount: 9 });
+  const task = await app.wait(id, ['completed','failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(renders, 9);
+  assert.ok(task.files.filter(file=>file.role==='image').every(file=>file.composition.subjectBox===null));
+});
+
+test('gallery persists approved frames privately and a known failure retries only the remaining frames', async t => {
+  let renders=0;
+  const model=mockModel({async identifyFood(){return foodAppearance;},async renderFood(input){
+    if(++renders===3)throw Object.assign(Error('explicit provider rejection'),{code:'PROVIDER_ERROR'});
+    return {bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};
+  },async reviewFoodRender(){return foodReview;},async write(){throw Error('optional copy unavailable');}});
+  const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});
+  const id=randomUUID();await app.api('/tasks',{requestId:id,images:await photos(2),rightsConfirmed:true,autoGenerate:true,outputCount:6});
+  const failed=await app.wait(id,['failed']);assert.equal(failed.code,'PROVIDER_ERROR');
+  const saved=await app.handler.store.getTask('owner',id);assert.equal(saved.galleryCheckpoints.filter(x=>x.status==='ready').length,2);
+  assert.equal(failed.galleryCheckpoints,undefined);
+  assert.equal((await app.api(`/tasks/${id}/files/${saved.galleryCheckpoints[0].key.split('/').at(-1)}`)).status,404);
+  assert.equal((await app.credits.snapshot('owner')).balance,1000);
+  await app.api(`/tasks/${id}/retry`,{});const completed=await app.wait(id,['completed','failed']);
+  assert.equal(completed.status,'completed',completed.error);assert.equal(renders,7);
+  assert.equal(completed.files.filter(x=>x.role==='image').length,6);assert.equal(completed.billing.chargedPoints,300);
+});
+
+test('an explicitly requested new gallery reuses known frames from an uncertain task without replaying its unknown call',async t=>{
+  let renders=0;
+  const model=mockModel({async identifyFood(){return foodAppearance;},async renderFood(input){
+    if(++renders===3)throw Object.assign(Error('unknown result'),{code:'PROVIDER_UNCERTAIN'});
+    return {bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};
+  },async reviewFoodRender(){return foodReview;},async write(){throw Error('optional copy unavailable');}});
+  const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});
+  const id=randomUUID();await app.api('/tasks',{requestId:id,images:await photos(2),rightsConfirmed:true,autoGenerate:true,outputCount:6});
+  await app.wait(id,['failed']);assert.equal((await app.api(`/tasks/${id}/retry`,{})).status,409);assert.equal(renders,3);
+  const next=randomUUID();await app.api(`/tasks/${id}/fork`,{requestId:next,reuseCompletedImages:true});
+  await app.api(`/tasks/${next}/generate`,{directionId:'store-gallery',imageMode:'promotional',workflow:'store-gallery-v1',outputCount:6});
+  const completed=await app.wait(next,['completed','failed']);assert.equal(completed.status,'completed',completed.error);
+  assert.equal(renders,7);assert.equal((await app.credits.snapshot('owner')).balance,700);
+  const again=await app.api(`/tasks/${id}/fork`,{requestId:next,reuseCompletedImages:true});assert.equal(again.body.task.id,next);
+});
+
 test('food rephotography changes angles, reuses completed calls during local retries and charges delivered images once', async t => {
   let renders=0, attempts=0, identities=0;const plans=[],styles=[];
   const model=mockModel({async identifyFood(){identities++;return foodAppearance;},async renderFood(input){renders++;plans.push(input.plan.angle);styles.push(Boolean(input.styleReference));return {bytes:input.photo.bytes,requestId:'render-id'};},async reviewFoodRender(input){assert.equal(input.photos.length,2);return foodReview;}});

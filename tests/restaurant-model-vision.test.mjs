@@ -5,7 +5,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRestaurantModel } from '../services/restaurant/model.mjs';
-import { COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT, FOOD_IDENTITY_PROMPT, FOOD_RENDER_AUDIT_PROMPT } from '../services/restaurant/prompts.mjs';
+import { loadAIConfig } from '../services/ai/server.mjs';
+import { COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT, FOOD_IDENTITY_PROMPT, FOOD_RENDER_AUDIT_PROMPT, GALLERY_STORYBOARD_PROMPT } from '../services/restaurant/prompts.mjs';
 
 const config = { apiKey: 'vision-test-only-not-a-secret', baseUrl: 'https://provider.invalid/v1', chatModel: 'test-vision', limits: { chatDaily: 100 } };
 const profile = { name: '桃园火锅', city: '重庆', address: '南滨路二十六号', category: '火锅店' };
@@ -28,12 +29,12 @@ function copy() {
     tags: ['重庆火锅', '南滨路晚饭', '朋友约饭', '门店日常', '实拍分享'], coverText: '沿江散步约一顿火锅', imageOrder: ['photo-night', 'photo-food'],
     claims: [{ text: '桃园火锅', factKeys: ['name'], imageIds: [] }, { text: '木质入口挨着绿植', factKeys: [], imageIds: ['photo-night'] }] };
 }
-function harness(result, failure, responseFactory) {
+function harness(result, failure, responseFactory, modelConfig = config) {
   const requests = [], reservations = [], dispatches = [], finishes = [];
   const ledger = { ready: Promise.resolve(),
     async reserve(record) { reservations.push(record); }, async markDispatched(id) { dispatches.push(id); },
     async finish(id, completion) { finishes.push({ id, ...completion }); }, async summary() { return {}; } };
-  const model = createRestaurantModel({ config, ledger, fetchImpl: async (url, options) => {
+  const model = createRestaurantModel({ config: modelConfig, ledger, fetchImpl: async (url, options) => {
     requests.push({ url, options, body: JSON.parse(options.body) });
     if (failure) throw failure;
     if (responseFactory) return responseFactory();
@@ -59,6 +60,86 @@ test('food consistency audit compares original and generated photos and explicit
   const [system,user]=app.requests[0].body.messages;
   assert.equal(system.content,FOOD_RENDER_AUDIT_PROMPT);assert.deepEqual(user.content.slice(1).map(item=>item.image_url.url),photos.map(photo=>photo.dataUrl));
   assert.deepEqual(JSON.parse(user.content[0].text).plan,plan);assertCompletedAttempt(app);
+});
+test('food identity sends the requested spread or single food focus to the actual vision provider',async()=>{
+  const appearance={description:'可见肉盘',portion:'一盘',arrangement:'薄片摆放',vessel:'圆形餐盘',colors:['红色'],visibleComponents:['薄切肉片'],texture:['纹理'],distinctiveFeatures:[],uncertainDetails:[],dishCount:1,pieceCount:null};
+  const app=harness(appearance);
+  await app.model.identifyFood({analysis:analysis[0],photos:[photos[1]],subjectScope:'auto',subjectFocus:'原图前景肉盘'});
+  const input=JSON.parse(app.requests[0].body.messages[1].content[0].text);
+  assert.equal(input.subjectScope,'auto');assert.equal(input.subjectFocus,'原图前景肉盘');assertCompletedAttempt(app);
+});
+test('gallery planning sees the complete material analysis rather than only one food source',async()=>{
+  const board={theme:'菜品与门店',foodGroups:[],shots:[]},app=harness(board);
+  assert.deepEqual(await app.model.planGallery({analysis,profile,outputCount:9,photos:[photos[1]]}),board);
+  const [system,user]=app.requests[0].body.messages,input=JSON.parse(user.content[0].text);
+  assert.equal(system.content,GALLERY_STORYBOARD_PROMPT);assert.equal(input.images.length,analysis.length);
+  assert.equal(input.requestedOutputCount,9);assert.deepEqual(input.visualImageIds,['photo-food']);assertCompletedAttempt(app);
+});
+
+test('the image-text model is independently configurable without replacing chat or image generation', () => {
+  const defaults = loadAIConfig({ OPENLUX_CHAT_MODEL: 'test-chat', OPENLUX_IMAGE_MODEL: 'test-image', OPENLUX_IMAGE_TEXT_MODEL: '' });
+  assert.equal(defaults.chatModel, 'test-chat');
+  assert.equal(defaults.imageModel, 'test-image');
+  assert.equal(defaults.imageTextModel, 'claude-opus-5-5');
+  const custom = loadAIConfig({ OPENLUX_IMAGE_TEXT_MODEL: 'custom-image-text' });
+  assert.equal(custom.imageTextModel, 'custom-image-text');
+});
+
+test('all image-text operations route to Claude and retain accurate provider ledger entries', async () => {
+  const board = { theme: '菜品与门店', foodGroups: [], shots: [] };
+  const review = { status: 'passed', identityMatch: true, sceneMatch: true, shotMatch: true, compositionUsable: true, errors: [], warnings: [] };
+  const appearance = { description: '参考菜品', vessel: '圆形餐盘', colors: ['棕色'], visibleComponents: ['可见主体'], portion: '一份', arrangement: '盘内摆放', texture: [], distinctiveFeatures: [], uncertainDetails: [], dishCount: 1, pieceCount: null };
+  const analysed = { images: analysis.map(item => ({ ...item, possibleScene: [], rejectionReason: '', visibleTexts: [], textRisk: 'none', riskReasons: [] })) };
+  const responses = [analysed, { directions: [] }, appearance, board, review, copy(), copy(), { status: 'passed', warnings: [], errors: [] }];
+  const app = harness(null, undefined, () => new Response(JSON.stringify({ id: 'test-result', choices: [{ message: { content: JSON.stringify(responses.shift()) }, finish_reason: 'stop' }] })),
+    { ...config, imageTextModel: 'claude-opus-5-5' });
+  await app.model.analyse(photos, profile, { gallery: true });
+  await app.model.recommend(analysis, profile);
+  await app.model.identifyFood({ analysis: analysis[0], photos });
+  await app.model.planGallery({ analysis, profile, outputCount: 9, photos });
+  await app.model.reviewFoodRender({ sourceImageId: 'photo-food', photos });
+  await app.model.write({ profile, analysis, direction, facts, photos });
+  await app.model.write({ profile, analysis, direction, facts, photos, draft: copy(), qualityIssues: ['调整开头'] });
+  await app.model.audit({ profile, copy: copy(), photos });
+  const expected = Array(8).fill('claude-opus-5-5');
+  assert.deepEqual(app.requests.map(request => request.body.model), expected);
+  assert.deepEqual(app.reservations.map(record => record.model), expected);
+  assert.equal(app.finishes.length, 8);
+  assert.ok(app.finishes.every(record => record.status === 'completed'));
+  assert.deepEqual(app.requests[0].body.messages[1].content.slice(1).map(item => item.image_url.url), photos.map(photo => photo.dataUrl));
+});
+
+test('a configured image-text model failure is not silently retried with the chat model', async t => {
+  for (const operation of ['planGallery', 'reviewFoodRender']) await t.test(operation, async () => {
+    const app = harness(null, undefined, () => new Response('{}', { status: 503 }),
+      { ...config, imageTextModel: 'claude-opus-5-5' });
+    await assert.rejects(app.model[operation]({ analysis, profile, outputCount: 9, photos }), { code: 'PROVIDER_ERROR' });
+    assert.equal(app.requests.length, 1);
+    assert.equal(app.requests[0].body.model, 'claude-opus-5-5');
+    assert.equal(app.reservations[0].model, 'claude-opus-5-5');
+    assert.equal(app.finishes[0].status, 'failed');
+  });
+});
+
+test('Claude JSON fences are normalized without accepting prose, partial data or truncated responses', async t => {
+  const board = { theme: '菜品与门店', foodGroups: [], shots: [] };
+  for (const content of [JSON.stringify(board), '```json\n' + JSON.stringify(board) + '\n```', '  ```JSON\r\n' + JSON.stringify(board) + '\r\n```  ']) await t.test('complete object', async () => {
+    const app = harness(null, undefined, () => new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] })), { ...config, imageTextModel: 'claude-opus-5-5' });
+    assert.deepEqual(await app.model.planGallery({ analysis, profile, outputCount: 9, photos }), board);
+    assert.equal(app.reservations[0].model, 'claude-opus-5-5');
+    assert.equal(app.finishes[0].status, 'completed');
+  });
+  for (const [content, finishReason] of [
+    ['这是分析结果：\n```json\n' + JSON.stringify(board) + '\n```', 'stop'],
+    ['```json\n{"theme":', 'stop'],
+    ['```json\n[]\n```', 'stop'],
+    ['```json\n' + JSON.stringify(board) + '\n```', 'length'],
+  ]) await t.test('invalid output', async () => {
+    const app = harness(null, undefined, () => new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: finishReason }] })));
+    await assert.rejects(app.model.planGallery({ analysis, profile, outputCount: 9, photos }), { code: 'MODEL_INVALID_OUTPUT' });
+    assert.equal(app.requests.length, 1);
+    assert.equal(app.finishes[0].status, 'failed');
+  });
 });
 function visualInput(request, expectedPrompt) {
   assert.equal(request.url, 'https://provider.invalid/v1/chat/completions');

@@ -95,12 +95,13 @@ test('thirty restaurant originals compress into ten batches and the selected pac
   assert.deepEqual(batches.map(call => call.body.startIndex), Array.from({ length: 10 }, (_, index) => index * 3));
   assert.ok(batches.every(call => call.body.images.length === 3));
   assert.equal(app.calls.filter(call => call.url.endsWith('/analyse') && call.method === 'POST').length, 1);
-  assert.match(app.markup(), /value="9" selected/);
+  assert.match(app.markup(), /value="30" selected/);
   assert.match(app.markup(), /value="15"/);
-  app.listeners.get('restaurant-output-count:change')({ target: { value: '15' } });
+  assert.equal(init[0].body.autoGenerate, true); assert.equal(init[0].body.outputCount, 30);
+  app.listeners.get('restaurant-output-count:change')({ target: { value: '6' } });
   app.module.handleRestaurantAction('rest-generate', {}, app.ctx);
   await app.settle(() => app.calls.some(call => call.url.endsWith('/generate') && call.method === 'POST'));
-  assert.equal(app.calls.find(call => call.url.endsWith('/generate') && call.method === 'POST').body.outputCount, 15);
+  assert.equal(app.calls.find(call => call.url.endsWith('/generate') && call.method === 'POST').body.outputCount, 6);
   assert.equal(app.files[29].name, '实拍-29.png');
 });
 

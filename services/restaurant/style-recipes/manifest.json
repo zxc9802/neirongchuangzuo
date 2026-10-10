@@ -1,0 +1,466 @@
+{
+  "version": "approved-atmosphere-20261011-v1",
+  "recipes": [
+    {
+      "id": "bar-01",
+      "order": 1,
+      "title": "Mamacita红霓虹门头",
+      "purpose": "首图展示店铺识别性最强的正面门头，红色霓虹招牌、米黄橙粉墙面、铁艺楼梯、木质百叶门扇构成复古热带风格入口",
+      "framing": "中景正面构图，保留完整门头立面从地面台阶至二楼格栅窗，上方现代建筑作为环境对比",
+      "signature": {
+        "hash": "05b5570352136a426ea8293b65cdf878c509366e2ae507bb92fd99e05291cd61",
+        "ratio": 0.75,
+        "pixels": "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"
+      },
+      "reference": "bar-01.jpg",
+      "referenceHash": "c887634745e2d1cf03472e080d92f0950d4ec44fbe1cf57cec2bd408d9bbd3f4",
+      "processing": "model_edit",
+      "analysis": {
+        "imageType": "exterior",
+        "visibleObjects": [
+          "红色霓虹灯管招牌显示「Mamacita」字样",
+          "建筑外立面为米黄色和橙粉色墙面",
+          "入口处有木质百叶窗门扇",
+          "左侧有铁艺曲线扶手楼梯",
+          "左下角可见白色铁艺椅子一把",
+          "入口台阶为浅色石材",
+          "二楼有木质横向格栅窗",
+          "墙面安装有两个木质菜单框",
+          "右侧墙面有红色中文告示牌",
+          "上方可见多层现代建筑外立面带阳台和栏杆",
+          "夜间拍摄，人工照明",
+          "建筑风格混合复古和装饰元素"
+        ],
+        "possibleScene": [
+          "酒馆氛围"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "none",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": []
+      },
+      "style": {
+        "mood": "夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑",
+        "palette": "暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调",
+        "lighting": "保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复",
+        "texture": "做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感"
+      },
+      "prompt": "Produce one enhanced 3:4 vertical photographic image. Image 1 is the complete authoritative identity reference. Remaining images are context from the SAME real store, not replacement products. The actual photo takes precedence over any guessed food names in the creative brief. Do not replace an uncertain ingredient or dish with a named guess. Keep the main subject complete in product photographs; partial views are appropriate only for deliberate detail photographs.\nVerified visible observations and explicitly uncertain details:\n{\"imageId\":\"xhs5-1\",\"type\":\"门头\",\"visibleFacts\":[\"红色霓虹灯管招牌显示「Mamacita」字样\",\"建筑外立面为米黄色和橙粉色墙面\",\"入口处有木质百叶窗门扇\",\"左侧有铁艺曲线扶手楼梯\",\"左下角可见白色铁艺椅子一把\",\"入口台阶为浅色石材\",\"二楼有木质横向格栅窗\",\"墙面安装有两个木质菜单框\",\"右侧墙面有红色中文告示牌\",\"上方可见多层现代建筑外立面带阳台和栏杆\",\"夜间拍摄，人工照明\",\"建筑风格混合复古和装饰元素\"],\"uncertainFacts\":[],\"qualityIssues\":[],\"potential\":\"门头招牌清晰，建筑外观特征明显，适合展示餐饮场所门面\"}\nSeries brief independently derived from this input set:\n{\"mood\":\"夜间酒吧的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑\",\"palette\":\"暖琥珀色为主导，红色霓虹点睛，米黄墙面和深木色，热带绿植点缀，保留夜间照明的自然暖黄偏橙色调\",\"lighting\":\"保留夜间人工照明特征，串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感\",\"texture\":\"做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感\",\"contrast\":\"中等对比度，保留酒吧环境的柔和过渡，红色霓虹和串灯作为高光重点，不做成高反差黑白分明\",\"editingIntensity\":\"门头与室内空间轻度优化（已有良好曝光），饮品和装饰细节中高强度修复（严重欠曝需大幅提升可见度和色彩），所有图保持摄影真实感不做3D渲染效果\",\"evidence\":[{\"sourceIds\":[\"xhs5-1\",\"xhs5-2\",\"xhs5-3\"],\"observation\":\"三张图曝光正常，呈现暖黄色调夜间照明，墙面米黄橙粉、木质深棕、红色霓虹清晰可见\",\"decision\":\"将这组色温和亮度作为整体基准，不向冷色或过亮方向调整\"},{\"sourceIds\":[\"xhs5-5\",\"xhs5-6\",\"xhs5-8\"],\"observation\":\"三张严重欠曝，xhs5-5饮品暗部无细节但主体轮廓和色彩信息存在，xhs5-6/8装饰元素几乎不可见\",\"decision\":\"xhs5-5可通过大幅提亮、增强玻璃透光和液体色彩饱和度挽救，xhs5-8仅作装饰氛围参考需重建暗部，xhs5-6质量过差排除\"},{\"sourceIds\":[\"xhs5-3\"],\"observation\":\"双层空间层次清晰，串灯、酒柜背光、吧台灯带构成多层光源，黄色高脚凳是空间色彩重点\",\"decision\":\"复用此图时通过裁剪和描述重点差异化：全景展示空间、特写吧台细节、强调二层关系\"}]}\nPhotographer's frame-specific editing brief:\nNight exterior of Mamacita bar entrance with glowing red neon script signage against warm terracotta and cream facade. Preserve authentic vintage architectural details: wooden louvered door, wrought iron curved stair railing, white metal chair. Clean up minor debris on steps while keeping weathered texture of walls. Enhance neon glow slightly, balance ambient tungsten light from upper windows. Keep natural nighttime photography feel with soft shadows. Straighten vertical lines if needed. Maintain warm amber street lighting color temperature. 3:4 vertical framing emphasizing storefront identity.\nKeep the food type and core appearance. Same-ingredient quantities, plating, camera position and food background consistent with the supplied real store may improve. Preserve actual architecture, shop signage, furniture and real people in scene/process shots. No invented ingredient types, food products, people or luxury renovation. Do not invent facts for unclear details. No added poster text, collage, watermark or CGI texture. This is a promotional photograph, make the subject appetizing and the scene clean and appealing while retaining natural photographic depth.",
+      "contextRecipeIds": [],
+      "input": "bar-01-input.jpg",
+      "inputHash": "05b5570352136a426ea8293b65cdf878c509366e2ae507bb92fd99e05291cd61"
+    },
+    {
+      "id": "bar-02",
+      "order": 2,
+      "title": "双层挑高吧台空间",
+      "purpose": "展示室内核心区域完整环境，双层结构、背光酒柜、串灯、黄色高脚凳、壁龛陈列等装修细节构成整体氛围",
+      "framing": "室内广角全景，从一层吧台前视角向上拍摄二层阳台，包含完整的吧台、酒柜、串灯、高脚凳、拱形门洞结构",
+      "signature": {
+        "hash": "4197b90f39fd1615b40c55eb54a87d6130b5e2c2fc85f81d0fd11798b06e76b2",
+        "ratio": 0.75,
+        "pixels": "IxgFJBkFIhgEHRYCGxQCGRICGRICGxQCGhMCGBABGBABFg4CEwoBEAkADwgBHRIFGQ4DDgYBCgQBFwoCGQsCFgkBHQ8CHg4DFQgBFwoBFQgAFAkAEggAFAgBFggBEggBJxsIJBkFIhcDIBcDHRYDHBUCHBUCGxQCGxQCGhMBGBABFQ0CFAsBEAkBCgQCEAkDHhEEEAgBCQMBEggBGwsBGQsBGAoBGgoCGAoBFgkBFgkBFwkBFgkBFgkBFgkBFQgBLiMQKyAMKB0JJRoGIhgDIRcDIBcEHRUDHBUCGxUCGhQCGBACEwsCEAkBDggCDwgCHBEEFg0DCgMBDAUBHA0CHQ0BGwwCGQoCGQkBGQoBGw0BHA0BGgsCGgsCGAkBFwkBLyQQKyAMKyALKR4JJhsHJRoGJRoFJxsFIhcEHxUCHxUCGxMDFQ4CEAkBEwoBGBEBHBQCGxEEDwcBDgYBFwsCHg4BHw4CHA0CHAwBGwsCHAwCHg0BGwwCGgwCGgoCGgoCNSoUMygSLiMOLCEMKiAKKB0JKB0HKh4GJxsGJBkEIhcEHxQEHhQDGA4CEAgAFw4CIBQCFQwDDgcCFwsCEQgCHw4CIQ8CIA8DHg4BHQ0BHw0CHw8CHA0BGwwBGwwCGwoCMSgTOC0WNCkTMicSLiQNKyIKLSEJLiELKh0HJxsGJRoEJhoEIhYEHxUDHRADEwoBHhICHA8CHRADJxcFFwwBGQwCIhADIA8CIA8DIA4CIA4CIA4CHw4BHQ4BGw0CGgwBKSIPKyQQLiURMiYSMCUQLiQMMSQLMCMKLB4IKx0HKx4HKhsGKBsGJBcDJBcEHhEEFwwCJRYCJhcBLR0GJBQEFQkCIA8CIhACIQ8CIA4CIA8CIA4CIA4CHw4BHQ4BHA0BKCEOKyMRKyQRLiMPMCURLiMMLiEKLiIIMCIILSEHLR8GLR8FLB4FKhwEJhkDJxgFHBEDHREDJBcBJhcDLhwHGw4CGw4DJhQDJBMDIxIDIQ8BIQ8CIA8CIA8CHg4BHg4BIhoGJB4KKCANMScSNCkVMyYRLyILLiIKMiMINCQIMSIHLx8FLh8DLh8ELB0DKRsCKxsDJxkCJxkCIRMBKRkFLRsGGg0DJhUFKxcFKhYFJBMDIRACIQ8BIQ8CIA8CIQ8CQDUjLCILJSAJIBsHLCIOMSMPMyQOMyYMMiQJLh8GMCAFMiMG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"
+      },
+      "reference": "bar-02.jpg",
+      "referenceHash": "f044e110ac75be8f58bdb46b6a20a91ba989b3ac541a9a3c8de80ce85b93af8d",
+      "processing": "model_edit",
+      "analysis": {
+        "imageType": "interior",
+        "visibleObjects": [
+          "室内双层挑高空间结构",
+          "一层吧台区域，深色木质台面",
+          "吧台后方木质酒柜带背光照明，陈列多排酒瓶",
+          "吧台前排列多把高脚凳，黄色软包坐垫，木质底座带底部灯带",
+          "天花板悬挂多个球形灯泡串灯",
+          "二层阳台位置有「Mamacita」标识牌框",
+          "墙面有多个壁龛和格子陈列架，摆放装饰陶罐和物品",
+          "可见拱形门洞和拱形窗洞结构",
+          "左侧有铁艺栏杆和绿色植物装饰",
+          "整体照明为暖黄色调",
+          "墙面为米黄色涂料",
+          "二层有铁艺护栏"
+        ],
+        "possibleScene": [
+          "酒馆氛围"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "none",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": []
+      },
+      "style": {
+        "mood": "夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑",
+        "palette": "暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调",
+        "lighting": "保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复",
+        "texture": "做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感"
+      },
+      "prompt": "Produce one enhanced 3:4 vertical photographic image. Image 1 is the complete authoritative identity reference. Remaining images are context from the SAME real store, not replacement products. The actual photo takes precedence over any guessed food names in the creative brief. Do not replace an uncertain ingredient or dish with a named guess. Keep the main subject complete in product photographs; partial views are appropriate only for deliberate detail photographs.\nVerified visible observations and explicitly uncertain details:\n{\"imageId\":\"xhs5-3\",\"type\":\"环境\",\"visibleFacts\":[\"室内双层挑高空间结构\",\"一层吧台区域，深色木质台面\",\"吧台后方木质酒柜带背光照明，陈列多排酒瓶\",\"吧台前排列多把高脚凳，黄色软包坐垫，木质底座带底部灯带\",\"天花板悬挂多个球形灯泡串灯\",\"二层阳台位置有「Mamacita」标识牌框\",\"墙面有多个壁龛和格子陈列架，摆放装饰陶罐和物品\",\"可见拱形门洞和拱形窗洞结构\",\"左侧有铁艺栏杆和绿色植物装饰\",\"整体照明为暖黄色调\",\"墙面为米黄色涂料\",\"二层有铁艺护栏\"],\"uncertainFacts\":[],\"qualityIssues\":[],\"potential\":\"室内环境氛围完整，展示空间层次和装修风格，适合餐饮场所内部环境展示\"}\nSeries brief independently derived from this input set:\n{\"mood\":\"夜间酒吧的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑\",\"palette\":\"暖琥珀色为主导，红色霓虹点睛，米黄墙面和深木色，热带绿植点缀，保留夜间照明的自然暖黄偏橙色调\",\"lighting\":\"保留夜间人工照明特征，串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感\",\"texture\":\"做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感\",\"contrast\":\"中等对比度，保留酒吧环境的柔和过渡，红色霓虹和串灯作为高光重点，不做成高反差黑白分明\",\"editingIntensity\":\"门头与室内空间轻度优化（已有良好曝光），饮品和装饰细节中高强度修复（严重欠曝需大幅提升可见度和色彩），所有图保持摄影真实感不做3D渲染效果\",\"evidence\":[{\"sourceIds\":[\"xhs5-1\",\"xhs5-2\",\"xhs5-3\"],\"observation\":\"三张图曝光正常，呈现暖黄色调夜间照明，墙面米黄橙粉、木质深棕、红色霓虹清晰可见\",\"decision\":\"将这组色温和亮度作为整体基准，不向冷色或过亮方向调整\"},{\"sourceIds\":[\"xhs5-5\",\"xhs5-6\",\"xhs5-8\"],\"observation\":\"三张严重欠曝，xhs5-5饮品暗部无细节但主体轮廓和色彩信息存在，xhs5-6/8装饰元素几乎不可见\",\"decision\":\"xhs5-5可通过大幅提亮、增强玻璃透光和液体色彩饱和度挽救，xhs5-8仅作装饰氛围参考需重建暗部，xhs5-6质量过差排除\"},{\"sourceIds\":[\"xhs5-3\"],\"observation\":\"双层空间层次清晰，串灯、酒柜背光、吧台灯带构成多层光源，黄色高脚凳是空间色彩重点\",\"decision\":\"复用此图时通过裁剪和描述重点差异化：全景展示空间、特写吧台细节、强调二层关系\"}]}\nPhotographer's frame-specific editing brief:\nWide-angle interior of double-height bar space with warm ambient lighting. Foreground bar counter with glowing backlit bottle display and yellow upholstered bar stools with base lighting. String bulb lights across ceiling, second-floor mezzanine with Mamacita signage visible. Preserve authentic architectural elements: arched doorways, niches with ceramic vessels, wrought iron railings, tropical plants. Slightly enhance exposure in shadow areas while maintaining intimate bar atmosphere. Clean minor distracting items without altering furniture layout or major decor. Correct slight lens distortion, keep vertical lines straight. Maintain warm yellow-orange color temperature from tungsten sources. 3:4 vertical emphasizing vertical spatial layers.\nKeep the food type and core appearance. Same-ingredient quantities, plating, camera position and food background consistent with the supplied real store may improve. Preserve actual architecture, shop signage, furniture and real people in scene/process shots. No invented ingredient types, food products, people or luxury renovation. Do not invent facts for unclear details. No added poster text, collage, watermark or CGI texture. This is a promotional photograph, make the subject appetizing and the scene clean and appealing while retaining natural photographic depth.",
+      "contextRecipeIds": [],
+      "input": "bar-02-input.jpg",
+      "inputHash": "4197b90f39fd1615b40c55eb54a87d6130b5e2c2fc85f81d0fd11798b06e76b2"
+    },
+    {
+      "id": "bar-03",
+      "order": 3,
+      "title": "三杯特调鸡尾酒",
+      "purpose": "展示酒水产品，三杯不同色泽饮品、玻璃杯透光质感、橙黄杯垫、背景烛光构成酒馆产品氛围",
+      "framing": "桌面静物特写，前景压花玻璃杯居中，左后方深棕色液体杯和右侧高杯浅黄绿色液体形成三角构图，背景红色蜡烛和金属镂空装饰框",
+      "signature": {
+        "hash": "d7ec9f0ba2f6d9746b0f1040e39b89cc456bb61b4548e6defaf5669fa58d463d",
+        "ratio": 0.75,
+        "pixels": "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"
+      },
+      "reference": "bar-03.jpg",
+      "referenceHash": "c76b4e3daa89d5d38888f518f475e97d4d3608558ce01c739539174c2be353e0",
+      "processing": "model_edit",
+      "analysis": {
+        "imageType": "food",
+        "visibleObjects": [
+          "桌面摆放三杯透明玻璃杯装饮品",
+          "前景杯为压花纹理玻璃杯，内有琥珀色透明液体和不规则冰块",
+          "左后方杯内有深棕色液体",
+          "右侧高杯内有浅黄绿色液体，杯中插有绿色叶片若干",
+          "三只杯子底部均放置橙黄色圆形杯垫",
+          "背景中央位置有红色点燃蜡烛",
+          "背景有金属镂空装饰框架",
+          "桌面为深色材质",
+          "整体环境光线昏暗，呈暖黄色调"
+        ],
+        "possibleScene": [
+          "酒馆饮品"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "none",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": []
+      },
+      "style": {
+        "mood": "夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑",
+        "palette": "暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调",
+        "lighting": "保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复",
+        "texture": "做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感"
+      },
+      "prompt": "Produce one enhanced 3:4 vertical photographic image. Image 1 is the complete authoritative identity reference. Remaining images are context from the SAME real store, not replacement products. The actual photo takes precedence over any guessed food names in the creative brief. Do not replace an uncertain ingredient or dish with a named guess. Keep the main subject complete in product photographs; partial views are appropriate only for deliberate detail photographs.\nVerified visible observations and explicitly uncertain details:\n{\"imageId\":\"xhs5-5\",\"type\":\"饮品\",\"visibleFacts\":[\"桌面摆放三杯透明玻璃杯装饮品\",\"前景杯为压花纹理玻璃杯，内有琥珀色透明液体和不规则冰块\",\"左后方杯内有深棕色液体\",\"右侧高杯内有浅黄绿色液体，杯中插有绿色叶片若干\",\"三只杯子底部均放置橙黄色圆形杯垫\",\"背景中央位置有红色点燃蜡烛\",\"背景有金属镂空装饰框架\",\"桌面为深色材质\",\"整体环境光线昏暗，呈暖黄色调\"],\"uncertainFacts\":[\"琥珀色液体的具体饮品类型\",\"右侧杯中绿色叶片是否为薄荷或其他香草\",\"左侧深色液体具体成分\"],\"qualityIssues\":[\"整体曝光不足，暗部细节丢失\",\"白平衡偏暖导致色彩还原不准确\",\"对比度较低\"],\"potential\":\"氛围感营造较好，适合展示酒吧或餐厅场景，但需提升曝光和色彩还原度\"}\nSeries brief independently derived from this input set:\n{\"mood\":\"夜间酒吧的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑\",\"palette\":\"暖琥珀色为主导，红色霓虹点睛，米黄墙面和深木色，热带绿植点缀，保留夜间照明的自然暖黄偏橙色调\",\"lighting\":\"保留夜间人工照明特征，串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感\",\"texture\":\"做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感\",\"contrast\":\"中等对比度，保留酒吧环境的柔和过渡，红色霓虹和串灯作为高光重点，不做成高反差黑白分明\",\"editingIntensity\":\"门头与室内空间轻度优化（已有良好曝光），饮品和装饰细节中高强度修复（严重欠曝需大幅提升可见度和色彩），所有图保持摄影真实感不做3D渲染效果\",\"evidence\":[{\"sourceIds\":[\"xhs5-1\",\"xhs5-2\",\"xhs5-3\"],\"observation\":\"三张图曝光正常，呈现暖黄色调夜间照明，墙面米黄橙粉、木质深棕、红色霓虹清晰可见\",\"decision\":\"将这组色温和亮度作为整体基准，不向冷色或过亮方向调整\"},{\"sourceIds\":[\"xhs5-5\",\"xhs5-6\",\"xhs5-8\"],\"observation\":\"三张严重欠曝，xhs5-5饮品暗部无细节但主体轮廓和色彩信息存在，xhs5-6/8装饰元素几乎不可见\",\"decision\":\"xhs5-5可通过大幅提亮、增强玻璃透光和液体色彩饱和度挽救，xhs5-8仅作装饰氛围参考需重建暗部，xhs5-6质量过差排除\"},{\"sourceIds\":[\"xhs5-3\"],\"observation\":\"双层空间层次清晰，串灯、酒柜背光、吧台灯带构成多层光源，黄色高脚凳是空间色彩重点\",\"decision\":\"复用此图时通过裁剪和描述重点差异化：全景展示空间、特写吧台细节、强调二层关系\"}]}\nPhotographer's frame-specific editing brief:\nGroup composition of three cocktails on dark table: textured glass with amber liquid and ice in foreground, dark brown drink in back left, tall pale yellow-green drink with fresh green leaves in back right, all on bright orange coasters. Dramatically lift overall exposure from severe underexposure while keeping moody bar ambiance. Enhance liquid colors distinctly: warm amber, rich brown, fresh citrus-green. Improve glass transparency and ice clarity. Red votive candle glow and metal lattice decoration visible in soft-focus background. Correct yellow-green color cast toward natural warm tones. Balance highlights on glass rims. Maintain intimate low-key lighting, not flat or clinical. 3:4 vertical showing all three drinks in social setting context.\nKeep the food type and core appearance. Same-ingredient quantities, plating, camera position and food background consistent with the supplied real store may improve. Preserve actual architecture, shop signage, furniture and real people in scene/process shots. No invented ingredient types, food products, people or luxury renovation. Do not invent facts for unclear details. No added poster text, collage, watermark or CGI texture. This is a promotional photograph, make the subject appetizing and the scene clean and appealing while retaining natural photographic depth.",
+      "contextRecipeIds": [],
+      "input": "bar-03-input.jpg",
+      "inputHash": "d7ec9f0ba2f6d9746b0f1040e39b89cc456bb61b4548e6defaf5669fa58d463d"
+    },
+    {
+      "id": "bar-04",
+      "order": 4,
+      "title": "街景中的Mamacita外观",
+      "purpose": "展示店铺与周边街道建筑的关系，左侧浅蓝灰色相邻建筑窗户、垂坠绿植、物品陈列与Mamacita门头形成完整街景",
+      "framing": "广角街景构图，包含左侧完整相邻建筑立面和Mamacita门头，上方多层现代建筑",
+      "signature": {
+        "hash": "4078b6e042ee11f09d5f8238d3d9c107b9695d2cee0d84c2603c4c66b94ca0b1",
+        "ratio": 1.3333333333333333,
+        "pixels": "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"
+      },
+      "reference": "bar-04.jpg",
+      "referenceHash": "37458936b314c66f7dd7d5890f72a8a9cf4981eb3ab9f5a499ba45046d8bc00f",
+      "processing": "model_edit",
+      "analysis": {
+        "imageType": "exterior",
+        "visibleObjects": [
+          "同一「Mamacita」红色霓虹灯招牌建筑的更广角度",
+          "左侧相邻建筑外立面为浅蓝灰色",
+          "左侧建筑有多扇木框窗户",
+          "左侧建筑窗台和立面悬挂垂坠绿色植物",
+          "左侧建筑窗内有物品陈列",
+          "左侧建筑外墙安装壁灯",
+          "左侧建筑窗下放置秤和花盆等物品",
+          "Mamacita建筑保持xhs5-1中的结构和装饰特征",
+          "上方可见多层现代建筑",
+          "夜间拍摄"
+        ],
+        "possibleScene": [
+          "酒馆氛围"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "none",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": []
+      },
+      "style": {
+        "mood": "夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑",
+        "palette": "暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调",
+        "lighting": "保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复",
+        "texture": "做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感"
+      },
+      "prompt": "Produce one enhanced 3:4 vertical photographic image. Image 1 is the complete authoritative identity reference. Remaining images are context from the SAME real store, not replacement products. The actual photo takes precedence over any guessed food names in the creative brief. Do not replace an uncertain ingredient or dish with a named guess. Keep the main subject complete in product photographs; partial views are appropriate only for deliberate detail photographs.\nVerified visible observations and explicitly uncertain details:\n{\"imageId\":\"xhs5-2\",\"type\":\"门头\",\"visibleFacts\":[\"同一「Mamacita」红色霓虹灯招牌建筑的更广角度\",\"左侧相邻建筑外立面为浅蓝灰色\",\"左侧建筑有多扇木框窗户\",\"左侧建筑窗台和立面悬挂垂坠绿色植物\",\"左侧建筑窗内有物品陈列\",\"左侧建筑外墙安装壁灯\",\"左侧建筑窗下放置秤和花盆等物品\",\"Mamacita建筑保持xhs5-1中的结构和装饰特征\",\"上方可见多层现代建筑\",\"夜间拍摄\"],\"uncertainFacts\":[],\"qualityIssues\":[],\"potential\":\"展示店铺与周边街景关系，构图完整，有助于呈现位置环境\"}\nSeries brief independently derived from this input set:\n{\"mood\":\"夜间酒吧的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑\",\"palette\":\"暖琥珀色为主导，红色霓虹点睛，米黄墙面和深木色，热带绿植点缀，保留夜间照明的自然暖黄偏橙色调\",\"lighting\":\"保留夜间人工照明特征，串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感\",\"texture\":\"做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感\",\"contrast\":\"中等对比度，保留酒吧环境的柔和过渡，红色霓虹和串灯作为高光重点，不做成高反差黑白分明\",\"editingIntensity\":\"门头与室内空间轻度优化（已有良好曝光），饮品和装饰细节中高强度修复（严重欠曝需大幅提升可见度和色彩），所有图保持摄影真实感不做3D渲染效果\",\"evidence\":[{\"sourceIds\":[\"xhs5-1\",\"xhs5-2\",\"xhs5-3\"],\"observation\":\"三张图曝光正常，呈现暖黄色调夜间照明，墙面米黄橙粉、木质深棕、红色霓虹清晰可见\",\"decision\":\"将这组色温和亮度作为整体基准，不向冷色或过亮方向调整\"},{\"sourceIds\":[\"xhs5-5\",\"xhs5-6\",\"xhs5-8\"],\"observation\":\"三张严重欠曝，xhs5-5饮品暗部无细节但主体轮廓和色彩信息存在，xhs5-6/8装饰元素几乎不可见\",\"decision\":\"xhs5-5可通过大幅提亮、增强玻璃透光和液体色彩饱和度挽救，xhs5-8仅作装饰氛围参考需重建暗部，xhs5-6质量过差排除\"},{\"sourceIds\":[\"xhs5-3\"],\"observation\":\"双层空间层次清晰，串灯、酒柜背光、吧台灯带构成多层光源，黄色高脚凳是空间色彩重点\",\"decision\":\"复用此图时通过裁剪和描述重点差异化：全景展示空间、特写吧台细节、强调二层关系\"}]}\nPhotographer's frame-specific editing brief:\nContextual night street view showing Mamacita's illuminated red neon sign within its neighborhood setting. Include adjacent blue-gray building with wooden windows, hanging plants, and decorative items on facade. Maintain authentic urban context with modern apartment buildings above. Balance exposure between bright neon and darker surrounding architecture. Clean up any significant clutter while preserving genuine street character and weathered building textures. Keep natural nighttime color palette with warm and cool light sources mixing. Straighten composition if tilted. 3:4 vertical framing showing building relationships.\nKeep the food type and core appearance. Same-ingredient quantities, plating, camera position and food background consistent with the supplied real store may improve. Preserve actual architecture, shop signage, furniture and real people in scene/process shots. No invented ingredient types, food products, people or luxury renovation. Do not invent facts for unclear details. No added poster text, collage, watermark or CGI texture. This is a promotional photograph, make the subject appetizing and the scene clean and appealing while retaining natural photographic depth.",
+      "contextRecipeIds": [],
+      "input": "bar-04-input.jpg",
+      "inputHash": "4078b6e042ee11f09d5f8238d3d9c107b9695d2cee0d84c2603c4c66b94ca0b1"
+    },
+    {
+      "id": "bar-05",
+      "order": 5,
+      "title": "吧台前的等待时刻",
+      "purpose": "展示顾客真实使用场景，人物坐在高脚凳前低头看手机的自然状态与xhs5-3空间环境形成对比",
+      "framing": "室内中景，从吧台区域拍摄双层空间，人物背影位于画面前景偏左，二层阳台和串灯作为背景",
+      "signature": {
+        "hash": "c2385e88b5ff2a3788c6f2fed239e2f75aac4682dc75a04f7362694888faed71",
+        "ratio": 1.3333333333333333,
+        "pixels": "CQMDCQMDCQMDCQMCCQMCCAMACAMACAMACAMACAMACQIAEAcBGw8CGQ4CFQoCEwoBDgYBJBcHJRcGDgYCEgkBJhcEHQ0DFwgCFQgAEwkAEggBFwoCGw4CHxEDIhMEGQ4CCQMDCQMDCQMDCQMDCQMDCQMBCQMCCQMCCgMACQIADgUCGA0CHRABGA0CFwsDEQgAGQ4EKxsHEQgCCwUBJRgFIhQEGQoCGAoCFgkBFAkAGQwCGw0CHQ8CIxMDHxECGg8CCQQDCQMDCQQDCQICCgIBCgIBCQMDCQMDCgMCCQIBFAkCHhACHREBFw0CFwsDEAcBLRwIKBkGCQMAHRIEJxcFHAwCGgoCGgoCGQoCHA0BIBACIxMCLBgDKRUCIhEDGg4DCQQBCQQBCQQBCQQCCQQBCQQCCgQCCwQDCAMDEwkDHxEDIRQDHhEDFw8CEwoBHREENiEKIxUFEggCJhYFIhADHg4CGwwCGQoCGwsCJBIEKRcDMBsDLBgBJxMCKBQDGA0CCwUCCwQCCwQBCgQBCgQBCwQBDQQCCgQCEAcCJBUDIBICIBMBHxEBGQ4CFAoBMB4IKRcHFQkDHg8DJBADIhACIA8DHQ0CGgsCFwkCJRMDMhwDLRkCIxEBIhACLRgCGw0CDAUCCwUCCwUCCwUCDAQCDgMCDgICDwUCIhMCJBQCHRABIxQBHREBFQoBIRMENiAIFQoCJhQEKxYFJREDIxACIRADIA4CHg4CHAwCLRgDMBsBJxQCIxACHw4BHg4CEgcCCwUCDAUCDAUCDAUCDgQCDQMCDQQCHA4CIxMALxwHNSAMIxQAHhABFQoCNB8HIxMEHQ8CMhsGKhQFKBIEJxIEJxMEIhADIhADHw4CKxYDKxYEIxEDHA0CEgcCDAQCDwUCDQQCDgQCDgQCDgUCCwIBFwsCVzgXRyoHNh8BNB8JLxwNGw0AFwsBJRUENiAGGw4CMBsFLRgGKhUEKhQEKxUFKBIEJhMDJBIDHg4CJBMDJRMDHg8DFQkCEAYBEQcBEAYBDgUCDQQBDgQBEAYCIhMIKRgGSy0NSSwGTy4EVjIEQyYCJhQBJxQJQScLJBQCLBgFNRwGMBkGLRcFLBcFKhUFKRIEJRIDIQ8DGg0CIBICKhYDIBMFGQ4EEwcBEwcAFQsDEQYCGAsGDQQAMSQXUjkcXzoEeEsGRysFTC0KSCoKPSMEIhAA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"
+      },
+      "reference": "bar-05.jpg",
+      "referenceHash": "d1d79da95e4fef9e09fbce694d3f5916932a01ac2f0de4ee1c4febf3318eef0f",
+      "processing": "model_edit",
+      "analysis": {
+        "imageType": "customers",
+        "visibleObjects": [
+          "与xhs5-3相同的室内双层空间，从不同角度拍摄",
+          "画面中一位人物坐在吧台前方的高脚凳上",
+          "人物身穿深色外套",
+          "人物背对镜头",
+          "人物低头看手持发光屏幕（疑似手机）",
+          "吧台、酒柜、串灯等环境元素与xhs5-3一致",
+          "画面右下角可见深色木质餐椅靠背",
+          "二层阳台区域有陈列架和装饰品",
+          "天花板悬挂串灯",
+          "多层空间结构清晰可见"
+        ],
+        "possibleScene": [
+          "酒馆氛围"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "none",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": []
+      },
+      "style": {
+        "mood": "夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑",
+        "palette": "暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调",
+        "lighting": "保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复",
+        "texture": "做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感"
+      },
+      "prompt": "Produce one enhanced 3:4 vertical photographic image. Image 1 is the complete authoritative identity reference. Remaining images are context from the SAME real store, not replacement products. The actual photo takes precedence over any guessed food names in the creative brief. Do not replace an uncertain ingredient or dish with a named guess. Keep the main subject complete in product photographs; partial views are appropriate only for deliberate detail photographs.\nVerified visible observations and explicitly uncertain details:\n{\"imageId\":\"xhs5-4\",\"type\":\"人物\",\"visibleFacts\":[\"与xhs5-3相同的室内双层空间，从不同角度拍摄\",\"画面中一位人物坐在吧台前方的高脚凳上\",\"人物身穿深色外套\",\"人物背对镜头\",\"人物低头看手持发光屏幕（疑似手机）\",\"吧台、酒柜、串灯等环境元素与xhs5-3一致\",\"画面右下角可见深色木质餐椅靠背\",\"二层阳台区域有陈列架和装饰品\",\"天花板悬挂串灯\",\"多层空间结构清晰可见\"],\"uncertainFacts\":[\"人物性别和面部特征无法确认\"],\"qualityIssues\":[\"画面包含人物，虽背对镜头但身形体态清晰，商业使用可能涉及肖像权\"],\"potential\":\"展示顾客实际场景使用状态，但因包含可识别人物轮廓，商业用途需考虑授权\"}\nSeries brief independently derived from this input set:\n{\"mood\":\"夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑\",\"palette\":\"暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调\",\"lighting\":\"保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复\",\"texture\":\"做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感\",\"editingIntensity\":\"xhs5-1/2/3曝光正常仅需轻度优化，xhs5-4人物场景轻度曝光调整，xhs5-5饮品中高强度修复(提亮暗部、增强玻璃透光和液体色彩饱和度)，xhs5-8高强度暗部重建(恢复绿植层次、灯笼质感、墙面肌理)，所有图保持摄影真实感不做3D渲染效果\",\"evidence\":[{\"sourceIds\":[\"xhs5-1\",\"xhs5-2\",\"xhs5-3\"],\"observation\":\"三张曝光正常，呈现暖黄色调夜间照明，墙面米黄橙粉、木质深棕、红色霓虹清晰可见\",\"decision\":\"将这组色温和亮度作为整体基准，不向冷色或过亮方向调整\"},{\"sourceIds\":[\"xhs5-5\",\"xhs5-8\"],\"observation\":\"两张严重欠曝，xhs5-5饮品暗部无细节但主体轮廓和色彩信息存在，xhs5-8装饰元素几不可见\",\"decision\":\"xhs5-5通过大幅提亮、增强玻璃透光和液体色彩饱和度挽救，xhs5-8需重建暗部恢复绿植层次、灯笼质感、墙面肌理\"},{\"sourceIds\":[\"xhs5-3\",\"xhs5-4\"],\"observation\":\"同一双层空间不同角度，xhs5-3为空间全景展示吧台酒柜串灯，xhs5-4加入背对人物低头看手机的真实使用场景\",\"decision\":\"两图信息增量明确：空间环境vs顾客使用状态，分别展示不重复\"}]}\nPhotographer's frame-specific editing brief:\nInterior medium shot of double-height bar space from different angle than full room view, showing a person seated on bar stool at counter, back to camera, wearing dark jacket, looking down at glowing phone screen in hands. Same bar setup with dark wood counter, backlit liquor shelves, globe string lights on ceiling, second-floor balcony with display shelves and decorative items, dark wooden dining chair back visible lower right. Multi-level spatial structure clear. Slightly boost exposure on figure and immediate surroundings while preserving ambient bar darkness, maintain warm yellow string light and shelf backlighting, enhance phone screen glow naturally, keep person's posture and clothing exactly as captured. Standard photo enhancement only, no facial reconstruction or figure alteration.\nPreserve the actual primary subject and its identity. For food subjects keep food type and core appearance; same-ingredient plating and appetizing photographic presentation may improve. For non-food scenes preserve actual architecture, signage, vessels, furniture, people and their actions. Improve lighting and atmosphere without inventing missing objects. No invented ingredient types, food products, people or luxury renovation. Do not invent facts for unclear details. No added poster text, collage, watermark or CGI texture. This is a promotional photograph, make the subject appetizing and the scene clean and appealing while retaining natural photographic depth.",
+      "contextRecipeIds": [],
+      "input": "bar-05-input.jpg",
+      "inputHash": "c2385e88b5ff2a3788c6f2fed239e2f75aac4682dc75a04f7362694888faed71"
+    },
+    {
+      "id": "bar-06",
+      "order": 6,
+      "title": "天井仰拍热带装饰",
+      "purpose": "展示垂直空间层次：天窗自然光、棕榈叶悬垂、木质层板与金属灯笼的立体装饰构成",
+      "framing": "保持仰视角度，强调从底层向天窗的视觉引导",
+      "signature": {
+        "hash": "4520402e3cb0becfb6d2888c38c38e8846cec8876859937868a36022dd3871d9",
+        "ratio": 0.75,
+        "pixels": "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"
+      },
+      "reference": "bar-06.jpg",
+      "referenceHash": "64da25e9883c1a6b12a811060dc4284c73f11b1b9e1e66b9d0ea752912694fa6",
+      "processing": "model_edit",
+      "analysis": {
+        "imageType": "interior",
+        "visibleObjects": [
+          "室内天井或中庭仰拍视角",
+          "顶部有玻璃天窗结构，透出灰白色天空",
+          "墙面为米黄色做旧质感",
+          "墙上有「CodZre」字样（字母Z清晰可见）",
+          "墙面有黑色线条装饰图案",
+          "顶部悬挂大型棕榈叶片",
+          "木质搁板上摆放多只金属灯笼",
+          "墙面有浅色浮雕或凸起装饰",
+          "多处垂吊和攀爬绿植"
+        ],
+        "possibleScene": [
+          "酒馆氛围"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "none",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": []
+      },
+      "style": {
+        "mood": "夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑",
+        "palette": "暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调",
+        "lighting": "保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复",
+        "texture": "做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感"
+      },
+      "prompt": "Produce one enhanced 3:4 vertical photographic image. Image 1 is the complete authoritative identity reference. Remaining images are context from the SAME real store, not replacement products. The actual photo takes precedence over any guessed food names in the creative brief. Do not replace an uncertain ingredient or dish with a named guess. Keep the main subject complete in product photographs; partial views are appropriate only for deliberate detail photographs.\nVerified visible observations and explicitly uncertain details:\n{\"imageId\":\"xhs5-6\",\"type\":\"环境\",\"visibleFacts\":[\"室内天井或中庭仰拍视角\",\"顶部有玻璃天窗结构，透出灰白色天空\",\"墙面为米黄色做旧质感\",\"墙上有「CodZre」字样（字母Z清晰可见）\",\"墙面有黑色线条装饰图案\",\"顶部悬挂大型棕榈叶片\",\"木质搁板上摆放多只金属灯笼\",\"墙面有浅色浮雕或凸起装饰\",\"多处垂吊和攀爬绿植\"],\"uncertainFacts\":[\"墙面装饰图案的具体内容和制作方式\",\"「CodZre」文字的完整拼写和含义\",\"灯笼材质是否为金属\"],\"qualityIssues\":[\"曝光严重不足，细节模糊\",\"色彩还原度差\",\"整体画面偏暗绿色调\"],\"potential\":\"空间层次感明确，热带风格装饰特点突出，但拍摄质量差需重新拍摄\"}\nSeries brief independently derived from this input set:\n{\"mood\":\"夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑\",\"palette\":\"暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调\",\"lighting\":\"保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复\",\"texture\":\"做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感\",\"editingIntensity\":\"xhs5-1/2/3曝光正常仅需轻度优化，xhs5-4人物场景轻度曝光调整，xhs5-5饮品中高强度修复(提亮暗部、增强玻璃透光和液体色彩饱和度)，xhs5-8高强度暗部重建(恢复绿植层次、灯笼质感、墙面肌理)，所有图保持摄影真实感不做3D渲染效果\",\"evidence\":[{\"sourceIds\":[\"xhs5-1\",\"xhs5-2\",\"xhs5-3\"],\"observation\":\"三张曝光正常，呈现暖黄色调夜间照明，墙面米黄橙粉、木质深棕、红色霓虹清晰可见\",\"decision\":\"将这组色温和亮度作为整体基准，不向冷色或过亮方向调整\"},{\"sourceIds\":[\"xhs5-5\",\"xhs5-8\"],\"observation\":\"两张严重欠曝，xhs5-5饮品暗部无细节但主体轮廓和色彩信息存在，xhs5-8装饰元素几不可见\",\"decision\":\"xhs5-5通过大幅提亮、增强玻璃透光和液体色彩饱和度挽救，xhs5-8需重建暗部恢复绿植层次、灯笼质感、墙面肌理\"},{\"sourceIds\":[\"xhs5-3\",\"xhs5-4\"],\"observation\":\"同一双层空间不同角度，xhs5-3为空间全景展示吧台酒柜串灯，xhs5-4加入背对人物低头看手机的真实使用场景\",\"decision\":\"两图信息增量明确：空间环境vs顾客使用状态，分别展示不重复\"}]}\nPhotographer's frame-specific editing brief:\nReconstruct an underexposed upward courtyard view using advanced model-based recovery. Substantially elevate exposure across the entire frame to reveal layered tropical decoration. Restore the natural texture and deep green color (#2D5C3F) of hanging palm fronds with realistic leaf structure. Rebuild the weathered plaster wall surface (#E8D5B8) showing authentic aging, cracks, and tonal variation. Enhance the metallic sheen of bronze lanterns and the wood grain of horizontal shelving. Clarify the silhouette of potted plants and decorative elements against the skylight above. Maintain the warm ambient glow from interior lighting while revealing architectural depth. Preserve photographic authenticity with natural grain rather than synthetic smoothness.\nPreserve the actual primary subject and its identity. For food subjects keep food type and core appearance; same-ingredient plating and appetizing photographic presentation may improve. For non-food scenes preserve actual architecture, signage, vessels, furniture, people and their actions. Improve lighting and atmosphere without inventing missing objects. No invented ingredient types, food products, people or luxury renovation. Do not invent facts for unclear details. No added poster text, collage, watermark or CGI texture. This is a promotional photograph, make the subject appetizing and the scene clean and appealing while retaining natural photographic depth.",
+      "contextRecipeIds": [
+        "bar-08"
+      ],
+      "input": "bar-06-input.jpg",
+      "inputHash": "4520402e3cb0becfb6d2888c38c38e8846cec8876859937868a36022dd3871d9"
+    },
+    {
+      "id": "bar-07",
+      "order": 7,
+      "title": "拍照互动瞬间",
+      "purpose": "捕捉顾客自然拍照动作，体现酒馆作为拍照打卡场所的社交属性与真实人物互动",
+      "framing": "保持原中近景人物构图，相机动作清晰可见",
+      "signature": {
+        "hash": "6b6d7bcc55eb31fa8a2fe748df5faec5a71d6893685aa598df5f6ff0eb1b82b4",
+        "ratio": 0.8723747980613893,
+        "pixels": "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"
+      },
+      "reference": "bar-07.jpg",
+      "referenceHash": "6df6cd7199aa4bb16738a4b18cb4e0d4c3d94cee309b53e48fd00ed936d3ce2e",
+      "processing": "photo_enhancement",
+      "analysis": {
+        "imageType": "customers",
+        "visibleObjects": [
+          "一位女性坐姿，双手举相机至面前做拍摄动作",
+          "穿深蓝色水手服上衣，袖口和领口有多道白色条纹",
+          "胸前有黄色布质领结或领巾",
+          "手持浅色相机，机身表面有卡通图案装饰",
+          "背景墙面挂有装裱画框",
+          "左侧可见浅色沙发一角",
+          "右下角桌面可见透明玻璃杯"
+        ],
+        "possibleScene": [
+          "酒馆氛围"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "low",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": [
+          "请确认人物照片的使用授权。"
+        ]
+      },
+      "style": {
+        "mood": "夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑",
+        "palette": "暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调",
+        "lighting": "保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复",
+        "texture": "做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感"
+      },
+      "prompt": "常规曝光、饱和度与轻度对比度调整，不重新生成人物。\n",
+      "contextRecipeIds": [
+        "bar-05"
+      ],
+      "adjustments": {
+        "modulate": {
+          "brightness": 1.5,
+          "saturation": 1.02
+        },
+        "linear": [
+          1.035,
+          -3
+        ],
+        "background": "#241c15"
+      },
+      "input": "bar-07-input.jpg",
+      "inputHash": "6b6d7bcc55eb31fa8a2fe748df5faec5a71d6893685aa598df5f6ff0eb1b82b4"
+    },
+    {
+      "id": "bar-08",
+      "order": 8,
+      "title": "热带绿植装饰角落",
+      "purpose": "展示装饰细节，大型棕榈叶、金属灯笼、垂吊藤蔓、壁灯、米黄做旧墙面构成热带风格层次",
+      "framing": "室内角落仰拍视角，从下向上拍摄木质搁板上的四只灯笼、顶部棕榈叶、多处绿植、壁灯和墙面",
+      "signature": {
+        "hash": "a77c0f46a571c47fcc3ad2590790bd5e0df5d88e7103c236571d481a5a7a6f8e",
+        "ratio": 0.75,
+        "pixels": "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"
+      },
+      "reference": "bar-08.jpg",
+      "referenceHash": "3310aacb2b30ae7724b5817cf8188f6683ff4b509397538647206f19f7f95403",
+      "processing": "model_edit",
+      "analysis": {
+        "imageType": "interior",
+        "visibleObjects": [
+          "室内角落仰拍视角",
+          "顶部悬挂多片大型棕榈叶",
+          "木质搁板上排列四只金属质感灯笼",
+          "墙面安装点亮的壁灯，呈暖黄色光",
+          "多处绿色植物，包括垂吊藤蔓和小型盆栽",
+          "墙面为米黄色做旧效果",
+          "右侧有黑色金属栅栏或窗框结构",
+          "左下角可见编织篮或类似物品"
+        ],
+        "possibleScene": [
+          "酒馆氛围"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "none",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": []
+      },
+      "style": {
+        "mood": "夜间酒馆的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑",
+        "palette": "暖琥珀色主导(#E9A568, #D4915A)，红色霓虹点睛(#FF3347)，米黄墙面(#E8D5B8)和深木色(#5C3D2E)，热带绿植点缀(#2D5C3F)，保留夜间照明的自然暖黄偏橙色调",
+        "lighting": "保留夜间人工照明特征：串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感，xhs5-5/8严重欠曝需大幅度曝光修复",
+        "texture": "做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感"
+      },
+      "prompt": "Produce one enhanced 3:4 vertical photographic image. Image 1 is the complete authoritative identity reference. Remaining images are context from the SAME real store, not replacement products. The actual photo takes precedence over any guessed food names in the creative brief. Do not replace an uncertain ingredient or dish with a named guess. Keep the main subject complete in product photographs; partial views are appropriate only for deliberate detail photographs.\nVerified visible observations and explicitly uncertain details:\n{\"imageId\":\"xhs5-8\",\"type\":\"环境\",\"visibleFacts\":[\"室内角落仰拍视角\",\"顶部悬挂多片大型棕榈叶\",\"木质搁板上排列四只金属质感灯笼\",\"墙面安装点亮的壁灯，呈暖黄色光\",\"多处绿色植物，包括垂吊藤蔓和小型盆栽\",\"墙面为米黄色做旧效果\",\"右侧有黑色金属栅栏或窗框结构\",\"左下角可见编织篮或类似物品\"],\"uncertainFacts\":[\"灯笼内光源类型\",\"植物具体品种\",\"墙面做旧是涂料效果还是真实年代感\"],\"qualityIssues\":[\"曝光严重不足，大面积暗部无细节\",\"壁灯周围高光溢出过曝\",\"对比度过高，中间调缺失\",\"整体偏色严重\"],\"potential\":\"装饰层次丰富，热带或地中海风格明显，但当前拍摄质量极差，仅可作为环境参考不可直接使用\"}\nSeries brief independently derived from this input set:\n{\"mood\":\"夜间酒吧的温暖私密氛围，热带装饰与复古建筑结合的独特场所感，适度昏暗但不压抑\",\"palette\":\"暖琥珀色为主导，红色霓虹点睛，米黄墙面和深木色，热带绿植点缀，保留夜间照明的自然暖黄偏橙色调\",\"lighting\":\"保留夜间人工照明特征，串灯、壁灯、烛光构成的层次光源，适度提亮暗部但不做成日光感，酒水需强化透光质感\",\"texture\":\"做旧墙面肌理、木质温润感、玻璃透明度、金属灯具光泽、植物自然形态，避免过度锐化或塑料质感\",\"contrast\":\"中等对比度，保留酒吧环境的柔和过渡，红色霓虹和串灯作为高光重点，不做成高反差黑白分明\",\"editingIntensity\":\"门头与室内空间轻度优化（已有良好曝光），饮品和装饰细节中高强度修复（严重欠曝需大幅提升可见度和色彩），所有图保持摄影真实感不做3D渲染效果\",\"evidence\":[{\"sourceIds\":[\"xhs5-1\",\"xhs5-2\",\"xhs5-3\"],\"observation\":\"三张图曝光正常，呈现暖黄色调夜间照明，墙面米黄橙粉、木质深棕、红色霓虹清晰可见\",\"decision\":\"将这组色温和亮度作为整体基准，不向冷色或过亮方向调整\"},{\"sourceIds\":[\"xhs5-5\",\"xhs5-6\",\"xhs5-8\"],\"observation\":\"三张严重欠曝，xhs5-5饮品暗部无细节但主体轮廓和色彩信息存在，xhs5-6/8装饰元素几乎不可见\",\"decision\":\"xhs5-5可通过大幅提亮、增强玻璃透光和液体色彩饱和度挽救，xhs5-8仅作装饰氛围参考需重建暗部，xhs5-6质量过差排除\"},{\"sourceIds\":[\"xhs5-3\"],\"observation\":\"双层空间层次清晰，串灯、酒柜背光、吧台灯带构成多层光源，黄色高脚凳是空间色彩重点\",\"decision\":\"复用此图时通过裁剪和描述重点差异化：全景展示空间、特写吧台细节、强调二层关系\"}]}\nPhotographer's frame-specific editing brief:\nAtmospheric corner detail shot looking upward: large tropical palm fronds hanging from above, wooden shelf displaying four metal lanterns with warm glow, illuminated wall sconce casting yellow light on textured cream-colored aged wall surface. Cascading green vines and small potted plants adding lush layers. Black metal lattice or window frame structure on right. Heavily lift exposure from severely underexposed source to reveal decorative details while maintaining intimate mood lighting. Reconstruct shadow details in foliage and wall texture. Enhance warm yellow light from sconce and lanterns. Clean excessive color cast toward natural warm earth tones. Keep authentic aged wall finish and tropical decor style. Not over-lit or studio feel. 3:4 vertical emphasizing upward decorative layers.\nKeep the food type and core appearance. Same-ingredient quantities, plating, camera position and food background consistent with the supplied real store may improve. Preserve actual architecture, shop signage, furniture and real people in scene/process shots. No invented ingredient types, food products, people or luxury renovation. Do not invent facts for unclear details. No added poster text, collage, watermark or CGI texture. This is a promotional photograph, make the subject appetizing and the scene clean and appealing while retaining natural photographic depth.",
+      "contextRecipeIds": [],
+      "input": "bar-08-input.jpg",
+      "inputHash": "a77c0f46a571c47fcc3ad2590790bd5e0df5d88e7103c236571d481a5a7a6f8e"
+    },
+    {
+      "id": "river-01",
+      "order": 9,
+      "title": "璀璨江岸·都市夜韵",
+      "purpose": "作为城市形象宣传主视觉，展现滨水商业区夜间繁华氛围与多层次灯光景观，提升视觉冲击力与专业度",
+      "framing": "保持完整构图：前景露台占下三分之一，中景江面与游船居中，远景高层建筑群占上半幅，钟楼保留于右侧前景边缘",
+      "signature": {
+        "hash": "b92b6d27442285cca0eb393708f042634bb85fbdf52f00253a265d6ae7481eac",
+        "ratio": 0.75,
+        "pixels": "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"
+      },
+      "reference": "river-01.jpg",
+      "referenceHash": "b6374a5ed26110501549d3c843e2f4be9ea35aedb95503c95954df4423d04484",
+      "processing": "model_edit",
+      "analysis": {
+        "imageType": "other",
+        "visibleObjects": [
+          "高层住宅楼立面有红色横向灯光装饰，顶部有白色弧形灯带",
+          "中景有传统建筑屋檐轮廓与现代商业综合体，可见蓝白色招牌文字",
+          "江面可见三艘游船，包括左边缘部分露出的一艘，保留其位置及数量",
+          "前景为滨水露台，有金色轮廓灯勾勒栏杆与廊道，地面投影大幅彩色广告",
+          "露台上有散坐的游客剪影，部分人使用手机",
+          "右侧前景有灯塔或钟楼结构，表盘清晰",
+          "水面有灯光倒影，呈流动光斑状"
+        ],
+        "possibleScene": [
+          "江岸夜景"
+        ],
+        "qualityScore": 75,
+        "privacyRisk": "none",
+        "usable": true,
+        "rejectionReason": "",
+        "visibleTexts": [],
+        "textRisk": "none",
+        "riskReasons": []
+      },
+      "style": {
+        "mood": "繁华而有层次的都市夜晚，既展现商业活力也保留夜景深邃感",
+        "palette": "深蓝夜空、暖黄灯带、红棕建筑立面、冷白街灯、水面反光的青蓝与金橙",
+        "lighting": "多层光源：高层建筑红光、滨水步道暖黄轮廓灯、游船白光、前景露台金色线灯、水面镜面反射",
+        "texture": "玻璃幕墙反光、水面流动光斑、木质栏杆、传统建筑屋檐剪影"
+      },
+      "prompt": "Produce one enhanced 3:4 vertical photographic image. Image 1 is the complete authoritative identity reference. Remaining images are context from the SAME real store, not replacement products. The actual photo takes precedence over any guessed food names in the creative brief. Do not replace an uncertain ingredient or dish with a named guess. Keep the main subject complete in product photographs; partial views are appropriate only for deliberate detail photographs.\nVerified visible observations and explicitly uncertain details:\n{\"imageId\":\"night-user-1\",\"type\":\"cityscape_night_riverside\",\"visibleFacts\":[\"高层住宅楼立面有红色横向灯光装饰，顶部有白色弧形灯带\",\"中景有传统建筑屋檐轮廓与现代商业综合体，可见蓝白色招牌文字\",\"江面可见三艘游船，包括左边缘部分露出的一艘，保留其位置及数量\",\"前景为滨水露台，有金色轮廓灯勾勒栏杆与廊道，地面投影大幅彩色广告\",\"露台上有散坐的游客剪影，部分人使用手机\",\"右侧前景有灯塔或钟楼结构，表盘清晰\",\"水面有灯光倒影，呈流动光斑状\"],\"uncertainFacts\":[\"招牌文字模糊，无法确认具体商家名称或地标\",\"建筑具体楼层数与建筑风格细节因夜景与距离受限\"],\"qualityIssues\":[\"整体曝光偏暗，暗部细节丢失，前景人物与植物几乎全黑\",\"灯光色彩混杂但分离度不足，缺乏清晰的冷暖对比层次\",\"水面反光较弱，未能充分体现夜景的镜面质感\",\"前景广告投影过于饱和跳跃，与整体氛围不协调\",\"建筑立面红光偏暗红，缺乏通透感\",\"天空与远景建筑几乎融为一体，缺少空间纵深\"]}\nSeries brief independently derived from this input set:\n{\"mood\":\"繁华而有层次的都市夜晚，既展现商业活力也保留夜景深邃感\",\"palette\":\"深蓝夜空、暖黄灯带、红棕建筑立面、冷白街灯、水面反光的青蓝与金橙\",\"lighting\":\"多层光源：高层建筑红光、滨水步道暖黄轮廓灯、游船白光、前景露台金色线灯、水面镜面反射\",\"texture\":\"玻璃幕墙反光、水面流动光斑、木质栏杆、传统建筑屋檐剪影\",\"editingIntensity\":\"中等强度——提升灯光通透度与色彩分离度，压低杂乱暗部，增强水面反光，保持夜景真实感，不做白天化或过度HDR\"}\nPhotographer's frame-specific editing brief:\nEnhance this riverside cityscape night photograph for promotional use while preserving authentic nighttime atmosphere. Lift midtones selectively to reveal architectural detail in the red-lit residential towers—boost luminosity and separation of the horizontal red light strips so they glow with clarity against dark facade, and brighten the white curved rooftop light arches to create stronger visual anchor. Preserve deep blacks in unlit building sections to maintain night depth. Strengthen the cool-warm color contrast: slightly shift the red building lights toward warm amber-red for inviting glow, keep the white streetlights and cruise ship outline lights crisp and neutral-white, and enhance the golden-yellow linear lighting on the foreground riverside terrace railings and pathways to define spatial structure. Deepen the river water to rich navy-blue base, then amplify the reflections of all light sources—particularly the golden terrace lights and warm ship lights—to create glowing, flowing light streaks on water surface with slight motion blur for liveliness. Subtly lift exposure on the traditional architecture silhouette in midground to separate it from the commercial building behind, revealing roofline detail without losing night mood. Reduce saturation and luminosity of the foreground projected advertisement to 60-70% of original intensity so it integrates as ambient color rather than competing focal point. Gently lift shadows on foreground human figures and plants just enough to suggest presence and scale without eliminating silhouette mystery. Separate sky from distant buildings by introducing very subtle gradient—deepest blue-black at top transitioning to slightly lighter near horizon—to restore spatial depth. Apply localized clarity boost to the clock tower on right to sharpen the clock face and structural lines as recognizable landmark element. Use graduated filter to balance exposure between bright foreground and darker upper buildings. Final color grade: deepen overall contrast with gentle S-curve, add warmth to highlights (+3 Kelvin) and slight cool tint to shadows (-2 Kelvin) for dimensional color layering. Maintain grain structure and avoid HDR halo artifacts. Output should feel professionally edited for city tourism or real estate marketing: vibrant, layered, and inviting, yet unmistakably nighttime with preserved shadow depth and authentic light behavior.\nPreserve the actual primary subject and its identity. For food subjects keep food type and core appearance; same-ingredient plating and appetizing photographic presentation may improve. For non-food scenes preserve actual architecture, signage, vessels, furniture, people and their actions. Improve lighting and atmosphere without inventing missing objects. No invented ingredient types, food products, people or luxury renovation. Do not invent facts for unclear details. No added poster text, collage, watermark or CGI texture. This is a promotional photograph, make the subject appetizing and the scene clean and appealing while retaining natural photographic depth.",
+      "contextRecipeIds": [],
+      "input": "river-01-input.jpg",
+      "inputHash": "b92b6d27442285cca0eb393708f042634bb85fbdf52f00253a265d6ae7481eac"
+    }
+  ]
+}

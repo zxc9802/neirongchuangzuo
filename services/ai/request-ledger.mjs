@@ -304,6 +304,15 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
         return copy(updated);
       });
     },
+    recordProviderRequest(id, providerRequestId) {
+      return run(async () => {
+        const record = records.get(id);
+        if (!record || record.status !== 'dispatched' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(providerRequestId || '')) throw error('INVALID_REQUEST_STATUS', '上游任务编号无法保存。');
+        if (record.providerRequestId && record.providerRequestId !== providerRequestId) throw error('REQUEST_ID_CONFLICT', '上游任务编号不一致。', 409);
+        await persist(new Map(records).set(id, { ...record, providerRequestId }));
+        return copy(records.get(id));
+      });
+    },
     finish(id, details = {}) {
       return run(async () => {
         const record = records.get(id);

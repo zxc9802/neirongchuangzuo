@@ -10,6 +10,7 @@ import { createImageRetention } from './retention.mjs';
 import { displayModelName } from '../../design/model-labels.js';
 import { GENERATION_MODES, imagePlan, imageRequestId, selectImageReferences } from './image-sets.mjs';
 import { createImageUploads } from './image-uploads.mjs';
+import { imageWithFallback, FAL_IMAGE_MODEL } from './image-fallback.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const MB = 1024 * 1024;
@@ -23,7 +24,7 @@ class ApiError extends Error {
 export function loadAIConfig(env = process.env) {
   let local = {};
   try {
-    local = Object.fromEntries(readFileSync(join(ROOT, '.env.local'), 'utf8').split(/\r?\n/).filter(line => /^(OPENLUX|AI)_[A-Z_]+=/.test(line)).map(line => {
+    local = Object.fromEntries(readFileSync(join(ROOT, '.env.local'), 'utf8').split(/\r?\n/).filter(line => /^(OPENLUX|AI|FAL)_[A-Z_]+=/.test(line)).map(line => {
       const index = line.indexOf('='); return [line.slice(0, index), line.slice(index + 1).trim().replace(/^(['"])(.*)\1$/, '$2')];
     }));
   } catch { /* Optional local configuration. */ }
@@ -34,7 +35,9 @@ export function loadAIConfig(env = process.env) {
     if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new ApiError('调用上限配置无效，请联系管理员。', 503, 'INVALID_LIMIT_CONFIG');
     return Number(raw);
   };
-  return { apiKey: value('OPENLUX_API_KEY'), chatModel: value('OPENLUX_CHAT_MODEL') || 'gpt-6-luna', imageModel: value('OPENLUX_IMAGE_MODEL') || 'gpt-image-2.5-sunburst-c', baseUrl: 'https://api.openlux.ai/v1', limits: { imageDaily: limit('AI_IMAGE_DAILY_LIMIT', 20), chatDaily: limit('AI_CHAT_DAILY_LIMIT', 100), perMinute: limit('AI_REQUESTS_PER_MINUTE', 10) } };
+  return { apiKey: value('OPENLUX_API_KEY'), chatModel: value('OPENLUX_CHAT_MODEL') || 'gpt-6-luna',
+    imageTextModel: value('OPENLUX_IMAGE_TEXT_MODEL') || 'claude-opus-5-5',
+    imageModel: value('OPENLUX_IMAGE_MODEL') || 'gpt-image-2.5-sunburst-c', falImageKey: value('FAL_IMAGE_KEY'), falImageModel: value('FAL_IMAGE_MODEL') || FAL_IMAGE_MODEL, baseUrl: 'https://api.openlux.ai/v1', limits: { imageDaily: limit('AI_IMAGE_DAILY_LIMIT', 20), chatDaily: limit('AI_CHAT_DAILY_LIMIT', 100), perMinute: limit('AI_REQUESTS_PER_MINUTE', 10) } };
 }
 
 function json(res, status, body) {
@@ -292,13 +295,13 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     task.code = error?.code && (error instanceof ApiError || ['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error.code)) ? error.code : 'RESULT_FAILED';
     task.failedAt = new Date(now()).toISOString();
   }
-  async function dispatch(id, task) {
+  async function dispatch(id, task, operation = () => ledger.markDispatched(id)) {
     for (;;) {
       if (task && (closing || unhealthy)) throw new ApiError('服务已停止后续生成，请查询已完成图片。', 503, closing ? 'SERVICE_CLOSING' : 'STORAGE_FAILED');
       try {
-        await ledger.markDispatched(id);
+        const result = await operation();
         if (task) delete task.waitingForRateLimit;
-        return;
+        return result;
       } catch (error) {
         if (task && error.code === 'RATE_LIMITED' && (config.limits?.perMinute ?? 10) > 0) {
           if (!task.waitingForRateLimit) { task.waitingForRateLimit = true; await persist(task); }
@@ -311,6 +314,27 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       }
     }
   }
+  async function generateImage(id, task, form, maximum = 1) {
+    try {
+      return await imageWithFallback({ config, ledger, id, form, fetchImpl, sleepImpl: rateLimitWait, isStopping: () => closing || unhealthy,
+        dispatch: operation => dispatch(id, task, operation), primary: body => provider('/images/edits', body, 10 * 60_000),
+        consume: async info => {
+          if (!Array.isArray(info.data.data) || !info.data.data.length || info.data.data.length > maximum) throw new ApiError('模型没有返回完整图片，请保留任务记录并检查供应商记录。', 502, 'EMPTY_RESULT');
+          const decodedImages = [];
+          for (const image of info.data.data) {
+            const bytes = image.b64_json ? Buffer.from(image.b64_json, 'base64') : typeof image.url === 'string' ? await downloadImpl(image.url) : null;
+            if (!bytes || bytes.length > 32 * MB) throw new ApiError('生成图片内容不可用。', 502, 'INVALID_IMAGE');
+            let type;
+            try { type = imageType(bytes); } catch { throw new ApiError('生成图片内容不可用。', 502, 'INVALID_IMAGE'); }
+            decodedImages.push({ bytes, ...type });
+          }
+          return { ...info, decodedImages };
+        } });
+    } catch (error) {
+      if (error instanceof ApiError || ['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED', 'AI_LEDGER_UNAVAILABLE'].includes(error.code)) throw error;
+      throw new ApiError('图片生成暂时无法完成，请稍后查询原任务。', error.status || 502, error.code || 'INVALID_IMAGE');
+    }
+  }
   async function runImage(task, images) {
     let info;
     try {
@@ -320,15 +344,10 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       form.set('n', '1'); form.set('size', SIZES[task.ratio]); form.set('quality', task.quality);
       form.set('response_format', 'b64_json'); form.set('format', 'png');
       for (const image of selectImageReferences(images)) form.append('image', new Blob([image.bytes], { type: image.mime }), image.name);
-      await dispatch(task.id);
-      info = await provider('/images/edits', form, 10 * 60_000);
-      const data = info.data;
-      if (!Array.isArray(data.data) || !data.data.length || data.data.length > 4 || credits && data.data.length !== 1) throw new ApiError('模型没有返回完整的单张图片，请保留任务记录并检查供应商记录。', 502, 'EMPTY_RESULT');
+      info = await generateImage(task.id, task, form, credits ? 1 : 4);
       const output = [];
-      for (const [index, image] of data.data.entries()) {
-        const bytes = image.b64_json ? Buffer.from(image.b64_json, 'base64') : typeof image.url === 'string' ? await downloadImpl(image.url) : null;
-        if (!bytes || bytes.length > 32 * MB) throw new ApiError('生成图片内容不可用。', 502, 'INVALID_IMAGE');
-        const type = imageType(bytes); const filename = `result-${index + 1}.${type.ext}`;
+      for (const [index, image] of info.decodedImages.entries()) {
+        const { bytes, ext } = image; const filename = `result-${index + 1}.${ext}`;
         await writeFile(join(await retention.taskDirectory(task.id), filename), bytes, { flag: 'wx', mode: 0o600 });
         output.push({ url: `/api/ai/media/${task.id}/${filename}`, filename, index: index + 1, label: '单图', style: '单图' });
       }
@@ -363,24 +382,24 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
             form.append('image', new Blob([firstResult.bytes], { type: firstResult.mime }), `series-style-reference.${firstResult.ext}`);
             form.set('prompt', `${prompt}\n最后一张附图是本系列首张成功成品，仅参考其色调、字体、版式和光线等视觉设计，不作为门店、菜品、人物、产品或文字事实依据。事实依据始终为前面的本张用户原图。`);
           }
-          await dispatch(requestId, task); dispatched = true;
-          info = await provider('/images/edits', form, 10 * 60_000);
-          if (!Array.isArray(info.data.data) || info.data.data.length !== 1) throw new ApiError('模型没有返回单张完整图片，本张未交付。', 502, 'EMPTY_RESULT');
-          const image = info.data.data[0];
-          const bytes = image.b64_json ? Buffer.from(image.b64_json, 'base64') : typeof image.url === 'string' ? await downloadImpl(image.url) : null;
-          if (!bytes || bytes.length > 32 * MB) throw new ApiError('生成图片内容不可用。', 502, 'INVALID_IMAGE');
-          const type = imageType(bytes), filename = `result-${plan.index}.${type.ext}`;
+          info = await generateImage(requestId, task, form); dispatched = true;
+          const { bytes, mime, ext } = info.decodedImages[0];
+          const filename = `result-${plan.index}.${ext}`;
           await writeFile(join(await retention.taskDirectory(task.id), filename), bytes, { flag: 'wx', mode: 0o600 });
           task.images.push({ url: `/api/ai/media/${task.id}/${filename}`, filename, index: plan.index, label: plan.label, style: plan.style });
           task.completedCount = task.images.length;
-          firstResult ||= { bytes, ...type };
+          firstResult ||= { bytes, mime, ext };
           task.updatedAt = new Date(now()).toISOString();
           await persist(task);
           await finishRequest(requestId, { status: 'completed', usage: info.data.usage, providerRequestId: info.providerRequestId });
         } catch (error) {
           lastError = error;
           if (!(error instanceof ApiError) && !['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error.code)) failStorage();
-          if (!terminal.has(requestId)) await finishRequest(requestId, { status: !dispatched ? 'cancelled' : error.code === 'UPSTREAM_UNCERTAIN' ? 'uncertain' : 'failed', code: error.code || 'RESULT_FAILED', usage: info?.data?.usage, providerRequestId: info?.providerRequestId });
+          if (!terminal.has(requestId)) {
+            const record = await ledger.get(requestId);
+            dispatched ||= Number.isFinite(record?.dispatchedAt);
+            await finishRequest(requestId, { status: !dispatched ? 'cancelled' : error.code === 'UPSTREAM_UNCERTAIN' ? 'uncertain' : 'failed', code: error.code || 'RESULT_FAILED', usage: info?.data?.usage, providerRequestId: info?.providerRequestId });
+          }
           if (unhealthy || stopCodes.has(error.code)) break;
         }
       }

@@ -30,7 +30,10 @@ export function validateFoodAppearance(value) {
     || !strings(value.texture, 8) || !strings(value.distinctiveFeatures, 10) || !strings(value.uncertainDetails, 8)
     || value.dishCount !== null && (!Number.isInteger(value.dishCount) || value.dishCount < 1 || value.dishCount > 12)
     || value.pieceCount !== null && (!Number.isInteger(value.pieceCount) || value.pieceCount < 1 || value.pieceCount > 120)) bad('菜品视觉特征格式不正确。');
-  return Object.fromEntries(['description','portion','arrangement','vessel','colors','visibleComponents','texture','distinctiveFeatures','uncertainDetails','dishCount','pieceCount'].map(key => [key,value[key]]));
+  return { ...Object.fromEntries(['description','portion','arrangement','vessel','colors','visibleComponents','texture','distinctiveFeatures','uncertainDetails','dishCount','pieceCount'].map(key => [key,value[key]])),
+    ...(value.identityScope === 'dish' && rectangle(value.subjectBox) && value.subjectBox.width >= .15 && value.subjectBox.height >= .15
+      && Number.isFinite(value.subjectConfidence) && value.subjectConfidence >= .8 && value.subjectConfidence <= 1
+      ? { identityScope: 'dish', subjectBox: Object.fromEntries(['left','top','width','height'].map(key => [key,value.subjectBox[key]])), subjectConfidence: value.subjectConfidence } : {}) };
 }
 
 export function validateFoodRenderReview(value) {
@@ -105,6 +108,7 @@ export function validateAnalysis(value, imageIds) {
       rejectionReason: item.privacyRisk === 'high' ? item.rejectionReason.trim() || '照片存在严重隐私风险，请换用已获授权且风险可控的素材。'
         : unsafeText ? item.rejectionReason.trim() || '图片存在无法安全处理的私人敏感信息或严重宣传风险，请换图。' : item.rejectionReason,
       visibleTexts: item.visibleTexts ?? [], textRisk: crop ? 'none' : unsafeText ? 'high' : item.textRisk, riskReasons: item.riskReasons ?? [],
+      ...([0, 90, 180, 270].includes(item.rotation) ? { rotation: item.rotation } : {}),
       ...(item.imageType === 'food' && SCENE_TYPES.includes(item.presentation?.sceneType) && CAMERA_ANGLES.includes(item.presentation?.cameraAngle)
         ? { presentation: { sceneType: item.presentation.sceneType, cameraAngle: item.presentation.cameraAngle } } : {}),
       ...(foodAppearance ? { foodAppearance } : {}),
