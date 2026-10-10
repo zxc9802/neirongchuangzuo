@@ -93,7 +93,7 @@ async function imagePage(t, { config = {}, remaining = 20, tasks = [], uploadDra
   globalThis.fetch = async (url, options = {}) => {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ url, method: options.method || 'GET', body });
-    if (url.endsWith('/status')) return Response.json({ image: { configured: true, model: 'Max模型', remaining, dailyLimit: 20 } });
+    if (url.endsWith('/status')) return Response.json({ image: { configured: true, model: 'Max模型', remaining, dailyLimit: remaining === null ? null : 20 } });
     if (url.includes('/image-uploads')) {
       if(url==='/api/ai/image-uploads'&&options.method==='POST'){upload={id:body.requestId,imageCount:body.imageCount,uploadedCount:0,submitted:false};return Response.json({upload});}
       if(options.method==='POST'){upload.uploadedCount=body.startIndex+body.images.length;upload.complete=upload.uploadedCount===upload.imageCount;return Response.json({upload});}
@@ -283,6 +283,15 @@ test('an interrupted upload survives page reload and resumes remaining photos un
   assert.equal(generated.body.requestId, draft.id);
   assert.equal(app.calls.filter(call => call.url === '/api/ai/image-uploads' && call.method === 'POST').length, 1);
   assert.deepEqual(app.calls.filter(call => call.url.endsWith('/batches') && call.method === 'POST').map(call => call.body.startIndex), [0, 3, 6]);
+});
+
+test('unlimited daily image quota keeps the largest image set available to submit', async t => {
+  const app = await imagePage(t, { config: { generationMode: 'series', count: '15' }, remaining: null });
+  assert.equal(app.nodes.get('[data-action="generate"]').disabled, false);
+  app.module.handleImageGenerationAction('generate', {}, app.ctx);
+  await app.settle(() => app.calls.some(call => call.url === '/api/ai/images' && call.method === 'POST'));
+  assert.equal(app.calls.find(call => call.url === '/api/ai/images' && call.method === 'POST').body.outputCount, 15);
+  assert.doesNotMatch(app.nodes.get('#input-requirement').textContent, /今日.*上限|限额|明日/);
 });
 
 test('fifteen image outputs require fifteen remaining calls without hiding retained legacy counts', async t => {

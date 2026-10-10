@@ -44,6 +44,34 @@ test('concurrent reservations atomically respect daily limits; duplicate ids reu
   assert.deepEqual((await ledger.summary()).used, { image: 2, chat: 1 });
 });
 
+test('removing the image daily cap preserves exhausted history while chat and minute limits remain enforced', async t => {
+  let clock = at;
+  const { create, file } = await fixture(t, { now: () => clock, limits: { imageDaily: 20, chatDaily: 1, perMinute: 100 } });
+  const previous = create();
+  for (let index = 1; index <= 20; index++) {
+    const id = `previous-${index}`;
+    await previous.reserve(input(id)); await previous.markDispatched(id); await previous.finish(id, { status: 'completed' });
+  }
+  await assert.rejects(previous.reserve(input('blocked-by-old-cap')), { code: 'DAILY_QUOTA_EXCEEDED' });
+  await previous.close(); clock += 60_001;
+  const ledger = create({ limits: { imageDaily: null, chatDaily: 1, perMinute: 2 } });
+  assert.equal((await ledger.summary()).used.image, 20);
+  assert.equal((await ledger.summary()).remaining.image, null);
+  await ledger.reserveBatch([input('image-21'), input('image-22'), input('image-23')]);
+  await ledger.markDispatched('image-21'); await ledger.finish('image-21', { status: 'completed' });
+  await ledger.markDispatched('image-22'); await ledger.finish('image-22', { status: 'failed' });
+  await assert.rejects(ledger.markDispatched('image-23'), { code: 'RATE_LIMITED' });
+  clock += 60_001;
+  await ledger.markDispatched('image-23'); await ledger.finish('image-23', { status: 'completed' });
+  await ledger.reserve(input('chat-1', { kind: 'chat' })); await ledger.markDispatched('chat-1'); await ledger.finish('chat-1', { status: 'completed' });
+  await assert.rejects(ledger.reserve(input('chat-2', { kind: 'chat' })), { code: 'DAILY_QUOTA_EXCEEDED' });
+  assert.equal((await ledger.reserve(input('image-21'))).created, false);
+  const summary = JSON.parse(JSON.stringify(await ledger.summary()));
+  assert.equal(summary.limits.imageDaily, null); assert.deepEqual(summary.used, { image: 23, chat: 1 });
+  assert.deepEqual(summary.remaining, { image: null, chat: 0 });
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).records.length, 24);
+});
+
 test('batch reservations atomically reserve every image or none, and duplicate batches never consume again', async t => {
   const { create, file } = await fixture(t, { limits: { imageDaily: 4, perMinute: 10 } });
   const ledger = create();

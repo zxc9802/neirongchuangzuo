@@ -32,12 +32,13 @@ export function loadAIConfig(env = process.env) {
   const limit = (name, fallback) => {
     const raw = value(name);
     if (raw === '') return fallback;
+    if (fallback === null && raw === 'unlimited') return null;
     if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new ApiError('调用上限配置无效，请联系管理员。', 503, 'INVALID_LIMIT_CONFIG');
     return Number(raw);
   };
   return { apiKey: value('OPENLUX_API_KEY'), chatModel: value('OPENLUX_CHAT_MODEL') || 'gpt-6-luna',
     imageTextModel: value('OPENLUX_IMAGE_TEXT_MODEL') || 'claude-opus-5-5',
-    imageModel: value('OPENLUX_IMAGE_MODEL') || 'gpt-image-2.5-sunburst-c', falImageKey: value('FAL_IMAGE_KEY'), falImageModel: value('FAL_IMAGE_MODEL') || FAL_IMAGE_MODEL, baseUrl: 'https://api.openlux.ai/v1', limits: { imageDaily: limit('AI_IMAGE_DAILY_LIMIT', 20), chatDaily: limit('AI_CHAT_DAILY_LIMIT', 100), perMinute: limit('AI_REQUESTS_PER_MINUTE', 10) } };
+    imageModel: value('OPENLUX_IMAGE_MODEL') || 'gpt-image-2.5-sunburst-c', falImageKey: value('FAL_IMAGE_KEY'), falImageModel: value('FAL_IMAGE_MODEL') || FAL_IMAGE_MODEL, baseUrl: 'https://api.openlux.ai/v1', limits: { imageDaily: limit('AI_IMAGE_DAILY_LIMIT', null), chatDaily: limit('AI_CHAT_DAILY_LIMIT', 100), perMinute: limit('AI_REQUESTS_PER_MINUTE', 10) } };
 }
 
 function json(res, status, body) {
@@ -162,7 +163,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
   let jobs = new Map(); let busy = false; let chatCount = 0; let closing = false;
   let retention, uploads; let unhealthy = false; let shutdownPromise;
   const posts = new Set(); const running = new Set();
-  const ledger = createRequestLedger({ storageDir, now, limits: config.limits || { imageDaily: 20, chatDaily: 100, perMinute: 10 }, logger: event => logger.warn?.({ event: 'ai_control', code: event?.code || 'AI_LEDGER_UNAVAILABLE' }) });
+  const ledger = createRequestLedger({ storageDir, now, limits: config.limits || {}, logger: event => logger.warn?.({ event: 'ai_control', code: event?.code || 'AI_LEDGER_UNAVAILABLE' }) });
   const storageErrorCodes = new Set(['ENOENT', 'EPERM', 'EACCES', 'EBUSY', 'ENOSPC', 'EDQUOT', 'EROFS', 'ENOTDIR', 'EISDIR', 'EEXIST', 'EIO', 'EMFILE', 'ENFILE', 'EXDEV']);
   const failStorage = cause => {
     unhealthy = true;

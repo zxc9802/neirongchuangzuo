@@ -5,7 +5,7 @@ import { dirname, join, parse, resolve } from 'node:path';
 
 const TERMINAL = new Set(['completed', 'failed', 'uncertain', 'cancelled']);
 const STATUSES = new Set(['reserved', 'dispatched', ...TERMINAL]);
-const DEFAULT_LIMITS = { imageDaily: 20, chatDaily: 100, perMinute: 10 };
+const DEFAULT_LIMITS = { imageDaily: null, chatDaily: 100, perMinute: 10 };
 const TIME_ZONE = 'Asia/Shanghai';
 const dayAt = time => new Date(time + 8 * 3600000).toISOString().slice(0, 10);
 const copy = value => value == null ? value : structuredClone(value);
@@ -82,8 +82,8 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
   const ledgerPath = join(controlDir, 'requests.json');
   const token = randomUUID();
   const effectiveLimits = Object.fromEntries(Object.entries(DEFAULT_LIMITS).map(([key, fallback]) => {
-    const value = limits[key] ?? fallback;
-    if (!Number.isSafeInteger(value) || value < 0) throw error('INVALID_AI_LIMIT', '调用上限必须为非负整数。', 400);
+    const value = key === 'imageDaily' && limits[key] === null ? null : limits[key] ?? fallback;
+    if (!(key === 'imageDaily' && value === null) && (!Number.isSafeInteger(value) || value < 0)) throw error('INVALID_AI_LIMIT', '调用上限必须为非负整数。', 400);
     return [key, value];
   }));
   let records = new Map();
@@ -260,7 +260,8 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
     const active = [...records.values()].filter(counted);
     for (const kind of ['image', 'chat']) {
       const requested = checked.filter(item => item.kind === kind).length;
-      if (requested && active.filter(record => record.kind === kind && record.day === day).length + requested > effectiveLimits[`${kind}Daily`]) throw quotaError(kind);
+      const dailyLimit = effectiveLimits[`${kind}Daily`];
+      if (requested && dailyLimit !== null && active.filter(record => record.kind === kind && record.day === day).length + requested > dailyLimit) throw quotaError(kind);
     }
     // A set reserves its daily allowance atomically. Its individual calls are
     // paced at dispatch; reserving 15 positions must not require a 15/min limit.
@@ -295,7 +296,8 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
         const timestamp = now();
         const day = dayAt(timestamp);
         const others = [...records.values()].filter(candidate => candidate.id !== id && counted(candidate));
-        if (others.filter(candidate => candidate.kind === record.kind && candidate.day === day).length >= effectiveLimits[`${record.kind}Daily`]) {
+        const dailyLimit = effectiveLimits[`${record.kind}Daily`];
+        if (dailyLimit !== null && others.filter(candidate => candidate.kind === record.kind && candidate.day === day).length >= dailyLimit) {
           throw quotaError(record.kind);
         }
         if (others.filter(candidate => Number.isFinite(candidate.dispatchedAt) && recentAttempt(candidate, timestamp)).length >= effectiveLimits.perMinute) throw rateError();
@@ -339,7 +341,7 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
         const used = { image: 0, chat: 0 };
         for (const record of today) if (counted(record)) used[record.kind]++;
         return { day, timeZone: TIME_ZONE, limits: copy(effectiveLimits), used,
-          remaining: { image: Math.max(0, effectiveLimits.imageDaily - used.image), chat: Math.max(0, effectiveLimits.chatDaily - used.chat) },
+          remaining: { image: effectiveLimits.imageDaily === null ? null : Math.max(0, effectiveLimits.imageDaily - used.image), chat: Math.max(0, effectiveLimits.chatDaily - used.chat) },
           recent: [...records.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(safeRecord) };
       });
     },
