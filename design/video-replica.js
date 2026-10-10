@@ -3,8 +3,7 @@ import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorksp
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
 const DEFAULT_VOICE_ENGINE = 'indextts2';
-const VOICE_ENGINES = [{ id: 'seedance', name: 'Seedance 2.0' }, { id: 'indextts2', name: 'IndexTTS2' }];
-const voiceName = task => task.voiceEngine ? `${task.voiceEngine === 'indextts2' ? 'IndexTTS2' : 'Seedance 2.0'} 配音` : '';
+const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成未完成', expired: '已过期' };
 const taskLabel = task => task.voiceEngine === 'indextts2' && task.status === 'verifying'
   ? task.narrationProgress?.ready ? '正在同步口型与参考配音' : '正在完成参考声音配音'
@@ -39,22 +38,19 @@ function remember(task) {
 }
 function refresh() { if (context && document.body.dataset.page === 'video') context.refresh(); }
 function failureMessage(task) {
-  return task?.canRecheck ? task.error?.replace('请核对素材后重新生成。', '请重新检查成片。') : task?.error;
+  return displayMessage(task?.canRecheck ? task.error?.replace('请核对素材后重新生成。', '请重新检查成片。') : task?.error);
 }
 function actionMessage() {
-  if (state.error || state.pollError) return state.error || state.pollError;
+  if (state.error || state.pollError) return displayMessage(state.error || state.pollError);
   if (state.busy) return '';
   if (state.current?.status === 'verifying') return state.current.voiceEngine === 'indextts2' ? `${taskLabel(state.current)}，请稍候。` : '正在核对已有成片的台词与开口时间，请稍候。';
   if (state.current?.status === 'failed') return failureMessage(state.current);
   return !state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : '';
 }
-function voicePicker(ctx) {
-  const task = state.current, locked = state.busy || task && task.status !== 'draft';
+function voiceHint() {
+  const task = state.current;
   const selected = task && task.status !== 'draft' ? task.voiceEngine || 'seedance' : state.voiceEngine;
-  return `<div class="replica-voice-picker"><label for="replica-voice-engine">配音模型</label><select id="replica-voice-engine" ${locked ? 'disabled' : ''}>${VOICE_ENGINES.map(engine => {
-    const enabled = engine.id === 'seedance' || state.config?.voiceEngines?.some(item => item.id === engine.id && item.enabled);
-    return `<option value="${engine.id}" ${engine.id === selected ? 'selected' : ''} ${enabled ? '' : 'disabled'}>${ctx.esc(engine.name)}${enabled ? '' : '（未配置）'}</option>`;
-  }).join('')}</select></div><p class="replica-voice-hint">${selected === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
+  return `<p class="replica-voice-hint">${selected === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
 }
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind];
@@ -67,7 +63,7 @@ function slot(kind, ctx) {
     : voice ? `<audio src="${ctx.esc(source)}" controls preload="metadata" aria-label="声音参考试听"></audio>`
       : `<img src="${ctx.esc(source)}" alt="目标人物照片预览">` : `<div class="replica-upload-symbol">${ctx.icon(video ? 'video' : voice ? 'audio' : 'image')}</div>`;
   return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title"><span>${video ? '01' : voice ? '03' : '02'}</span><h3>${title}${voice ? `<small>${voiceRequired ? '必填' : '选填'} · 更换音色</small>` : ''}</h3></div>
-    ${voice ? voicePicker(ctx) : ''}<div class="replica-input-preview">${preview}</div>
+    ${voice ? voiceHint() : ''}<div class="replica-input-preview">${preview}</div>
     <strong class="replica-file-name">${ctx.esc(selected?.name || (saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : '上传你想替换成的人物'))}</strong>
     <p>${video ? '单个人物 · 2–15 秒 · MP4 / MOV · 最大 50 MB' : voice ? state.config && !state.config.voiceEnabled ? '声音分析服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}">
@@ -77,7 +73,7 @@ function result(ctx) {
   const task = state.current;
   if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p><span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
-  const message = task.status === 'failed' ? failureMessage(task) : task.error;
+  const message = task.status === 'failed' ? failureMessage(task) : displayMessage(task.error);
   return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${taskLabel(task)}</h3><p>${ctx.esc(message || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击一键生成。' : '请重新上传素材创建任务。'))}</p></div>`;
 }
 function progress(ctx) {
@@ -89,15 +85,15 @@ function progress(ctx) {
   const mb = bytes => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   const download = Number.isFinite(received) && received >= 0 ? `<p>保存成片：${mb(received)}${total > 0 ? ` / ${mb(total)}` : ''}</p>${total > 0 ? `<progress aria-label="成片保存进度" max="${total}" value="${Math.min(received, total)}"></progress>` : ''}` : '';
   return `<p>已等待 ${duration(elapsed)} · ${task.lastCheckedAt ? `最近收到模型回复：${duration(now - task.lastCheckedAt)}前` : '等待模型回复'}</p>${download}
-    ${state.pollError ? `<p class="replica-error">${ctx.esc(state.pollError)}</p>` : elapsed >= 600_000 ? '<p>等待时间较长，仍在查询原任务，请勿重复提交。</p>' : ''}
+    ${state.pollError ? `<p class="replica-error">${ctx.esc(displayMessage(state.pollError))}</p>` : elapsed >= 600_000 ? '<p>等待时间较长，仍在查询原任务，请勿重复提交。</p>' : ''}
     <small>任务编号：${ctx.esc(task.id)}</small>`;
 }
 function history(ctx) {
-  return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" ${state.busy ? 'disabled' : ''}><span>${taskLabel(task)}</span><small>${voiceName(task) ? `${ctx.esc(voiceName(task))} · ` : ''}${ctx.esc(new Date(task.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} · ${task.duration || '—'} 秒</small></button>`).join('') : '<p class="replica-muted">你的复刻记录会保存在这里</p>';
+  return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" ${state.busy ? 'disabled' : ''}><span>${taskLabel(task)}</span><small>${ctx.esc(new Date(task.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} · ${task.duration || '—'} 秒</small></button>`).join('') : '<p class="replica-muted">你的复刻记录会保存在这里</p>';
 }
 function summary(ctx) {
   const task = state.current;
-  return task ? `<div><strong>${taskLabel(task)}</strong><span>${ctx.esc(task.modelName || '旗舰模型')}${voiceName(task) ? ` · ${ctx.esc(voiceName(task))}` : ''} · ${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${task.captionCheck?.warning ? `<span>${ctx.esc(task.captionCheck.warning)}</span>` : ''}${task.audioCheck ? `<span>${task.audioCheck.engine === 'indextts2' ? '已使用参考声音配音，并按新配音处理口型；请预览核对效果。' : task.audioCheck.warning ? ctx.esc(task.audioCheck.warning) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
+  return task ? `<div><strong>${taskLabel(task)}</strong><span>${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${task.captionCheck?.warning ? `<span>${ctx.esc(displayMessage(task.captionCheck.warning))}</span>` : ''}${task.audioCheck ? `<span>${task.audioCheck.engine === 'indextts2' ? '已使用参考声音配音，并按新配音处理口型；请预览核对效果。' : task.audioCheck.warning ? ctx.esc(displayMessage(task.audioCheck.warning)) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
 }
 export function renderVideoReplica(ctx) {
   account(); context = ctx;
@@ -124,7 +120,7 @@ async function selectFile(kind, file) {
 async function submit() {
   if (state.busy || pending(state.current) || state.current && state.current.status !== 'draft') return;
   if ((!state.files.video && !state.current?.video) || (!state.files.photo && !state.current?.photo)) { state.error = '请先上传一段参考视频和一张人物照片。'; refresh(); return; }
-  if (state.voiceEngine === 'indextts2' && !state.files.voice && !state.current?.voice) { state.error = '使用 IndexTTS2 请先上传声音参考。'; refresh(); return; }
+  if (state.voiceEngine === 'indextts2' && !state.files.voice && !state.current?.voice) { state.error = '请先上传声音参考。'; refresh(); return; }
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
@@ -180,11 +176,6 @@ export function bindVideoReplica(ctx) {
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refresh);
   for (const kind of ['video', 'photo', 'voice']) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
-  document.querySelector('#replica-voice-engine').onchange = event => {
-    if (state.busy || state.current && state.current.status !== 'draft') return;
-    if (!VOICE_ENGINES.some(engine => engine.id === event.target.value)) return;
-    state.voiceEngine = event.target.value; state.error = ''; refresh();
-  };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
   document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.voiceEngine = DEFAULT_VOICE_ENGINE; state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };
