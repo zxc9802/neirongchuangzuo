@@ -95,6 +95,17 @@ async function uploadVoice(app, id) {
   assert.equal(response.status, 200, await response.text());
 }
 
+test('reference voice detection no longer rejects empty or short speech detection', async t => {
+  for (const intervals of [[], [{ start: 0.2, end: 0.3 }]]) await t.test(JSON.stringify(intervals), async t => {
+    const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+      speech: fakeSpeech({ detect: async () => intervals }) });
+    const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+    assert.equal((await app.call(`/tasks/${id}/analyze`, { body: {} })).status, 200);
+    assert.equal((await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } })).status, 202);
+    await app.until(id, task => task.status === 'running'); assert.equal(app.state.generations, 1);
+  });
+});
+
 test('voice reference requires analysis confirmation and reaches the provider as an audio material', async t => {
   const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
@@ -264,9 +275,12 @@ test('minor ASR differences deliver a real result and settle once without concea
   });
 });
 
-test('voice analysis rejects silence, unaligned words, rewritten scripts and excessive speed changes', () => {
-  assert.throws(() => speechTimeline({ words: SPEECH.segments[0].words }, [], 4), /未识别/);
-  assert.throws(() => speechTimeline({ words: [{ word: '你好', start: 1, end: 0 }] }, [{ start: 1, end: 2 }], 4), /时间戳/);
+test('voice analysis tolerates missing detection and unreliable ASR times while alignment stays conservative', () => {
+  const undetected = speechTimeline({ words: SPEECH.segments[0].words }, [], 4);
+  assert.equal(undetected.text, '你好世界'); assert.equal(undetected.start, 1.25); assert.equal(undetected.end, 3.5);
+  assert.equal(undetected.timingSource, 'asr');
+  const untimed = speechTimeline({ words: [{ word: '你好', start: 1, end: 0 }] }, [{ start: 1, end: 2 }], 4);
+  assert.equal(untimed.text, '你好'); assert.match(untimed.warning, /核对/);
   const zeroCharacter = speechTimeline({ words: [{ word: '欢', start: 1, end: 1 }, { word: '迎', start: 1, end: 1.5 }] }, [{ start: 1, end: 1.5 }], 2);
   assert.equal(zeroCharacter.text, '欢迎'); assert.equal(zeroCharacter.segments[0].words[0].start, 1);
   assert.throws(() => alignmentSegments(SPEECH, { ...SPEECH, text: '台词改变' }), /台词/);
@@ -298,18 +312,30 @@ test('ASR words crossing a real pause cannot expand VAD intervals into artificia
   assert.deepEqual(result.segments.map(segment => segment.words[0]), [
     { word: '你好', start: 0, end: 1 }, { word: '世界', start: 1.5, end: 2.2 },
   ]);
-  assert.throws(() => speechTimeline({ words: SPEECH.segments[0].words }, [{ start: 0, end: 2 }, { start: 1.5, end: 3 }], 4), /检测区间无效/);
-  assert.throws(() => speechTimeline({ words: [{ word: '不匹配', start: 2.5, end: 3 }] }, [{ start: 0, end: 1 }], 4), /不一致/);
+  const overlapping = speechTimeline({ words: SPEECH.segments[0].words }, [{ start: 0, end: 2 }, { start: 1.5, end: 3 }], 4);
+  assert.equal(overlapping.text, '你好世界'); assert.equal(overlapping.timingSource, 'asr');
+  const mismatched = speechTimeline({ words: [{ word: '不匹配', start: 2.5, end: 3 }] }, [{ start: 0, end: 1 }], 4);
+  assert.equal(mismatched.text, '不匹配'); assert.match(mismatched.warning, /核对/);
 });
 
-test('an untranscribed short closing phrase cannot disappear from the speech timeline', () => {
+test('untranscribed closing speech allows editable confirmation without discarding its time range', () => {
   const intervals = [{ start: 0, end: 9.28 }, { start: 11.232, end: 12.282 }];
-  assert.throws(() => speechTimeline({ words: [{ word: '又薄又脆', start: 8, end: 9.28 }] }, intervals, 12.3), cause => {
-    assert.equal(cause.code, 'VIDEO_SPEECH_INVALID');
-    assert.match(cause.message, /台词识别不完整/);
-    assert.deepEqual(cause.unmatchedVadIntervals, [intervals[1]]);
-    return true;
-  });
+  const result = speechTimeline({ words: [{ word: '又薄又脆', start: 8, end: 9.28 }] }, intervals, 12.3);
+  assert.equal(result.text, '又薄又脆'); assert.equal(result.end, 12.282);
+  assert.equal(result.segments.length, 1); assert.match(result.warning, /核对/);
+  const confirmed = confirmSpeech(result, [{ text: '又薄又脆真的超好吃' }]);
+  assert.equal(confirmed.text, '又薄又脆真的超好吃'); assert.equal(confirmed.end, 12.282);
+});
+
+test('empty recognition and many VAD intervals do not reject the analysis result', () => {
+  const empty = speechTimeline({ text: '', words: [] }, [], 4);
+  assert.equal(empty.segments.length, 1); assert.equal(empty.start, 0); assert.equal(empty.end, 4);
+  assert.equal(empty.text, ''); assert.equal(empty.timingSource, 'manual');
+  const confirmed = confirmSpeech(empty, [{ text: '手动填写原台词' }]);
+  assert.equal(confirmed.text, '手动填写原台词');
+  const intervals = Array.from({ length: 31 }, (_, i) => ({ start: i * 0.1, end: i * 0.1 + 0.05 }));
+  const many = speechTimeline({ text: '你好' }, intervals, 4);
+  assert.equal(many.text, '你好'); assert.equal(many.segments.length, 1);
 });
 
 test('a split consonant tail stays with its transcribed word without hiding another phrase', () => {
@@ -320,7 +346,8 @@ test('a split consonant tail stays with its transcribed word without hiding anot
   assert.deepEqual(result.segments.map(({ start, end }) => ({ start, end })), [
     { start: 5.056, end: 12.96 }, { start: 14.08, end: 15.104 },
   ]);
-  assert.throws(() => speechTimeline({ words }, [intervals[0], { start: 13.1, end: 13.228 }, intervals[2]], 15.104), /台词识别不完整/);
+  const unmatched = speechTimeline({ words }, [intervals[0], { start: 13.1, end: 13.228 }, intervals[2]], 15.104);
+  assert.equal(unmatched.text, '又薄又脆真的超好吃'); assert.equal(unmatched.end, 15.104); assert.match(unmatched.warning, /核对/);
 });
 
 test('confirmed speech changes text while retaining measured boundaries and original word timestamps', () => {

@@ -318,9 +318,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             await writeFile(temporary, bytes, { mode: 0o600 });
             const normalized = join(folder(task), 'voice.tmp.wav');
             const metadata = await voice(temporary, normalized);
-            const intervals = await speech.detect(normalized);
-            if (!intervals.length || intervals.reduce((sum, interval) => sum + interval.end - interval.start, 0) < 0.5) throw error('声音参考中未检测到足够的人声，请使用清晰的单人声音。', 422, 'VIDEO_VOICE_INVALID');
-            await rename(normalized, file(task, 'voice')); task.voice = { ...metadata, speechStart: intervals[0].start }; delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt;
+            const intervals = await speech.detect(normalized).catch(cause => {
+              if (cause.code !== 'VIDEO_SPEECH_INVALID') throw cause;
+              return [];
+            });
+            await rename(normalized, file(task, 'voice')); task.voice = { ...metadata, speechStart: intervals[0]?.start ?? null }; delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt;
             await save(task); json(res, 200, { task: view(task) }); return;
           } else {
             if (bytes.length < 12 || bytes.toString('ascii', 4, 8) !== 'ftyp') throw error('请上传 MP4 或 MOV 视频。');

@@ -90,7 +90,7 @@ function speechPreview(ctx) {
   const task = state.current;
   if (!task?.voice || !task.speech || state.files.video || state.files.voice) return '';
   const editable = canEditSpeech(task), texts = speechTexts(task);
-  return `<section id="replica-speech" class="replica-speech" aria-label="原视频台词"><h3>原视频台词</h3>${editable ? `<p>${task.status === 'draft' ? '可修改错字，确认后开始复刻。' : '可修改错字，重新检查成片。'}</p>` : ''}<ol>${task.speech.segments.map((segment, index) => `<li><time>${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒</time>${editable ? `<textarea data-replica-segment="${index}" aria-label="第 ${index + 1} 段台词" rows="3" maxlength="2000" ${state.busy ? 'disabled' : ''}>${ctx.esc(texts[index])}</textarea>` : `<span>${ctx.esc(segment.text)}</span>`}</li>`).join('')}</ol><button type="button" id="replica-listen" class="textbutton">试听原视频</button></section>`;
+  return `<section id="replica-speech" class="replica-speech" aria-label="原视频台词"><h3>原视频台词</h3>${editable ? `<p>${task.status === 'draft' ? '可修改错字，确认后开始复刻。' : '可修改错字，重新检查成片。'}</p>` : ''}${task.speech.warning ? `<p>${ctx.esc(task.speech.warning)}</p>` : ''}<ol>${task.speech.segments.map((segment, index) => `<li><time>${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒</time>${editable ? `<textarea data-replica-segment="${index}" aria-label="第 ${index + 1} 段台词" rows="3" maxlength="2000" ${state.busy ? 'disabled' : ''}>${ctx.esc(texts[index])}</textarea>` : `<span>${ctx.esc(segment.text)}</span>`}</li>`).join('')}</ol><button type="button" id="replica-listen" class="textbutton">试听原视频</button></section>`;
 }
 export function renderVideoReplica(ctx) {
   account(); context = ctx;

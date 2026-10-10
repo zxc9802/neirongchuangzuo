@@ -36,15 +36,32 @@ test('analysis preserves VAD and ASR diagnostics when a closing speech interval 
     VIDEO_TRANSCRIPTION_BASE_URL: 'https://transcription.example',
     VIDEO_PYTHON_BIN: process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN,
   }, async () => new Response(JSON.stringify({ text: '你好', words }), { headers: { 'content-type': 'application/json' } }));
-  await assert.rejects(speech.analyze(input, 5, { diagnosticsPath: diagnosticPath }), /台词识别不完整/);
+  const timeline = await speech.analyze(input, 5, { diagnosticsPath: diagnosticPath });
+  assert.equal(timeline.text, '你好'); assert.equal(timeline.end, intervals[1].end); assert.match(timeline.warning, /核对/);
   const diagnostic = JSON.parse(await readFile(diagnosticPath, 'utf8'));
   assert.deepEqual(diagnostic.vad, intervals);
   assert.deepEqual(diagnostic.asr, { text: '你好', words });
-  assert.deepEqual(diagnostic.unmatchedVadIntervals, [intervals[1]]);
-  assert.equal(diagnostic.error.code, 'VIDEO_SPEECH_INVALID');
-  assert.match(diagnostic.error.message, /台词识别不完整/);
-  assert.equal(diagnostic.timeline, undefined);
+  assert.deepEqual(diagnostic.timeline, timeline);
+  assert.equal(diagnostic.error, undefined);
   await assert.rejects(readFile(input + '.asr.wav'), { code: 'ENOENT' });
+});
+
+test('analysis continues to transcription when the real detector finds no speech', { skip: !enabled }, async t => {
+  const root = await mkdtemp(join(await realpath(tmpdir()), 'replica-empty-vad-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const input = join(root, 'source.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=16000:cl=mono', '-t', '3', input]);
+  let transcriptions = 0;
+  const speech = createSpeechService({
+    VIDEO_TRANSCRIPTION_API_KEY: 'test-no-network', VIDEO_TRANSCRIPTION_BASE_URL: 'https://transcription.example',
+    VIDEO_PYTHON_BIN: process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN,
+  }, async () => {
+    transcriptions++;
+    return Response.json({ text: '你好', words: [{ word: '你好', start: 1, end: 2 }] });
+  });
+  const timeline = await speech.analyze(input, 3);
+  assert.equal(transcriptions, 1); assert.equal(timeline.text, '你好'); assert.equal(timeline.timingSource, 'asr');
+  assert.equal(timeline.start, 1); assert.equal(timeline.end, 2); assert.match(timeline.warning, /核对/);
 });
 
 test('real Silero detects delayed speech and corrected FFmpeg audio within 100 ms, rejects a music tone', { skip: !enabled }, async t => {
