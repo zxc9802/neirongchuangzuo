@@ -54,13 +54,24 @@ test('automatic successful polling clears restart errors on first load and after
   page.ctx.refresh(); assert.equal(page.message(), '');
 });
 
-test('reopening the page previews the latest completed task without reopening it after New Replica', async t => {
-  const task = { id: 'completed-task', status: 'completed', createdAt: Date.now(),
-    resultUrl: '/api/video-replica/tasks/completed-task/result' };
+for (const status of ['completed', 'running', 'failed', 'draft']) test(`reopening the page starts blank with a ${status} task available in history`, async t => {
+  const task = { id: 'saved-task', status, createdAt: Date.now(), video: {}, photo: {}, voice: {}, voiceEngine: 'seedance',
+    sourceVideoUrl: '/source.mp4', sourcePhotoUrl: '/photo.jpg', sourceVoiceUrl: '/reference.wav',
+    resultUrl: status === 'completed' ? '/api/video-replica/tasks/saved-task/result' : null };
   const page = await fixture(t, { tasks: [task] });
   page.recover(); await page.poll();
-  assert.match(page.html(), /src="\/api\/video-replica\/tasks\/completed-task\/result"/);
-  assert.match(page.html(), /aria-label="人物复刻成片"/);
+  for (let i = 0; i < 2; i++) {
+    await page.poll(); page.ctx.refresh();
+    assert.match(page.html(), /成片在这里预览/);
+    assert.match(page.html(), /data-replica-task="saved-task"/);
+    assert.match(page.html(), /value="indextts2" selected/);
+    assert.doesNotMatch(page.html(), /素材已上传并保存|aria-label="人物复刻成片"/);
+    for (const kind of ['video', 'photo']) assert.doesNotMatch(page.html().match(new RegExp(`<input[^>]*id="replica-${kind}"[^>]*>`))[0], /disabled/);
+  }
+  page.select(task.id);
+  assert.match(page.html(), /素材已上传并保存/);
+  assert.match(page.html(), /value="seedance" selected/);
+  if (status === 'completed') assert.match(page.html(), /aria-label="人物复刻成片"/);
   page.node('#replica-new').onclick();
   await page.poll();
   assert.doesNotMatch(page.html(), /aria-label="人物复刻成片"/);
@@ -70,7 +81,7 @@ test('reopening the page previews the latest completed task without reopening it
 test('New Replica stays available during generation and polling preserves the new form', async t => {
   const task = { id: 'running-task', status: 'running', createdAt: Date.now(), video: {}, photo: {} };
   const page = await fixture(t, { tasks: [task] });
-  page.recover(); await page.poll();
+  page.recover(); await page.poll(); page.select(task.id);
   const button = page.html().match(/<button[^>]*id="replica-new"[^>]*>/)[0];
   assert.doesNotMatch(button, /disabled/);
   page.node('#replica-new').onclick();
@@ -88,7 +99,7 @@ test('minor transcript differences still preview and download with an honest rev
   const task = { id: 'minor-task', status: 'completed', createdAt: Date.now(),
     resultUrl: '/api/video-replica/tasks/minor-task/result', audioCheck: { transcriptMatched: false, transcriptDifferences: 2, afterOffsetMs: 16 } };
   const page = await fixture(t, { tasks: [task] });
-  page.recover(); await page.poll();
+  page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /台词有 2 字轻微识别差异/);
   assert.match(page.html(), /开口偏差 16 毫秒/);
   assert.match(page.html(), /请预览核对台词、音色与口型/);
@@ -103,7 +114,7 @@ test('uncorrected generated audio stays playable without claiming matching words
       transcriptMatched: null, transcriptDifferences: null, afterOffsetMs: null,
       warning: '已保留模型生成的声音，请预览核对台词、音色与开口时间。' } };
   const page = await fixture(t, { tasks: [task] });
-  page.recover(); await page.poll();
+  page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /已保留模型生成的声音/);
   assert.match(page.html(), /aria-label="人物复刻成片"/);
   assert.match(page.html(), /href="\/api\/video-replica\/tasks\/advisory-task\/result\?download=1"/);
@@ -299,7 +310,7 @@ test('tasks without recoverable output do not request recheck', async t => {
 test('downloading output shows received size and progress with or without content length', async t => {
   const task = { id: 'download-task', status: 'downloading', createdAt: Date.now(), downloadProgress: { receivedBytes: 1024 * 1024, totalBytes: 4 * 1024 * 1024 } };
   const page = await fixture(t, { tasks: [task] });
-  page.recover(); await page.poll();
+  page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /保存成片：1.0 MB \/ 4.0 MB/);
   assert.match(page.html(), /progress aria-label="成片保存进度" max="4194304" value="1048576"/);
   task.downloadProgress.totalBytes = null;
@@ -348,7 +359,7 @@ test('an exempt task with zero estimated points does not fall back to paid-task 
     billing: { exempt: true, reservedPoints: 0, chargedPoints: 0 } };
   const page = await fixture(t, { tasks: [task] });
   await page.wallet(finiteWallet());
-  page.recover(); await page.poll();
+  page.recover(); await page.poll(); page.select(task.id);
   assert.equal(page.cost(), '10 秒');
   assert.doesNotMatch(page.html(), /预计冻结|失败退回预留积分|已冻结|已使用|查看费用/);
   assert.match(page.html(), /id="replica-submit"[^>]*disabled[^>]*>正在替换人物/);
@@ -358,7 +369,7 @@ test('pending tasks show elapsed time, last model reply and a task ID instead of
   const now = Date.now();
   const task = { id: 'waiting-task', status: 'running', createdAt: now - 700_000, startedAt: now - 650_000, lastCheckedAt: now - 30_000 };
   const page = await fixture(t, { tasks: [task] });
-  page.recover(); await page.poll();
+  page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /已等待 10 分/);
   assert.match(page.html(), /最近收到模型回复/);
   assert.match(page.html(), /waiting-task/);
