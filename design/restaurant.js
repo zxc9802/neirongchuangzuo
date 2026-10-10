@@ -22,8 +22,8 @@ const icon = name => state.ctx?.icon?.(name) || '';
 const button = (action, label, cls = 'restaurant-secondary', extra = '') => `<button type="button" class="${cls}" data-action="rest-${action}" ${extra}>${label}</button>`;
 const dateLabel = value => { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); };
 
-export function validateRestaurantProfile(profile = {}) {
-  const missing = REQUIRED.filter(([field]) => typeof profile[field] !== 'string' || !profile[field].trim());
+export function validateRestaurantProfile(profile = {}, { required = true } = {}) {
+  const missing = required ? REQUIRED.filter(([field]) => typeof profile[field] !== 'string' || !profile[field].trim()) : [];
   if (missing.length) return `请填写${missing.map(([, label]) => label).join('、')}。`;
   return Object.values(profile).some(value => typeof value === 'string' && value.length > 1500) ? '门店资料过长，请精简后保存。' : '';
 }
@@ -206,10 +206,10 @@ function paintUploadProgress() {
   if (node) node.textContent = `素材已保存 ${state.task?.uploadedCount || 0} / ${state.task?.imageCount || state.uploadDraft?.imageCount || state.files.length} 张${state.uploadProgress ? ` · 正在压缩 ${state.uploadProgress.current} / ${state.uploadProgress.total}` : ''}`;
 }
 function renderProfile() {
-  const complete = !validateRestaurantProfile(state.profile);
+  const summary = [state.profile.name, state.profile.city, state.profile.category].filter(Boolean).join(' · ');
   const value = state.profileDraft;
   const field = ([key, label], required = false) => `<label class="restaurant-field"><span>${escape(label)}${required ? '<b aria-label="必填">*</b>' : ''}</span><input id="rest-profile-${key}" data-rest-profile="${key}" value="${escape(value[key] || '')}" maxlength="${key === 'groupBuy' || key === 'features' ? 1500 : 300}" ${required ? 'required' : ''} ${state.busy ? 'disabled' : ''} autocomplete="${key === 'name' ? 'organization' : key === 'address' ? 'street-address' : 'off'}" placeholder="${key === 'address' ? '真实地址，便于顾客导航' : key === 'category' ? '例如：面馆、火锅、家常菜' : key === 'groupBuy' ? '套餐：牛肉面和饮料；价格：18元；使用条件：工作日午餐' : '填写真实信息'}"></label>`;
-  return `<section class="restaurant-profile"><div class="restaurant-section-heading"><div><h2>${icon('store')} 门店资料</h2><p>${complete ? `${escape(state.profile.name)} · ${escape(state.profile.city)} · ${escape(state.profile.category)}` : ''}</p></div>${complete ? button('profile-toggle', state.profileOpen ? '收起' : '修改资料', 'restaurant-text') : ''}</div>${!complete || state.profileOpen ? `<form id="restaurant-profile-form" class="restaurant-profile-form"><div class="restaurant-field-grid">${REQUIRED.map(item => field(item, true)).join('')}</div><details class="restaurant-profile-optional"><summary>补充资料 <small>选填</small></summary><div class="restaurant-field-grid">${OPTIONAL.map(item => field(item)).join('')}</div></details><div class="restaurant-profile-actions"><button type="submit" class="restaurant-secondary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在保存…' : '保存门店资料'}</button></div></form>` : ''}</section>`;
+  return `<section class="restaurant-profile"><div class="restaurant-section-heading"><div><h2>${icon('store')} 门店资料 <small>选填</small></h2>${summary ? `<p>${escape(summary)}</p>` : ''}</div>${button('profile-toggle', state.profileOpen ? '收起' : summary ? '修改资料' : '填写资料', 'restaurant-text')}</div>${state.profileOpen ? `<form id="restaurant-profile-form" class="restaurant-profile-form"><div class="restaurant-field-grid">${REQUIRED.map(item => field(item)).join('')}</div><details class="restaurant-profile-optional"><summary>更多资料</summary><div class="restaurant-field-grid">${OPTIONAL.map(item => field(item)).join('')}</div></details><div class="restaurant-profile-actions"><button type="submit" class="restaurant-secondary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在保存…' : '保存门店资料'}</button></div></form>` : ''}</section>`;
 }
 function renderUpload() {
   return `<section class="restaurant-upload-section"><div class="restaurant-section-heading"><div><h2>上传门店实拍</h2><p>上传菜品、门店、环境或服务实拍</p></div><span class="restaurant-count">${state.files.length} / 30</span></div><div class="restaurant-upload-grid" id="restaurant-dropzone">${state.files.map((item, index) => `<figure class="restaurant-source"><img src="${escape(item.url)}" alt="待分析照片 ${index + 1}：${escape(item.file.name)}" loading="lazy" decoding="async"><figcaption>${escape(item.file.name)}</figcaption>${button('remove-photo', '×', 'restaurant-remove', `data-index="${index}" aria-label="移除照片 ${index + 1}" ${state.busy ? 'disabled' : ''}`)}</figure>`).join('')}${state.files.length < 30 ? `<label class="restaurant-upload-picker${state.files.length ? '' : ' empty'}">${icon('plus')}<strong>${state.files.length ? '添加照片' : '选择照片，或拖放到这里'}</strong><small>JPG / PNG / WebP · 原图单张 ≤ 20MB · 总计 ≤ 400MB</small><input type="file" id="restaurant-file-input" accept="image/jpeg,image/png,image/webp" multiple ${state.busy || state.pending ? 'disabled' : ''} aria-label="上传门店实拍照片"></label>` : ''}</div><div class="restaurant-output-settings"><label for="restaurant-upload-output-count">套图张数 <select id="restaurant-upload-output-count" ${state.busy ? 'disabled' : ''}><option value="0" ${state.uploadOutputCount === 0 ? 'selected' : ''}>与上传张数一致</option>${Array.from({ length: 30 }, (_, i) => i + 1).map(number => `<option value="${number}" ${number === state.uploadOutputCount ? 'selected' : ''}>${number} 张</option>`).join('')}</select></label><small>无字摄影 · 菜品重拍 · 环境美化</small></div><label class="restaurant-check"><input id="restaurant-rights" type="checkbox" ${state.rights ? 'checked' : ''} ${state.busy ? 'disabled' : ''}><span>我拥有这些照片的使用权，并已获得照片中人物的使用授权。</span></label><div class="restaurant-submit-row"><p>${escape(restaurantImagePrice())} · ${state.uploadOutputCount || state.files.length} 张</p>${button('analyse', state.busy ? '正在提交…' : state.pending ? '正在核对提交状态' : state.task?.status === 'uploading' ? `继续上传并分析 ${icon('arrow')}` : `一键生成套图 ${icon('arrow')}`, 'restaurant-primary', state.busy || state.pending || !state.loaded || state.status?.enabled === false ? 'disabled' : '')}</div></section>`;
@@ -357,7 +357,7 @@ function addFiles(files) {
 }
 async function saveProfile({ silent = false } = {}) {
   const revision = state.revision;
-  const error = validateRestaurantProfile(state.profileDraft);
+  const error = validateRestaurantProfile(state.profileDraft, { required: false });
   if (error) { state.error = error; state.profileOpen = true; paint(); return false; }
   if (!silent) { state.busy = true; state.error = ''; paint(); }
   try {
@@ -439,14 +439,14 @@ async function analyse() {
   if (state.busy || state.pending || !state.loaded || state.status?.enabled === false) return;
   const existing = state.task?.status === 'uploading' ? state.task : null;
   const complete = existing && existing.uploadedCount === existing.imageCount;
-  state.error = validateRestaurantProfile(state.profileDraft) || (!complete ? validateRestaurantUploads(state.files) : '') || (!complete && !state.rights ? '请确认照片使用权和人物授权后继续。' : '');
-  if (state.error) { if (validateRestaurantProfile(state.profileDraft)) state.profileOpen = true; paint(); return; }
+  state.error = validateRestaurantProfile(state.profileDraft, { required: false }) || (!complete ? validateRestaurantUploads(state.files) : '') || (!complete && !state.rights ? '请确认照片使用权和人物授权后继续。' : '');
+  if (state.error) { if (validateRestaurantProfile(state.profileDraft, { required: false })) state.profileOpen = true; paint(); return; }
   state.busy = true; paint();
   const revision = state.revision;
   state.uploadController = new AbortController();
   const signal = state.uploadController.signal;
   try {
-    if (!await saveProfile({ silent: true })) return;
+    if (state.profileDirty && !await saveProfile({ silent: true })) return;
     let draft = state.uploadDraft || (complete ? { id: existing.id, imageCount: existing.imageCount, uploadedCount: existing.uploadedCount, fingerprint: fileFingerprint(state.files), rightsConfirmed: true, analyseSubmitted: false } : null);
     if (!draft || state.files.length && fileFingerprint(state.files) !== draft.fingerprint) {
       if (existing?.id) { const cancelled = await request('/tasks/' + encodeURIComponent(existing.id) + '/cancel-upload', { method: 'POST', body: '{}' }); if (cancelled.task) mergeTask(cancelled.task); }

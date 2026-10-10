@@ -128,6 +128,26 @@ test('promotional processing failure retries locally and releases held credits w
 const foodAppearance={description:'圆碗中的食物',portion:'一碗',arrangement:'食物在碗内',vessel:'圆碗',colors:['浅色'],visibleComponents:['条状食物'],texture:['可见纹理'],distinctiveFeatures:['圆碗'],uncertainDetails:[],dishCount:1,pieceCount:null};
 const foodReview={status:'passed',identityMatch:true,sceneMatch:true,shotMatch:true,compositionUsable:true,errors:[],warnings:[]};
 
+test('new food photos generate with empty or partial store details without requesting optional copy', async t => {
+  let renders = 0;
+  const model = mockModel({ async identifyFood() { return foodAppearance; },
+    async renderFood(input) { renders++; return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId }; },
+    async reviewFoodRender() { return foodReview; }, async write() { assert.fail('Store-specific copy must not run without its facts'); } });
+  const app = await setup(t, { model });
+  for (const partial of [false, true]) {
+    if (partial) assert.equal((await app.api('/profile', { profile: { name: '老板的小店' } })).status, 200);
+    const id = randomUUID();
+    assert.equal((await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 2 })).status, 202);
+    const task = await app.wait(id, ['completed', 'failed']);
+    assert.equal(task.status, 'completed', task.error);
+    assert.equal(task.files.filter(file => file.role === 'image').length, 2);
+    assert.equal(task.copyStatus, 'not_requested'); assert.equal(task.copy.body, '');
+    assert.equal(task.profileSnapshot.name || '', partial ? '老板的小店' : '');
+    assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 200);
+  }
+  assert.equal(renders, 4); assert.equal(model.counts.recommend, 0);
+});
+
 test('one-click gallery analyses the whole upload, expands two food references to six new frames, and delivers without optional copy', async t => {
   let renders = 0, copies = 0;
   const plans = [];

@@ -5,7 +5,7 @@ import { restaurantAvailablePhotos, restaurantOutputCount, restaurantCanGenerate
 const profile = { name: '竹里面馆', city: '武汉', address: '建设一路 18 号', category: '面馆' };
 const originals = count => Array.from({ length: count }, (_, index) => ({ name: `实拍-${index}.png`, size: 7 * 1024 * 1024, type: 'image/png', lastModified: index }));
 
-async function restaurantPage(t, { count = 30, interruptBatch = false } = {}) {
+async function restaurantPage(t, { count = 30, interruptBatch = false, merchantProfile = profile } = {}) {
   const keys = ['document', 'fetch', 'FileReader', 'sessionStorage', 'location', 'createImageBitmap', 'matchMedia'];
   const originalGlobals = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
   const originalCreate = URL.createObjectURL, originalRevoke = URL.revokeObjectURL;
@@ -25,7 +25,7 @@ async function restaurantPage(t, { count = 30, interruptBatch = false } = {}) {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ url, method: options.method || 'GET', body });
     if (url.endsWith('/status')) return Response.json({ enabled: true });
-    if (url.endsWith('/profile')) return Response.json({ profile });
+    if (url.endsWith('/profile')) return Response.json({ profile: options.method === 'PUT' ? body.profile : merchantProfile });
     if (url.endsWith('/usage')) return Response.json({ usage: { limit: 20, remaining: 20 } });
     if (url.includes('/tasks?')) return Response.json({ tasks: [...tasks.values()], nextCursor: null });
     if (url.endsWith('/tasks') && options.method === 'POST') {
@@ -59,7 +59,7 @@ async function restaurantPage(t, { count = 30, interruptBatch = false } = {}) {
   const files = originals(count);
   const select = () => { listeners.get('restaurant-file-input:change')({ target: { files, value: '' } }); listeners.get('restaurant-rights:change')({ target: { checked: true } }); };
   t.after(() => { module.disposeRestaurant(); URL.createObjectURL = originalCreate; URL.revokeObjectURL = originalRevoke; for (const [key, value] of Object.entries(originalGlobals)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value; });
-  module.renderRestaurant(ctx); module.bindRestaurant(ctx); await settle(() => markup.includes('竹里面馆 · 武汉'));
+  module.renderRestaurant(ctx); module.bindRestaurant(ctx); await settle(() => /data-action="rest-analyse"\s*>/.test(markup));
   return { module, ctx, calls, tasks, saved, files, listeners, select, settle, markup: () => markup };
 }
 
@@ -76,6 +76,27 @@ test('restaurant counts only usable supporting photos and rejects inflated or un
   assert.equal(restaurantCanGenerate(task, shortDirection), false);
   assert.equal(restaurantCanGenerate(task, shortDirection, { outputCount: 3, acceptSparse: true }), true);
   assert.equal(restaurantCanGenerate(task, shortDirection, { outputCount: 6, acceptSparse: true }), false);
+});
+
+test('one-click upload does not require a store profile or save an untouched empty form', async t => {
+  const app = await restaurantPage(t, { count: 9, merchantProfile: null });
+  assert.match(app.markup(), /门店资料 <small>选填<\/small>/);
+  assert.ok(!app.markup().includes('id="restaurant-profile-form"'));
+  app.select(); app.module.handleRestaurantAction('rest-analyse', {}, app.ctx);
+  await app.settle(() => app.markup().includes('选择一个内容方向'));
+  const created = app.calls.find(call => call.url.endsWith('/tasks') && call.method === 'POST');
+  assert.equal(created.body.autoGenerate, true); assert.equal(created.body.outputCount, 9);
+  assert.equal(app.calls.filter(call => call.url.endsWith('/profile') && call.method === 'PUT').length, 0);
+  assert.ok(!app.markup().includes('请填写门店'));
+});
+
+test('partial store details stay collapsed and all profile fields remain optional', async t => {
+  const app = await restaurantPage(t, { merchantProfile: { name: '真实酒馆' } });
+  assert.ok(!app.markup().includes('id="restaurant-profile-form"'));
+  app.module.handleRestaurantAction('rest-profile-toggle', {}, app.ctx);
+  assert.ok(app.markup().includes('id="restaurant-profile-form"'));
+  const form = app.markup().split('id="restaurant-profile-form"')[1].split('</form>')[0];
+  assert.ok(!form.includes(' required')); assert.ok(!form.includes('aria-label="必填"'));
 });
 
 test('thirty restaurant originals compress into ten batches and the selected package count reaches generation', async t => {

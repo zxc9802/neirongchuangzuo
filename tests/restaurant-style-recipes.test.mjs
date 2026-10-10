@@ -47,7 +47,7 @@ test('recipes keep nine distinct originals, preserve the accepted order and reje
   assert.ok(analysis.at(-1).visibleObjects.some(f => f.includes('三艘游船')));
 });
 
-test('website regenerates nine, corrects a style deviation, conventionally enhances the portrait and settles points once', async t => {
+test('website regenerates nine without store details, corrects style, enhances the portrait and settles points once', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'restaurant-style-'));
   const credits = createCreditsLedger({ storageDir: join(dir, 'credits'), databaseUrl: null });
   const calls = [], reviews = [], recipes = createStyleRecipes();
@@ -63,7 +63,7 @@ test('website regenerates nine, corrects a style deviation, conventionally enhan
       reviews.push(input); assert.equal(input.photos.length, 3);
       return reviews.length === 1 ? { status: 'needs_revision', styleScore: 50, issues: ['暖琥珀色被改成了冷色'] } : { status: 'passed', styleScore: 95, issues: [] };
     },
-    async write() { throw Object.assign(new Error('Optional copy is unavailable'), { code: 'COPY_UNAVAILABLE' }); },
+    async write() { assert.fail('Image-only tasks must not invent store details to write copy'); },
     async usage() { return {}; }, async close() {},
   };
   const handler = createRestaurantHandler({ dataDir: join(dir, 'restaurant'), databaseUrl: '', model, credits, config: { apiKey: 'test', limits: {} }, requireAuth: true, cleanupIntervalMs: 0, logger: { warn() {} } });
@@ -76,7 +76,8 @@ test('website regenerates nine, corrects a style deviation, conventionally enhan
     return { status: response.status, body: await response.json() };
   };
   t.after(async () => { await handler.shutdown(); await new Promise(resolve => server.close(resolve)); await credits.close(); await rm(dir, { recursive: true, force: true }); });
-  await api('/profile', { profile: { name: '实测酒馆', city: '成都', address: '测试街道', category: '酒馆' } }, 'PUT');
+  assert.equal((await api('/profile')).body.profile, null);
+  assert.equal((await api('/tasks', { requestId: randomUUID(), imageCount: 9, rightsConfirmed: true })).body.code, 'PROFILE_INCOMPLETE');
   const id = randomUUID(), photos = await sources();
   assert.equal((await api('/tasks', { requestId: id, imageCount: 9, rightsConfirmed: true, autoGenerate: true, outputCount: 9 })).status, 202);
   for (let at = 0; at < photos.length; at += 3) assert.equal((await api(`/tasks/${id}/photos`, { startIndex: at, images: photos.slice(at, at + 3).map(p => ({ name: 'renamed.jpg', dataUrl: `data:image/jpeg;base64,${p.bytes.toString('base64')}` })) })).status, 202);
@@ -84,6 +85,7 @@ test('website regenerates nine, corrects a style deviation, conventionally enhan
   let task;
   for (let i = 0; i < 500; i++) { task = (await api(`/tasks/${id}`)).body.task; if (['completed', 'failed', 'awaiting_confirmation'].includes(task.status)) break; await new Promise(r => setTimeout(r, 20)); }
   assert.equal(task.status, 'awaiting_confirmation', task.error);
+  assert.deepEqual(task.profileSnapshot, {}); assert.equal(task.copyStatus, 'not_requested');
   assert.equal(task.galleryStoryboard.source, 'approved-style'); assert.equal(task.outputCount, 9);
   assert.equal(task.styleRecipe, undefined); assert.equal(calls.length, 9); assert.equal(reviews.length, 9);
   assert.equal(calls[1].attempt, 1); assert.deepEqual(calls[1].corrections, ['暖琥珀色被改成了冷色']);
@@ -93,6 +95,7 @@ test('website regenerates nine, corrects a style deviation, conventionally enhan
   assert.equal((await api(`/tasks/${id}/confirm`, { confirmWarnings: true })).status, 200);
   const completed = (await api(`/tasks/${id}`)).body.task;
   assert.equal(completed.status, 'completed'); assert.equal(completed.billing.chargedPoints, 450);
+  assert.equal((await api(`/tasks/${id}/generate`, { directionId: completed.selection.directionId, outputCount: 9, imageMode: 'cover' })).body.code, 'PROFILE_INCOMPLETE');
   await api(`/tasks/${id}/generate`, { workflow: 'store-gallery-v1', directionId: completed.selection.directionId, outputCount: 9, imageMode: 'promotional' });
   await api(`/tasks/${id}/confirm`, { confirmWarnings: true });
   assert.equal(calls.length, 9); assert.equal((await credits.snapshot('style-owner')).balance, 550);

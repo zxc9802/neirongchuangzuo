@@ -581,9 +581,10 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     }
     const evidence = task.analysis.filter(item => successfulSources.has(item.imageId));
     let copy = { titles: [], body: '', tags: [], coverText: '', claims: [], imageOrder: selection.shots.map(shot => shot.imageId) };
-    let copyStatus = 'unavailable';
+    const hasCopyProfile = ['name', 'city', 'address', 'category'].every(field => task.profileSnapshot?.[field]?.trim());
+    let copyStatus = hasCopyProfile ? 'unavailable' : 'not_requested';
     const warningSet = new Set(evidence.filter(item => item.privacyRisk === 'low' || item.textRisk === 'warning').flatMap(item => item.riskReasons));
-    try {
+    if (hasCopyProfile) try {
       await store.patchTask(userId, id, { status: 'generating', progress: { stage: 'copy', message: '套图已生成，正在整理配套文案。' } });
       const photos = await Promise.all(evidence.slice(0, 4).map(item => referenceFor(item.imageId)));
       const draft = validateCopy(await model.write({ profile: task.profileSnapshot, analysis: evidence, direction: selection.direction, facts: selection.facts,
@@ -653,6 +654,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (body.outputCount !== undefined && (!Number.isInteger(body.outputCount) || body.outputCount < 1 || body.outputCount > (gallery ? 30 : 15))) throw new RestaurantError(`请选择1—${gallery ? 30 : 15}张真实成品图片。`, 400, 'INVALID_OUTPUT_COUNT');
     if (task.selection && (ACTIVE.has(task.status) || task.status === 'awaiting_confirmation') && body.outputCount !== undefined && body.outputCount !== (task.selection.outputCount ?? task.selection.imageIds.length)) throw new RestaurantError('该任务已按其他成品数量开始，请查询原任务。', 409, 'OUTPUT_COUNT_CONFLICT');
     if (ACTIVE.has(task.status) || task.status === 'awaiting_confirmation') return task;
+    if (!gallery) requireProfile(task.profileSnapshot);
     if (task.status === 'completed') {
       // A repeated exact request returns its charged task, while a new direction is a new task.
       const sameCount = body.outputCount === undefined ? task.selection?.strictOutputCount !== true : task.selection?.strictOutputCount === true && task.selection.outputCount === body.outputCount;
@@ -728,7 +730,8 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
           if (body.rightsConfirmed !== true) throw new RestaurantError('请确认图片使用权和人物授权。', 422, 'RIGHTS_REQUIRED');
           if (body.autoGenerate !== undefined && typeof body.autoGenerate !== 'boolean') throw new RestaurantError('生成方式无效。');
           if (body.autoGenerate && (!Number.isInteger(body.outputCount) || body.outputCount < 1 || body.outputCount > 30)) throw new RestaurantError('请选择1—30张套图。', 400, 'INVALID_OUTPUT_COUNT');
-          const profile = await store.getProfile(userId); requireProfile(profile);
+          const profile = await store.getProfile(userId) ?? {};
+          if (!body.autoGenerate) requireProfile(profile);
           if (body.images === undefined) {
             if (!Number.isInteger(body.imageCount) || body.imageCount < 1 || body.imageCount > 30) throw new RestaurantError('请选择1—30张素材。', 400, 'INVALID_IMAGE_COUNT');
             const fp = fingerprint({ uploadProtocol: 'batches', imageCount: body.imageCount, rightsConfirmed: true, profile,

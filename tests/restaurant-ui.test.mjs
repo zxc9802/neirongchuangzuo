@@ -7,9 +7,12 @@ const id = '00000000-abcd-1234-5678-000000000000';
 const photo = (size = 1024, type = 'image/jpeg') => ({ size, type, name: '门店.jpg' });
 const direction = { id: 'food', supportingImageIds: ['photo-1'], missingFacts: [{ field: 'dishName', requiredForGeneration: true, reason: '确认菜名' }, { field: 'parking', requiredForGeneration: false, reason: '停车可不写' }] };
 
-test('restaurant entry requires four real merchant fields and validates original photos before upload', () => {
+test('image-only profiles may be empty while copy profiles and original uploads retain validation', () => {
   assert.equal(validateRestaurantProfile(profile), '');
   assert.match(validateRestaurantProfile({ ...profile, address: '  ' }), /门店地址/);
+  assert.equal(validateRestaurantProfile({}, { required: false }), '');
+  assert.equal(validateRestaurantProfile({ name: '真实面馆' }, { required: false }), '');
+  assert.match(validateRestaurantProfile({ features: '字'.repeat(1501) }, { required: false }), /过长/);
   assert.match(validateRestaurantUploads([]), /至少.*1 张/);
   assert.match(validateRestaurantUploads(Array.from({ length: 31 }, () => photo())), /最多添加 30/);
   assert.match(validateRestaurantUploads([photo(1, 'image/svg+xml')]), /JPG/);
