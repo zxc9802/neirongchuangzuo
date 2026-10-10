@@ -210,7 +210,7 @@ export function localReview(copy, profile, facts, selectedAnalysis) {
   if (selectedAnalysis.some(item => item.privacyRisk === 'low' || item.textRisk === 'warning')) warnings.push('部分图片含人物或宣传文字，请确认授权与文字真实性后发布。');
   if (/进口|认证|资质|排名|经营\d+年|\d{4}年/.test(all)) warnings.push('文案涉及来源、资质或经营历史，请核对证明资料与真实性。');
   if (copy.titles.some(title => [...title].length < 12 || [...title].length > 22)) warnings.push('部分标题超出建议的12—22字，请发布前核对。');
-  if ([...copy.body].length < 250 || [...copy.body].length > 500) warnings.push('正文长度超出建议的250—500字，请发布前核对。');
+  if ([...copy.body.replace(/\s/gu, '')].length < 150 || [...copy.body.replace(/\s/gu, '')].length > 500) warnings.push('正文长度超出150—500字符，请发布前核对。');
   const coverHan = [...copy.coverText].filter(char => /\p{Script=Han}/u.test(char)).length;
   if (coverHan < 8 || coverHan > 16 || [...copy.coverText].length > 24) errors.push('封面文字需要控制在8—16个汉字，不超过24个字符。');
   return { errors: [...new Set(errors)], warnings: [...new Set(warnings)] };

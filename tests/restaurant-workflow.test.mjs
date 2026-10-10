@@ -707,6 +707,31 @@ test('one complete weak draft is rewritten with its original facts and photo evi
   assert.equal(usage.used, 1); assert.equal(usage.reserved, 0);
 });
 
+test('clinical food narration is rewritten before publication and only the delivered package consumes points', async t => {
+  const writes = [], audits = [];
+  const model = mockModel({
+    async write(input) {
+      writes.push(structuredClone(input));
+      const result = copy(input.analysis);
+      if (writes.length === 1) result.body = result.body.replace('圆碗里盛着面条', '圆碗里可见长条状食材');
+      return result;
+    },
+    async audit(input) { audits.push(input.copy); return { status: 'passed', warnings: [], errors: [] }; },
+  });
+  const app = await setup(t, { model, withCredits: true }), { id } = await newTask(app);
+  const selection = { directionId: 'D01', imageMode: 'natural', acceptSparse: true, outputCount: 2, facts: {} };
+  await app.api(`/tasks/${id}/generate`, selection);
+  const result = await app.wait(id, ['completed', 'failed']);
+  assert.equal(result.status, 'completed', result.error);
+  assert.equal(writes.length, 2);
+  assert.ok(writes[1].qualityIssues.some(issue => /食材.*分析描述/.test(issue)));
+  assert.equal(audits.length, 1);
+  assert.equal(result.copy.body, copy(result.analysis).body);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+  assert.equal((await app.api(`/tasks/${id}/generate`, selection)).body.task.id, id);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+});
+
 test('a model-only factual rejection rewrites the complete draft and reviews the replacement before delivery', async t => {
   const writes = [], audits = [];
   const parkingError = '文案出现免费停车位，但门店资料和照片分析均未确认停车信息。';

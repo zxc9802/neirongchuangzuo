@@ -42,6 +42,34 @@ test('food-copy editing instructions cannot leak into the public body', () => {
   assert.equal(result.passed,false);assert.ok(result.issues.some(issue=>/内部|报告/.test(issue)));
 });
 
+const actualHotpotBody = `想和朋友约一顿火锅时，围着一口锅慢慢聊，是很自然的聚餐选择。桃园火锅，想把这张围桌火锅的画面分享给你：圆锅在桌面中央，周围摆着多只盘碗，聚餐的主题就落在这一桌上。
+
+铜色圆锅里可见红褐色汤汁和红色长条状食材；周边几盘薄片状食材铺开摆放，旁边还有叶片状、浅色片状和菌菇状食材。锅在中间、菜盘围在四周，视觉上层次很丰富，也让人容易想到把不同选择摆上桌，和朋友边吃边聊。
+
+如果你正想约朋友碰面，想找一顿可以围坐分享的晚饭，可以考虑桃园火锅。我们店经营火锅，欢迎感兴趣的朋友把这里作为一次聚餐选择；约上想见的人，一起围着锅吃饭、聊聊天吧。`;
+
+test('the actual hotpot output is rejected for clinical food labels despite valid length and no AI keywords', () => {
+  const result = inspect({ ...goodCopy(), body: actualHotpotBody });
+  assert.equal(result.passed, false);
+  assert.ok(result.issues.some(issue => /食材.*分析描述/.test(issue)));
+});
+
+test('replacing clinical ingredient words alone cannot rescue a photo-report dominated body', () => {
+  const body = actualHotpotBody.replaceAll('红色长条状食材', '红辣椒').replaceAll('薄片状食材', '切片').replaceAll('叶片状', '绿叶').replaceAll('浅色片状', '浅色切片').replaceAll('菌菇状', '菌菇');
+  const result = inspect({ ...goodCopy(), body });
+  assert.equal(result.passed, false);
+  assert.ok(result.issues.some(issue => /看图报告/.test(issue)));
+});
+
+test('plain owner invitations and one photo reference remain allowed without inventing taste, price or meat species', () => {
+  const body = `如果和朋友说了好几次“改天聚”，却还没定吃什么，不妨约一顿火锅。把饭局当成一个见面的理由，有话想聊、有近况想听的时候，先把这顿饭约起来。
+
+我们桃园火锅这一桌，铜锅摆在中间，红汤衬着一圈菜盘，颜色看着就热闹。肉片铺在盘里，旁边是绿叶菜和菌菇，照片里也能看到这样的搭配。有人想吃切片，有人想搭些蔬菜，可以把各自想吃的聊一聊；不必每个人都选同一道菜，也不用把一次碰面安排得太隆重。
+
+我想用这一桌的颜色，给还在商量约饭的朋友一点灵感。晚饭想换个相聚的方式，可以来吃一顿火锅，把聊天的时间留给想见的人。桃园火锅在重庆南滨路二十六号，想来可以搜索店名、导航到店；也欢迎把这篇转给约饭搭子，问一句“下次一起吃火锅吗？”`;
+  assert.deepEqual(inspect({ ...goodCopy(), body }), { passed: true, issues: [] });
+});
+
 test('repeating a long sentence with different punctuation is rejected', () => {
   const sentence = '门口的木质入口与旁边的绿植一起留在这张夜间实拍里';
   const result = inspect({ ...goodCopy(), body: goodBody + '\n' + sentence + '。' + sentence.slice(0, 8) + '，' + sentence.slice(8) + '。' });
@@ -116,9 +144,19 @@ test('only highly similar title wording is rejected, rather than shared category
 
 test('length uses one visible-character definition, includes punctuation and never counts whitespace padding', () => {
   const short = inspect({ ...goodCopy(), body: '桃园火锅的门口有绿植。' + '\n '.repeat(300) });
-  assert.ok(short.issues.some(issue => /250—500字符/.test(issue)));
+  assert.ok(short.issues.some(issue => /150—500字符/.test(issue)));
   const long = inspect({ ...goodCopy(), body: goodBody + '。'.repeat(250) });
-  assert.ok(long.issues.some(issue => /250—500字符/.test(issue)));
+  assert.ok(long.issues.some(issue => /150—500字符/.test(issue)));
   assert.doesNotThrow(() => inspectCopyQuality(null));
   assert.equal(inspectCopyQuality({ body: goodBody, titles: [null] }).passed, false);
+});
+
+test('a sparse-photo brief can stay concise without padding invitations or creating a length confirmation', async () => {
+  const { localReview } = await import('../services/restaurant/rules.mjs');
+  const body = '想和朋友约一顿饭，又还没定吃什么，不妨提议一顿火锅。围着一锅，按各自喜好搭几盘菜，把下一次见面落在这一餐。\n\n我们这桌的红汤很醒目，肉片和绿叶菜搭在一起，看着挺有食欲。肉片一盘卷着、一盘铺开，我喜欢这样摆在桌上的样子，热闹但不用把聚餐安排得多隆重。\n\n下一顿想吃火锅，欢迎来桃园火锅，把这篇转给想约饭的朋友，一起定个见面的时间。';
+  assert.ok([...body.replace(/\s/gu, '')].length >= 150 && [...body.replace(/\s/gu, '')].length < 250);
+  const copy = { ...goodCopy(), body, claims: [] };
+  assert.deepEqual(inspect(copy), { passed: true, issues: [] });
+  assert.ok(!localReview(copy, profile, {}, analysis).warnings.some(warning => /正文长度/.test(warning)));
+  assert.ok(inspect({ ...copy, body: body + '薄片状食材。' }).issues.some(issue => /分析描述/.test(issue)));
 });

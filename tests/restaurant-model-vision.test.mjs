@@ -86,8 +86,10 @@ test('first copy write supplies real images in declared order without duplicatin
   assert.deepEqual(await app.model.write({ profile, analysis, direction, facts, photos, imageMode: 'promotional' }), copy());
   assert.equal(app.requests.length, 1);
   const input = visualInput(app.requests[0], COPY_PROMPT);
-  assert.deepEqual(input.profile, profile); assert.deepEqual(input.images, analysis);
-  assert.deepEqual(input.direction, direction); assert.deepEqual(input.confirmedFacts, facts);
+  assert.deepEqual(input.profile, profile); assert.deepEqual(input.images.map(item => item.imageId), analysis.map(item => item.imageId));
+  assert.deepEqual(input.images.map(item => item.visibleObjects), analysis.map(item => item.visibleObjects));
+  assert.deepEqual(input.direction, { id: direction.id, label: direction.label, targetCustomer: direction.targetCustomer, consumptionScene: direction.consumptionScene }); assert.deepEqual(input.confirmedFacts, facts);
+  assert.equal(app.requests[0].body.temperature, 0.6);
   assert.equal(input.imageMode, 'promotional');
   assert.equal(Object.hasOwn(input, 'draft'), false); assert.equal(Object.hasOwn(input, 'qualityIssues'), false);
   assert.deepEqual(structuredClone({ profile, analysis, direction, facts, photos }), snapshot);
@@ -104,7 +106,8 @@ test('rewrite sends completed draft and quality feedback while retaining the ori
   const input = visualInput(app.requests[0], COPY_REWRITE_PROMPT);
   assert.deepEqual(input.draft, draft); assert.deepEqual(input.qualityIssues, qualityIssues);
   assert.deepEqual(input.profile, profile); assert.deepEqual(input.confirmedFacts, facts);
-  assert.equal(input.confirmedFacts.price, '18'); assert.deepEqual(input.images, analysis); assert.deepEqual(input.direction, direction);
+  assert.equal(input.confirmedFacts.price, '18'); assert.deepEqual(input.images.map(item => item.visibleObjects), analysis.map(item => item.visibleObjects));
+  assert.equal(input.direction.label, direction.label); assert.equal(input.direction.targetCustomer, direction.targetCustomer);
   assert.deepEqual(structuredClone({ profile, analysis, direction, facts, photos, draft, qualityIssues }), snapshot);
   assertCompletedAttempt(app);
 });
@@ -118,8 +121,22 @@ test('publication audit receives the same attachments separately from its struct
   const input = visualInput(app.requests[0], AUDIT_PROMPT);
   assert.deepEqual(input.profile, profile); assert.deepEqual(input.analysis, analysis); assert.deepEqual(input.direction, direction);
   assert.deepEqual(input.facts, facts); assert.deepEqual(input.copy, copy());
+  assert.equal(app.requests[0].body.temperature, 0.3);
   assert.deepEqual(structuredClone(payload), snapshot);
   assertCompletedAttempt(app);
+});
+
+test('writing omits rephotography measurements and internal recommendation prose while retaining facts, risks and original photos', async () => {
+  const evidence = analysis.map(item => ({ ...item, textRisk: 'warning', riskReasons: ['人工确认图片文字'],
+    foodAppearance: { description: '内部形态档案，薄片状食材' }, foodSubjects: [{ box: { left: 0.1, top: 0.2, width: 0.5, height: 0.4 } }] }));
+  const planned = { ...direction, recommendationReason: '图中可见多盘食材组合，不能确认肉种', contentGoal: '通过视觉层次呈现菜盘组合', expectedAction: '列入消费候选' };
+  const app = harness(copy());
+  await app.model.write({ profile, analysis: evidence, direction: planned, facts, photos });
+  const input = visualInput(app.requests[0], COPY_PROMPT);
+  assert.deepEqual(input.images.map(item => item.visibleObjects), evidence.map(item => item.visibleObjects));
+  assert.ok(input.images.every(item => item.textRisk === 'warning' && item.riskReasons[0] === '人工确认图片文字'));
+  assert.doesNotMatch(JSON.stringify(input), /foodAppearance|foodSubjects|qualityScore|recommendationReason|contentGoal|expectedAction/);
+  assert.deepEqual(input.confirmedFacts, facts);
 });
 
 test('audit retains selected evidence beyond the preview attachment subset', async () => {

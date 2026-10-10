@@ -13,10 +13,10 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
   const ready = ledger.ready;
   let stopping = false;
   const renderFood = createFoodRenderer({ config, ledger, fetchImpl, isStopping: () => stopping, sleepImpl, budgetWaitMaxMs, budgetWaitStepMs });
-  async function call(prompt, input, photos = [], { onBudgetWait } = {}) {
+  async function call(prompt, input, photos = [], { onBudgetWait, temperature = 0.3 } = {}) {
     if (!config.apiKey) throw new RestaurantError('尚未配置内容分析接口，请联系管理员。', 503, 'MODEL_NOT_CONFIGURED');
     const id = randomUUID();
-    const body = { model: config.chatModel, messages: [{ role: 'system', content: prompt }, { role: 'user', content: photos.length ? [{ type: 'text', text: JSON.stringify(input) }, ...photos.map(photo => ({ type: 'image_url', image_url: { url: photo.dataUrl, detail: 'high' } }))] : JSON.stringify(input) }], response_format: { type: 'json_object' }, temperature: 0.3 };
+    const body = { model: config.chatModel, messages: [{ role: 'system', content: prompt }, { role: 'user', content: photos.length ? [{ type: 'text', text: JSON.stringify(input) }, ...photos.map(photo => ({ type: 'image_url', image_url: { url: photo.dataUrl, detail: 'high' } }))] : JSON.stringify(input) }], response_format: { type: 'json_object' }, temperature };
     let waitedMs = 0;
     async function beforeDispatch(operation) {
       while (true) {
@@ -99,8 +99,11 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
       return replacement;
     },
     async write({ profile, analysis, direction, facts, photos = [], imageMode, draft, qualityIssues = [] }, { onBudgetWait } = {}) {
-      const input = { profile, images: analysis, direction, confirmedFacts: facts, imageMode, outputCount: analysis.length, visualImageIds: photos.map(photo => photo.id), ...(draft ? { draft, qualityIssues } : {}) };
-      return validateCopy(await call(draft ? COPY_REWRITE_PROMPT : COPY_PROMPT, input, photos, { onBudgetWait }), analysis.map(item => item.imageId));
+      const evidenceFields = ['imageId', 'imageType', 'visibleObjects', 'possibleScene', 'privacyRisk', 'textRisk', 'riskReasons'];
+      const images = analysis.map(item => Object.fromEntries(evidenceFields.filter(key => item[key] !== undefined).map(key => [key, item[key]])));
+      const writingDirection = direction && { id: direction.id, label: direction.label, targetCustomer: direction.targetCustomer, consumptionScene: direction.consumptionScene };
+      const input = { profile, images, direction: writingDirection, confirmedFacts: facts, imageMode, outputCount: analysis.length, visualImageIds: photos.map(photo => photo.id), ...(draft ? { draft, qualityIssues } : {}) };
+      return validateCopy(await call(draft ? COPY_REWRITE_PROMPT : COPY_PROMPT, input, photos, { onBudgetWait, temperature: 0.6 }), analysis.map(item => item.imageId));
     },
     async audit({ photos = [], ...input }, { onBudgetWait } = {}) { return validateAudit(await call(AUDIT_PROMPT, { ...input, visualImageIds: photos.map(photo => photo.id) }, photos, { onBudgetWait })); },
     usage: () => ledger.summary(),

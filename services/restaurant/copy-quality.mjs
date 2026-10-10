@@ -5,6 +5,8 @@ const INTERNAL_LANGUAGE = /视觉线索|根据(?:这[些组张]?|所上传的)?(
 const PICTURE_REMINDER = /(?:看(?:看|一眼|一看)?(?!到|见)|翻看|浏览|对照).{0,12}(?:照片|图片|画面|实拍|外观|门头|门口|入口)|(?:收藏|保存).{0,10}(?:照片|图片|外观|门口|入口|门头)|(?:辨认|认准|认清|记住|确认).{0,10}(?:门口|入口|门头|外观)|(?:照片|图片|外观|门口|入口|门头).{0,12}(?:辨认|认准|认清|记住|收藏|保存|确认入口|找到门店)/;
 
 const characters = value => [...value];
+const CLINICAL_FOOD = /(?:薄片|叶片|菌菇|颗粒|长条|浅色片|伞|长柄)状(?:的)?(?:食材|内容物)|(?:相对体积|体积观感|皱褶状食材)/;
+const PHOTO_REPORT = /可见|视觉上|视觉层次|(?:画面|照片)(?:中央|中|里|上)|(?:画面|照片)[^。！？!?\n]{0,16}(?:呈现|展示|分享给你)|聚餐的主题|红褐色汤汁/;
 const hanCount = value => (value.match(HAN) ?? []).length;
 const compact = value => value.normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 function withoutName(value, name) {
@@ -82,13 +84,19 @@ export function inspectCopyQuality(copy, { profile, analysis, direction } = {}) 
   }
   const body = copy.body.trim(), name = typeof profile?.name === 'string' ? profile.name.trim() : '';
   const length = characters(body.replace(/\s/gu, '')).length;
-  if (length < 250 || length > 500) issues.push(`正文目前${length}个非空白字符，请改写至250—500字符（含标点），不要重复句子凑字数。`);
+  if (length < 150 || length > 500) issues.push(`正文目前${length}个非空白字符，请改写至150—500字符（含标点）；事实较少时写简版，不要重复句子凑字数。`);
   if (name && !compact(body).includes(compact(name))) issues.push('正文没有落到已确认的门店名称，请自然写明店名，方便顾客搜索和到店。');
   if (duplicatedLongPhrase(body, name)) issues.push('正文重复了至少16个汉字的长句或连续表述，请删除重复信息并用不同的真实内容展开。');
   else if (overlappingParagraphs(body, name)) issues.push('正文段落高度重叠，请让各段分别表达顾客场景、真实细节和到店行动。');
   const outwardText = [body, ...copy.titles, typeof copy.coverText === 'string' ? copy.coverText : '', ...(Array.isArray(copy.tags) ? copy.tags.filter(tag => typeof tag === 'string') : [])].join('\n');
   if (INTERNAL_LANGUAGE.test(outwardText)) issues.push('文案出现照片识别、信息缺失或审核分析口吻；这些内容应留在内部提示，改为老板自然分享。');
+  if (CLINICAL_FOOD.test(outwardText)) issues.push('文案使用“薄片状食材、叶片状食材”等分析描述，请用有依据的日常说法；无法判断的食材直接避开，不猜肉种、菜名或配方。');
   const sentences = body.split(/[。！？!?；;\n]+/).map(sentence => sentence.trim()).filter(Boolean);
+  const reportSentences = sentences.filter(sentence => PHOTO_REPORT.test(sentence));
+  const reportLength = reportSentences.reduce((sum, sentence) => sum + characters(sentence.replace(/\s/gu, '')).length, 0);
+  if (reportSentences.length >= 3 && reportLength / Math.max(1, length) >= 0.4) {
+    issues.push('正文大部分是看图报告，在描述颜色、盘碗和画面位置；保留一两处可靠细节，用老板口吻说清适合谁、什么用餐场景和自然邀约，不编造口味或服务。');
+  }
   const reminderSentences = sentences.filter(sentence => PICTURE_REMINDER.test(sentence));
   const reminderLength = reminderSentences.reduce((sum, sentence) => sum + characters(sentence.replace(/\s/gu, '')).length, 0);
   if (reminderSentences.length >= 3 && reminderLength / Math.max(1, length) >= 0.45) {
