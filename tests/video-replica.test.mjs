@@ -36,6 +36,7 @@ async function fixture(t, options = {}) {
       photo: async () => Buffer.from('photo'), probe: async () => META, download: async (_url, path) => writeFile(path, VIDEO),
       captions: { extract: async () => null },
       narration: null, lipsync: null,
+      providerStorage: { upload: async input => `https://fal.media/${input.split('/').at(-1)}` },
       pollIntervalMs: 15, ...options, ...overrides });
     await handler.ready;
     app = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-owner'] || 'alice'; void handler(req, res); });
@@ -1134,7 +1135,9 @@ test('invalid voice selection and IndexTTS without a voice fail before any credi
 
 test('IndexTTS and Seedance start in parallel, and new audio waits for real lip-sync before delivery', async t => {
   let releaseTTS, voiceStarted = new Promise(resolve => releaseTTS = resolve), voiceReady = false, mouthSubmits = 0;
+  const uploaded = new Map();
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (input, output) => { await writeFile(output, await readFile(input)); return { duration: 5, ready: true }; },
+    providerStorage: { upload: async input => { const url = `https://fal.media/${input.split('/').at(-1)}`; uploaded.set(url, await readFile(input)); return url; } },
     generate: async () => { await voiceStarted; return { taskId: 'parallel-video' }; },
     narration: fakeNarration({ advance: async (task, folder, urls, save) => {
       releaseTTS();
@@ -1147,10 +1150,8 @@ test('IndexTTS and Seedance start in parallel, and new audio waits for real lip-
     lipsync: fakeLipsync({ submit: async (video, audio) => {
       mouthSubmits++;
       for (const [url, expected] of [[video, VIDEO], [audio, Buffer.from('INDEXTTS_AUDIO')]]) {
-        const signed = new URL(url);
-        const response = await fetch(app.base + signed.pathname + signed.search);
-        assert.equal(response.status, 200); assert.deepEqual(Buffer.from(await response.arrayBuffer()), expected);
-        assert.equal((await fetch(app.base + signed.pathname)).status, 403);
+        assert.equal(new URL(url).hostname, 'fal.media');
+        assert.deepEqual(uploaded.get(url), expected);
       }
       return { id: 'mouth-job' };
     } }),

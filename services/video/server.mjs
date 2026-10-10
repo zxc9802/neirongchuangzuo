@@ -10,6 +10,7 @@ import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createCaptionService, captionSpeech } from './captions.mjs';
 import { createNarrationService } from './narration.mjs';
 import { createLipsyncService } from './lipsync.mjs';
+import { createProviderStorage } from './provider-storage.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
@@ -39,7 +40,7 @@ async function readJSON(req) {
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), falProvider = createFalVideoProvider(config), probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env),
-  narration = createNarrationService(env), lipsync = createLipsyncService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  narration = createNarrationService(env), lipsync = createLipsyncService(env), providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const models = [{ id: MODEL, name: '旗舰模型', resolution: '720p', enabled: Boolean(config.enabled) }];
   const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
@@ -253,8 +254,12 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (task.voiceEngine === 'indextts2') {
         if (!task.narration.ready) return;
         if (!task.lipsync) {
+          task.lipsyncFiles ||= {};
+          for (const [kind, input, type] of [['video', generated, 'video/mp4'], ['audio', join(folder(task), 'narration.wav'), 'audio/wav']]) {
+            if (!task.lipsyncFiles[kind]) { task.lipsyncFiles[kind] = await providerStorage.upload(input, type); await save(task); }
+          }
           task.lipsync = { submitting: true }; await save(task);
-          task.lipsync = await lipsync.submit(sourceUrl(task, 'generated'), sourceUrl(task, 'narration')); await save(task); return;
+          task.lipsync = await lipsync.submit(task.lipsyncFiles.video, task.lipsyncFiles.audio); await save(task); return;
         }
         if (task.lipsync.submitting) throw error('口型提交确认中断，未自动重复生成，请核对原口型任务。', 502, 'VIDEO_LIPSYNC_UNCERTAIN');
         if (!task.lipsync.url) {
