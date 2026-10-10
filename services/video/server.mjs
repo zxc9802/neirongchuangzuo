@@ -36,13 +36,12 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), falProvider = createFalVideoProvider(config), probe = probeVideo,
   photo = normalizePhoto, mute = muteVideo, voice = normalizeVoice, speech = createSpeechService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
-  const models = [{ id: MODEL, name: '旗舰模型', resolution: '720p', enabled: Boolean(config.enabled) },
-    { id: FAL_MODEL, name: '极速模型', resolution: '768p', enabled: Boolean(config.falEnabled) }];
+  const models = [{ id: MODEL, name: '旗舰模型', resolution: '720p', enabled: Boolean(config.enabled) }];
   const enabled = models.some(model => model.enabled);
   function selectedModel(id = MODEL) {
     const model = models.find(model => model.id === id);
-    if (!model) throw error('请选择支持的复刻模型。', 400, 'VIDEO_MODEL_INVALID');
-    if (!model.enabled) throw error(`${model.name}尚未配置，请选择其他模型。`, 503, 'VIDEO_NOT_CONFIGURED');
+    if (!model) throw error('当前仅支持旗舰模型，请刷新页面后重新提交。', 400, 'VIDEO_MODEL_INVALID');
+    if (!model.enabled) throw error(`${model.name}尚未配置，请联系管理员。`, 503, 'VIDEO_NOT_CONFIGURED');
     return model.id;
   }
   // Share the existing durable single-writer lock implementation, in a separate directory.
@@ -72,7 +71,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
-      model: task.model || MODEL, modelName: models.find(model => model.id === (task.model || MODEL))?.name,
+      model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : '旗舰模型',
       resolution: task.model === FAL_MODEL ? '768p' : '720p',
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
       sourcePhotoUrl: !expired && task.photo ? `${PREFIX}/tasks/${task.id}/photo` : null,
@@ -125,6 +124,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   async function processTask(task) {
     if (closing || fatal) return;
+    // Retain the provider only to finish tasks submitted before H3 Max was removed.
     const taskProvider = task.model === FAL_MODEL ? falProvider : provider;
     if (task.expiresAt <= now()) {
       if (task.status !== 'expired') {
@@ -385,7 +385,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
           if (task.voice && (!task.speech || body.speechConfirmed !== true)) throw error('请先分析并确认原视频的台词与开口时间。', 409, 'VIDEO_SPEECH_CONFIRM_REQUIRED');
-          task.model = selectedModel(body.model ?? task.model);
+          task.model = selectedModel(body.model);
           if ([...jobs.values()].some(item => item.userId === userId && ACTIVE.has(item.status))) throw error('当前有视频正在生成，请完成后再提交。', 409, 'VIDEO_BUSY');
           if (task.voice && !task.videoAudioRemoved) {
             await mute(file(task, 'video'), join(folder(task), 'source-silent.mp4'));

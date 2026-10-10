@@ -98,29 +98,29 @@ function speechDraft() {
     speech: { start: 0, end: 2, segments: [{ start: 0, end: 1, text: '薄饼' }, { start: 1.3, end: 2, text: '真的超好吃' }] } };
 }
 
-test('model choice survives polling, reaches start and is fixed on completed history', async t => {
+test('replica has no model picker and old drafts submit with the flagship model', async t => {
   const fal = 'minimax/h3-max/reference-to-video', seedance = 'doubao-seedance-2-0-260128';
-  let task = speechDraft(); const calls = [];
+  let task = { ...speechDraft(), model: fal }; const calls = [];
   const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
     if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true, model: seedance,
-      models: [{ id: seedance, name: '旗舰模型', enabled: true }, { id: fal, name: '极速模型', enabled: true }] });
+      models: [{ id: seedance, name: '旗舰模型', enabled: true }] });
     if (options?.method !== 'POST') return;
     const body = JSON.parse(options.body); calls.push({ path, body });
     if (path.endsWith('/start')) task = { ...task, model: body.model, status: 'running' };
     return Response.json({ task });
   } });
-  page.recover(); await page.poll();
-  page.select(task.id); page.node('#replica-model').onchange({ target: { value: fal } });
-  await page.poll();
-  assert.match(page.html(), /value="minimax\/h3-max\/reference-to-video" selected/);
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.doesNotMatch(page.html(), /replica-model|<select|复刻模型/);
+  assert.match(page.html(), /AI 视频 · 旗舰模型/);
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(calls.find(call => call.path.endsWith('/start')).body.model, fal);
-  task = { ...task, status: 'completed', modelName: '极速模型', resolution: '768p', resultUrl: '/api/video-replica/tasks/editable-task/result' };
+  assert.equal(calls.find(call => call.path.endsWith('/tasks')).body.model, seedance);
+  assert.equal(calls.find(call => call.path.endsWith('/start')).body.model, seedance);
+  task = { ...task, model: fal, status: 'completed', modelName: '极速模型', resolution: '768p', resultUrl: '/api/video-replica/tasks/editable-task/result' };
   await page.poll(); page.select(task.id);
-  assert.match(page.html(), /aria-label="复刻模型" disabled/);
   assert.match(page.html(), /极速模型 · .*768p/);
+  assert.match(page.html(), /aria-label="人物复刻成片"/);
   page.node('#replica-new').onclick();
-  assert.match(page.html(), /value="doubao-seedance-2-0-260128" selected/);
+  assert.doesNotMatch(page.html(), /replica-model|<select|极速模型/);
 });
 
 test('draft corrections survive refresh and are saved with original timings before one generation starts', async t => {
