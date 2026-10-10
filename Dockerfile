@@ -27,7 +27,8 @@ RUN python3 -m venv /opt/lipsync \
 ENV LIPSYNC_PYTHON=/opt/lipsync/bin/python LIPSYNC_MODEL_DIR=/opt/lipsync/models
 COPY --from=builder /app /app
 RUN python3 -m venv /opt/mix-venv \
-    && /opt/mix-venv/bin/pip install --no-cache-dir -r services/mix/python/requirements.txt
+    && /opt/mix-venv/bin/pip install --no-cache-dir -r services/mix/python/requirements.txt -r services/video/requirements.txt \
+    && /opt/mix-venv/bin/pip install --no-cache-dir --no-deps rapidocr-onnxruntime==1.4.4
 ENV MIX_PYTHON_BIN=/opt/mix-venv/bin/python
 WORKDIR /app/services/digital-human
 RUN npx remotion browser ensure

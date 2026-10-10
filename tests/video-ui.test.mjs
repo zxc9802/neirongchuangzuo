@@ -111,9 +111,32 @@ test('uncorrected generated audio stays playable without claiming matching words
 });
 
 function speechDraft() {
-  return { id: 'editable-task', status: 'draft', createdAt: Date.now(), video: {}, photo: {}, voice: {},
+  return { id: 'editable-task', status: 'draft', createdAt: Date.now(), captionsChecked: true, video: {}, photo: {}, voice: {},
     speech: { start: 0, end: 2, segments: [{ start: 0, end: 1, text: '薄饼' }, { start: 1.3, end: 2, text: '真的超好吃' }] } };
 }
+
+test('caption scripts are editable without a voice reference and keep every cue in confirmation', async t => {
+  let task = { ...speechDraft(), voice: undefined, captions: { cues: [
+    { start: .1, end: .6, text: '今天吃生腌' }, { start: .6, end: 1.2, text: '只要9.9元' },
+    { start: 1.3, end: 2, text: '真的超好吃' },
+  ] } };
+  const calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (options?.method !== 'POST') return;
+    const body = JSON.parse(options.body); calls.push({ path, body });
+    if (path.endsWith('/speech')) task = { ...task, captions: { cues: task.captions.cues.map((cue, i) => ({ ...cue, text: body.segments[i].text })) } };
+    if (path.endsWith('/start')) task = { ...task, status: 'running' };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /来自原视频字幕 · 同时用于语音文案和成片字幕/);
+  assert.match(page.html(), /第 3 段台词/); assert.match(page.html(), /0\.100–0\.600 秒/);
+  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '2' }, value: '确实超好吃' } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.deepEqual(calls.find(call => call.path.endsWith('/speech')).body.segments,
+    [{ text: '今天吃生腌' }, { text: '只要9.9元' }, { text: '确实超好吃' }]);
+  assert.equal(calls.filter(call => call.path.endsWith('/start')).length, 1);
+});
 
 test('replica has no model picker and old drafts submit with the flagship model', async t => {
   const fal = 'minimax/h3-max/reference-to-video', seedance = 'doubao-seedance-2-0-260128';

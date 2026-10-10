@@ -7,6 +7,7 @@ import { createVideoProvider, videoConfig, VideoError, MODEL, DURATIONS, PROMPT 
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, muteVideo, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
+import { createCaptionService, captionSpeech } from './captions.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
@@ -34,7 +35,7 @@ async function readJSON(req) {
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider = createVideoProvider(config), falProvider = createFalVideoProvider(config), probe = probeVideo,
-  photo = normalizePhoto, mute = muteVideo, voice = normalizeVoice, speech = createSpeechService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  photo = normalizePhoto, mute = muteVideo, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const models = [{ id: MODEL, name: '旗舰模型', resolution: '720p', enabled: Boolean(config.enabled) }];
   const enabled = models.some(model => model.enabled);
@@ -71,7 +72,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
-      ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
+      ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
+      captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
       model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : '旗舰模型',
       resolution: task.model === FAL_MODEL ? '768p' : '720p',
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
@@ -108,6 +110,38 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const expires = task.startedAt + DAY;
     return `${config.publicOrigin}${PREFIX}/source/${task.id}/${kind}?expires=${expires}&signature=${signature(task.id, kind, expires)}`;
   }
+  async function analyzeSource(task) {
+    if (!task.captionsChecked) {
+      try { task.captions = await captions.extract(file(task, 'video')); }
+      catch { task.captionCheck = { warning: '原视频字幕未能提取，将继续使用原视频人声。' }; }
+      task.captionsChecked = true;
+    }
+    if ((!task.speech || task.speech.source !== 'subtitles') && task.captions?.cues?.length) {
+      const intervals = task.video.audio ? await speech.detect(file(task, 'video')).catch(() => []) : [];
+      task.speech = captionSpeech(task.captions, intervals);
+      task.originalSpeech = structuredClone(task.speech);
+    } else if (!task.speech && task.voice) {
+      if (!task.video.audio) throw error('参考视频没有音轨，无法保留原台词。', 422, 'VIDEO_SPEECH_INVALID');
+      task.speech = await speech.analyze(file(task, 'video'), task.video.duration, { diagnosticsPath: join(folder(task), 'verification-source.json') });
+      task.originalSpeech = structuredClone(task.speech);
+    }
+    await save(task);
+  }
+  async function renderCaptions(task, input) {
+    if (!task.captions?.cues?.length) return;
+    const output = join(folder(task), 'result-caption.tmp');
+    try {
+      await captions.render(input, output, task.captions);
+      const metadata = await probe(output);
+      if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw new Error('Invalid caption render');
+      await rename(output, input);
+      task.captionCheck = { rendered: true, source: 'subtitles', cueCount: task.captions.cues.length };
+    } catch {
+      // Caption processing must never discard a playable model result.
+      await rm(output, { force: true });
+      task.captionCheck = { rendered: false, warning: '原字幕合成未完成，已保留可播放成片，请预览核对字幕。' };
+    }
+  }
   async function acceptResult(task, result) {
     task.lastCheckedAt = now();
     if (result.failed) { await fail(task, '视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。', 'VIDEO_GENERATION_FAILED'); return; }
@@ -133,7 +167,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       await reconcile(task);
       if (!task.cleaned) {
-        for (const name of ['photo.jpg', 'source.mp4', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
+        for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         task.cleaned = true; await save(task);
       }
       return;
@@ -172,14 +206,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       } finally { await progressWrites; }
       const metadata = await probe(temporary);
       if (metadata.duration > task.duration + 1 || metadata.duration < 1 || !metadata.audio) throw error('成片缺少声音或时长不符合要求，预留积分将退回。', 502, 'VIDEO_RESULT_INVALID');
-      await rename(temporary, task.voice ? join(folder(task), 'generated.mp4') : file(task, 'result'));
+      await rename(temporary, task.voice || task.captions ? join(folder(task), 'generated.mp4') : file(task, 'result'));
       task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
-      if (task.voice) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
+      if (task.voice || task.captions) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
       else { await complete(task); }
     }
     if (task.status === 'verifying') {
       const generated = join(folder(task), 'generated.mp4'), aligned = join(folder(task), 'result.tmp');
-      try {
+      if (!task.voice) await copyFile(generated, aligned);
+      else try {
         task.verificationStage = 'generated'; await save(task);
         const timeline = await speech.analyze(generated, task.actualDuration, { diagnosticsPath: join(folder(task), 'verification-generated.json') });
         task.verificationStage = 'aligning'; await save(task);
@@ -204,6 +239,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       const metadata = await probe(aligned);
       if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw error('声音校正后的成片无效。', 502, 'VIDEO_RESULT_INVALID');
+      await renderCaptions(task, aligned);
       await rename(aligned, file(task, 'result')); await complete(task);
     }
   }
@@ -264,7 +300,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         // Keep the original signed URL usable while its generation is still active.
         if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || (expires <= now() && !ACTIVE.has(task.status)) || expires !== task.startedAt + DAY || task.status === 'expired') throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
         if (!task[source[2]]) throw error('素材尚未上传。', 404, 'VIDEO_NOT_FOUND');
-        const input = source[2] === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4') : file(task, source[2]);
+        const input = source[2] === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4')
+          : source[2] === 'video' && task.videoCaptionsRemoved ? join(folder(task), 'source-clean.mp4') : file(task, source[2]);
         await serveMedia(req, res, input, mime(source[2])); return;
       }
       const userId = req.authenticatedUserId;
@@ -329,6 +366,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             if (metadata.duration < 2 || metadata.duration > 15 || metadata.width < 300 || metadata.height < 300) throw error('参考视频需为 2–15 秒，宽高至少 300 像素。');
             task.video = metadata;
             delete task.videoAudioRemoved;
+            delete task.videoCaptionsRemoved; delete task.captions; delete task.captionsChecked; delete task.captionCheck;
             delete task.speech;
             delete task.originalSpeech; delete task.speechConfirmedAt;
             task.duration = DURATIONS.find(value => value >= Math.ceil(metadata.duration - 0.05)) || 15;
@@ -341,17 +379,21 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         }
         if (match[2] === 'analyze' && req.method === 'POST') {
           await readJSON(req);
-          if (task.status !== 'draft' || !task.video || !task.voice) throw error('请先上传参考视频和声音参考，再分析人声。', 409);
-          if (!task.video.audio) throw error('参考视频没有音轨，无法保留原台词。', 422, 'VIDEO_SPEECH_INVALID');
-          if (!task.speech) { task.speech = await speech.analyze(file(task, 'video'), task.video.duration, { diagnosticsPath: join(folder(task), 'verification-source.json') }); task.originalSpeech = structuredClone(task.speech); await save(task); }
+          if (task.status !== 'draft' || !task.video) throw error('请先上传参考视频，再分析台词。', 409);
+          await analyzeSource(task);
           json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'speech' && req.method === 'POST') {
           const body = await readJSON(req);
           if (task.status !== 'draft' && !view(task).canRecheck) throw error('当前任务不能修改台词。', 409);
-          if (!task.voice || !task.speech) throw error('请先分析原视频台词。', 409);
+          if (!task.speech) throw error('请先分析原视频台词。', 409);
           const original = task.originalSpeech || structuredClone(task.speech);
-          const confirmed = confirmSpeech(original, body.segments);
+          let confirmed;
+          if (task.captions) {
+            const edited = confirmSpeech({ segments: task.captions.cues }, body.segments);
+            task.captions.cues = edited.segments;
+            confirmed = captionSpeech(task.captions, original.segments);
+          } else confirmed = confirmSpeech(original, body.segments);
           task.originalSpeech = original; task.speech = confirmed; task.speechConfirmedAt = now();
           await save(task); json(res, 200, { task: view(task) }); return;
         }
@@ -384,9 +426,16 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
           if (task.voice && (!task.speech || body.speechConfirmed !== true)) throw error('请先分析并确认原视频的台词与开口时间。', 409, 'VIDEO_SPEECH_CONFIRM_REQUIRED');
+          await analyzeSource(task);
           task.model = selectedModel(body.model);
+          if (task.captions?.kind === 'burned' && !task.videoCaptionsRemoved) {
+            try {
+              await captions.clean(file(task, 'video'), join(folder(task), 'source-clean.mp4'), task.captions);
+              task.videoCaptionsRemoved = true;
+            } catch { task.captionCheck = { warning: '原字幕已用于台词，成片生成后将重新合成字幕。' }; }
+          }
           if (task.voice && !task.videoAudioRemoved) {
-            await mute(file(task, 'video'), join(folder(task), 'source-silent.mp4'));
+            await mute(task.videoCaptionsRemoved ? join(folder(task), 'source-clean.mp4') : file(task, 'video'), join(folder(task), 'source-silent.mp4'));
             task.videoAudioRemoved = true;
           }
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);

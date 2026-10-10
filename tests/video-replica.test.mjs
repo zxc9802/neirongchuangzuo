@@ -34,6 +34,7 @@ async function fixture(t, options = {}) {
     handler = createVideoHandler({ storageDir: join(root, 'video'), config: CONFIG, provider, credits: wallet,
       photo: async () => Buffer.from('photo'), probe: async () => META, download: async (_url, path) => writeFile(path, VIDEO),
       mute: async (_input, output) => writeFile(output, Buffer.from('silent-video')),
+      captions: { extract: async () => null },
       pollIntervalMs: 15, ...options, ...overrides });
     await handler.ready;
     app = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-owner'] || 'alice'; void handler(req, res); });
@@ -94,6 +95,90 @@ async function uploadVoice(app, id) {
   const response = await fetch(app.base + `/api/video-replica/tasks/${id}/voice`, { method: 'PUT', body: VIDEO });
   assert.equal(response.status, 200, await response.text());
 }
+
+const CAPTIONS = { engine: 'rapidocr', kind: 'burned', width: 512, height: 768, cues: [
+  { start: 0.3, end: 1.5, text: '生腌真好吃', box: [100, 550, 412, 600] },
+  { start: 2, end: 3.5, text: '只要9.9元', box: [100, 550, 412, 600] },
+] };
+
+test('original captions supply the script and final subtitles even without a reference voice', async t => {
+  let extracts = 0, cleaned = 0, rendered;
+  const app = await fixture(t, { speech: fakeSpeech({ detect: async () => [{ start: 0.16, end: 1.4 }, { start: 2.1, end: 3.4 }],
+    analyze: async () => { assert.fail('Caption text must not come from ASR'); } }), captions: {
+    extract: async () => { extracts++; return structuredClone(CAPTIONS); },
+    clean: async (_input, output) => { cleaned++; await writeFile(output, Buffer.from('clean-video')); },
+    render: async (_input, output, captions) => { rendered = captions; await writeFile(output, VIDEO); },
+  } });
+  const id = await app.init(); await app.upload(id);
+  const analyzed = (await (await app.call(`/tasks/${id}/analyze`, { body: {} })).json()).task;
+  assert.equal(analyzed.speech.source, 'subtitles'); assert.equal(analyzed.speech.start, 0.16);
+  assert.equal(analyzed.speech.text, '生腌真好吃只要9.9元'); assert.deepEqual(analyzed.captions, CAPTIONS);
+  const edited = (await (await app.call(`/tasks/${id}/speech`, { body: { segments: [{ text: '生腌特别好吃' }, { text: '只要9.9元' }] } })).json()).task;
+  assert.equal(edited.speech.text, '生腌特别好吃只要9.9元');
+  assert.deepEqual(edited.speech.segments.map(segment => [segment.start, segment.end]), [[0.16, 1.4], [2.1, 3.4]]);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.match(app.state.body.prompt, /台词来自原视频字幕/); assert.match(app.state.body.prompt, /生腌特别好吃/);
+  assert.equal('referAudioUrl' in app.state.body.payload, false);
+  const signed = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  assert.equal(await (await fetch(app.base + signed.pathname + signed.search)).text(), 'clean-video');
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
+  app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.captionCheck.rendered, true); assert.equal(completed.captionCheck.cueCount, 2);
+  assert.equal(rendered.cues[0].text, '生腌特别好吃'); assert.equal(rendered.cues[0].start, .3);
+  assert.equal(extracts, 1); assert.equal(cleaned, 1); assert.equal(app.state.generations, 1);
+  assert.equal(completed.billing.status, 'settled');
+});
+
+test('captions with no source audio still provide narration and changing the source invalidates them', async t => {
+  const app = await fixture(t, { probe: async () => ({ ...META, audio: false }),
+    captions: { extract: async () => structuredClone(CAPTIONS) },
+    speech: fakeSpeech({ analyze: async () => assert.fail('No ASR needed'), detect: async () => assert.fail('No audio') }) });
+  const id = await app.init(); await app.upload(id);
+  const analyzed = (await (await app.call(`/tasks/${id}/analyze`, { body: {} })).json()).task;
+  assert.equal(analyzed.speech.text, '生腌真好吃只要9.9元'); assert.equal(analyzed.speech.start, .3);
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  const replaced = await app.current(id);
+  assert.equal(replaced.captions, undefined); assert.equal(replaced.speech, undefined); assert.equal(replaced.captionsChecked, undefined);
+});
+
+test('caption extraction and rendering failures deliver the playable model result without extra generation', async t => {
+  for (const stage of ['extract', 'render', 'clean']) await t.test(stage, async t => {
+    const app = await fixture(t, { captions: {
+      extract: async () => { if (stage === 'extract') throw new Error('OCR unavailable'); return structuredClone(CAPTIONS); },
+      clean: async (_input, output) => { if (stage === 'clean') throw new Error('Cleanup unavailable'); await writeFile(output, VIDEO); },
+      render: async (_input, output) => { if (stage === 'render') throw new Error('Renderer unavailable'); await writeFile(output, VIDEO); },
+    } });
+    const id = await app.init(); await app.upload(id);
+    assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+    await app.until(id, task => task.status === 'running'); app.state.done = true;
+    const completed = await app.until(id, task => task.status === 'completed');
+    assert.equal(app.state.generations, 1); assert.equal(completed.billing.status, 'settled');
+    assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+    if (stage === 'render') assert.equal(completed.captionCheck.rendered, false);
+    if (stage !== 'clean') assert.match(completed.captionCheck.warning, /字幕/);
+  });
+});
+
+test('uploaded voice uses caption words and sends the cleaned muted source to the provider', async t => {
+  let alignmentReference;
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ detect: async () => [{ start: .16, end: 3.5 }],
+      align: async (_input, output, original) => { alignmentReference = original; await writeFile(output, VIDEO); return {}; } }),
+    captions: { extract: async () => structuredClone(CAPTIONS), clean: async (_input, output) => writeFile(output, VIDEO),
+      render: async (_input, output) => writeFile(output, VIDEO) } });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/analyze`, { body: {} });
+  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } });
+  await app.until(id, task => task.status === 'running');
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+  assert.match(app.state.body.prompt, /生腌真好吃只要9.9元/);
+  const signed = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  assert.equal(await (await fetch(app.base + signed.pathname + signed.search)).text(), 'silent-video');
+  app.state.done = true; const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(alignmentReference.text, '生腌真好吃只要9.9元'); assert.equal(completed.captionCheck.rendered, true);
+});
 
 test('reference voice detection no longer rejects empty or short speech detection', async t => {
   for (const intervals of [[], [{ start: 0.2, end: 0.3 }]]) await t.test(JSON.stringify(intervals), async t => {
