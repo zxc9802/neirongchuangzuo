@@ -112,6 +112,8 @@ export async function finalizeFaceLipsync(params: {
       }, params.jobDir);
       params.onLog?.(`口型校准完成：调整 ${alignment.appliedDelayMs} 毫秒${alignment.warnings?.length ? "，部分片段测量不确定，成片正常交付" : ""}`);
     } catch (error) {
+      const code = (error as { code?: string }).code;
+      if (code !== "LIPSYNC_ALIGNMENT" && code !== "LIPSYNC_RUNTIME") throw error;
       params.onLog?.("口型时间测量暂不可用，保留合成画面和完整配音继续交付");
       await finalizeVideo(videoPath, params.audioPath, candidate);
     }
