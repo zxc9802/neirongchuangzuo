@@ -134,8 +134,8 @@ test('caption drafts start in one click without a transcript confirmation step',
   assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', '/api/video-replica/tasks/editable-task/start']);
   assert.equal(calls[1].body.speechConfirmed, undefined);
   assert.match(page.html(), /正在自动分析字幕与人声/);
-  assert.match(page.html(), /来自原视频字幕 · 同时用于语音文案和成片字幕/);
-  assert.doesNotMatch(page.html(), /textarea/);
+  assert.doesNotMatch(page.html(), /replica-speech|原视频台词|textarea|今天吃生腌/);
+  assert.equal(task.captions.cues[0].text, '今天吃生腌');
 });
 
 test('replica has no model picker and old drafts submit with the flagship model', async t => {
@@ -205,19 +205,34 @@ test('an uncertain start response retries the same task without reuploading or d
   assert.match(page.html(), /正在自动分析字幕与人声/);
 });
 
-test('failed correction save preserves edits and never submits generation', async t => {
+test('failed recheck displays the service error without saving speech or submitting generation', async t => {
   const task = { ...speechDraft(), status: 'failed', canRecheck: true }, calls = [];
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
     if (options?.method !== 'POST') return;
     calls.push(path);
-    return path.endsWith('/speech') ? Response.json({ error: '台词保存失败，请重试。' }, { status: 503 }) : Response.json({ task });
+    return Response.json({ error: '成片检查暂时不可用，请重试。' }, { status: 503 });
   } });
   page.recover(); await page.poll(); page.select(task.id);
-  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
   page.node('#replica-recheck').onclick(); await page.settle();
-  assert.equal(page.message(), '台词保存失败，请重试。');
-  assert.match(page.html(), />博主<\/textarea>/);
-  assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/speech']);
+  assert.equal(page.message(), '成片检查暂时不可用，请重试。');
+  assert.doesNotMatch(page.html(), /replica-speech|textarea/);
+  assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/recheck']);
+});
+
+test('source dialogue stays hidden in every task state while saved captions remain intact', async t => {
+  const tasks = ['draft', 'reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'verifying', 'settling', 'completed', 'failed', 'expired'].map(status => ({
+    ...speechDraft(), id: `hidden-${status}`, status, canRecheck: status === 'failed',
+    captions: { cues: [{ start: .1, end: 1, text: '原字幕内部保留' }] },
+  }));
+  const original = structuredClone(tasks);
+  const page = await fixture(t, { tasks });
+  page.recover(); await page.poll();
+  for (const task of tasks) {
+    page.select(task.id);
+    assert.doesNotMatch(page.html(), /replica-speech|原视频台词|textarea|试听原视频|原字幕内部保留|薄饼|真的超好吃/, task.status);
+    if (task.canRecheck) assert.match(page.html(), /id="replica-recheck"/);
+  }
+  assert.deepEqual(tasks, original);
 });
 
 test('completed and failed tasks cannot submit or edit speech', async t => {
@@ -237,27 +252,16 @@ test('eligible failed output rechecks the same task once without generating agai
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
     if (options?.method !== 'POST') return;
     calls.push({ path, body: JSON.parse(options.body) });
-    return Response.json({ task: path.endsWith('/speech') ? task : { ...task, status: 'verifying', canRecheck: false } });
+    return Response.json({ task: { ...task, status: 'verifying', canRecheck: false } });
   } });
   page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /id="replica-recheck"[^>]*>重新检查成片/);
-  assert.match(page.html(), /成片台词与原视频不一致，未交付成片；请核对台词后重新检查。/);
+  assert.match(page.html(), /成片台词与原视频不一致，未交付成片；请重新检查成片。/);
   assert.doesNotMatch(page.html(), /请核对素材后重新生成/);
-  assert.match(page.html(), /textarea[^>]*aria-label="第 1 段台词"/);
-  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '博主' } });
+  assert.doesNotMatch(page.html(), /replica-speech|textarea/);
   page.node('#replica-recheck').onclick(); page.node('#replica-recheck').onclick(); await page.settle();
-  assert.deepEqual(calls, [{ path: '/api/video-replica/tasks/editable-task/speech', body: { segments: [{ text: '博主' }, { text: '真的超好吃' }] } }, { path: '/api/video-replica/tasks/editable-task/recheck', body: {} }]);
+  assert.deepEqual(calls, [{ path: '/api/video-replica/tasks/editable-task/recheck', body: {} }]);
   assert.doesNotMatch(page.html(), /id="replica-recheck"/);
-});
-
-test('blank corrected segments block rechecking an existing output', async t => {
-  const task = { ...speechDraft(), status: 'failed', canRecheck: true }, calls = [];
-  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => { if (options?.method) calls.push(path); } });
-  page.recover(); await page.poll(); page.select(task.id);
-  page.node('#replica-speech').oninput({ target: { dataset: { replicaSegment: '0' }, value: '' } });
-  page.node('#replica-recheck').onclick(); await page.settle();
-  assert.equal(page.message(), '每段台词不能为空。');
-  assert.deepEqual(calls, []);
 });
 
 test('recheck shows immediate progress and keeps the failure reason next to the action after polling', async t => {
