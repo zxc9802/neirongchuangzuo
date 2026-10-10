@@ -46,7 +46,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
     { id: 'indextts2', name: 'IndexTTS2', enabled: Boolean(narration?.enabled && lipsync?.enabled) }];
   const enabled = models.some(model => model.enabled);
-  function selectedVoiceEngine(id = 'seedance') {
+  function selectedVoiceEngine(id = 'indextts2') {
     if (!voiceEngines.some(engine => engine.id === id)) throw error('配音模型无效，请刷新页面后重新选择。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
     return id;
   }
@@ -385,7 +385,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers.origin && req.headers.origin !== expected) throw error('请求来源无效。', 403, 'VIDEO_ORIGIN_REJECTED');
         if (closing || fatal) throw error('视频服务暂时不可用，请稍后查询原任务。', 503, 'VIDEO_UNAVAILABLE');
       }
-      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled, models, voiceEnabled: speech.enabled, voiceEngines, voiceEngine: 'seedance', model: models.find(model => model.enabled)?.id || MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return; }
+      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled, models, voiceEnabled: speech.enabled, voiceEngines, voiceEngine: 'indextts2', model: models.find(model => model.enabled)?.id || MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return; }
       if (path === `${PREFIX}/tasks` && req.method === 'GET') {
         const tasks = [...jobs.values()].filter(task => task.userId === userId).sort((a, b) => b.createdAt - a.createdAt).map(view);
         json(res, 200, { tasks: url.searchParams.get('completed') === 'true' ? tasks.filter(task => task.status === 'completed') : tasks.slice(0, 50) }); return;
@@ -499,7 +499,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const body = await readJSON(req);
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
-          const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine);
+          const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
           if (voiceEngine === 'indextts2') {
             if (!task.voice) throw error('使用 IndexTTS2 请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
             if (!narration?.enabled || !lipsync?.enabled) throw error('参考声音配音或口型服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');

@@ -47,7 +47,7 @@ async function fixture(t, options = {}) {
   t.after(async () => { await close(); await wallet.close(); await rm(root, { recursive: true, force: true }); });
   const call = (path, { body, method = body ? 'POST' : 'GET', owner = 'alice', headers = {} } = {}) => fetch(base + '/api/video-replica' + path, {
     method, headers: { 'x-test-owner': owner, ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body && JSON.stringify(body) });
-  async function init(id = randomUUID()) { const response = await call('/tasks', { body: { requestId: id } }); assert.equal(response.status, 201); return id; }
+  async function init(id = randomUUID()) { const response = await call('/tasks', { body: { requestId: id, voiceEngine: 'seedance' } }); assert.equal(response.status, 201); return id; }
   async function upload(id) {
     for (const kind of ['video', 'photo']) {
       const response = await fetch(base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: VIDEO });
@@ -1077,12 +1077,12 @@ const fakeLipsync = overrides => ({ enabled: true,
   submit: async () => ({ id: 'mouth-job', statusUrl: 'https://queue.fal.run/veed/lipsync/requests/mouth-job/status' }),
   query: async () => 'https://cdn.example/mouth.mp4', ...overrides });
 
-test('Seedance is the default voice engine and never calls separate TTS or lip-sync', async t => {
+test('an explicit Seedance choice never calls separate TTS or lip-sync', async t => {
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     narration: fakeNarration({ prepare: async () => assert.fail('Seedance must not prepare IndexTTS'), advance: async () => assert.fail('Seedance must not synthesize IndexTTS') }),
     lipsync: fakeLipsync({ submit: async () => assert.fail('Seedance must not submit a lip-sync job') }) });
   const config = await (await app.call('/config')).json();
-  assert.equal(config.voiceEngine, 'seedance'); assert.equal(config.voiceEngines.find(engine => engine.id === 'indextts2').enabled, true);
+  assert.equal(config.voiceEngine, 'indextts2'); assert.equal(config.voiceEngines.find(engine => engine.id === 'indextts2').enabled, true);
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   const started = (await (await app.call(`/tasks/${id}/start`, { body: {} })).json()).task;
   assert.equal(started.voiceEngine, 'seedance');
@@ -1092,6 +1092,32 @@ test('Seedance is the default voice engine and never calls separate TTS or lip-s
   const completed = await app.until(id, task => task.status === 'completed');
   assert.equal(completed.narrationProgress, undefined); assert.equal(app.state.generations, 1);
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+});
+
+test('new tasks default to IndexTTS and retain that default when starting after restart', async t => {
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration(), lipsync: fakeLipsync() });
+  const id = randomUUID();
+  const created = await app.call('/tasks', { body: { requestId: id } });
+  assert.equal(created.status, 201); assert.equal((await created.json()).task.voiceEngine, 'indextts2');
+  await app.upload(id);
+  const missingVoice = await app.call(`/tasks/${id}/start`, { body: {} });
+  assert.equal(missingVoice.status, 400); assert.equal((await missingVoice.json()).code, 'VIDEO_VOICE_REQUIRED');
+  assert.equal(await app.wallet.reservation('alice', id), null);
+  await uploadVoice(app, id); await app.close(); await app.open();
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.voiceEngine, 'indextts2'); assert.equal('referAudioUrl' in app.state.body.payload, false);
+});
+
+test('legacy drafts without a recorded voice engine still start with Seedance', async t => {
+  const app = await fixture(t);
+  const id = await app.init(); await app.upload(id); await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  delete saved.voiceEngine; await writeFile(path, JSON.stringify(saved)); await app.open();
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.voiceEngine, 'seedance'); assert.equal(app.state.generations, 1);
 });
 
 test('a draft can switch back to Seedance without requiring IndexTTS credentials and locks its choice after start', async t => {
