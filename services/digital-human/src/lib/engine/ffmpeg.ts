@@ -31,7 +31,7 @@ export function sha256File(filePath: string): Promise<string> {
 export function execMediaCommand(
   command: string,
   args: string[],
-  options: { timeoutMs?: number; maxOutputBytes?: number } = {},
+  options: { timeoutMs?: number; maxOutputBytes?: number; returnStderr?: boolean } = {},
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const timeoutMs = options.timeoutMs ?? 20 * 60_000;
@@ -87,7 +87,7 @@ export function execMediaCommand(
       settled = true;
       clearTimeout(timer);
       if (code === 0) {
-        resolve(stdout);
+        resolve(options.returnStderr ? stderr : stdout);
       } else {
         reject(
           new Error(

@@ -8,7 +8,7 @@ const STORAGE_KEY = accountStorageKey('store-studio:digital-human:v1');
 const state = {
   hydrated: false, loaded: false, loading: false, status: null, session: null,
   avatars: [], voices: [], tasks: [], avatarId: '', voiceId: '', activeTaskId: '',
-  script: '', toneProfile: 'low', videoFit: 'smart', emotionIntensity: 0.5, engine: 'b',
+  script: '', toneProfile: 'low', videoFit: 'smart', emotionIntensity: 0.8, engine: 'b',
   errors: {}, upload: null, submitting: false, busy: new Set(),
   pollError: '',
   library: { kind: 'all', items: [], nextCursor: null, hasMore: false, total: 0, counts: { all: 0, avatars: 0, tasks: 0 }, loading: false, loaded: false, error: '' },
@@ -49,6 +49,7 @@ function persist(ctx = context) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({
       script: state.script, avatarId: state.avatarId, voiceId: state.voiceId, activeTaskId: state.activeTaskId,
       toneProfile: state.toneProfile, videoFit: state.videoFit, emotionIntensity: state.emotionIntensity, engine: state.engine,
+      emotionReferenceVersion: 1,
     }));
   } catch { /* Editing and generating still work when local storage is unavailable. */ }
 }
@@ -61,7 +62,7 @@ function hydrate(ctx) {
       if (['low', 'high'].includes(saved.toneProfile)) state.toneProfile = saved.toneProfile;
       if (['smart', 'preserve'].includes(saved.videoFit)) state.videoFit = saved.videoFit;
       if (['a', 'b', 'c'].includes(saved.engine)) state.engine = saved.engine;
-      if (Number.isFinite(saved.emotionIntensity)) state.emotionIntensity = Math.max(0, Math.min(1, saved.emotionIntensity));
+      if (saved.emotionReferenceVersion === 1 && Number.isFinite(saved.emotionIntensity)) state.emotionIntensity = Math.max(0.1, Math.min(0.85, saved.emotionIntensity));
     } catch { /* Ignore an invalid browser draft. */ }
     state.script = (ctx.configs.avatar.prompt || state.script).slice(0, 5000);
     ctx.configs.avatar.prompt = state.script;
@@ -182,7 +183,7 @@ export function renderDigitalHuman(ctx) {
     <section class="dh-generator" id="dh-generator" aria-labelledby="dh-generator-title">
       <div class="dh-generator-heading"><div><h2 id="dh-generator-title">制作口播视频</h2></div><span class="dh-generator-type">${icon('avatar')}视频数字人</span></div>
       <div class="dh-composer"><div class="dh-avatar-setting" id="dh-materials">${materialsMarkup(ctx)}</div><div class="dh-composer-main">${ctx.renderBusinessEntry?.('avatar') || ''}<div class="dh-field-heading"><label for="dh-script">口播文案</label></div><div class="dh-script-box"><textarea id="dh-script" maxlength="5000" placeholder="填写口播文案">${esc(state.script)}</textarea><div><span id="dh-script-duration">${state.script.trim() ? `约 ${Math.max(1, Math.round(state.script.replace(/\s/g, '').length / 4))} 秒口播` : ''}</span><small id="dh-script-count">${state.script.length} / 5000</small></div></div><div class="dh-script-ideas"><span>宣传方案</span>${button('dh-template', '使用方案口播稿', '', 'data-template="brief"')}${button('business-open', '重新整理宣传信息', '', 'data-mode="avatar"')}</div><section id="dh-voice" class="dh-voice-section" aria-label="口播声音">${voiceMarkup(ctx)}</section></div></div>
-      <details class="dh-advanced"><summary>${icon('settings')}高级设置${icon('chevron')}</summary><div class="dh-advanced-body"><label class="studio-field">生成方案<select id="dh-engine" data-dh-option="engine">${engineMarkup(ctx)}</select></label><label class="studio-field">语速<select data-dh-option="toneProfile"><option value="low" ${state.toneProfile === 'low' ? 'selected' : ''}>自然（1.0×）</option><option value="high" ${state.toneProfile === 'high' ? 'selected' : ''}>提速（1.2×）</option></select></label><label class="studio-field">视频适配<select data-dh-option="videoFit"><option value="smart" ${state.videoFit === 'smart' ? 'selected' : ''}>智能适配</option><option value="preserve" ${state.videoFit === 'preserve' ? 'selected' : ''}>保留原视频</option></select></label><div class="dh-emotion-field"><label class="dh-emotion-label" for="dh-emotion">表达强度<output id="dh-emotion-value">${Math.round(state.emotionIntensity * 100)}%</output></label><input id="dh-emotion" data-dh-option="emotionIntensity" type="range" min="0" max="1" step="0.05" value="${state.emotionIntensity}" aria-label="表达强度"><div class="dh-range-labels"><span>平稳</span><span>鲜明</span></div></div></div></details>
+      <details class="dh-advanced"><summary>${icon('settings')}高级设置${icon('chevron')}</summary><div class="dh-advanced-body"><label class="studio-field">生成方案<select id="dh-engine" data-dh-option="engine">${engineMarkup(ctx)}</select></label><label class="studio-field">语速<select data-dh-option="toneProfile"><option value="low" ${state.toneProfile === 'low' ? 'selected' : ''}>自然（1.0×）</option><option value="high" ${state.toneProfile === 'high' ? 'selected' : ''}>提速（1.2×）</option></select></label><label class="studio-field">视频适配<select data-dh-option="videoFit"><option value="smart" ${state.videoFit === 'smart' ? 'selected' : ''}>智能适配</option><option value="preserve" ${state.videoFit === 'preserve' ? 'selected' : ''}>保留原视频</option></select></label><div class="dh-emotion-field"><label class="dh-emotion-label" for="dh-emotion">表达强度<output id="dh-emotion-value">${Math.round(state.emotionIntensity * 100)}%</output></label><input id="dh-emotion" data-dh-option="emotionIntensity" type="range" min="0.1" max="0.85" step="0.05" value="${state.emotionIntensity}" aria-label="表达强度"><div class="dh-range-labels"><span>平稳</span><span>鲜明</span></div></div></div></details>
       <footer class="dh-generate-footer"><div class="dh-generation-note"><div id="dh-service-status">${statusMarkup(ctx)}</div><p id="dh-credit-estimate" class="credit-estimate">${esc(videoCreditEstimateText(speechEstimate()))}</p><p id="dh-generate-hint">${esc(hint || '')}</p></div>${button('dh-generate', icon('star') + '<span>生成口播视频</span>', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}</footer><div id="dh-task-status">${taskMarkup(ctx)}</div>
     </section>
     <section class="dh-library" id="dh-library" aria-labelledby="dh-library-title"><div class="dh-library-heading"><div><h2 id="dh-library-title">我的创作</h2><p>成品保留 3 天，请及时下载</p></div><div class="dh-library-tools">${uploadControl(ctx, 'avatar', 'dh-outline-button', '上传视频')}${button('dh-library-refresh', refreshIcon, 'dh-refresh-button', 'aria-label="刷新素材和作品" title="刷新素材和作品"')}</div></div><div class="dh-library-tabs" id="dh-library-tabs" role="tablist" aria-label="素材与作品分类">${libraryTabsMarkup(ctx)}</div><div class="dh-library-grid" id="dh-library-grid" role="tabpanel" aria-labelledby="dh-tab-${state.library.kind}">${state.library.items.map(item => libraryItemMarkup(item, ctx)).join('')}</div><div id="dh-library-state">${libraryStateMarkup(ctx)}</div><div class="dh-library-sentinel" id="dh-library-sentinel" aria-hidden="true"></div></section>
@@ -254,7 +255,10 @@ function patchCollections() {
 function normalizeSelections(libraryOnly = false) {
   if (!currentAvatar()) state.avatarId = state.avatars[0]?.id || '';
   if (!libraryOnly) {
-    if (!state.errors.voices && !safeUrl(currentVoice()?.audioUrl)) state.voiceId = state.voices.find(item => safeUrl(item.audioUrl))?.id || '';
+    if (!state.errors.voices && !safeUrl(currentVoice()?.audioUrl)) {
+      const availableVoices = state.voices.filter(item => safeUrl(item.audioUrl));
+      state.voiceId = (availableVoices.find(item => item.isDefault) || availableVoices[0])?.id || '';
+    }
     if (!state.errors.status && !state.status?.engines?.some(item => item.id === state.engine && item.available)) state.engine = state.status?.engines?.find(item => item.available)?.id || '';
   }
   if (!currentTask()) state.activeTaskId = state.tasks.find(running)?.id || '';

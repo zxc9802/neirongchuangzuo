@@ -216,7 +216,10 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       emotionIntensity: task.inputs.emotionIntensity,
       toneProfile: task.inputs.toneProfile,
       outDir: jobDir,
-      onLog: (m) => logProvider(`[TTS] ${m}`),
+      onLog: (m) => {
+        ensureTaskActive();
+        logProvider(`[TTS] ${m}`);
+      },
       cacheScope: `${task.userId || "local"}:${task.inputs.speakerVoiceId || "default"}`,
     });
     ensureTaskActive();

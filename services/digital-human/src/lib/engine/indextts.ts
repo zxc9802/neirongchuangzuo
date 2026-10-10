@@ -5,6 +5,36 @@ import { providerUrlPolicy } from "../server/outbound-url-policy";
 import path from "path";
 import crypto from "crypto";
 import { applyToneProfile } from "./ffmpeg";
+import { splitSpeechText, stitchSpeechSegments } from "./speech-stitch";
+
+const TTS_CONCURRENCY = 3;
+let activeRequests = 0;
+const waitingRequests: (() => void)[] = [];
+
+async function acquireRequestSlot(): Promise<() => void> {
+  await new Promise<void>(resolve => {
+    const enter = () => { activeRequests++; resolve(); };
+    if (activeRequests < TTS_CONCURRENCY) enter();
+    else waitingRequests.push(enter);
+  });
+  return () => { activeRequests--; waitingRequests.shift()?.(); };
+}
+
+function referenceCacheIdentity(value: string): string {
+  try {
+    const url = new URL(value);
+    if (/\.cos\.[a-z0-9-]+\.myqcloud\.com$/i.test(url.hostname)) {
+      for (const name of [...url.searchParams.keys()]) {
+        if (/^q-(sign-|signature$|key-time$|ak$|header-list$|url-param-list$)/.test(name) || name === "response-content-disposition") {
+          url.searchParams.delete(name);
+        }
+      }
+      url.searchParams.sort();
+      return url.toString();
+    }
+  } catch {}
+  return value;
+}
 
 export interface IndexTTSOptions {
   apiKey: string;
@@ -37,7 +67,7 @@ function getCacheKey(
   toneProfile: string = "low",
   cacheScope: string = "local"
 ): string {
-  const payload = `${cacheScope}|${text.trim()}|${speakerUrl}|${emotionUrl}|${intensity}|${toneProfile}`;
+  const payload = `sentence-stitch-v1|${cacheScope}|${text.trim()}|${referenceCacheIdentity(speakerUrl)}|${referenceCacheIdentity(emotionUrl)}|${intensity}|${toneProfile}`;
   return crypto.createHash("sha256").update(payload).digest("hex");
 }
 
@@ -117,91 +147,127 @@ export async function generateIndexTTS(
     }
   }
 
-  // 2. Cache Miss: Execute cloud synthesis
-  onLog(`正在向 302.AI 提交 IndexTTS-2 语音合成请求...`);
-
-  const payload: Record<string, any> = {
-    text: text.trim(),
-    speaker_audio_url: speakerAudioUrl,
-    emotion_alpha: Math.min(Math.max(emotionIntensity, 0), 0.85),
-  };
-
-  if (emotionAudioUrl && emotionAudioUrl.startsWith("http")) {
-    payload.emotion_audio_url = emotionAudioUrl;
-  } else {
-    payload.emotion_vector = [0, 0, 0, 0, 0, 0, 0, 1.0];
-  }
-
-  onLog(`[TTS] 👤 发音人音色克隆: ${speakerAudioUrl}`);
-  onLog(`[TTS] 🎭 语气与情绪参考音频: ${payload.emotion_audio_url || "基准"} (情绪强度: ${payload.emotion_alpha})`);
-
-  const endpoint = `${baseUrl.replace(/\/$/, "")}/302/index_tts2/task`;
-  const createResp = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!createResp.ok) {
-    const errText = await createResp.text();
-    throw new Error(`IndexTTS-2 任务创建失败 (${createResp.status}): ${errText}`);
-  }
-
-  const createJson = await createResp.json();
-  const taskId = createJson.task_id;
-  if (!taskId) {
-    throw new Error(`IndexTTS-2 未返回 task_id: ${JSON.stringify(createJson)}`);
-  }
-
-  // Poll for completion. Long scripts need more than the old 5-minute cap.
-  const ttsTimeoutMs = Math.min(
-    Math.max(12 * 60 * 1000, Math.ceil(text.trim().length * 1200)),
-    45 * 60 * 1000
-  );
-  onLog(
-    `TTS 任务已创建 (TaskID: ${taskId})，正在轮询合成进度（最长等待 ${Math.round(
-      ttsTimeoutMs / 60000
-    )} 分钟）...`
-  );
-  const deadline = Date.now() + ttsTimeoutMs;
+  // 2. Cache Miss: Synthesize short sentences and join them before applying the final speech rate.
+  const segments = splitSpeechText(text);
   let audioUrl: string | null = null;
+  if (segments.length > 1) {
+    onLog(`文案已分为 ${segments.length} 段，最多 ${TTS_CONCURRENCY} 段同时合成，完成后按原顺序拼接...`);
+    const parts: { text: string; audioPath: string }[] = new Array(segments.length);
+    let next = 0;
+    let failure: unknown;
+    await Promise.all(Array.from({ length: Math.min(TTS_CONCURRENCY, segments.length) }, async () => {
+      while (next < segments.length && !failure) {
+        const index = next++;
+        try {
+          onLog(`正在合成第 ${index + 1}/${segments.length} 段...`);
+          const part = await generateIndexTTS(segments[index], {
+            ...options,
+            toneProfile: "low",
+            outDir: path.join(outDir, "tts-segments", String(index + 1)),
+            onLog: message => {
+              if (failure) throw failure;
+              onLog(`[第 ${index + 1}/${segments.length} 段] ${message}`);
+            },
+          });
+          parts[index] = { text: segments[index], audioPath: part.rawWavPath };
+        } catch (error) {
+          failure ||= error;
+        }
+      }
+    }));
+    if (failure) throw failure;
+    onLog("各段合成完成，正在整理首尾静音并拼接音轨...");
+    await stitchSpeechSegments(parts, rawWavPath);
+  } else {
+    const release = await acquireRequestSlot();
+    try {
+      onLog(`正在向 302.AI 提交 IndexTTS-2 语音合成请求...`);
 
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2500));
-    const pollResp = await fetch(`${endpoint}?task_id=${encodeURIComponent(taskId)}`, {
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
-    });
+      const payload: Record<string, any> = {
+        text: text.trim(),
+        speaker_audio_url: speakerAudioUrl,
+        emotion_alpha: Math.min(Math.max(emotionIntensity, 0), 0.85),
+      };
 
-    if (!pollResp.ok) {
-      continue;
-    }
+      if (emotionAudioUrl && emotionAudioUrl.startsWith("http")) {
+        payload.emotion_audio_url = emotionAudioUrl;
+      } else {
+        payload.emotion_vector = [0, 0, 0, 0, 0, 0, 0, 1.0];
+      }
 
-    const pollJson = await pollResp.json();
-    if (pollJson.state === "SUCCESS") {
-      audioUrl = pollJson.audio_url;
-      break;
-    } else if (pollJson.state === "FAILURE") {
-      throw new Error(`IndexTTS-2 合成失败: ${JSON.stringify(pollJson)}`);
+      onLog(`[TTS] 👤 发音人音色克隆: ${speakerAudioUrl}`);
+      onLog(`[TTS] 🎭 语气与情绪参考音频: ${payload.emotion_audio_url || "基准"} (情绪强度: ${payload.emotion_alpha})`);
+
+      const endpoint = `${baseUrl.replace(/\/$/, "")}/302/index_tts2/task`;
+      const createResp = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!createResp.ok) {
+        const errText = await createResp.text();
+        throw new Error(`IndexTTS-2 任务创建失败 (${createResp.status}): ${errText}`);
+      }
+
+      const createJson = await createResp.json();
+      const taskId = createJson.task_id;
+      if (!taskId) {
+        throw new Error(`IndexTTS-2 未返回 task_id: ${JSON.stringify(createJson)}`);
+      }
+
+      // Poll for completion. Long scripts need more than the old 5-minute cap.
+      const ttsTimeoutMs = Math.min(
+        Math.max(12 * 60 * 1000, Math.ceil(text.trim().length * 1200)),
+        45 * 60 * 1000
+      );
+      onLog(
+        `TTS 任务已创建 (TaskID: ${taskId})，正在轮询合成进度（最长等待 ${Math.round(
+          ttsTimeoutMs / 60000
+        )} 分钟）...`
+      );
+      const deadline = Date.now() + ttsTimeoutMs;
+
+      while (Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const pollResp = await fetch(`${endpoint}?task_id=${encodeURIComponent(taskId)}`, {
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+          },
+        });
+
+        if (!pollResp.ok) {
+          continue;
+        }
+
+        const pollJson = await pollResp.json();
+        if (pollJson.state === "SUCCESS") {
+          audioUrl = pollJson.audio_url;
+          break;
+        } else if (pollJson.state === "FAILURE") {
+          throw new Error(`IndexTTS-2 合成失败: ${JSON.stringify(pollJson)}`);
+        }
+      }
+
+      if (!audioUrl) {
+        throw new Error(`IndexTTS-2 超时或未获取到音频下载地址`);
+      }
+
+      onLog(`TTS 合成成功，正在下载音频文件...`);
+
+      await downloadFileToDisk({
+        url: audioUrl,
+        outputPath: rawWavPath,
+        maxBytes: 100 * 1024 * 1024,
+        urlPolicy: providerUrlPolicy("indextts"),
+      });
+    } finally {
+      release();
     }
   }
-
-  if (!audioUrl) {
-    throw new Error(`IndexTTS-2 超时或未获取到音频下载地址`);
-  }
-
-  onLog(`TTS 合成成功，正在下载音频文件...`);
-
-  await downloadFileToDisk({
-    url: audioUrl,
-    outputPath: rawWavPath,
-    maxBytes: 100 * 1024 * 1024,
-    urlPolicy: providerUrlPolicy("indextts"),
-  });
 
   onLog(`音频下载完成，正在应用音调/语速配置文件 (${toneProfile})...`);
 
@@ -223,7 +289,7 @@ export async function generateIndexTTS(
         selectedDuration: toneResult.selectedDuration,
         toneProfile,
         rate,
-        audioUrl,
+        audioUrl: audioUrl || undefined,
         createdAt: Date.now(),
       }),
       "utf-8"
@@ -245,7 +311,7 @@ export async function generateIndexTTS(
     selectedDuration: toneResult.selectedDuration,
     toneProfile,
     rate,
-    audioUrl,
+    audioUrl: audioUrl || undefined,
     fromCache: false,
   };
 }
