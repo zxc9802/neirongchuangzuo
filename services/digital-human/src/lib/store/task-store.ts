@@ -100,6 +100,7 @@ export interface TaskItem {
     chargedPoints?: number;
     costCny?: number;
     billingDuration?: number;
+    faceWorkflowVersion?: 1;
     lipsyncChunks?: {
       index: number;
       lipsyncId?: string;

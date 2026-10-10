@@ -36,7 +36,7 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       const generated = spawnSync("ffmpeg", ["-v", "error", ...args], {encoding: "utf8"});
       assert.equal(generated.status, 0, generated.stderr);
     }
-    for (const scenario of ["under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
+    for (const scenario of ["alignment-failure", "face-input-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
       const audioOnly = scenario.startsWith("audio-");
       const events = [];
       globalThis.fetch = async (url, init) => {
@@ -72,12 +72,32 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
           }
           return {finalWavPath: wav, rawDuration: duration, selectedDuration: duration};
         }},
+        "./face-lipsync": {
+          prepareFaceLipsync: async options => {
+            events.push({stage: "face-input"});
+            if (scenario === "face-input-failure") throw Object.assign(new Error("face too small"), {code: "LIPSYNC_FACE_INPUT"});
+            assert.equal(options.inputVideoPath, task.inputs.videoPath, "crop must read native source pixels");
+            const videoPath = path.join(options.jobDir, "face-input.mp4");
+            const audioPath = path.join(options.jobDir, "face-audio.wav");
+            fs.copyFileSync(sound, videoPath); fs.copyFileSync(options.audioPath, audioPath);
+            return {videoPath, audioPath, durationSeconds: duration + 0.9};
+          },
+          finalizeFaceLipsync: async options => {
+            events.push({stage: "alignment"});
+            if (scenario === "alignment-failure") throw Object.assign(new Error("low sync confidence"), {code: "LIPSYNC_ALIGNMENT"});
+            fs.writeFileSync(options.outputPath, "fixture");
+            return {durationSeconds: duration, width: 160, height: 120, fps: 30};
+          },
+        },
         "./ffmpeg": {...media, finalizeVideo: async (_video, _audio, output) => {
           fs.writeFileSync(output, "fixture"); return {durationSeconds: duration, width: 160, height: 120, fps: 30};
         }},
         "../mcp/heygen-adapter": {HeyGenMcpAdapter: {}},
         "./openlux-lipsync": {OpenLuxLipsyncAdapter: {}},
         "./fal-veed-lipsync": {FalVeedLipsyncAdapter: {execute: async options => {
+          assert.equal(path.basename(options.videoPath), "face-input.mp4");
+          assert.equal(path.basename(options.audioPath), "face-audio.wav");
+          assert.equal(options.objectKeyPrefix, `jobs/${scenario}/face-provider`);
           events.push({stage: "lipsync"}); options.onProviderAccepted();
           options.onJobCreated({lipsyncId: "test-job"});
           return {lipsyncId: "test-job", status: "completed"};
@@ -100,7 +120,15 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       }, module, module.exports);
       await module.exports.runDigitalHumanPipeline(scenario, "fake");
       if (audioOnly) assert.equal(events.some(e => e.stage === "lipsync"), false, "audio must never submit paid lip-sync");
-      if (scenario.endsWith("under-reserved") || scenario === "preserve-failure" || scenario === "setup-failure") {
+      if (scenario === "alignment-failure" || scenario === "face-input-failure") {
+        assert.equal(task.status, "failed", `${scenario}: unreliable mouth movement must never be delivered`);
+        assert.equal(task.errorCode, scenario === "alignment-failure" ? "LIPSYNC_ALIGNMENT" : "LIPSYNC_FACE_INPUT");
+        assert.equal(events.some(e => e.action === "settle"), false, "failed quality must not settle success credits");
+        assert.equal(isTaskOutputDeliverable(task), false);
+        assert.equal(task.results.finalVideoUrl, undefined);
+        assert.equal(task.billing.status, "released");
+        assert.equal(events.some(e => e.stage === "lipsync"), scenario === "alignment-failure");
+      } else if (scenario.endsWith("under-reserved") || scenario === "preserve-failure" || scenario === "setup-failure") {
         assert.equal(events.some(e => e.stage === "lipsync"), false, scenario);
         assert.equal(task.status, "failed", scenario);
         assert.equal(task.billing.status, "released", scenario);

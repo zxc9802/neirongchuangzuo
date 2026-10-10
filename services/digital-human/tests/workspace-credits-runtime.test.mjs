@@ -350,7 +350,7 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
   }).outputText;
   try {
-    for (const scenario of ["success", "unlimited-success", "unlimited-audio", "confirmed-failure", "uncertain", "submit-uncertain", "settlement-pending"]) {
+    for (const scenario of ["quality-failure", "success", "unlimited-success", "unlimited-audio", "confirmed-failure", "uncertain", "submit-uncertain", "settlement-pending"]) {
       const userId = `pipeline-${scenario}`;
       const exempt = scenario.startsWith("unlimited-");
       const audioOnly = scenario === "unlimited-audio";
@@ -375,6 +375,13 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
           const file = path.join(options.outDir, "voice-track.wav"); fs.writeFileSync(file, "fixture");
           return { finalWavPath: file, rawDuration: 30, selectedDuration: 30 };
         } },
+        "./face-lipsync": {
+          prepareFaceLipsync: async options => ({videoPath: source, audioPath: options.audioPath, durationSeconds: 30.9}),
+          finalizeFaceLipsync: async options => {
+            if (scenario === "quality-failure") throw Object.assign(new Error("low sync confidence"), {code: "LIPSYNC_ALIGNMENT"});
+            fs.writeFileSync(options.outputPath, "fixture"); return probe;
+          },
+        },
         "./ffmpeg": { probeMedia: async () => probe, sha256File: async () => "fixture-hash",
           encodeMp3: async (_input, output) => { fs.writeFileSync(output, "fixture"); },
           prepareSourceVideo: async (_input, _seconds, output) => { fs.writeFileSync(output, "fixture"); return { duration: 30, width: 160, height: 120 }; },
@@ -412,7 +419,7 @@ test("workspace pipeline settles probed duration, refunds confirmed failures and
         assert.equal(task.billing.chargedPoints, exempt ? 0 : 333);
         assert.equal(wallet.available, exempt ? 1000 : 667); assert.equal(wallet.held, 0);
         assert.equal(publicData.toPublicTask(task).billing.exempt, exempt);
-      } else if (scenario === "confirmed-failure") {
+      } else if (scenario === "confirmed-failure" || scenario === "quality-failure") {
         assert.equal(task.billing.status, "released");
         assert.equal(wallet.available, 1000); assert.equal(wallet.held, 0);
       } else {
@@ -472,7 +479,7 @@ test("MP3 settlement outages preserve a recoverable file and recovery probes and
     const baseDeps = {
       path, fs, crypto, "../store/task-store": { TaskStore }, "../config": { getAppConfig: () => config },
       "./task-execution": { withTaskExecution: async (_id, action) => action() },
-      "./ffmpeg": media, "../cos": { CosService: { isConfigured: () => false } },
+      "./face-lipsync": {}, "./ffmpeg": media, "../cos": { CosService: { isConfigured: () => false } },
       "./fal-veed-lipsync": { FalVeedLipsyncAdapter: { execute: () => assert.fail("audio recovery must never call lip-sync") } },
       "./openlux-lipsync": { OpenLuxLipsyncAdapter: {} }, "../lipsync-provider": { resolveLipsyncProvider: () => "veed" },
     };

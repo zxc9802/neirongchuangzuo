@@ -14,7 +14,7 @@ const DIRECT_PART_BYTES = 8 * 1024 * 1024;
 function isManagedMediaKey(key: string): boolean {
   return (
     /^uploads\/users\/[a-zA-Z0-9_-]+\/(?:videos|voices|thumbnails)\/[^/]+$/.test(key) ||
-    /^jobs\/[a-zA-Z0-9_-]+\/(?:source-video\.mp4|voice-track\.(?:wav|mp3)|final\.mp4|production-report\.json|exact-final-indextts\.wav|evidence\.json)$/.test(key)
+    /^jobs\/[a-zA-Z0-9_-]+\/(?:source-video\.mp4|face-input\.mp4|(?:face-provider\/)?(?:rendered-source\.mp4|lipsync-chunks\/result-\d+\.mp4)|voice-track\.(?:wav|mp3)|final\.mp4|production-report\.json|exact-final-indextts\.wav|evidence\.json)$/.test(key)
   );
 }
 

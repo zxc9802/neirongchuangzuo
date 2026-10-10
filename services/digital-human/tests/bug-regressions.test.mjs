@@ -70,6 +70,10 @@ function baseTask() {
 }
 
 function recoveryStubs(s) {
+  s.overrides.set("src/lib/engine/face-lipsync.ts", {
+    finalizeFaceLipsync: async options => s.load("src/lib/engine/ffmpeg.ts")
+      .finalizeVideo(options.renderedPath, options.audioPath, options.outputPath),
+  });
   s.overrides.set("src/lib/engine/fal-veed-lipsync.ts", { FalVeedLipsyncAdapter: {} });
   s.overrides.set("src/lib/engine/openlux-lipsync.ts", { OpenLuxLipsyncAdapter: {} });
   s.overrides.set("src/lib/engine/pixverse-ingest.ts", {});
@@ -105,6 +109,9 @@ test("B6: retrying a claimed voice upload must preserve the first voice audio", 
 
 test("B7: deleting a provider-committed task must not refund its stale initial reservation", async t => {
   const s = sandbox();
+  s.overrides.set("src/lib/engine/face-lipsync.ts", {
+    prepareFaceLipsync: async options => ({videoPath: options.inputVideoPath, audioPath: options.audioPath, durationSeconds: options.durationSeconds + 0.9}),
+  });
   try {
     const { TaskStore } = s.load("src/lib/store/task-store.ts");
     const source = path.join(s.tmp, "source.mp4"); const speaker = path.join(s.tmp, "speaker.wav");
@@ -604,4 +611,88 @@ test("B11: voice fallback handles deleting the last item, another item and a fai
       assert.equal(hooks.state[0].some(voice => voice.id === "custom"), scenario === "failed");
     } finally { globalThis.confirm = previousConfirm; s.close(); }
   }
+});
+
+test("lip-sync quality failure cannot be published or bypassed by recovering a cloud final", async () => {
+  for (const faceWorkflow of [false, true]) {
+    const s = sandbox();
+    try {
+      recoveryStubs(s);
+      const { video, audio } = makeMedia(s.tmp);
+      const events = [];
+      s.overrides.set("src/lib/engine/face-lipsync.ts", {
+        restoreFaceLipsync: async () => {events.push("restore-mapping"); return 3;},
+        finalizeFaceLipsync: async options => {
+          assert.equal(options.faceWorkflow, faceWorkflow);
+          events.push("quality-check");
+          throw Object.assign(new Error("locally inconsistent mouth timing"), {code: "LIPSYNC_ALIGNMENT"});
+        },
+      });
+      s.overrides.set("src/lib/cos.ts", { CosService: {
+        isConfigured: () => true, saveJsonToCos: async () => {},
+        objectExists: async key => {events.push(key); return key.endsWith("final.mp4") || key.endsWith("rendered-source.mp4");},
+        getDownloadUrl: async key => `https://storage.example.test/${key}`,
+        uploadFile: async () => assert.fail("failed quality must never upload a final"),
+      }});
+      s.overrides.set("src/lib/server/media-response.ts", {downloadTrustedMediaToFile: async ({source, outputPath}) => {
+        if (faceWorkflow) assert.match(source, /\/face-provider\/rendered-source\.mp4$/);
+        fs.copyFileSync(video, outputPath);
+      }});
+      globalThis.fetch = async (_url, init) => {
+        const request = JSON.parse(init.body); events.push(request.action);
+        assert.equal(request.action, "release", "unusable results must not settle success credits");
+        return Response.json({success: true, data: {}});
+      };
+      const { TaskStore } = s.load("src/lib/store/task-store.ts");
+      const task = TaskStore.create({...baseTask(), status: "failed",
+        billing: {...baseTask().billing, status: "provider_committed"},
+        results: {faceWorkflowVersion: faceWorkflow ? 1 : undefined, heygenLipsyncId: "already-paid"}});
+      const dir = path.join(s.tmp, ".runtime/jobs", task.id); fs.mkdirSync(dir, {recursive: true});
+      fs.copyFileSync(audio, path.join(dir, "voice-track.wav"));
+      const recovery = s.load("src/lib/engine/recover-lipsync.ts");
+      await assert.rejects(recovery.recoverStuckLipsyncTask(task.id, "fake"), {code: "LIPSYNC_ALIGNMENT"});
+      const failed = TaskStore.get(task.id);
+      assert.equal(failed.status, "failed"); assert.equal(failed.errorCode, "LIPSYNC_ALIGNMENT");
+      assert.equal(failed.billing.status, "released"); assert.equal(failed.results.finalVideoUrl, undefined);
+      assert.equal(recovery.isRecoverableLipsyncTask(failed), false);
+      const visible = s.load("src/lib/server/public-data.ts").toPublicTask(failed);
+      assert.equal(visible.recoverable, false); assert.equal(visible.results.downloadUrl, undefined);
+      assert.match(visible.error, /口型与配音未通过同步检查/);
+      assert.equal(events.filter(e => e === "quality-check").length, 1);
+      assert.equal(events.filter(e => e === "release").length, 1);
+      if (faceWorkflow) assert.equal(events.some(e => e.endsWith("/final.mp4")), false,
+        "a full-frame final cannot stand in for a provider face crop");
+    } finally {s.close();}
+  }
+});
+
+test("face recovery uses padded provider duration and removes context before delivery", async () => {
+  const s = sandbox();
+  try {
+    recoveryStubs(s);
+    const base = makeMedia(s.tmp);
+    const padded = makeMedia(s.tmp, 4);
+    let checked = false;
+    s.overrides.set("src/lib/engine/face-lipsync.ts", {
+      restoreFaceLipsync: async () => 3.9,
+      finalizeFaceLipsync: async options => {
+        assert.equal(options.faceWorkflow, true);
+        const media = s.load("src/lib/engine/ffmpeg.ts");
+        assert.equal((await media.probeMedia(options.renderedPath)).videoDurationSeconds, 4);
+        checked = true;
+        return media.finalizeVideo(base.video, options.audioPath, options.outputPath);
+      },
+    });
+    const { TaskStore } = s.load("src/lib/store/task-store.ts");
+    const task = TaskStore.create({...baseTask(), status: "failed",
+      billing: {isExternalUser: false, status: "not_applicable"},
+      results: {faceWorkflowVersion: 1, heygenLipsyncId: "already-paid"}});
+    const dir = path.join(s.tmp, ".runtime/jobs", task.id); fs.mkdirSync(dir, {recursive: true});
+    fs.copyFileSync(base.audio, path.join(dir, "voice-track.wav"));
+    fs.copyFileSync(padded.video, path.join(dir, "rendered-source.mp4"));
+    const result = await s.load("src/lib/engine/recover-lipsync.ts").recoverStuckLipsyncTask(task.id);
+    assert.equal(checked, true); assert.equal(result.status, "completed");
+    assert.equal(result.results.videoDuration, 3);
+    assert.equal(result.results.faceWorkflowVersion, 1);
+  } finally {s.close();}
 });
