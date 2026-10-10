@@ -4,6 +4,8 @@ import { loadAIConfig } from '../ai/server.mjs';
 import { createRestaurantStore, FILES_TTL_MS } from './store.mjs';
 import { createRestaurantMedia } from './media.mjs';
 import * as images from './images.mjs';
+import * as promotion from './promotion.mjs';
+import { createSubjectMasker } from './subject-mask.mjs';
 import { createRestaurantModel } from './model.mjs';
 import { displayModelName } from '../../design/model-labels.js';
 import { inspectCopyQuality } from './copy-quality.mjs';
@@ -41,7 +43,7 @@ function decodeUploads(value, max = 9, startIndex = 0) {
 }
 
 export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'), databaseUrl = process.env.RESTAURANT_DATABASE_URL || process.env.AUTH_DATABASE_URL, config = loadAIConfig(), fetchImpl = fetch, now = Date.now,
-  store: injectedStore, media: injectedMedia, model: injectedModel, providerLedger, credits, mediaEnv = process.env, imageProcessor = images, packageDailyLimit = Number(process.env.RESTAURANT_PACKAGE_DAILY_LIMIT || 20), cleanupIntervalMs = 60_000,
+  store: injectedStore, media: injectedMedia, model: injectedModel, providerLedger, credits, mediaEnv = process.env, imageProcessor = images, promotionalProcessor = promotion, subjectMasker: injectedMasker, packageDailyLimit = Number(process.env.RESTAURANT_PACKAGE_DAILY_LIMIT || 20), cleanupIntervalMs = 60_000,
   requireAuth = process.env.NODE_ENV === 'production', logger = console } = {}) {
   const store = injectedStore ?? createRestaurantStore({ dataDir, databaseUrl, now, packageDailyLimit });
   const rawMedia = injectedMedia ?? createRestaurantMedia({ dataDir, now, env: mediaEnv });
@@ -51,6 +53,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     get: (_userId, _taskId, key) => rawMedia.get(key),
     remove: (_userId, _taskId, key) => rawMedia.remove(key) };
   const model = injectedModel ?? createRestaurantModel({ config, storageDir: join(dataDir, 'model-control'), fetchImpl, now, ledger: providerLedger });
+  const subjectMasker = injectedMasker ?? createSubjectMasker({ env: mediaEnv });
   let closing = false, cleanupTimer, shutdownPromise;
   const running = new Set(), serial = new Map(), mediaWriteGroups = new Map();
   const report = code => { try { logger.warn?.({ event: 'restaurant', code }); } catch {} };
@@ -271,7 +274,9 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   }
   async function process(userId, task, photo, options) {
     for (let attempt = 0; attempt < 3; attempt++) {
-      try { return await imageProcessor.processPhoto(photo.bytes, options); }
+      try { return options?.promotional
+        ? await promotionalProcessor.processPromotionalPhoto(photo.bytes, { ...options, mask: bytes => subjectMasker.mask(bytes) })
+        : await imageProcessor.processPhoto(photo.bytes, options); }
       catch (cause) {
         if (attempt === 2) throw cause;
         await store.patchTask(userId, task.id, { status: 'retrying', progress: { stage: 'image', imageId: photo.id, retry: attempt + 1 } });
@@ -285,7 +290,8 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     for (let index = 0; index < copy.imageOrder.length; index++) {
       const result = processed.get(copy.imageOrder[index]);
       const filename = `${String(index + 1).padStart(2, '0')}.jpg`, key = scopedKey(userId, task.id, `results/${filename}`);
-      files.push({ key, filename, mime: 'image/jpeg', role: 'image', imageId: copy.imageOrder[index], bytes: result.bytes.length, expiresAt, width: result.width, height: result.height });
+      files.push({ key, filename, mime: 'image/jpeg', role: 'image', imageId: copy.imageOrder[index], bytes: result.bytes.length, expiresAt, width: result.width, height: result.height,
+        ...(result.composition ? { composition: result.composition } : {}) });
     }
     const zip = await imageProcessor.createPackageZip(copy.imageOrder.map(imageId => ({ ...processed.get(imageId) })), { ...copy, hashtags: copy.tags.map(tag => `#${tag}`), store: task.profileSnapshot.name, risks: review.warnings, review });
     const zipKey = scopedKey(userId, task.id, 'results/package.zip');
@@ -309,10 +315,12 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     let selected = [];
     const processed = new Map();
     const targetCount = selection.outputCount ?? selection.imageIds.length;
+    const promoSeed = `${task.id}:${selection.directionId}`;
     for (const item of candidates) {
       if (processed.size >= targetCount) break;
       const source = sources.find(photo => photo.id === item.imageId);
-      try { processed.set(item.imageId, await process(userId, task, source, item.crop ? { crop: item.crop } : {})); selected.push(item); }
+      try { processed.set(item.imageId, await process(userId, task, source, { ...(item.crop ? { crop: item.crop } : {}),
+        ...(selection.imageMode === 'promotional' ? { promotional: true, analysis: item, seed: promoSeed, index: processed.size, label: selection.direction.label, storeName: task.profileSnapshot.name } : {}) })); selected.push(item); }
       catch { /* Failed photos may be removed before copy is written against remaining evidence. */ }
     }
     if (!selected.length) throw new RestaurantError('可用图片处理失败，未形成完整内容包。', 502, 'IMAGES_FAILED');
@@ -324,8 +332,11 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     await store.patchTask(userId, id, { status: 'generating', outputCount: selected.length, progress: { stage: 'copy' }, removedImageIds: selection.imageIds.filter(imageId => !processed.has(imageId)) });
     // Let writing and review see a few actual final photos, with removed edge risks already cropped.
     // The full structured analysis remains available for every selected photo.
-    const photos = await Promise.all(selected.slice(0, 3).map(async item => {
-      const result = processed.get(item.imageId);
+    const photos = await Promise.all(selected.slice(0, 4).map(async item => {
+      // Designed backgrounds are not evidence of the store's actual environment.
+      const result = selection.imageMode === 'promotional'
+        ? await imageProcessor.preparePhotoPixels(sources.find(source => source.id === item.imageId).bytes, { crop: item.crop })
+        : processed.get(item.imageId);
       const photo = imageProcessor.prepareAnalysisPhoto ? await imageProcessor.prepareAnalysisPhoto(result.bytes) : { bytes: result.bytes, mime: 'image/jpeg' };
       return { id: item.imageId, dataUrl: `data:${photo.mime};base64,${photo.bytes.toString('base64')}` };
     }));
@@ -335,7 +346,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       const draft = copy, qualityIssues = review?.errors ?? [];
       if (revision) await store.patchTask(userId, id, { progress: { stage: 'copy_refining' } });
       // Only complete, known drafts can be rewritten. Uncertain provider errors propagate without replay.
-      copy = validateCopy(await model.write({ profile: task.profileSnapshot, analysis: selected, direction: selection.direction, facts: selection.facts, photos,
+      copy = validateCopy(await model.write({ profile: task.profileSnapshot, analysis: selected, direction: selection.direction, facts: selection.facts, photos, imageMode: selection.imageMode,
         ...(draft ? { draft, qualityIssues } : {}) }, { onBudgetWait }), selected.map(item => item.imageId));
       if (copy.imageOrder.length !== selected.length) throw new RestaurantError('文案返回的图片顺序不完整。', 502, 'MODEL_INVALID_OUTPUT');
       const quality = inspectCopyQuality(copy, { profile: task.profileSnapshot, analysis: selected, direction: selection.direction });
@@ -356,7 +367,14 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
           error: '文案自动改写后仍未通过检查，请补充真实亮点或更换内容方向。', retryable: false, progress: null }); return;
       }
     }
-    if (selection.imageMode === 'cover') {
+    if (selection.imageMode === 'promotional') {
+      for (const [index, imageId] of copy.imageOrder.entries()) {
+        const item = selected.find(item => item.imageId === imageId);
+        const label = index === 0 ? copy.coverText : copy.imageCaptions?.find(caption => caption.imageId === imageId)?.text
+          || (item.imageType === 'food' ? '分享店里的这一份好味' : '看看我们店里的日常');
+        processed.set(imageId, await promotionalProcessor.addPromotionalHeadline(processed.get(imageId), label, promoSeed, { index }));
+      }
+    } else if (selection.imageMode === 'cover') {
       // A cover can move to another successfully processed, reviewed photo without adding any claims.
       let cover;
       for (const imageId of copy.imageOrder) {
@@ -421,7 +439,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (missingFacts.length) return await store.patchTask(userId, task.id, { status: 'awaiting_facts', missingFacts, selectedDirectionId: direction.id });
     if (task.sparsePhotos && body.acceptSparse !== true && body.allowFewImages !== true) throw new RestaurantError('可用照片较少，请确认继续生成简版图文。', 422, 'SPARSE_CONFIRMATION_REQUIRED');
     const imageMode = body.imageMode ?? body.processingMode ?? 'natural';
-    if (!['natural', 'cover'].includes(imageMode)) throw new RestaurantError('请选择自然美化或封面加字。');
+    if (!['natural', 'cover', 'promotional'].includes(imageMode)) throw new RestaurantError('请选择有效的图片风格。');
     const orderedIds = [...coreImageIds, ...availableIds.filter(imageId => !coreImageIds.includes(imageId))];
     const imageIds = orderedIds.slice(0, outputCount), backupImageIds = orderedIds.slice(outputCount);
     task = await reserveTaskCredits(userId, task, imageIds.length);
@@ -575,7 +593,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     }
   };
   handler.ready = ready;
-  handler.shutdown = () => shutdownPromise ||= (async () => { closing = true; model.stop?.(); clearInterval(cleanupTimer); await ready.catch(() => {}); await Promise.allSettled([...serial.values()]); await Promise.allSettled([...running]); await model.close?.(); await store.close?.(); })();
+  handler.shutdown = () => shutdownPromise ||= (async () => { closing = true; model.stop?.(); clearInterval(cleanupTimer); await ready.catch(() => {}); await Promise.allSettled([...serial.values()]); await Promise.allSettled([...running]); await model.close?.(); await subjectMasker.close?.(); await store.close?.(); })();
   handler.store = store;
   return handler;
 }

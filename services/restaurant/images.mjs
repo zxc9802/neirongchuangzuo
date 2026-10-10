@@ -48,6 +48,15 @@ function checkedCrop(crop, width, height) {
 }
 
 /** No image generation or object removal. Crop coordinates require a trusted, reviewed subject box. */
+export async function preparePhotoPixels(bytes, { crop } = {}) {
+  const meta = await inspectPhoto(bytes);
+  let pipeline = input(bytes).autoOrient().flatten({ background: '#faf8f3' });
+  const area = checkedCrop(crop, meta.width, meta.height);
+  if (area) pipeline = pipeline.extract(area);
+  const result = await pipeline.resize(1600, 2000, { fit: 'inside', withoutEnlargement: true }).png().toBuffer({ resolveWithObject: true });
+  return { bytes: result.data, width: result.info.width, height: result.info.height };
+}
+
 export async function processPhoto(bytes, { coverText, crop } = {}) {
   const metadata = await inspectPhoto(bytes);
   let pipeline = input(bytes).autoOrient().flatten({ background: '#faf8f3' });

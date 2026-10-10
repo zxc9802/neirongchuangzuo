@@ -83,6 +83,8 @@ test('direction cards show all twelve usable photos and the real output range', 
   assert.match(app.html(), /<option value="9" selected>9 张<\/option>/);
   assert.match(app.html(), /<option value="12" >12 张<\/option>/);
   assert.equal(app.calls.filter(call => call.method !== 'GET').length, 0);
+  assert.match(app.html(), /value="promotional" checked/);
+  assert.match(app.html(), /宣传套图/);
 });
 
 test('shared supporting photos count independently when switching between directions', async t => {
@@ -99,6 +101,14 @@ test('shared supporting photos count independently when switching between direct
   app.module.handleRestaurantAction('rest-select', { dataset: { id: second.id } }, app.ctx);
   assert.match(app.html(), /<option value="8" selected>8 张<\/option>/);
   assert.ok(!app.html().includes('<option value="12"'));
+});
+
+test('restored task selections keep their saved image mode instead of switching to promotional', async t => {
+  for (const imageMode of ['natural', 'cover', 'promotional']) await t.test(imageMode, async child => {
+    const analysis = photos(6), current = direction(analysis.map(item => item.imageId));
+    const app = await renderTask(child, analysis, [current], { taskOverrides: { selection: { directionId: current.id, imageMode, outputCount: 6 } } });
+    assert.match(app.html(), new RegExp(`value="${imageMode}" checked`));
+  });
 });
 
 test('legacy directions show related material without an invented core label', async t => {

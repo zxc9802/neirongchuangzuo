@@ -93,8 +93,8 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
       }
       return replacement;
     },
-    async write({ profile, analysis, direction, facts, photos = [], draft, qualityIssues = [] }, { onBudgetWait } = {}) {
-      const input = { profile, images: analysis, direction, confirmedFacts: facts, outputCount: analysis.length, visualImageIds: photos.map(photo => photo.id), ...(draft ? { draft, qualityIssues } : {}) };
+    async write({ profile, analysis, direction, facts, photos = [], imageMode, draft, qualityIssues = [] }, { onBudgetWait } = {}) {
+      const input = { profile, images: analysis, direction, confirmedFacts: facts, imageMode, outputCount: analysis.length, visualImageIds: photos.map(photo => photo.id), ...(draft ? { draft, qualityIssues } : {}) };
       return validateCopy(await call(draft ? COPY_REWRITE_PROMPT : COPY_PROMPT, input, photos, { onBudgetWait }), analysis.map(item => item.imageId));
     },
     async audit({ photos = [], ...input }, { onBudgetWait } = {}) { return validateAudit(await call(AUDIT_PROMPT, { ...input, visualImageIds: photos.map(photo => photo.id) }, photos, { onBudgetWait })); },

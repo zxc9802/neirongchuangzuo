@@ -85,6 +85,12 @@ export function validateAnalysis(value, imageIds) {
       rejectionReason: item.privacyRisk === 'high' ? item.rejectionReason.trim() || '照片存在严重隐私风险，请换用已获授权且风险可控的素材。'
         : unsafeText ? item.rejectionReason.trim() || '图片存在无法安全处理的私人敏感信息或严重宣传风险，请换图。' : item.rejectionReason,
       visibleTexts: item.visibleTexts ?? [], textRisk: crop ? 'none' : unsafeText ? 'high' : item.textRisk, riskReasons: item.riskReasons ?? [],
+      ...(Array.isArray(item.foodSubjects) && item.foodSubjects.length <= 12 && item.foodSubjects.every(subject => rectangle(subject?.box)
+        && Number.isFinite(subject.confidence) && subject.confidence >= 0 && subject.confidence <= 1 && text(subject.label ?? '', 80))
+        ? { foodSubjects: item.foodSubjects.map(subject => ({ box: Object.fromEntries(['left', 'top', 'width', 'height'].map(key => [key, subject.box[key]])), confidence: subject.confidence, label: subject.label ?? '',
+          ...(Array.isArray(subject.outline) && subject.outline.length >= 8 && subject.outline.length <= 24 && subject.outline.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y)
+            && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1)
+            ? { outline: subject.outline.map(point => ({ x: point.x, y: point.y })) } : {}) })) } : {}),
       ...(crop ? { crop, safeCrop: item.safeCrop, subjectBox: item.subjectBox, riskyTextBoxes: item.riskyTextBoxes, cropReason: '保留至少75%画面及完整主体，裁除画面边缘风险文字。' } : {}) };
   });
   return output;
@@ -153,13 +159,18 @@ export function validateCopy(value, imageIds) {
     || value.imageOrder.some(id => !imageIds.includes(id)) || new Set(value.imageOrder).size !== value.imageOrder.length
     || !Array.isArray(value.claims) || value.claims.length > 30) bad('模型发布文案不符合约定格式。');
   for (const claim of value.claims) if (!text(claim?.text, 500) || !claim.text.trim() || !strings(claim.factKeys, 15) || claim.factKeys.some(key => !FACT_FIELDS.includes(key)) || !strings(claim.imageIds, 15) || claim.imageIds.some(id => !imageIds.includes(id)) || (!claim.factKeys.length && !claim.imageIds.length)) bad('文案事实缺少可追踪依据。');
-  return { titles, body: value.body.trim(), tags, coverText: value.coverText.trim(), imageOrder: value.imageOrder, claims: value.claims };
+  if (value.imageCaptions !== undefined && (!Array.isArray(value.imageCaptions) || value.imageCaptions.length !== imageIds.length
+    || new Set(value.imageCaptions.map(item => item?.imageId)).size !== imageIds.length
+    || value.imageCaptions.some(item => !imageIds.includes(item?.imageId) || !text(item?.text, 24) || /[\r\n\u0000-\u001f]/.test(item.text)
+      || (item.text.match(/\p{Script=Han}/gu)?.length ?? 0) < 8 || (item.text.match(/\p{Script=Han}/gu)?.length ?? 0) > 16))) bad('图片宣传文字需要覆盖本次每张照片，并控制在8—16个汉字。');
+  return { titles, body: value.body.trim(), tags, coverText: value.coverText.trim(), imageOrder: value.imageOrder, claims: value.claims,
+    ...(value.imageCaptions ? { imageCaptions: value.imageCaptions.map(item => ({ imageId: item.imageId, text: item.text.trim() })) } : {}) };
 }
 const ABSOLUTE = /全网第一|当地第一|最好吃|必吃|百分百|100[%％]|保证|一定|绝对|天天排队|场场爆满|明星来过|销量第一|回头客最多|顾客一致好评|减肥|养生|治疗|改善疾病|治愈|零添加|有机|非遗|独家配方|网红店|今天来探店|亲测|我来探店/;
 const CONDITIONAL = ['纯手工', '现杀', '现做', '当天采购', '进口', '手工', '新鲜', '预制', '冷冻'];
 export function localReview(copy, profile, facts, selectedAnalysis) {
   const errors = [], warnings = [];
-  const all = `${copy.titles.join('\n')}\n${copy.coverText}\n${copy.body}\n${copy.tags.join(' ')}`;
+  const all = `${copy.titles.join('\n')}\n${copy.coverText}\n${copy.body}\n${copy.tags.join(' ')}\n${(copy.imageCaptions ?? []).map(item => item.text).join('\n')}`;
   const confirmed = { ...profile, ...facts };
   if (ABSOLUTE.test(all)) errors.push('文案含夸张、绝对化、健康功效或顾客探店表述。');
   for (const word of CONDITIONAL) if (all.includes(word) && !JSON.stringify({ profile, facts }).includes(word)) errors.push(`“${word}”缺少已确认的门店资料依据。`);

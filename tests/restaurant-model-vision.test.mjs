@@ -65,11 +65,12 @@ function assertCompletedAttempt(app) {
 
 test('first copy write supplies real images in declared order without duplicating binary data into the JSON facts', async () => {
   const app = harness(copy()), snapshot = structuredClone({ profile, analysis, direction, facts, photos });
-  assert.deepEqual(await app.model.write({ profile, analysis, direction, facts, photos }), copy());
+  assert.deepEqual(await app.model.write({ profile, analysis, direction, facts, photos, imageMode: 'promotional' }), copy());
   assert.equal(app.requests.length, 1);
   const input = visualInput(app.requests[0], COPY_PROMPT);
   assert.deepEqual(input.profile, profile); assert.deepEqual(input.images, analysis);
   assert.deepEqual(input.direction, direction); assert.deepEqual(input.confirmedFacts, facts);
+  assert.equal(input.imageMode, 'promotional');
   assert.equal(Object.hasOwn(input, 'draft'), false); assert.equal(Object.hasOwn(input, 'qualityIssues'), false);
   assert.deepEqual(structuredClone({ profile, analysis, direction, facts, photos }), snapshot);
   assertCompletedAttempt(app);
@@ -101,6 +102,17 @@ test('publication audit receives the same attachments separately from its struct
   assert.deepEqual(input.facts, facts); assert.deepEqual(input.copy, copy());
   assert.deepEqual(structuredClone(payload), snapshot);
   assertCompletedAttempt(app);
+});
+
+test('audit retains selected evidence beyond the preview attachment subset', async () => {
+  const images = [...analysis, { ...analysis[1], imageId: 'photo-extra' }];
+  const app = harness({ status: 'passed', warnings: [], errors: [] });
+  await app.model.audit({ copy: copy(), profile, images, confirmedFacts: facts, direction, photos });
+  const input = visualInput(app.requests[0], AUDIT_PROMPT);
+  assert.deepEqual(input.images.map(item => item.imageId), ['photo-food', 'photo-night', 'photo-extra']);
+  assert.equal(input.visualImageIds.includes('photo-extra'), false);
+  assert.match(AUDIT_PROMPT, /visualImageIds只是本次直接附带缩略图的子集/);
+  assert.match(AUDIT_PROMPT, /未出现在visualImageIds不等于已排除/);
 });
 
 test('known unsent reserve and dispatch rate limits wait in short steps using the same id and only send once', async () => {

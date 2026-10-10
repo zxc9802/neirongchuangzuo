@@ -11,6 +11,7 @@ import { createRestaurantHandler } from '../services/restaurant/server.mjs';
 import { createRestaurantModel } from '../services/restaurant/model.mjs';
 import { validateAnalysis, validateDirections, validateCopy, localReview } from '../services/restaurant/rules.mjs';
 import * as processor from '../services/restaurant/images.mjs';
+import * as promotion from '../services/restaurant/promotion.mjs';
 import { COPY_PROMPT } from '../services/restaurant/prompts.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
 
@@ -84,6 +85,45 @@ async function uploadPool(app, count) {
   assert.equal((await app.api(`/tasks/${id}/analyse`, {})).status, 202);
   return { id, task: await app.wait(id, ['awaiting_selection', 'failed']), inputs };
 }
+
+test('promotional package uses original photo evidence, produces six themed images and ZIP, and charges once', async t => {
+  let masks = 0, closed = 0, seen;
+  const model = mockModel({ async write(input) {
+    seen = input;
+    return { ...copy(input.analysis), imageCaptions: input.analysis.map(item => ({ imageId: item.imageId, text: '附近午餐看看这一碗面' })) };
+  } });
+  const app = await setup(t, { model, withCredits: true, subjectMasker: { mask() { masks++; throw new Error('should not mask non-food geometry'); }, close() { closed++; } } });
+  const { id } = await uploadPool(app, 6);
+  const body = { directionId: 'D01', imageMode: 'promotional', outputCount: 6 };
+  assert.equal((await app.api(`/tasks/${id}/generate`, body)).status, 202);
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(task.imageMode, 'promotional');
+  assert.equal(seen.imageMode, 'promotional'); assert.equal(seen.photos.length, 4);
+  for (const photo of seen.photos) {
+    const metadata = await sharp(Buffer.from(photo.dataUrl.split(',')[1], 'base64')).metadata();
+    assert.equal(metadata.width, 300); assert.equal(metadata.height, 400, 'model sees genuine scene instead of designed background');
+  }
+  assert.equal(task.files.filter(file => file.mime === 'image/jpeg').length, 6);
+  assert.ok(task.files.filter(file => file.mime === 'image/jpeg').every(file => file.width === 1080 && file.height === 1440 && file.composition.method === 'original-frame'));
+  assert.equal(new Set(task.files.filter(file => file.mime === 'image/jpeg').map(file => file.composition.palette)).size, 1);
+  assert.equal(masks, 0); assert.equal(task.billing.chargedPoints, 300);
+  const zip = await app.api(`/tasks/${id}/files/package.zip`);
+  assert.equal(zip.status, 200); assert.equal(Object.keys(unzipSync(zip.body)).filter(name => /\.jpg$/.test(name)).length, 6);
+  assert.equal((await app.api(`/tasks/${id}/generate`, body)).body.task.id, id);
+  assert.equal((await app.credits.snapshot('owner')).balance, 700);
+  await app.handler.shutdown(); assert.equal(closed, 1);
+});
+
+test('promotional processing failure retries locally and releases held credits without publishing a partial set', async t => {
+  let attempts = 0;
+  const app = await setup(t, { withCredits: true, promotionalProcessor: { ...promotion, processPromotionalPhoto() { attempts++; throw new Error('composition failed'); } } });
+  const { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true, imageMode: 'promotional' });
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'failed'); assert.equal(attempts, 6);
+  assert.equal(task.files.length, 0); assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0); assert.equal((await app.api('/usage')).body.usage.used, 0);
+});
 
 test('restaurant points: upload and analysis are free, cover replaces first photo, and repeated completion charges once', async t => {
   const app = await setup(t, { withCredits: true }), { id } = await newTask(app);
@@ -862,6 +902,7 @@ test('copy claims use explicit flat fact keys or exact visual image references',
   ]) assert.throws(() => validateCopy({ ...original, claims: [claim] }, ['photo-1']), /可追踪依据/);
   assert.match(COPY_PROMPT, /factKeys只允许以下平铺字段名/);
   assert.match(COPY_PROMPT, /纯视觉事实必须使用factKeys:\[\]/);
+  assert.match(COPY_PROMPT, /正文必须自然写出profile.name原值/);
 });
 
 test('asset task filter uses completion time and includes old tasks completed recently', async t => {
