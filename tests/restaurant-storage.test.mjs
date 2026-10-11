@@ -5,6 +5,55 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRestaurantStore, FILES_TTL_MS, TASK_TTL_MS } from '../services/restaurant/store.mjs';
 import { createRestaurantMedia } from '../services/restaurant/media.mjs';
+import { withDailyCallPolicy } from '../services/ai/call-policy.mjs';
+
+test('account daily exemption keeps the package ledger without blocking reservation or completion', async t => {
+  const f = await fixture(t, { packageDailyLimit: 0 });
+  await f.store.createTask('owner', { id: 'exempt', status: 'generating' });
+  await assert.rejects(f.store.reservePackage('owner', 'exempt'), { code: 'package_limit' });
+  await withDailyCallPolicy(true, async () => {
+    await f.store.reservePackage('owner', 'exempt');
+    await f.store.completeTask('owner', 'exempt');
+    assert.equal((await f.store.usage('owner')).remaining, null);
+  });
+  assert.equal((await f.store.usage('owner')).used, 1);
+  assert.equal((await f.store.usage('owner')).limit, 0);
+  await f.store.createTask('other', { id: 'not-exempt', status: 'generating' });
+  await withDailyCallPolicy(true, async () => {
+    await assert.rejects(f.store.reservePackage('other', 'not-exempt'), { code: 'package_limit' });
+    assert.equal((await f.store.usage('other')).limit, 0);
+  }, 'owner');
+});
+
+test('task deletion persists, queues all media and keeps completed accounting and profile', async t => {
+  const f = await fixture(t);
+  await f.store.saveProfile('alice', { name: '原门店' });
+  await f.store.createTask('alice', { id: 'delete-me', status: 'generating',
+    sourceImages: [{ key: 'alice/delete-me/original.jpg', expiresAt: f.now() + FILES_TTL_MS }],
+    galleryCheckpoints: [{ key: 'alice/delete-me/checkpoint.jpg', expiresAt: f.now() + FILES_TTL_MS }] });
+  await f.store.reservePackage('alice', 'delete-me');
+  await f.store.completeTask('alice', 'delete-me', { files: [{ key: 'alice/delete-me/package.zip', expiresAt: f.now() + FILES_TTL_MS }] });
+  assert.equal(await f.store.deleteTask('bob', 'delete-me'), false);
+  assert.equal(await f.store.deleteTask('alice', 'delete-me'), true);
+  assert.equal(await f.store.deleteTask('alice', 'delete-me'), false);
+  assert.equal(await f.store.getTask('alice', 'delete-me'), null);
+  assert.equal((await f.store.usage('alice')).used, 1);
+  assert.equal((await f.store.getProfile('alice')).name, '原门店');
+  await f.store.close(); const reopened = f.make(); await reopened.ready;
+  assert.equal(await reopened.getTask('alice', 'delete-me'), null);
+  await assert.rejects(reopened.createTask('alice', { id: 'delete-me' }), { code: 'TASK_DELETED' });
+  assert.equal((await reopened.sweep()).expiredFiles.length, 3);
+});
+
+test('deletion protects running tasks and unsettled financial state', async t => {
+  const f = await fixture(t);
+  for (const status of ['uploading', 'analysing', 'generating', 'retrying']) {
+    await f.store.createTask('owner', { id: status, status });
+    await assert.rejects(f.store.deleteTask('owner', status), { code: 'TASK_BUSY' });
+  }
+  await f.store.createTask('owner', { id: 'unsettled', status: 'completed', billing: { source: 'workspace', status: 'settle_pending' } });
+  await assert.rejects(f.store.deleteTask('owner', 'unsettled'), { code: 'CREDITS_PENDING' });
+});
 
 async function fixture(t, options = {}) {
   const dataDir = await mkdtemp(join(tmpdir(), 'restaurant-store-'));

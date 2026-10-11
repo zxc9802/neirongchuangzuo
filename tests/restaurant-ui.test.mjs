@@ -7,6 +7,44 @@ const id = '00000000-abcd-1234-5678-000000000000';
 const photo = (size = 1024, type = 'image/jpeg') => ({ size, type, name: '门店.jpg' });
 const direction = { id: 'food', supportingImageIds: ['photo-1'], missingFacts: [{ field: 'dishName', requiredForGeneration: true, reason: '确认菜名' }, { field: 'parking', requiredForGeneration: false, reason: '停车可不写' }] };
 
+test('history deletion confirms, removes the selected task and prevents stale refresh from restoring it', async () => {
+  const original = Object.fromEntries(['document', 'fetch', 'sessionStorage', 'location', 'matchMedia', 'confirm'].map(key => [key, globalThis[key]]));
+  let markup = '', accepted = false, deleted = 0;
+  const root = { contains: () => false, querySelector: () => null, querySelectorAll: () => [], set outerHTML(value) { markup = value; } };
+  globalThis.document = { activeElement: null, querySelector: selector => selector === '#restaurant-workspace' ? root : null, getElementById: () => null };
+  globalThis.location = { origin: 'http://127.0.0.1:5173' };
+  globalThis.matchMedia = () => ({ matches: true });
+  const memory = new Map([['restaurant-active-task', id]]);
+  globalThis.sessionStorage = { getItem: key => memory.get(key) || null, setItem: (key, value) => memory.set(key, value), removeItem: key => memory.delete(key) };
+  globalThis.confirm = () => accepted;
+  const task = { id, status: 'failed', createdAt: Date.now(), analysis: [], sourceImages: [], files: [] };
+  globalThis.fetch = async (url, options = {}) => {
+    if (options.method === 'DELETE') { deleted++; return Response.json({ deleted: true, taskId: id }); }
+    if (url.endsWith('/status')) return Response.json({ enabled: true });
+    if (url.endsWith('/profile')) return Response.json({ profile });
+    if (url.endsWith('/usage')) return Response.json({ usage: { remaining: 20 } });
+    return Response.json(url.endsWith('/' + id) ? { task } : { tasks: [task] });
+  };
+  const module = await import('../design/restaurant.js?ui-history-deletion');
+  const ctx = { icon: () => '', toast() {} };
+  const settle = async () => { for (let count = 0; count < 15; count++) await new Promise(resolve => setImmediate(resolve)); };
+  try {
+    module.renderRestaurant(ctx); module.bindRestaurant(ctx); await settle();
+    assert.match(markup, /rest-delete-task/);
+    module.handleRestaurantAction('rest-delete-task', { dataset: { id } }); await settle();
+    assert.equal(deleted, 0);
+    accepted = true;
+    module.handleRestaurantAction('rest-delete-task', { dataset: { id } }); await settle();
+    assert.equal(deleted, 1); assert.doesNotMatch(markup, new RegExp('data-id="' + id + '"'));
+    assert.equal(memory.has('restaurant-active-task'), false);
+    module.handleRestaurantAction('rest-history-refresh', { dataset: {} }); await settle();
+    assert.doesNotMatch(markup, new RegExp('data-id="' + id + '"'));
+  } finally {
+    module.disposeRestaurant();
+    for (const [key, value] of Object.entries(original)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value;
+  }
+});
+
 test('image-only profiles may be empty while copy profiles and original uploads retain validation', () => {
   assert.equal(validateRestaurantProfile(profile), '');
   assert.match(validateRestaurantProfile({ ...profile, address: '  ' }), /门店地址/);

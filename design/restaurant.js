@@ -4,6 +4,8 @@ import { validatePhotoSelection, preparePhotoBatches } from './image-upload.js';
 
 import { imagePoints, creditEstimateText, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask, billingPointsText, workspaceCreditsState } from './workspace-credits.js';
 let unsubscribeCredits = null;
+let deletingTaskId = '';
+const deletedTaskIds = new Set();
 const API = '/api/restaurant';
 const GALLERY_WORKFLOW = 'store-gallery-v1';
 const ACTIVE = new Set(['uploading', 'analysing', 'generating', 'retrying']);
@@ -88,6 +90,7 @@ function readUploadDraft() { try { const value = JSON.parse(sessionStorage.getIt
 function rememberUpload(value) { state.uploadDraft = value; try { if (value) sessionStorage.setItem(uploadKey(), JSON.stringify(value)); else sessionStorage.removeItem(uploadKey()); } catch { /* The task stores the uploaded count on the server. */ } }
 function fileFingerprint(files) { return JSON.stringify(files.map(item => { const file = item?.file || item; return [file.name, file.size, file.type, file.lastModified || 0]; })); }
 function clearAccountData(ownerKey) {
+  deletingTaskId = ''; deletedTaskIds.clear();
   Object.assign(state, { ownerKey, profile: {}, profileDraft: {}, profileDirty: false, profileOpen: false, rights: false, status: null, usage: null, task: null, tasks: [], cursor: null, selected: '', imageMode: 'promotional', outputCount: 0, facts: {}, acceptSparse: false, confirmWarnings: false, pending: readPendingRecommendation(), uploadDraft: readUploadDraft(), uploadProgress: null, busy: false, loading: false, error: '', notice: '', loaded: false });
 }
 function ensureAccount() {
@@ -118,11 +121,11 @@ async function request(path, options = {}) {
   } finally { clearTimeout(timeout); state.controllers.delete(controller); }
 }
 function mergeTask(task) {
-  if (!task?.id) return;
+  if (!task?.id || deletedTaskIds.has(task.id)) return;
   state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => timestamp(b.createdAt) - timestamp(a.createdAt));
 }
 function chooseTask(task, reset = false) {
-  if (!task?.id) return;
+  if (!task?.id || deletedTaskIds.has(task.id)) return;
   observeCreditTask(task);
   const changed = state.task?.id !== task.id;
   state.task = task; mergeTask(task); remember(task.id);
@@ -296,13 +299,15 @@ function renderTask() {
   if (['awaiting_selection', 'awaiting_facts'].includes(task.status) && originalsExpired(task)) return `${analysis}<section class="restaurant-empty"><h2>原图已过期，请重新上传</h2><p>照片和下载包保留 3 天；任务文字记录保留 30 天。</p>${button('recommend', '重新推荐', 'restaurant-text', 'disabled')}${button('new', '重新上传照片')}</section>`;
   if (task.status === 'awaiting_confirmation' && filesExpired(task)) return `<section class="restaurant-empty"><h2>发布包已过期，请重新开始</h2>${task.billing?.exempt === true ? '' : '<p>未交付的成品不扣积分。</p>'}${button('new', '重新上传照片')}</section>`;
   if (task.status === 'awaiting_confirmation') return analysis + renderReview(task);
-  if (task.status === 'failed') return `${analysis}<section class="restaurant-empty restaurant-failure" role="status"><h2>这次没有完成发布包</h2><p>${escape(message(task.error || task.failureReason || task.message || '请稍后重试，或调整照片和门店资料。'))}</p>${task.billing?.exempt === true ? '' : '<small>未使用的冻结积分将在确认后退回。</small>'}<div>${task.retryable !== false && !task.uncertain && !filesExpired(task) ? button('retry', '重试任务', 'restaurant-secondary', state.busy || state.pending ? 'disabled' : '') : ''}${task.directions?.length && !originalsExpired(task) ? button('new-direction', '复用素材新建套图', 'restaurant-secondary', state.busy || state.pending ? 'disabled' : '') : ''}${button('new', '重新上传照片')}</div></section>`;
+  const refundPending = task.billing?.source === 'workspace' && task.billing.exempt !== true && !['settled', 'released'].includes(task.billing.status);
+  if (task.status === 'failed') return `${analysis}<section class="restaurant-empty restaurant-failure" role="status"><h2>这次没有完成发布包</h2><p>${escape(message(task.error || task.failureReason || task.message || '请稍后重试，或调整照片和门店资料。'))}</p>${refundPending ? '<small>积分正在退回。</small>' : ''}<div>${task.retryable !== false && !task.uncertain && !filesExpired(task) ? button('retry', '重试任务', 'restaurant-secondary', state.busy || state.pending ? 'disabled' : '') : ''}${task.directions?.length && !originalsExpired(task) ? button('new-direction', '复用素材新建套图', 'restaurant-secondary', state.busy || state.pending ? 'disabled' : '') : ''}${button('new', '重新上传照片')}</div></section>`;
   return analysis + renderDirections(task);
 }
 function renderHistory() {
   return `<section class="restaurant-history"><div class="restaurant-section-heading"><div><h2>我的图文任务</h2><p>文字记录保留 30 天，图片与下载包保留 3 天</p></div>${button('history-refresh', state.loading ? '正在刷新…' : `${icon('refresh')} 刷新记录`, 'restaurant-text', state.loading ? 'disabled' : '')}</div>${state.tasks.length ? `<div class="restaurant-history-grid">${state.tasks.map(task => {
     const file = task.status !== 'completed' || task.review?.status === 'blocked' || filesExpired(task) ? null : taskFiles(task).find(item => item.role === 'image');
-    return `<button type="button" class="restaurant-history-item${task.id === state.task?.id ? ' current' : ''}" data-action="rest-open-task" data-id="${escape(task.id)}">${file ? `<img src="${escape(file.url)}" alt="任务封面" loading="lazy">` : `<div class="restaurant-history-placeholder">${icon(task.status === 'completed' ? 'image' : 'clock')}<span>${filesExpired(task) ? '文件已过期' : LABELS[task.status] || '任务记录'}</span></div>`}<div><strong>${escape((task.review?.status !== 'blocked' ? task.copy?.titles?.[0] : '') || task.selection?.direction?.label || task.selectedDirection?.label || task.profileSnapshot?.name || task.storeProfile?.name || '餐饮图文任务')}</strong><small>${escape(dateLabel(task.createdAt))}</small><span class="restaurant-status ${escape(task.status)}">${escape(LABELS[task.status] || '任务记录')}</span></div></button>`;
+    const disabled = state.busy || state.pending || deletingTaskId || ACTIVE.has(task.status) || task.billing?.status === 'settle_pending';
+    return `<article class="restaurant-history-card"><button type="button" class="restaurant-history-item${task.id === state.task?.id ? ' current' : ''}" data-action="rest-open-task" data-id="${escape(task.id)}">${file ? `<img src="${escape(file.url)}" alt="任务封面" loading="lazy">` : `<div class="restaurant-history-placeholder">${icon(task.status === 'completed' ? 'image' : 'clock')}<span>${filesExpired(task) ? '文件已过期' : LABELS[task.status] || '任务记录'}</span></div>`}<div><strong>${escape((task.review?.status !== 'blocked' ? task.copy?.titles?.[0] : '') || task.selection?.direction?.label || task.selectedDirection?.label || task.profileSnapshot?.name || task.storeProfile?.name || '餐饮图文任务')}</strong><small>${escape(dateLabel(task.createdAt))}</small><span class="restaurant-status ${escape(task.status)}">${escape(LABELS[task.status] || '任务记录')}</span></div></button>${button('delete-task', `${icon('trash')} ${deletingTaskId === task.id ? '删除中…' : '删除'}`, 'restaurant-history-delete', `data-id="${escape(task.id)}" aria-label="删除图文任务" ${disabled ? 'disabled' : ''}`)}</article>`;
   }).join('')}</div>` : `<div class="restaurant-history-empty">${icon('image')}<p>${state.loading ? '正在读取任务记录…' : '暂无任务记录'}</p></div>`}${state.cursor ? `<div class="restaurant-load-more">${button('more', state.loading ? '正在加载…' : '加载更多任务', 'restaurant-secondary', `id="restaurant-history-more" ${state.loading ? 'disabled' : ''}`)}</div>` : ''}</section>`;
 }
 export function renderRestaurant(ctx = {}) {
@@ -376,7 +381,8 @@ async function loadHistory(more = false) {
   try {
     const data = await request('/tasks?limit=12' + (more ? '&cursor=' + encodeURIComponent(state.cursor) : ''));
     if (!Array.isArray(data.tasks)) throw new Error('任务列表暂时无法读取。');
-    state.tasks = more ? [...new Map([...state.tasks, ...data.tasks].map(item => [item.id, item])).values()] : data.tasks;
+    const tasks = data.tasks.filter(item => !deletedTaskIds.has(item.id));
+    state.tasks = more ? [...new Map([...state.tasks, ...tasks].map(item => [item.id, item])).values()] : tasks;
     state.cursor = data.nextCursor || null;
     if (state.task) { const fresh = data.tasks.find(item => item.id === state.task.id); if (fresh) chooseTask(fresh); }
   } catch (error) { if (error.name !== 'DisposedError') state.error = message(error.message); }
@@ -391,7 +397,7 @@ async function loadInitial() {
   if (status.status === 'fulfilled') state.status = status.value;
   if (profile.status === 'fulfilled') { state.profile = profile.value.profile || {}; if (!state.profileDirty) state.profileDraft = { ...state.profile }; }
   if (usage.status === 'fulfilled') state.usage = usage.value.usage || null;
-  if (history.status === 'fulfilled' && Array.isArray(history.value.tasks)) { state.tasks = history.value.tasks; state.cursor = history.value.nextCursor || null; }
+  if (history.status === 'fulfilled' && Array.isArray(history.value.tasks)) { state.tasks = history.value.tasks.filter(item => !deletedTaskIds.has(item.id)); state.cursor = history.value.nextCursor || null; }
   const rejected = results.find(item => item.status === 'rejected');
   state.error = rejected ? message(rejected.reason.message) : '';
   state.loaded = status.status === 'fulfilled' && profile.status === 'fulfilled';
@@ -541,6 +547,29 @@ async function newTask() {
   } catch (error) { if (error.name !== 'DisposedError') state.error = error.status === 409 ? '原任务已进入分析或生成，请刷新查询原任务，不能取消。' : message(error.message); }
   finally { if (revision === state.revision) { state.busy = false; paint(); } }
 }
+async function deleteHistoryTask(id) {
+  const task = state.tasks.find(item => item.id === id);
+  if (!task || state.busy || state.pending || deletingTaskId || ACTIVE.has(task.status) || task.billing?.status === 'settle_pending') return;
+  if (!globalThis.confirm('删除任务及相关图片？此操作无法恢复。')) return;
+  const revision = state.revision;
+  deletingTaskId = id; state.busy = true; state.error = ''; paint();
+  try {
+    try { await request('/tasks/' + encodeURIComponent(id), { method: 'DELETE' }); }
+    catch (error) { if (error.status !== 404) throw error; }
+    if (revision !== state.revision) return;
+    deletedTaskIds.add(id); state.tasks = state.tasks.filter(item => item.id !== id);
+    if (state.task?.id === id) {
+      state.task = null; state.selected = ''; state.facts = {}; state.outputCount = 0; state.acceptSparse = false;
+      state.confirmWarnings = false; state.rights = false; remember(null); releaseFiles(); clearTimeout(state.timer);
+    }
+    if (state.uploadDraft?.id === id) rememberUpload(null);
+    state.ctx?.toast?.('任务已删除'); void loadUsage();
+  } catch (error) {
+    if (error.name !== 'DisposedError') state.error = message(error.message);
+  } finally {
+    if (revision === state.revision) { deletingTaskId = ''; state.busy = false; paint(); schedulePoll(); }
+  }
+}
 export function bindRestaurant(ctx) {
   ensureAccount();
   state.ctx = ctx; attachInputs();
@@ -568,10 +597,12 @@ export function handleRestaurantAction(action, el, ctx) {
     case 'copy': void copySection(el.dataset.section); break;
     case 'open-task': { const task = state.tasks.find(item => item.id === el.dataset.id); if (task) { chooseTask(task, true); paint(); document.querySelector('.restaurant-creation')?.scrollIntoView({ behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' }); void refreshTask(); } break; }
     case 'new': void newTask(); break;
+    case 'delete-task': void deleteHistoryTask(el.dataset.id); break;
   }
   return true;
 }
 export function disposeRestaurant() {
+  deletingTaskId = '';
   unsubscribeCredits?.(); unsubscribeCredits = null;
   state.revision++; state.ctx = null; clearTimeout(state.timer); clearTimeout(state.expiryTimer); clearTimeout(state.quotaTimer); state.observer?.disconnect(); state.observer = null;
   state.uploadController?.abort(); state.uploadController = null; state.uploadProgress = null;

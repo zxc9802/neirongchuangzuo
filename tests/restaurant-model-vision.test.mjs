@@ -121,23 +121,22 @@ test('a configured image-text model failure is not silently retried with the cha
   });
 });
 
-test('Claude JSON fences are normalized without accepting prose, partial data or truncated responses', async t => {
+test('Claude JSON wrappers are normalized while partial data and truncated responses retry once', async t => {
   const board = { theme: '菜品与门店', foodGroups: [], shots: [] };
-  for (const content of [JSON.stringify(board), '```json\n' + JSON.stringify(board) + '\n```', '  ```JSON\r\n' + JSON.stringify(board) + '\r\n```  ']) await t.test('complete object', async () => {
+  for (const content of [JSON.stringify(board), '```json\n' + JSON.stringify(board) + '\n```', '  ```JSON\r\n' + JSON.stringify(board) + '\r\n```  ', '这是分析结果：\n```json\n' + JSON.stringify(board) + '\n```']) await t.test('complete object', async () => {
     const app = harness(null, undefined, () => new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: 'stop' }] })), { ...config, imageTextModel: 'claude-opus-5-5' });
     assert.deepEqual(await app.model.planGallery({ analysis, profile, outputCount: 9, photos }), board);
     assert.equal(app.reservations[0].model, 'claude-opus-5-5');
     assert.equal(app.finishes[0].status, 'completed');
   });
   for (const [content, finishReason] of [
-    ['这是分析结果：\n```json\n' + JSON.stringify(board) + '\n```', 'stop'],
     ['```json\n{"theme":', 'stop'],
     ['```json\n[]\n```', 'stop'],
     ['```json\n' + JSON.stringify(board) + '\n```', 'length'],
   ]) await t.test('invalid output', async () => {
     const app = harness(null, undefined, () => new Response(JSON.stringify({ choices: [{ message: { content }, finish_reason: finishReason }] })));
     await assert.rejects(app.model.planGallery({ analysis, profile, outputCount: 9, photos }), { code: 'MODEL_INVALID_OUTPUT' });
-    assert.equal(app.requests.length, 1);
+    assert.equal(app.requests.length, 2);
     assert.equal(app.finishes[0].status, 'failed');
   });
 });

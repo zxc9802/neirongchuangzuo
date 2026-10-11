@@ -734,11 +734,11 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       await ready;
       const userId = req.authenticatedUserId || (!requireAuth && loopback(req.socket?.remoteAddress) ? 'local-dev' : null);
       if (!userId) throw new RestaurantError('请先登录后继续。', 401, 'UNAUTHENTICATED');
-      if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.headers.origin) {
+      if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.headers.origin) {
         let origin; try { origin = new URL(req.headers.origin); } catch { throw new RestaurantError('请求来源不正确。', 403); }
         if (origin.host !== req.headers.host) throw new RestaurantError('请求来源不正确。', 403, 'ORIGIN_REJECTED');
       }
-      if (path === '/api/restaurant/status' && req.method === 'GET') { reply(res, 200, { enabled: model.enabled ?? true, packageDailyLimit, retention: { filesDays: 3, tasksDays: 30 }, model: displayModelName(config.imageTextModel || config.chatModel, 'Pro模型') }); return true; }
+      if (path === '/api/restaurant/status' && req.method === 'GET') { reply(res, 200, { enabled: model.enabled ?? true, packageDailyLimit: (await store.usage(userId)).limit, retention: { filesDays: 3, tasksDays: 30 }, model: displayModelName(config.imageTextModel || config.chatModel, 'Pro模型') }); return true; }
       if (path === '/api/restaurant/usage' && req.method === 'GET') { const usage = await store.usage(userId), raw = await model.usage?.(); reply(res, 200, { usage, budget: raw ? { day: raw.day, limits: raw.limits, used: raw.used, remaining: raw.remaining } : null }); return true; }
       if (path === '/api/restaurant/profile') {
         if (req.method === 'GET') { reply(res, 200, { profile: await store.getProfile(userId) }); return true; }
@@ -810,6 +810,19 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       const match = /^\/api\/restaurant\/tasks\/([^/]+)(?:\/(generate|retry|confirm|fork|files|photos|analyse|recommend|cancel-upload)(?:\/([^/]+))?)?$/.exec(path);
       if (match) {
         const [, id, action, filename] = match;
+        if (req.method === 'DELETE' && !action) {
+          if (!UUID.test(id)) throw new RestaurantError('任务地址无效。', 400);
+          await exclusive(userId, async () => {
+            const task = await store.getTask(userId, id);
+            if (!task) return;
+            if (ACTIVE.has(task.status)) throw new RestaurantError('任务处理中，请完成后再删除。', 409, 'TASK_BUSY');
+            if (task.billing?.status === 'settle_pending') throw new RestaurantError('积分正在结算，请稍后删除。', 409, 'CREDITS_PENDING');
+            await releaseTaskCredits(userId, task);
+            await store.deleteTask(userId, id);
+          });
+          await sweep().catch(() => report('CLEANUP_FAILED'));
+          reply(res, 200, { deleted: true, taskId: id }); return true;
+        }
         if (req.method === 'GET' && !action) {
           // Reconcile expiry on reads as well as the timer, so pending credits recover promptly after an outage.
           if (!UUID.test(id)) throw new RestaurantError('任务地址无效。', 400);

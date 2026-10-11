@@ -5,6 +5,7 @@ import { RestaurantError, fingerprint, validateAnalysis, validateDirections, val
 import { ANALYSIS_PROMPT, GALLERY_ANALYSIS_PROMPT, GALLERY_STORYBOARD_PROMPT, RECOMMEND_PROMPT, RECOMMEND_REPAIR_PROMPT, COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT, FOOD_IDENTITY_PROMPT, FOOD_RENDER_AUDIT_PROMPT } from './prompts.mjs';
 import { recommendationQualityIssues } from './recommendation-quality.mjs';
 import { createFoodRenderer } from './food-renderer.mjs';
+import { parseStructuredOutput, structuredOutputError } from './structured-output.mjs';
 
 /** Separate durable provider-attempt budget. User package charges live in the store. */
 export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, now = Date.now, timeoutMs = 90_000, ledger: injectedLedger,
@@ -13,11 +14,11 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
   const ready = ledger.ready;
   let stopping = false;
   const renderFood = createFoodRenderer({ config, ledger, fetchImpl, isStopping: () => stopping, sleepImpl, budgetWaitMaxMs, budgetWaitStepMs });
-  async function call(prompt, input, photos = [], { onBudgetWait, temperature = 0.3 } = {}) {
+  async function callOnce(prompt, input, photos = [], { onBudgetWait, temperature = 0.3, maxTokens = 8192 } = {}) {
     if (!config.apiKey) throw new RestaurantError('尚未配置内容分析接口，请联系管理员。', 503, 'MODEL_NOT_CONFIGURED');
     const id = randomUUID();
     const model = config.imageTextModel || config.chatModel;
-    const body = { model, messages: [{ role: 'system', content: prompt }, { role: 'user', content: photos.length ? [{ type: 'text', text: JSON.stringify(input) }, ...photos.map(photo => ({ type: 'image_url', image_url: { url: photo.dataUrl, detail: 'high' } }))] : JSON.stringify(input) }], response_format: { type: 'json_object' }, temperature };
+    const body = { model, messages: [{ role: 'system', content: prompt }, { role: 'user', content: photos.length ? [{ type: 'text', text: JSON.stringify(input) }, ...photos.map(photo => ({ type: 'image_url', image_url: { url: photo.dataUrl, detail: 'high' } }))] : JSON.stringify(input) }], response_format: { type: 'json_object' }, max_tokens: maxTokens, temperature };
     let waitedMs = 0;
     async function beforeDispatch(operation) {
       while (true) {
@@ -32,7 +33,7 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
       }
     }
     await beforeDispatch(() => ledger.reserve({ id, kind: 'chat', model, fingerprint: fingerprint(body) }));
-    const controller = new AbortController(); let dispatched = false, responseReceived = false, responseOK = false, bodyComplete = false, timer;
+    const controller = new AbortController(); let dispatched = false, responseReceived = false, responseOK = false, bodyComplete = false, timer, payload;
     try {
       if (stopping) throw new RestaurantError('服务正在关闭，尚未发送新的模型请求。', 503, 'SERVICE_CLOSING');
       await beforeDispatch(() => ledger.markDispatched(id)); dispatched = true;
@@ -44,24 +45,33 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
       const chunks = []; let size = 0;
       for await (const chunk of response.body) { size += chunk.length; if (size > 2 * 1024 * 1024) throw new RestaurantError('模型返回过大，已停止接收。', 502, 'MODEL_INVALID_OUTPUT'); chunks.push(chunk); }
       bodyComplete = true;
-      let payload, result;
-      try {
-        payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-        if (typeof payload.choices?.[0]?.message?.content !== 'string' || payload.choices?.[0]?.finish_reason === 'length') throw new Error('truncated');
-        const content = payload.choices[0].message.content.trim();
-        const fenced = content.match(/^```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n```$/i);
-        result = JSON.parse(fenced ? fenced[1] : content);
-        if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('schema');
-      } catch { throw new RestaurantError('模型没有返回完整的结构化结果，任务已停止。', 502, 'MODEL_INVALID_OUTPUT'); }
+      try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+      catch { throw structuredOutputError('invalid_json'); }
+      const result = parseStructuredOutput(payload);
       await ledger.finish(id, { status: 'completed', usage: payload.usage, providerRequestId: payload.id });
       return result;
     } catch (cause) {
       if (cause.code === 'MODEL_INVALID_OUTPUT') cause.providerResponseComplete = bodyComplete;
       const uncertain = dispatched && (!responseReceived || controller.signal.aborted || (responseOK && !bodyComplete && cause.code !== 'MODEL_INVALID_OUTPUT'));
-      await ledger.finish(id, { status: uncertain ? 'uncertain' : dispatched ? 'failed' : 'cancelled', code: uncertain ? 'PROVIDER_UNCERTAIN' : cause.code || 'PROVIDER_ERROR' }).catch(() => {});
+      await ledger.finish(id, { status: uncertain ? 'uncertain' : dispatched ? 'failed' : 'cancelled', code: uncertain ? 'PROVIDER_UNCERTAIN' : cause.code || 'PROVIDER_ERROR',
+        ...(payload?.usage ? { usage: payload.usage } : {}), ...(payload?.id ? { providerRequestId: payload.id } : {}),
+        ...(cause.outputIssue ? { outputIssue: cause.outputIssue } : {}) }).catch(() => {});
       if (uncertain) throw new RestaurantError('模型请求结果未确认，上游可能已执行。请管理员核对调用记录后再重新发起，系统不会自动重复请求。', 502, 'PROVIDER_UNCERTAIN');
       throw cause;
     } finally { clearTimeout(timer); }
+  }
+  async function call(prompt, input, photos = [], options = {}) {
+    let maxTokens = options.maxTokens || 8192;
+    for (let attempt = 0; ; attempt++) {
+      try { return await callOnce(prompt, input, photos, { ...options, maxTokens }); }
+      catch (cause) {
+        if (attempt >= 1 || cause.code !== 'MODEL_INVALID_OUTPUT' || cause.providerResponseComplete !== true
+          || !['truncated', 'empty', 'invalid_json', 'invalid_schema'].includes(cause.outputIssue) || stopping) throw cause;
+        await options.onStructuredRetry?.({ attempt: attempt + 1, issue: cause.outputIssue });
+        if (cause.outputIssue === 'truncated') maxTokens = Math.min(32768, maxTokens * 2);
+        prompt += '\n上一轮未返回完整且符合约定的JSON。本次请完成所有必需字段、图片ID和指定张数，只返回一个JSON对象，不输出前言、解释或Markdown。字段文字保持简洁，不能用截断、省略号或缺少图片的结果代替完整输出。';
+      }
+    }
   }
   return {
     ready,
@@ -83,7 +93,7 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
     async identifyFood({ analysis, photos, subjectScope, subjectFocus }, options) { return validateFoodAppearance(await call(FOOD_IDENTITY_PROMPT, { imageId: analysis.imageId,
       ...(subjectScope ? { subjectScope } : {}), ...(subjectFocus ? { subjectFocus } : {}) }, photos, options)); },
     async planGallery({ analysis, profile, outputCount, photos = [] }, options) { return call(GALLERY_STORYBOARD_PROMPT,
-      { profile, images: analysis, requestedOutputCount: outputCount, visualImageIds: photos.map(photo => photo.id) }, photos, options); },
+      { profile, images: analysis, requestedOutputCount: outputCount, visualImageIds: photos.map(photo => photo.id) }, photos, { ...options, maxTokens: Math.max(8192, Math.min(16384, outputCount * 512 + 1024)) }); },
     async reviewFoodRender({ photos, ...input }, options) { return validateFoodRenderReview(await call(FOOD_RENDER_AUDIT_PROMPT, input, photos, options)); },
     async analyse(photos, profile, options) { return validateAnalysis(await call(options?.gallery ? GALLERY_ANALYSIS_PROMPT : ANALYSIS_PROMPT, { profile, images: photos.map(photo => ({ imageId: photo.id, width: photo.width, height: photo.height })) }, photos, options), photos.map(photo => photo.id)); },
     async recommend(analysis, profile, options) {

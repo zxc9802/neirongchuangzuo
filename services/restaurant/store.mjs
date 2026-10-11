@@ -2,6 +2,7 @@ import { lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promises';
 import { dirname, join, parse, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
+import { isDailyCallExempt } from '../ai/call-policy.mjs';
 
 export const FILES_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 export const TASK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -152,13 +153,14 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
     const deadline = files.length ? Math.min(...files.map(file => file.expiresAt)) : entry.expiresAt ?? entry.reservedAt + FILES_TTL_MS;
     return Math.min(deadline, task.textExpiresAt);
   }
-  function summary(state) {
+  function summary(state, userId) {
     const day = dayAt(now());
     const records = Object.values(state.ledger);
     const used = records.filter(entry => entry.status === 'completed' && entry.day === day).length;
     // Pending deliveries span midnight. Otherwise yesterday's confirmations could bypass today's limit.
     const reserved = records.filter(entry => entry.status === 'reserved' && reservationExpires(state, entry) > now()).length;
-    return { day, timeZone: 'Asia/Shanghai', limit: packageDailyLimit, used, reserved, remaining: Math.max(0, packageDailyLimit - used - reserved) };
+    const limit = isDailyCallExempt(userId) ? null : packageDailyLimit;
+    return { day, timeZone: 'Asia/Shanghai', limit, used, reserved, remaining: limit === null ? null : Math.max(0, limit - used - reserved) };
   }
   function change(state, id, patch) {
     const task = state.tasks[id];
@@ -229,6 +231,7 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
       return run(() => stateFor(userId, state => {
         const id = taskKey(task.id || task.requestId || randomUUID());
         if (state.tasks[id]) return state.tasks[id];
+        if (state.deletedTasks?.[id] > now()) throw problem('TASK_DELETED', '此任务已删除，请创建新的任务。', 409);
         if (state.ledger[id]?.status === 'completed') throw problem('task_expired', '此任务已过期，请创建新的任务。', 409);
         const createdAt = now();
         state.tasks[id] = { ...checkedPatch(task), id, userId, status: task.status || 'analysing', createdAt, updatedAt: createdAt,
@@ -238,6 +241,25 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
     },
     getTask(userId, id) { taskKey(id); return run(() => stateFor(userId, state => state.tasks[id]?.textExpiresAt > now() ? state.tasks[id] : null, false)); },
     listTasks(userId) { return run(() => stateFor(userId, state => Object.values(state.tasks).filter(task => task.textExpiresAt > now()).sort((a, b) => b.createdAt - a.createdAt), false)); },
+    deleteTask(userId, id) {
+      taskKey(id);
+      return run(() => stateFor(userId, state => {
+        const task = state.tasks[id];
+        if (!task) return false;
+        if (INTERRUPTED.has(task.status)) throw problem('TASK_BUSY', '任务处理中，请完成后再删除。', 409);
+        if (task.billing?.source === 'workspace' && !['settled', 'released'].includes(task.billing.status)) throw problem('CREDITS_PENDING', '积分正在结算，请稍后删除。', 409);
+        state.garbage ||= [];
+        for (const item of [...(task.sourceImages || []), ...(task.files || []), ...(task.galleryCheckpoints || []), ...(task.pendingUpload?.sourceImages || [])]) {
+          if (validMediaKey(item.key) && !state.garbage.some(file => file.key === item.key)) state.garbage.push({ userId, taskId: id, key: item.key });
+        }
+        if (state.ledger[id]?.status === 'reserved') state.ledger[id].status = 'released';
+        state.deletedTasks ||= {};
+        state.deletedTasks[id] = task.textExpiresAt;
+        if (task.billing?.taskId) delete state.pendingCreditCleanup?.[task.billing.taskId];
+        delete state.tasks[id];
+        return true;
+      }));
+    },
     patchTask(userId, id, patch) { taskKey(id); return run(() => stateFor(userId, state => change(state, id, patch))); },
     claimTask(userId, id, allowedStatuses, patch) {
       taskKey(id);
@@ -248,15 +270,16 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
       return run(() => stateFor(userId, state => {
         if (!state.tasks[taskId] || state.tasks[taskId].textExpiresAt <= now()) throw problem('task_not_found', '任务不存在。', 404);
         const previous = state.ledger[taskId];
-        if (previous?.status === 'completed' || previous?.status === 'reserved' && reservationExpires(state, previous) > now()) return { reserved: true, duplicate: true, usage: summary(state) };
-        if (summary(state).remaining <= 0) throw problem('package_limit', '今日发布包额度已用完，北京时间次日恢复。', 429);
+        if (previous?.status === 'completed' || previous?.status === 'reserved' && reservationExpires(state, previous) > now()) return { reserved: true, duplicate: true, usage: summary(state, userId) };
+        const quota = summary(state, userId);
+        if (quota.remaining !== null && quota.remaining <= 0) throw problem('package_limit', '今日发布包额度已用完，北京时间次日恢复。', 429);
         state.ledger[taskId] = { taskId, day: dayAt(now()), status: 'reserved', reservedAt: now(), expiresAt: now() + FILES_TTL_MS };
-        return { reserved: true, duplicate: false, usage: summary(state) };
+        return { reserved: true, duplicate: false, usage: summary(state, userId) };
       }));
     },
     releasePackage(userId, taskId) {
       taskKey(taskId);
-      return run(() => stateFor(userId, state => { if (state.ledger[taskId]?.status === 'reserved') state.ledger[taskId].status = 'released'; return summary(state); }));
+      return run(() => stateFor(userId, state => { if (state.ledger[taskId]?.status === 'reserved') state.ledger[taskId].status = 'released'; return summary(state, userId); }));
     },
     completeTask(userId, taskId, patch = {}) {
       taskKey(taskId);
@@ -268,13 +291,13 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
           throw problem('FILES_EXPIRED', '结果文件或生成预留已过期，请重新上传并创建新的任务。', 410);
         }
         if (entry?.status !== 'reserved') throw problem('quota_not_reserved', '发布包未预留额度，无法完成。', 409);
-        const quota = summary(state);
-        if (quota.used + quota.reserved - 1 >= packageDailyLimit) throw problem('package_limit', '今日发布包额度已用完，北京时间次日恢复。', 429);
+        const quota = summary(state, userId);
+        if (quota.limit !== null && quota.used + quota.reserved - 1 >= quota.limit) throw problem('package_limit', '今日发布包额度已用完，北京时间次日恢复。', 429);
         entry.status = 'completed'; entry.completedAt = now(); entry.day = dayAt(now());
         return change(state, taskId, { ...patch, status: 'completed', completedAt: now() });
       }));
     },
-    usage(userId) { return run(() => stateFor(userId, summary, false)); },
+    usage(userId) { return run(() => stateFor(userId, state => summary(state, userId), false)); },
     sweep() {
       return run(async () => {
         const expiredTaskIds = [], expiredFiles = [], pendingCredits = [];
@@ -282,6 +305,7 @@ export function createRestaurantStore({ dataDir = '.data/restaurant', databaseUr
           await stateFor(userId, state => {
             state.garbage ||= [];
             state.pendingCreditCleanup ||= {};
+            for (const [id, expiresAt] of Object.entries(state.deletedTasks || {})) if (expiresAt <= now()) delete state.deletedTasks[id];
             for (const task of Object.values(state.tasks)) {
               const expiredTask = task.textExpiresAt <= now();
               if (task.status === 'uploading' && task.uploadProtocol === 'batches' && task.uploadExpiresAt <= now()) {

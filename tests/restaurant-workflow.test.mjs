@@ -61,7 +61,7 @@ async function setup(t, options = {}) {
   const server = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-user']; handler(req, res); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}/api/restaurant`;
-  async function api(path, body, user = 'owner') { const response = await fetch(base + path, { method: body === undefined ? 'GET' : path === '/profile' ? 'PUT' : 'POST', headers: { ...(user ? { 'x-test-user': user } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, body: response.headers.get('content-type')?.includes('json') ? await response.json() : Buffer.from(await response.arrayBuffer()) }; }
+  async function api(path, body, user = 'owner', method) { const response = await fetch(base + path, { method: method || (body === undefined ? 'GET' : path === '/profile' ? 'PUT' : 'POST'), headers: { ...(user ? { 'x-test-user': user } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, body: response.headers.get('content-type')?.includes('json') ? await response.json() : Buffer.from(await response.arrayBuffer()) }; }
   async function wait(id, states) {
     const deadline = performance.now() + 15_000;
     let last;
@@ -85,6 +85,37 @@ async function uploadPool(app, count) {
   assert.equal((await app.api(`/tasks/${id}/analyse`, {})).status, 202);
   return { id, task: await app.wait(id, ['awaiting_selection', 'failed']), inputs };
 }
+
+test('deleting a completed task removes downloads and retains spent points and daily accounting', async t => {
+  const app = await setup(t, { withCredits: true });
+  const { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true, imageMode: 'natural' });
+  const completed = await app.wait(id, ['completed', 'failed']);
+  assert.equal(completed.status, 'completed', completed.error);
+  const original = completed.sourceImages[0].filename;
+  const balance = (await app.credits.snapshot('owner')).balance;
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'other', 'DELETE')).status, 200);
+  assert.equal((await app.api(`/tasks/${id}`)).status, 200);
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 200);
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 200);
+  assert.equal((await app.api(`/tasks/${id}`)).status, 404);
+  assert.equal((await app.api(`/tasks/${id}/files/${original}`)).status, 404);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
+  assert.equal((await app.api('/tasks')).body.tasks.some(task => task.id === id), false);
+  assert.equal((await app.credits.snapshot('owner')).balance, balance);
+  assert.equal((await app.api('/usage')).body.usage.used, 1);
+  assert.equal((await app.api('/tasks', { requestId: id, images: await photos(), rightsConfirmed: true })).status, 409);
+});
+
+test('deletion blocks an active upload until it is cancelled', async t => {
+  const app = await setup(t);
+  const id = randomUUID();
+  await app.api('/profile', { profile });
+  assert.equal((await app.api('/tasks', { requestId: id, imageCount: 1, rightsConfirmed: true })).status, 202);
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 409);
+  await app.api(`/tasks/${id}/cancel-upload`, {});
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 200);
+});
 
 test('promotional package uses original photo evidence, produces six themed images and ZIP, and charges once', async t => {
   let masks = 0, closed = 0, seen;
@@ -1192,11 +1223,11 @@ test('publication blocks unsupported claims and privacy; no quota is charged', a
   assert.ok(localReview(copy([{ imageId: 'photo-1' }]), profile, {}, [{ imageId: 'photo-1', usable: false, privacyRisk: 'high', textRisk: 'none' }]).errors.length);
 });
 
-test('provider malformed JSON and uncertain transport failures consume internal attempts without auto replay', async t => {
+test('completed malformed JSON retries once; uncertain transport failures consume one attempt without replay', async t => {
   const root = await mkdtemp(join(tmpdir(), 'restaurant-model-')); let requests = 0;
   const model = createRestaurantModel({ config, storageDir: root, fetchImpl: async () => { requests++; return new Response(JSON.stringify({ choices: [{ message: { content: '{broken' }, finish_reason: 'stop' }] }), { status: 200 }); } });
   t.after(async () => { await model.close(); await rm(root, { recursive: true, force: true }); }); await model.ready;
-  await assert.rejects(model.recommend([], profile), error => error.code === 'MODEL_INVALID_OUTPUT'); assert.equal(requests, 1); assert.equal((await model.usage()).used.chat, 1);
+  await assert.rejects(model.recommend([], profile), error => error.code === 'MODEL_INVALID_OUTPUT'); assert.equal(requests, 2); assert.equal((await model.usage()).used.chat, 2);
   const secondRoot = await mkdtemp(join(tmpdir(), 'restaurant-model-uncertain-'));
   const uncertain = createRestaurantModel({ config, storageDir: secondRoot, fetchImpl: async () => { throw new Error('connection lost'); } });
   t.after(async () => { await uncertain.close(); await rm(secondRoot, { recursive: true, force: true }); }); await uncertain.ready;

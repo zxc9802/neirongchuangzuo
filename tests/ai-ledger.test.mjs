@@ -6,9 +6,47 @@ import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { createRequestLedger } from '../services/ai/request-ledger.mjs';
+import { withDailyCallPolicy } from '../services/ai/call-policy.mjs';
 
 const input = (id, overrides = {}) => ({ id, kind: 'image', fingerprint: `hash-${id}`, model: 'mock-model', ...overrides });
 const at = Date.parse('2026-09-30T08:00:00Z');
+
+test('trusted account exemption bypasses both daily caps, persists and still obeys dispatch rate limits', async t => {
+  const f = await fixture(t, { limits: { imageDaily: 1, chatDaily: 0, perMinute: 3 } });
+  const ledger = f.create(); await ledger.ready;
+  await ledger.reserve(input('ordinary')); await ledger.markDispatched('ordinary');
+  await assert.rejects(ledger.reserve(input('blocked')), { code: 'DAILY_QUOTA_EXCEEDED' });
+  await assert.rejects(ledger.reserve(input('forged', { dailyExempt: true })), { code: 'DAILY_QUOTA_EXCEEDED' });
+  await withDailyCallPolicy(true, async () => {
+    const reservations = await ledger.reserveBatch([input('exempt1'), input('exempt2'), input('exempt3')]);
+    assert.ok(reservations.records.every(item => item.dailyExempt));
+    await ledger.markDispatched('exempt1');
+    await ledger.markDispatched('exempt2');
+    await assert.rejects(ledger.markDispatched('exempt3'), { code: 'RATE_LIMITED' });
+    const usage = await ledger.summary();
+    assert.deepEqual(usage.remaining, { image: null, chat: null });
+    assert.equal(usage.limits.perMinute, 3);
+  });
+  assert.equal((await ledger.summary()).remaining.image, 0);
+  await ledger.close();
+  const reopened = f.create({ now: () => at + 60001 }); await reopened.ready;
+  assert.equal((await reopened.get('exempt1')).dailyExempt, true);
+  await withDailyCallPolicy(true, () => reopened.reserve(input('exempt-after-restart')));
+  await reopened.markDispatched('exempt-after-restart');
+  await withDailyCallPolicy(true, () => reopened.reserve(input('chat', { kind: 'chat' })));
+  await assert.rejects(reopened.reserve(input('ordinary-chat', { kind: 'chat' })), { code: 'DAILY_QUOTA_EXCEEDED' });
+});
+
+test('concurrent exempt and ordinary requests retain separate account policies', async t => {
+  const f = await fixture(t, { limits: { imageDaily: 0, chatDaily: 0, perMinute: 50 } });
+  const ledger = f.create(); await ledger.ready;
+  const outcomes = await Promise.allSettled(Array.from({ length: 10 }, (_, index) => withDailyCallPolicy(index % 2 === 0, async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    return ledger.reserve(input('concurrent-' + index));
+  })));
+  outcomes.forEach((outcome, index) => assert.equal(outcome.status, index % 2 === 0 ? 'fulfilled' : 'rejected'));
+  assert.equal((await ledger.summary()).used.image, 0);
+});
 
 async function fixture(t, options = {}) {
   const parent = resolve(tmpdir());
