@@ -92,8 +92,8 @@ export async function generateDoubaoTTS(
   const finalWavPath = path.join(options.outDir, "voice-track.wav");
   fs.writeFileSync(rawWavPath, Buffer.concat([header, ...chunks]));
   const toneProfile = options.toneProfile || "low";
-  const rate = toneProfile === "high" ? 1.2 : 1.0;
+  const rate = 1.2;
   const durations = await applyToneProfile(rawWavPath, finalWavPath, rate);
-  options.onLog?.(`豆包完整配音已就绪，时长 ${durations.selectedDuration.toFixed(1)}s`);
+  options.onLog?.(`豆包完整配音已就绪，语速 ${rate} 倍，时长 ${durations.selectedDuration.toFixed(1)}s`);
   return { rawWavPath, finalWavPath, ...durations, toneProfile, rate, fromCache: false };
 }

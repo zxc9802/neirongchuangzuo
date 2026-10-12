@@ -86,24 +86,27 @@ test('primary success never calls the fallback or changes the existing voice', a
   });
 });
 
-test('a failed IndexTTS sentence switches the entire script to Doubao 2.0 and applies speed once', async () => {
-  await harness(async h => {
-    const text = '第一句话成功。第二句话失败。第三句话成功。';
-    const result = await h.generate(text, {...h.options, toneProfile: 'high'});
-    const fallback = h.posts.filter(p => p.url.includes('openspeech.bytedance.com'));
-    assert.equal(fallback.length, 1);
-    assert.equal(fallback[0].payload.req_params.text, text);
-    assert.equal(fallback[0].payload.req_params.speaker, 'S_test');
-    assert.equal(fallback[0].payload.req_params.model, 'seed-tts-2.0-expressive');
-    assert.equal(fallback[0].init.headers['X-Api-Resource-Id'], 'seed-icl-2.0');
-    assert.equal(fallback[0].init.headers['X-Api-Key'], 'doubao-test');
-    assert.equal(fallback[0].init.redirect, 'error');
-    assert.equal(result.finalWavPath, path.join(h.options.outDir, 'voice-track.wav'));
-    assert.ok(Math.abs(result.rawDuration - 0.5) < 0.02, 'must use only the complete fallback track');
-    assert.ok(Math.abs(result.selectedDuration - result.rawDuration / 1.2) < 0.08);
-    assert.equal(h.logs.filter(m => m === 'fallback').length, 1);
+for (const toneProfile of [undefined, 'low', 'high']) {
+  test(`a failed IndexTTS sentence switches the entire script to Doubao at 1.2x (${toneProfile || 'default'})`, async () => {
+    await harness(async h => {
+      const text = '第一句话成功。第二句话失败。第三句话成功。';
+      const result = await h.generate(text, {...h.options, toneProfile});
+      const fallback = h.posts.filter(p => p.url.includes('openspeech.bytedance.com'));
+      assert.equal(fallback.length, 1);
+      assert.equal(fallback[0].payload.req_params.text, text);
+      assert.equal(fallback[0].payload.req_params.speaker, 'S_test');
+      assert.equal(fallback[0].payload.req_params.model, 'seed-tts-2.0-expressive');
+      assert.equal(fallback[0].init.headers['X-Api-Resource-Id'], 'seed-icl-2.0');
+      assert.equal(fallback[0].init.headers['X-Api-Key'], 'doubao-test');
+      assert.equal(fallback[0].init.redirect, 'error');
+      assert.equal(result.finalWavPath, path.join(h.options.outDir, 'voice-track.wav'));
+      assert.ok(Math.abs(result.rawDuration - 0.5) < 0.02, 'must use only the complete fallback track');
+      assert.equal(result.rate, 1.2);
+      assert.ok(Math.abs(result.selectedDuration - result.rawDuration / 1.2) < 0.08);
+      assert.equal(h.logs.filter(m => m === 'fallback').length, 1);
+    });
   });
-});
+}
 
 test('missing fallback credentials or voice mapping preserves the original error', async () => {
   await harness(async h => {
