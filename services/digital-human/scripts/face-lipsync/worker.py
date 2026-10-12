@@ -196,9 +196,15 @@ def frame_offset(source, rendered, prepad_frames):
                           for offset in range(-3, 4)], axis=1)
     # Compression/resizing can swap two adjacent per-frame nearest matches.
     # Compare one-second blocks, then apply ONE offset to the entire clip.
-    blocks = [int(distances[i:i + FPS].mean(axis=0).argmin())
-              for i in range(0, len(ids) - 11, FPS)]
-    best = int(distances.mean(axis=0).argmin())
+    # Held frames cannot identify time: all offsets tie, so argmin would turn
+    # a static tail into a false -3-frame jump. Register only moving blocks.
+    block_scores = [distances[i:i + FPS].mean(axis=0)
+                    for i in range(0, len(ids) - 11, FPS)
+                    if np.std(source[ids[i:i + FPS]], axis=0).mean() >= 0.5]
+    if not block_scores:
+        return 0
+    blocks = [int(scores.argmin()) for scores in block_scores]
+    best = int(np.mean(block_scores, axis=0).argmin())
     if best in (0, 6) or max(blocks) - min(blocks) > 1:
         raise QualityError("Provider frame correspondence is not stable", "LIPSYNC_MEDIA")
     return best - 3

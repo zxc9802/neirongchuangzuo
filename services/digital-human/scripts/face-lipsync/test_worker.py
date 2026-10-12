@@ -265,6 +265,15 @@ class FaceWorkflowTests(unittest.TestCase):
             rows = [{"delayMs": value, "confidence": 5} for value in [low, high, high]]
             self.assertEqual(choose_delay(rows), high)
 
+    def test_frame_registration_ignores_held_tail_when_matching_motion(self):
+        moving = np.random.default_rng(52).normal(128, 20, (90, 4, 4, 3)).astype(np.float32)
+        source = np.concatenate([moving, np.repeat(moving[-1:], 210, axis=0)])
+        for delay in [-2, 0, 2]:
+            with self.subTest(delay=delay):
+                rendered = np.concatenate([np.repeat(source[:1], 18 + delay, axis=0), source,
+                                           np.repeat(source[-1:], 9, axis=0)])
+                self.assertEqual(frame_offset(source, rendered, 18), delay)
+
     def test_frame_registration_uses_one_offset_and_rejects_local_speed_changes(self):
         source = np.random.default_rng(7).uniform(0, 255, (100, 12, 32, 3)).astype(np.float32)
         for delay in [-2, 0, 1]:
