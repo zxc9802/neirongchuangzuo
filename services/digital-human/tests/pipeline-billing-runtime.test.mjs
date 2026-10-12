@@ -8,6 +8,7 @@ import test from "node:test";
 import ts from "typescript";
 import * as billing from "../src/lib/main-app-billing.ts";
 import * as media from "../src/lib/engine/ffmpeg.ts";
+import * as sceneTail from "../src/lib/engine/scene-tail.ts";
 import * as retention from "../src/lib/task-output-retention.ts";
 import * as safeLog from "../src/lib/server/safe-log.ts";
 import * as taskExecution from "../src/lib/engine/task-execution.ts";
@@ -28,16 +29,18 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
   try {
     const silent = path.join(tmp, "silent.mp4");
     const sound = path.join(tmp, "sound.mp4");
+    const short = path.join(tmp, "short.mp4");
     const speaker = path.join(tmp, "speaker.wav");
     fs.writeFileSync(speaker, "fixture");
     for (const args of [
       ["-f", "lavfi", "-i", "color=c=black:s=160x120:r=30", "-t", "6", "-c:v", "libx264", silent],
       ["-i", silent, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-t", "6", "-c:v", "copy", "-c:a", "aac", sound],
+      ["-i", sound, "-t", "3", "-c", "copy", short],
     ]) {
       const generated = spawnSync("ffmpeg", ["-v", "error", ...args], {encoding: "utf8"});
       assert.equal(generated.status, 0, generated.stderr);
     }
-    for (const scenario of ["alignment-uncertain", "face-input-failure", "face-runtime-failure", "provider-failure", "provider-timeout", "composite-failure", "media-prep-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
+    for (const scenario of ["extended-source", "alignment-uncertain", "face-input-failure", "face-runtime-failure", "provider-failure", "provider-timeout", "composite-failure", "media-prep-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
       const audioOnly = scenario.startsWith("audio-");
       const fullFrame = scenario.startsWith("face-");
       const fallback = ["provider-failure", "provider-timeout", "composite-failure", "media-prep-failure"].includes(scenario);
@@ -52,17 +55,18 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       };
       const user = {id: "owner", role: scenario === "internal-success" ? "admin" : "member"};
       const reservation = await billing.reserveMainAppCredits({user, sessionToken: "fake", estimatedDuration: 6});
-      const duration = scenario.endsWith("under-reserved") ? 8 : 3;
+      const duration = scenario === "extended-source" ? 5 : scenario.endsWith("under-reserved") ? 8 : 3;
       let task = {id: scenario, userId: user.id, status: "pending", logs: [],
         billing: {isExternalUser: reservation.chargeRequired, status: reservation.chargeRequired ? "reserved" : "not_applicable",
           requestId: reservation.requestId, estimatedDuration: 6, estimatedPoints: reservation.requiredPoints, reservedPoints: reservation.reservedPoints},
-        inputs: {videoPath: audioOnly ? "" : scenario === "silent-smart" ? silent : sound, videoUrl: "", outputType: audioOnly ? "audio" : "video", scriptText: "你好",
+        inputs: {videoPath: audioOnly ? "" : scenario === "extended-source" ? short : scenario === "silent-smart" ? silent : sound, videoUrl: "", outputType: audioOnly ? "audio" : "video", scriptText: "你好",
           speakerAudioUrl: speaker, videoFit: scenario === "preserve-failure" ? "preserve" : "smart", lipsyncProvider: "veed"}, results: {}};
       const TaskStore = {get: () => task, isDeleted: () => false,
         addLog: (_id, message, level, publicMessage) => task.logs.push({message, level, publicMessage}),
         update: (_id, update) => {task = {...task, ...update, results: {...task.results, ...update.results}}; return task;}};
       const deps = {
         path, fs, crypto, "../server/safe-log": safeLog, "./task-execution": taskExecution,
+        "./scene-tail": sceneTail,
         "../server/task-worker": {startTaskHeartbeat: () => () => {}, withTaskBillingGuard: async (_id, action) => action()},
         "../store/task-store": {TaskStore},
         "../config": {getAppConfig: () => ({storageDir: path.join(tmp, "jobs"), publicBaseUrl: "https://media.example.test", indexttsSpeakerAudioUrl: speaker})},
@@ -80,7 +84,12 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
             events.push({stage: "face-input"});
             if (scenario === "face-runtime-failure") throw Object.assign(new Error("model unavailable"), {code: "LIPSYNC_RUNTIME"});
             if (scenario === "face-input-failure") throw Object.assign(new Error("Face track jumps or source contains a cut"), {code: "LIPSYNC_FACE_INPUT"});
-            assert.equal(options.inputVideoPath, task.inputs.videoPath, "crop must read native source pixels");
+            assert.equal(options.inputVideoPath, scenario === "extended-source" ? path.join(options.jobDir, "motion-source.mp4") : task.inputs.videoPath,
+              "lip-sync must read the extended pictures when narration exceeds the original");
+            if (scenario === "extended-source") {
+              assert.ok(Math.abs((await media.probeMedia(options.inputVideoPath)).durationSeconds - duration) < 0.05);
+              assert.ok(Math.abs((await media.probeMedia(options.audioPath)).durationSeconds - duration) < 0.05);
+            }
             const videoPath = path.join(options.jobDir, "face-input.mp4");
             const audioPath = path.join(options.jobDir, "face-audio.wav");
             fs.copyFileSync(sound, videoPath); fs.copyFileSync(options.audioPath, audioPath);

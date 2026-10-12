@@ -10,6 +10,7 @@ import { getAppConfig } from "../config";
 import { generateIndexTTS } from "./indextts";
 import { prepareFaceLipsync, finalizeFaceLipsync } from "./face-lipsync";
 import { deliverNarrationFallback } from "./narration-fallback";
+import { prepareSceneContinuation } from "./scene-tail";
 import {
   probeMedia,
   prepareSourceVideo,
@@ -317,6 +318,14 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     });
     log("🎞️ 第二步: 正在进行 FFmpeg 画面归一化与音画对齐...");
 
+    try {
+      localVideoPath = await prepareSceneContinuation({ inputPath: localVideoPath,
+        targetSeconds: ttsResult.selectedDuration, outputPath: path.join(jobDir, "motion-source.mp4"), onLog: log });
+    } catch (error) {
+      logServerError("pipeline.scene_continuation", error, "warn");
+      log("画面接续暂未完成，保留已有素材继续制作", "warn");
+    }
+    ensureTaskActive();
     const preparedVideoPath = path.join(jobDir, "source-video.mp4");
     const prepResult = await prepareSourceVideo(
       localVideoPath,

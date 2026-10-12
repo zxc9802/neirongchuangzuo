@@ -10,6 +10,7 @@ import { withTaskBillingGuard } from "../server/task-worker";
 import { TaskStore } from "../store/task-store";
 import { isTaskOutputExpired } from "../task-output-retention";
 import { execMediaCommand, probeMedia, sha256File } from "./ffmpeg";
+import { prepareSceneContinuation } from "./scene-tail";
 
 // This is an explicitly labelled, free narration video, never an AI lip-sync result.
 // Only call after narration exists; authentication and paid-submission guards stay
@@ -50,6 +51,10 @@ export async function deliverNarrationFallback(taskId: string, sessionToken?: st
     }
   }
   if (TaskStore.isDeleted(taskId)) return null;
+  try {
+    videoPath = await prepareSceneContinuation({ inputPath: videoPath, targetSeconds: audio.durationSeconds,
+      outputPath: path.join(jobDir, "fallback-motion-source.mp4") });
+  } catch { /* Optional picture editing must not stop a playable fallback. */ }
   log("口型处理未完成，正在用原画面和本次配音导出基础配音视频", "warn");
   const candidate = path.join(jobDir, "narration-fallback.mp4");
   try {
