@@ -53,11 +53,11 @@ export async function deliverNarrationFallback(taskId: string, sessionToken?: st
   log("口型处理未完成，正在用原画面和本次配音导出基础配音视频", "warn");
   const candidate = path.join(jobDir, "narration-fallback.mp4");
   try {
-    // Loop/trim pictures only. Keep the entire exact narration at its original speed.
+    // Hold the last picture when needed. Keep the entire exact narration at its original speed.
     await execMediaCommand("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y",
-      "-stream_loop", "-1", "-i", videoPath, "-i", audioPath,
+      "-i", videoPath, "-i", audioPath,
       "-map", "0:v:0", "-map", "1:a:0", "-t", String(audio.durationSeconds),
-      "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,fps=30,format=yuv420p",
+      "-vf", `scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration=${audio.durationSeconds},format=yuv420p`,
       "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
       "-c:a", "aac", "-b:a", "256k", "-movflags", "+faststart", candidate]);
     const probe = await probeMedia(candidate);

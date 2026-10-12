@@ -55,14 +55,13 @@ def probe(file):
             "duration": float(video.get("duration", data["format"]["duration"]))}
 
 
-def frames(file, width, height, fps=FPS, duration=None, loop=False, extra=""):
+def frames(file, width, height, fps=FPS, duration=None, extend=False, extra=""):
     args = ["ffmpeg", "-v", "error", "-threads", "2"]
-    if loop:
-        args += ["-stream_loop", "-1"]
     args += ["-i", str(file)]
     if duration is not None:
         args += ["-t", str(duration)]
-    args += ["-vf", f"{extra + ',' if extra else ''}scale={width}:{height},setsar=1,fps={fps}",
+    padding = f",tpad=stop_mode=clone:stop_duration={duration}" if extend and duration is not None else ""
+    args += ["-vf", f"{extra + ',' if extra else ''}scale={width}:{height},setsar=1,fps={fps}{padding}",
              "-an", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
     proc = sp.Popen(args, stdout=sp.PIPE, stderr=sp.DEVNULL)
     try:
@@ -82,17 +81,15 @@ def frames(file, width, height, fps=FPS, duration=None, loop=False, extra=""):
         proc.wait()
 
 
-def track(file, duration=None, loop=False):
+def track(file, duration=None, extend=False):
     info = probe(file)
     scale = min(1, 1280 / max(info["width"], info["height"]))
     w, h = int(info["width"] * scale) // 2 * 2, int(info["height"] * scale) // 2 * 2
     detector = cv2.FaceDetectorYN.create(str(MODELS / "yunet.onnx"), "", (w, h), 0.75)
     rows, gap = [], 0
-    repeated = {} if loop and duration is not None and duration > info["duration"] else None
-    for frame in frames(file, w, h, duration=duration, loop=loop):
-        # Reuse only byte-identical decoded frames. This also handles VFR loop
-        # boundaries without guessing frame indices; every quality gate below
-        # still checks the complete output track, including each loop join.
+    repeated = {} if extend and duration is not None and duration > info["duration"] else None
+    for frame in frames(file, w, h, duration=duration, extend=extend):
+        # Reuse byte-identical held frames; quality gates still check every frame.
         key = hashlib.sha256(frame).digest() if repeated is not None else None
         if repeated is not None and key in repeated:
             found = repeated[key]
@@ -167,13 +164,14 @@ def prepare(req):
         raise QualityError("Narration is too short to measure reliably", "LIPSYNC_INPUT_DURATION")
     # Check the full inference runtime before the server submits paid work.
     load_syncnet()
-    info, data = track(req["inputVideoPath"], duration=duration, loop=True)
+    info, data = track(req["inputVideoPath"], duration=duration, extend=True)
     crop = crop_plan(info, data)
     x, y, size, out = (crop[k] for k in ["x", "y", "size", "outputSize"])
     # Crop BEFORE reducing resolution. FFmpeg autorotates before this filter.
     # Lower CRF offsets the faster preset's compression loss in facial detail.
-    ffmpeg(["-stream_loop", "-1", "-i", req["inputVideoPath"], "-an", "-vf",
-            f"scale={info['width']}:{info['height']},setsar=1,fps=30,trim=duration={duration},setpts=PTS-STARTPTS,"
+    ffmpeg(["-i", req["inputVideoPath"], "-an", "-vf",
+            f"scale={info['width']}:{info['height']},setsar=1,fps=30,tpad=stop_mode=clone:stop_duration={duration},"
+            f"trim=duration={duration},setpts=PTS-STARTPTS,"
             f"crop={size}:{size}:{x}:{y},scale={out}:{out}:flags=lanczos,"
             f"tpad=start_duration={PREPAD}:stop_duration={POSTPAD}:start_mode=clone:stop_mode=clone",
             "-t", str(duration + PREPAD + POSTPAD), "-c:v", "libx264", "-threads", "2", "-preset", "veryfast",

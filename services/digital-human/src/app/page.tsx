@@ -553,7 +553,7 @@ export default function StudioPage() {
                           : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
                       }`}
                     >
-                      智能适配 (循环/裁剪)
+                      智能适配 (尾帧延长/裁剪)
                     </button>
                     <button
                       type="button"

@@ -233,7 +233,7 @@ export async function prepareSourceVideo(
     throw new Error("Video has no valid dimensions");
   }
 
-  const videoDuration = probe.durationSeconds;
+  const videoDuration = probe.videoDurationSeconds ?? probe.durationSeconds;
   const maxEdge = 1920;
   let targetWidth = probe.width;
   let targetHeight = probe.height;
@@ -260,26 +260,17 @@ export async function prepareSourceVideo(
   targetWidth = targetWidth % 2 === 0 ? targetWidth : targetWidth - 1;
   targetHeight = targetHeight % 2 === 0 ? targetHeight : targetHeight - 1;
 
-  // Video filter: scale and set 30 fps
-  const vf = `scale=${targetWidth}:${targetHeight}:flags=lanczos,setsar=1,fps=30,format=yuv420p`;
+  // Keep the last decoded frame when narration outlasts the source; -t caps the padding.
+  const vf = `scale=${targetWidth}:${targetHeight}:flags=lanczos,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration=${targetDurationSeconds},format=yuv420p`;
 
   const args: string[] = ["-hide_banner", "-loglevel", "error", "-y"];
 
-  if (videoDuration < targetDurationSeconds) {
-    // Video is shorter than audio -> loop video to match audio length
-    const loopCount = Math.ceil(targetDurationSeconds / videoDuration) + 1;
-    args.push("-stream_loop", `${loopCount}`, "-i", inputVideoPath);
-  } else if (videoDuration > targetDurationSeconds + 0.5) {
-    if (fitMode === "preserve") {
-      throw Object.assign(new Error(
-        `Video duration (${videoDuration.toFixed(1)}s) is longer than narration (${targetDurationSeconds.toFixed(1)}s), but fitMode is set to preserve.`
-      ), { code: "MEDIA_FIT_MISMATCH" });
-    }
-    // Smart trim to target duration
-    args.push("-i", inputVideoPath);
-  } else {
-    args.push("-i", inputVideoPath);
+  if (videoDuration > targetDurationSeconds + 0.5 && fitMode === "preserve") {
+    throw Object.assign(new Error(
+      `Video duration (${videoDuration.toFixed(1)}s) is longer than narration (${targetDurationSeconds.toFixed(1)}s), but fitMode is set to preserve.`
+    ), { code: "MEDIA_FIT_MISMATCH" });
   }
+  args.push("-i", inputVideoPath);
 
   // Declare every input before output options; otherwise -vf applies to lavfi.
   if (!probe.hasAudio) {
@@ -291,7 +282,7 @@ export async function prepareSourceVideo(
 
   // Keep original audio track or synthesize silent track (HeyGen requires audio track)
   if (probe.hasAudio) {
-    args.push("-c:a", "aac", "-b:a", "192k");
+    args.push("-af", "apad", "-c:a", "aac", "-b:a", "192k");
   } else {
     args.push("-c:a", "aac", "-b:a", "192k", "-shortest");
   }
