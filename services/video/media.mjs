@@ -17,11 +17,16 @@ const run = promisify(execFile);
 export async function probeVideo(path) {
   try {
     const { stdout } = await run('ffprobe', ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_entries',
-      'format=duration,format_name:stream=codec_type,codec_name,width,height,duration', '-of', 'json', path], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+      'format=duration,format_name:stream=codec_type,codec_name,width,height,duration,sample_aspect_ratio:stream_tags=rotate:stream_side_data=rotation', '-of', 'json', path], { timeout: 20_000, maxBuffer: 1024 * 1024 });
     const data = JSON.parse(stdout), video = data.streams?.find(item => item.codec_type === 'video');
     const duration = Number(data.format?.duration);
     if (!video || !Number.isFinite(duration) || duration <= 0 || !data.format?.format_name?.includes('mp4')) throw new Error();
-    return { duration, width: video.width, height: video.height, audio: data.streams.some(item => item.codec_type === 'audio') };
+    const [sarWidth, sarHeight] = String(video.sample_aspect_ratio || '').split(':').map(Number);
+    const width = Math.round(video.width * (sarWidth > 0 && sarHeight > 0 ? sarWidth / sarHeight : 1)), height = video.height;
+    const rotation = Number(video.side_data_list?.find(item => item.rotation !== undefined)?.rotation ?? video.tags?.rotate ?? 0);
+    const portraitRotation = Math.abs(Math.round(rotation)) % 180 === 90;
+    return { duration, width: portraitRotation ? height : width, height: portraitRotation ? width : height,
+      audio: data.streams.some(item => item.codec_type === 'audio') };
   } catch { throw new VideoError('无法读取视频，请上传可播放的 MP4 或 MOV 视频。', 400, 'VIDEO_MEDIA_INVALID'); }
 }
 export async function normalizePhoto(bytes) {

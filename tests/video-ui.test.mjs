@@ -54,6 +54,31 @@ test('automatic successful polling clears restart errors on first load and after
   page.ctx.refresh(); assert.equal(page.message(), '');
 });
 
+for (const [width, height] of [[720, 1280], [1280, 720], [720, 720], [720, 960]]) {
+  test(`replica preview follows uploaded ${width}x${height} video dimensions`, async t => {
+    const task = { id: 'aspect-task', status: 'completed', createdAt: Date.now(), ratio: '16:9',
+      video: { width, height }, resultUrl: '/api/video-replica/tasks/aspect-task/result' };
+    const page = await fixture(t, { tasks: [task] });
+    page.recover(); await page.poll(); page.select(task.id);
+    const player = page.html().match(/<div[^>]*id="replica-result"[^>]*>/)[0];
+    assert.ok(player.includes(`--replica-aspect:${width}/${height}`), 'The source dimensions override a stale task ratio');
+    assert.ok(player.includes(`--replica-max-width:${Math.round(440 * width / height)}px`));
+    assert.match(page.html(), /aria-label="人物复刻成片"/);
+    await page.poll();
+    assert.ok(page.html().includes(`--replica-aspect:${width}/${height}`), 'Polling preserves the video proportion');
+    page.node('#replica-new').onclick();
+    assert.doesNotMatch(page.html(), /--replica-aspect:/, 'A new blank form has no inherited media dimensions');
+  });
+}
+
+test('historical replica previews use their recorded ratio when source dimensions are missing', async t => {
+  const task = { id: 'legacy-aspect', status: 'completed', createdAt: Date.now(), ratio: '9:16',
+    resultUrl: '/api/video-replica/tasks/legacy-aspect/result' };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.ok(page.html().includes('--replica-aspect:9/16'));
+});
+
 for (const status of ['completed', 'running', 'failed', 'draft']) test(`reopening the page starts blank with a ${status} task available in history`, async t => {
   const task = { id: 'saved-task', status, createdAt: Date.now(), video: {}, photo: {}, voice: {}, voiceEngine: 'seedance',
     sourceVideoUrl: '/source.mp4', sourcePhotoUrl: '/photo.jpg', sourceVoiceUrl: '/reference.wav',
