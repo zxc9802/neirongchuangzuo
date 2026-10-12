@@ -223,6 +223,16 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         logProvider(`[TTS] ${m}`);
       },
       cacheScope: `${task.userId || "local"}:${task.inputs.speakerVoiceId || "default"}`,
+      fallback: {
+        apiKey: config.doubaoTtsApiKey,
+        speakerId: config.doubaoTtsVoiceMap?.[task.inputs.speakerVoiceId || "default"] || "",
+      },
+      checkActive: ensureTaskActive,
+      onFallback: () => log(
+        "主配音服务暂不可用，已切换豆包声音复刻 2.0，重新生成完整配音",
+        "warn",
+        "主配音服务暂不可用，已自动切换备用配音，重新生成完整音轨"
+      ),
     });
     ensureTaskActive();
 
