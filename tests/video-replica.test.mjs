@@ -19,6 +19,7 @@ import { createFalVideoProvider, FAL_MODEL } from '../services/video/fal.mjs';
 const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(100)]);
 const CONFIG = { enabled: true, publicOrigin: 'https://workspace.example', signingSecret: 'test-secret-not-for-production' };
 const META = { duration: 4, width: 512, height: 768, audio: true };
+const PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-replica-'));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode:options.costMode===true });
@@ -87,6 +88,80 @@ test('Seedance 2.0 connection matches reference project and never returns creden
   assert.equal(parseGeneration({ data: { status: 3 } }).failed, true);
   assert.equal(parseGeneration({ data: { results: [{ video_url: 'https://cdn.example/clip.mp4' }] } }).url, 'https://cdn.example/clip.mp4');
   assert.equal(videoConfig({}).enabled, false);
+});
+
+test('Seedance 2.5 reuses the same endpoint, credentials and generation payload', async () => {
+  const requests = [];
+  const provider = createVideoProvider({ video: { base: 'https://provider.example', project: 'project', access: 'access', secret: 'secret' } },
+    async (url, options) => { requests.push({ url: String(url), headers: options.headers, body: JSON.parse(options.body) }); return Response.json({ data: { taskId: 'paid-id' } }); });
+  const task = { duration: 30, ratio: '9:16', materials: { photo: { id: 'photo-id' }, video: { id: 'video-id' } } };
+  await provider.generate(task); await provider.generate({ ...task, model: PREMIUM_MODEL });
+  assert.equal(requests[1].body.modelId, PREMIUM_MODEL);
+  assert.deepEqual(requests[1], { ...requests[0], body: { ...requests[0].body, modelId: PREMIUM_MODEL } });
+});
+
+for (const [sourceDuration, generatedDuration] of [[15.1, 20], [20, 20], [20.1, 25], [25.1, 30], [30, 30]]) {
+  test(`premium replica accepts ${sourceDuration} seconds and preserves its model through generation and restart`, async t => {
+    const app = await fixture(t, { probe: async () => ({ ...META, duration: sourceDuration }) });
+    const id = randomUUID();
+    assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, voiceEngine: 'seedance' } })).status, 201);
+    await app.upload(id);
+    assert.equal((await app.current(id)).duration, generatedDuration);
+    await app.close(); await app.open();
+    assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+    const running = await app.until(id, task => task.status === 'running');
+    assert.equal(running.model, PREMIUM_MODEL); assert.equal(running.modelName, '至臻版');
+    assert.equal(app.state.body.modelId, PREMIUM_MODEL); assert.equal(app.state.body.payload.params.duration, generatedDuration);
+    assert.equal(app.state.generations, 1);
+    app.state.done = true;
+    assert.equal((await app.until(id, task => task.status === 'completed')).model, PREMIUM_MODEL);
+  });
+}
+
+for (const [model, duration, limit] of [['doubao-seedance-2-0-260128', 15.1, 15], [PREMIUM_MODEL, 30.1, 30]]) {
+  test(`replica rejects a ${duration}-second video for its ${limit}-second edition before billing`, async t => {
+    const app = await fixture(t, { probe: async () => ({ ...META, duration }) });
+    const id = randomUUID();
+    await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance' } });
+    const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+    assert.equal(response.status, 400); assert.match((await response.json()).error, new RegExp('2–' + limit));
+    assert.equal((await app.current(id)).video, undefined); assert.equal((await app.wallet.snapshot('alice')).held, 0);
+    assert.equal(app.state.generations, 0);
+  });
+}
+
+test('draft edition switches persist, reject incompatible downgrades, and lock after submission', async t => {
+  let duration = 4;
+  const app = await fixture(t, { probe: async () => ({ ...META, duration }) });
+  const id = await app.init(); await app.upload(id);
+  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: PREMIUM_MODEL } })).status, 200);
+  await app.close(); await app.open();
+  assert.equal((await app.current(id)).model, PREMIUM_MODEL);
+  duration = 20; await app.upload(id);
+  for (const route of ['model', 'start']) {
+    assert.equal((await app.call(`/tasks/${id}/${route}`, { body: { model: 'doubao-seedance-2-0-260128' } })).status, 400);
+    const draft = await app.current(id);
+    assert.equal(draft.model, PREMIUM_MODEL); assert.equal(draft.duration, 20); assert.equal(draft.status, 'draft');
+    assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  }
+  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: 'unknown' } })).status, 400);
+  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: PREMIUM_MODEL }, owner: 'bob' })).status, 404);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: 'doubao-seedance-2-0-260128' } })).status, 409);
+  assert.equal((await app.current(id)).model, PREMIUM_MODEL); assert.equal(app.state.generations, 1);
+});
+
+test('premium replica retains the existing actual-cost fee and records the selected model', async t => {
+  const app = await fixture(t, { costMode: true }), id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, voiceEngine: 'seedance' } }); await app.upload(id);
+  assert.equal((await app.current(id)).estimatedPoints, 500);
+  await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
+  const record = await app.wallet.reservation('alice', id);
+  assert.equal(record.costItems.seedance.metadata.model, PREMIUM_MODEL);
+  app.state.done = true;
+  const done = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(done.billing.chargedPoints, 500); assert.equal(done.billing.costCny, 4);
 });
 
 const SPEECH = { engine: 'silero-vad+whisper-1', start: 1.25, end: 3.5, text: '你好世界',
@@ -323,10 +398,13 @@ test('previously submitted H3 Max tasks can still finish without creating anothe
   assert.equal((await app.wallet.snapshot('alice')).available, 955);
 });
 
-test('only the flagship is offered and removed models cannot start or reserve points even with a fal key', async t => {
+test('both Seedance editions are offered and removed models cannot start or reserve points even with a fal key', async t => {
   const app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
-  assert.deepEqual(config.models.map(model => [model.name, model.enabled]), [['旗舰模型', true]]);
+  assert.deepEqual(config.models.map(model => [model.name, model.enabled, model.maxDuration]), [['标准版', true, 15], ['至臻版', true, 30]]);
+  assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
+  assert.equal(config.models[0].description, '最多生成15秒视频，视频质量良好，积分消耗较少');
+  assert.equal(config.models[1].description, '最多生成30秒视频，视频质量优秀，积分消耗较多');
   assert.equal(config.model, 'doubao-seedance-2-0-260128');
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: FAL_MODEL } })).status, 400);
@@ -343,12 +421,14 @@ test('a fal key alone no longer enables new replica tasks', async t => {
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID() } })).status, 503);
 });
 
-test('an old H3 Max draft uses the flagship when started without a model choice', async t => {
+test('an old H3 Max draft can replace its video before starting with the standard edition', async t => {
   const app = await fixture(t);
   const id = await app.init(); await app.upload(id); await app.close();
   const path = join(app.root, 'video', id, 'task.json');
   const task = JSON.parse(await readFile(path, 'utf8'));
   task.model = FAL_MODEL; await writeFile(path, JSON.stringify(task)); await app.open();
+  await app.upload(id);
+  assert.equal((await app.current(id)).model, 'doubao-seedance-2-0-260128');
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   const running = await app.until(id, task => task.status === 'running');
   assert.equal(running.model, 'doubao-seedance-2-0-260128'); assert.equal(app.state.generations, 1);
