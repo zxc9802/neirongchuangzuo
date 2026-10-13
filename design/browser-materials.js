@@ -797,6 +797,7 @@ const root = globalThis;
       if (!repair) {
         this.repairs.set(relativePath, { relativePath, file, handle, reinspect, attempted: reinspect, failed: reinspect });
         if (reinspect) {
+          // The failed scan is the initial attempt; only three tail retries remain.
           const key = 'repair:' + relativePath;
           this.attempts.set(key, 1);
           this.retryAfter.set(key, Date.now() + 15000);
