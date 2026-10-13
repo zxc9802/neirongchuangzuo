@@ -12,7 +12,6 @@ const root = globalThis;
   const MAX_ATTEMPTS = 4; // First attempt plus three automatic retries.
   const noop = () => {};
   const isAbort = error => error?.name === 'AbortError';
-  const retryable = error => error?.status === 408 || error?.status === 429 || error?.status >= 500 || error?.name === 'TypeError';
   const mediaError = message => Object.assign(new Error(message), { code: 'MEDIA_DECODE' });
   const repairVideo = async (...args) => (await import('./material-repair.js')).repairVideo(...args);
 
@@ -554,7 +553,8 @@ const root = globalThis;
               this._guard(token);
               complete = false;
               observations[index] = { relativePath: item.relativePath, error: error.message };
-              if (file && (file.size > MAX_SOURCE_SIZE || error.code === 'MEDIA_DECODE')) this._queueRepair(item.relativePath, file);
+              const needsConversion = file && (file.size > MAX_SOURCE_SIZE || error.code === 'MEDIA_DECODE');
+              this._queueRepair(item.relativePath, file, { handle: item.handle, reinspect: !needsConversion });
               this._error(item.relativePath, error);
             }
             this._report({ text: '并行扫描 ' + this.folderName + '：' + (this.status.scanned + 1) + '/' + candidates.length + ' 个视频',
@@ -569,7 +569,16 @@ const root = globalThis;
         this.originalFiles = originals;
         await this._save(token);
         const clips = observations.flatMap(item => item.entry?.clips || []);
-        await this._register(clips, token);
+        try { await this._register(clips, token); }
+        catch (error) {
+          this._guard(token);
+          complete = false;
+          for (const { entry } of observations) {
+            if (!entry || entry.clips.every(clip => this.registered.has(clip.id))) continue;
+            this._queueRepair(entry.relativePath, originals.get(entry.relativePath), { reinspect: true });
+            this._error(entry.relativePath, error);
+          }
+        }
         this._guard(token);
         this.lastStateCheck = Date.now();
         if (complete) {
@@ -783,10 +792,20 @@ const root = globalThis;
       workers.set(key, work);
     }
 
-    _queueRepair(relativePath, file) {
+    _queueRepair(relativePath, file, { handle, reinspect = false } = {}) {
       const repair = this.repairs.get(relativePath);
-      if (!repair) this.repairs.set(relativePath, { relativePath, file, attempted: false });
-      else if (repair.attempted) repair.failed = true;
+      if (!repair) {
+        this.repairs.set(relativePath, { relativePath, file, handle, reinspect, attempted: reinspect, failed: reinspect });
+        if (reinspect) {
+          const key = 'repair:' + relativePath;
+          this.attempts.set(key, 1);
+          this.retryAfter.set(key, Date.now() + 15000);
+        }
+      }
+      else if (repair.attempted) {
+        repair.failed = true;
+        if (!reinspect) repair.reinspect = false;
+      }
     }
 
     async _runStage(stage, action, token) {
@@ -835,7 +854,7 @@ const root = globalThis;
           this.unreadableFiles.add(item.assetId);
           this._queueRepair(item.relativePath, this.originalFiles.get(item.relativePath) || this.files.get(item.relativePath));
         }
-        if (!sampling && retryable(error) && this.attempts.get(clip.id) < MAX_ATTEMPTS) {
+        if (!sampling && error.status !== 409 && this.attempts.get(clip.id) < MAX_ATTEMPTS) {
           const delay = Math.min(60000, 15000 * 2 ** Math.min(2, (this.attempts.get(clip.id) || 1) - 1));
           this.retryAfter.set('clip:' + clip.id, Date.now() + delay);
         } else this.retryAfter.delete('clip:' + clip.id);
@@ -845,28 +864,41 @@ const root = globalThis;
     }
 
     async _repairFile(repair, token) {
-      const { relativePath, file } = repair;
+      const { relativePath } = repair;
       try {
+        const file = repair.reinspect && repair.handle ? await repair.handle.getFile() : repair.file;
+        this._guard(token);
+        if (repair.reinspect) {
+          await file.slice(0, 1).arrayBuffer();
+          this._guard(token);
+          repair.file = file;
+          this.originalFiles.set(relativePath, file);
+          if (file.size > MAX_SOURCE_SIZE) throw Object.assign(new Error('原视频超过 512 MiB，已排到队尾自动压缩'), { code: 'MEDIA_SIZE' });
+        }
         const previous = this.record.manifest[relativePath];
         const id = await assetId(relativePath, file.size, file.lastModified);
         this._guard(token);
-        const copy = await this.repairVideo(file, { signal: this.abort.signal, maxSize: MAX_SOURCE_SIZE,
+        const unchanged = previous?.assetId === id;
+        let copy = file;
+        if (repair.reinspect && unchanged && previous.repaired) copy = await this.store.getRepair?.(id);
+        else if (!repair.reinspect) copy = await this.repairVideo(file, { signal: this.abort.signal, maxSize: MAX_SOURCE_SIZE,
           onProgress: ({ progress = 0 } = {}) => {
             if (this.active && token === this.generation) this._report({ text: '正在压缩 / 转换 MP4：' + relativePath +
               (progress > 0 ? ' · ' + Math.min(100, Math.round(progress * 100)) + '%' : '') });
           } });
         this._guard(token);
+        if (!copy && repair.reinspect) throw mediaError('压缩副本缓存已失效，已排到队尾重新生成');
         if (!copy || copy.size > MAX_SOURCE_SIZE) throw new Error('压缩后的文件仍超过 512 MiB，请缩短视频后重新扫描');
-        const duration = await this.readDuration(copy, this.abort.signal);
+        const duration = repair.reinspect && unchanged ? previous.duration : await this.readDuration(copy, this.abort.signal);
         this._guard(token);
-        const unchanged = previous?.assetId === id;
         const clips = unchanged ? previous.clips : await makeClips(id, relativePath, duration, () => this._guard(token));
         this._guard(token);
         // Cache separately from the small manifest so every clip save does not copy video data.
-        await this.store.putRepair?.(id, copy);
+        if (!repair.reinspect) await this.store.putRepair?.(id, copy);
         this._guard(token);
         this.record.manifest[relativePath] = { relativePath, assetId: id, size: file.size,
-          lastModified: file.lastModified, duration: unchanged ? previous.duration : duration, clips, repaired: true };
+          lastModified: file.lastModified, duration: unchanged ? previous.duration : duration, clips,
+          repaired: !repair.reinspect || !!(unchanged && previous.repaired) };
         this.files.set(relativePath, copy);
         this.unreadableFiles.delete(id);
         if (previous && !unchanged) this.record.deferredRevocations.push(previous.assetId);
@@ -878,6 +910,7 @@ const root = globalThis;
         this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
       } catch (error) {
         this._guard(token);
+        if (repair.reinspect && ['MEDIA_DECODE', 'MEDIA_SIZE'].includes(error.code)) repair.reinspect = false;
         repair.failed = true;
         const key = 'repair:' + relativePath, attempt = this.attempts.get(key);
         if (attempt < MAX_ATTEMPTS) this.retryAfter.set(key, Date.now() + 15000 * 2 ** (attempt - 1));
