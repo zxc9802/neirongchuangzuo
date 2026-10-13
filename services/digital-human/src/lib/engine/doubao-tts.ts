@@ -2,19 +2,60 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { applyToneProfile } from "./ffmpeg";
+import { splitSpeechText, stitchSpeechSegments } from "./speech-stitch";
 import type { IndexTTSResult } from "./indextts";
+
+type DoubaoTTSOptions = {
+  apiKey: string;
+  speakerId: string;
+  toneProfile?: "low" | "high";
+  outDir: string;
+  onLog?: (message: string) => void;
+  checkActive?: () => void;
+};
 
 export async function generateDoubaoTTS(
   text: string,
-  options: {
-    apiKey: string;
-    speakerId: string;
-    toneProfile?: "low" | "high";
-    outDir: string;
-    onLog?: (message: string) => void;
-    checkActive?: () => void;
-  }
+  options: DoubaoTTSOptions,
 ): Promise<IndexTTSResult> {
+  options.checkActive?.();
+  fs.mkdirSync(options.outDir, { recursive: true });
+  const rawWavPath = path.join(options.outDir, "voice-raw.wav");
+  const finalWavPath = path.join(options.outDir, "voice-track.wav");
+  const texts = splitSpeechText(text);
+  if (texts.length <= 1) {
+    await synthesizeDoubaoSegment(text.trim(), rawWavPath, options);
+  } else {
+    // Long expressive requests can rush later sentences. Reset synthesis at natural
+    // boundaries, keeping the same voice/model and applying speed only after joining.
+    const segmentDir = fs.mkdtempSync(path.join(options.outDir, ".doubao-segments-"));
+    try {
+      const segments: { text: string; audioPath: string }[] = [];
+      for (let index = 0; index < texts.length; index++) {
+        const audioPath = path.join(segmentDir, `${index}.wav`);
+        await synthesizeDoubaoSegment(texts[index], audioPath, options);
+        segments.push({ text: texts[index], audioPath });
+        options.onLog?.(`豆包配音已完成 ${index + 1}/${texts.length} 段`);
+      }
+      options.checkActive?.();
+      await stitchSpeechSegments(segments, rawWavPath);
+    } finally {
+      fs.rmSync(segmentDir, { recursive: true, force: true });
+    }
+  }
+  options.checkActive?.();
+  const toneProfile = options.toneProfile || "low";
+  const rate = 1.2;
+  const durations = await applyToneProfile(rawWavPath, finalWavPath, rate);
+  options.onLog?.(`豆包完整配音已就绪，语速 ${rate} 倍，时长 ${durations.selectedDuration.toFixed(1)}s`);
+  return { rawWavPath, finalWavPath, ...durations, toneProfile, rate, fromCache: false };
+}
+
+async function synthesizeDoubaoSegment(
+  text: string,
+  rawWavPath: string,
+  options: DoubaoTTSOptions,
+): Promise<void> {
   options.checkActive?.();
   const response = await fetch("https://openspeech.bytedance.com/api/v3/tts/unidirectional", {
     method: "POST",
@@ -87,13 +128,5 @@ export async function generateDoubaoTTS(
   header.writeUInt32LE(24000, 24); header.writeUInt32LE(48000, 28);
   header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34);
   header.write("data", 36); header.writeUInt32LE(bytes, 40);
-  fs.mkdirSync(options.outDir, { recursive: true });
-  const rawWavPath = path.join(options.outDir, "voice-raw.wav");
-  const finalWavPath = path.join(options.outDir, "voice-track.wav");
   fs.writeFileSync(rawWavPath, Buffer.concat([header, ...chunks]));
-  const toneProfile = options.toneProfile || "low";
-  const rate = 1.2;
-  const durations = await applyToneProfile(rawWavPath, finalWavPath, rate);
-  options.onLog?.(`豆包完整配音已就绪，语速 ${rate} 倍，时长 ${durations.selectedDuration.toFixed(1)}s`);
-  return { rawWavPath, finalWavPath, ...durations, toneProfile, rate, fromCache: false };
 }

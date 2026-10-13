@@ -47,7 +47,7 @@ async function harness(run) {
     await media.execMediaCommand('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i',
       'sine=frequency=880:sample_rate=24000:duration=0.3', '-c:a', 'pcm_s16le', fixture]);
     const doubao = fs.existsSync(new URL('../src/lib/engine/doubao-tts.ts', import.meta.url))
-      ? load('../src/lib/engine/doubao-tts.ts', {fs, path, crypto, './ffmpeg': media}) : {};
+      ? load('../src/lib/engine/doubao-tts.ts', {fs, path, crypto, './ffmpeg': media, './speech-stitch': stitch}) : {};
     const primary = load('../src/lib/engine/indextts.ts', {fs, path, crypto,
       './ffmpeg': media, './speech-stitch': stitch, './doubao-tts': doubao,
       '../server/safe-log': {logServerError() {}},
@@ -92,15 +92,15 @@ for (const toneProfile of [undefined, 'low', 'high']) {
       const text = '第一句话成功。第二句话失败。第三句话成功。';
       const result = await h.generate(text, {...h.options, toneProfile});
       const fallback = h.posts.filter(p => p.url.includes('openspeech.bytedance.com'));
-      assert.equal(fallback.length, 1);
-      assert.equal(fallback[0].payload.req_params.text, text);
+      assert.equal(fallback.length, 3);
+      assert.equal(fallback.map(p => p.payload.req_params.text).join(''), text);
       assert.equal(fallback[0].payload.req_params.speaker, 'S_test');
       assert.equal(fallback[0].payload.req_params.model, 'seed-tts-2.0-expressive');
       assert.equal(fallback[0].init.headers['X-Api-Resource-Id'], 'seed-icl-2.0');
       assert.equal(fallback[0].init.headers['X-Api-Key'], 'doubao-test');
       assert.equal(fallback[0].init.redirect, 'error');
       assert.equal(result.finalWavPath, path.join(h.options.outDir, 'voice-track.wav'));
-      assert.ok(Math.abs(result.rawDuration - 0.5) < 0.02, 'must use only the complete fallback track');
+      assert.ok(Math.abs(result.rawDuration - 1.86) < 0.04, 'must use only the complete fallback track');
       assert.equal(result.rate, 1.2);
       assert.ok(Math.abs(result.selectedDuration - result.rawDuration / 1.2) < 0.08);
       assert.equal(h.logs.filter(m => m === 'fallback').length, 1);
@@ -113,6 +113,33 @@ test('missing fallback credentials or voice mapping preserves the original error
     await assert.rejects(h.generate('失败。', {...h.options, fallback: undefined}), /500/);
     await assert.rejects(h.generate('失败。', {...h.options, fallback: {apiKey: 'test', speakerId: ''}}), /500/);
     assert.ok(h.posts.every(p => !p.url.includes('openspeech.bytedance.com')));
+  });
+});
+
+test('long Doubao narration resets synthesis at sentence boundaries and speeds the joined track only once', async () => {
+  await harness(async h => {
+    const text = '你想想，公司里是不是有那么一两个销冠或者技术骨干，业绩全靠他们撑着？但他们一旦离职，经验带不走，甚至客户跟着走。你的企业，也才能真正不再被某个人绑架，实现系统自运转！';
+    const result = await h.generateDoubao(text, {...h.options.fallback, outDir: h.options.outDir});
+    const requests = h.posts.map(p => p.payload.req_params);
+    assert.deepEqual(requests.map(p => p.text), stitch.splitSpeechText(text));
+    assert.equal(requests.map(p => p.text).join(''), text, 'no words may be lost or repeated at joins');
+    assert.ok(requests.every(p => p.speaker === 'S_test' && p.model === 'seed-tts-2.0-expressive'));
+    const expectedRaw = requests.length * 0.5 + (requests.length - 1) * 0.18;
+    assert.ok(Math.abs(result.rawDuration - expectedRaw) < 0.04, 'keep every complete sentence and its pause');
+    assert.ok(Math.abs(result.selectedDuration - expectedRaw / 1.2) < 0.08, 'apply 1.2x to the whole joined track once');
+  });
+});
+
+test('a failed later Doubao sentence never delivers just the opening sentence', async () => {
+  await harness(async h => {
+    let calls = 0;
+    h.respond(() => ++calls === 1 ? response() : response(undefined, false));
+    await assert.rejects(h.generateDoubao('第一句话。第二句话。', {
+      ...h.options.fallback, outDir: h.options.outDir,
+    }), /豆包配音未完整生成/);
+    assert.equal(calls, 2);
+    assert.equal(fs.existsSync(path.join(h.options.outDir, 'voice-track.wav')), false);
+    assert.deepEqual(fs.readdirSync(h.options.outDir), [], 'discard incomplete temporary segments');
   });
 });
 
