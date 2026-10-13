@@ -10,10 +10,25 @@ const root = globalThis;
   const ANALYSIS_WORKERS = 5;
   const PIPELINE_WORKERS = FRAME_WORKERS + ANALYSIS_WORKERS;
   const MAX_ATTEMPTS = 4; // First attempt plus three automatic retries.
+  const READ_TIMEOUT = 30000;
   const noop = () => {};
   const isAbort = error => error?.name === 'AbortError';
   const mediaError = message => Object.assign(new Error(message), { code: 'MEDIA_DECODE' });
+  const readTimeout = () => Object.assign(new Error('读取视频超时，已排到队尾重试'), { code: 'MEDIA_TIMEOUT' });
   const repairVideo = async (...args) => (await import('./material-repair.js')).repairVideo(...args);
+
+  function readLocal(action, signal) {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); };
+      const finish = (settle, value) => { cleanup(); settle(value); };
+      const cancel = () => finish(reject, Object.assign(new Error('操作已停止'), { name: 'AbortError' }));
+      const timer = setTimeout(() => finish(reject, readTimeout()), READ_TIMEOUT);
+      signal?.addEventListener('abort', cancel, { once: true });
+      if (signal?.aborted) { cancel(); return; }
+      Promise.resolve().then(() => { if (!signal?.aborted) return action(); })
+        .then(value => finish(resolve, value), error => finish(reject, error));
+    });
+  }
 
   async function sha256(value) {
     if (!root.crypto?.subtle) throw new Error('请通过 HTTPS 或本机 localhost 打开网页后连接素材文件夹');
@@ -39,10 +54,10 @@ const root = globalThis;
     return clips;
   }
 
-  async function inspectFile(relativePath, file, previous, readDuration, guard = noop) {
+  async function inspectFile(relativePath, file, previous, readDuration, guard = noop, signal) {
     guard();
     if (file.size > MAX_SOURCE_SIZE) throw Object.assign(new Error('原视频超过 512 MiB，已排到队尾自动压缩'), { code: 'MEDIA_SIZE' });
-    await file.slice(0, 1).arrayBuffer();
+    await readLocal(() => file.slice(0, 1).arrayBuffer(), signal);
     guard();
     if (previous && previous.size === file.size && previous.lastModified === file.lastModified) return previous;
     const id = await assetId(relativePath, file.size, file.lastModified);
@@ -177,7 +192,7 @@ const root = globalThis;
       const ready = () => { cleanup(); resolve(); };
       const failed = () => { cleanup(); reject(mediaError('浏览器无法解码视频，已排到队尾转换为 MP4')); };
       const aborted = () => { cleanup(); reject(Object.assign(new Error('操作已停止'), { name: 'AbortError' })); };
-      const timer = setTimeout(() => { cleanup(); reject(mediaError('读取视频超时，已排到队尾检查并转换为 MP4')); }, 5000);
+      const timer = setTimeout(() => { cleanup(); reject(readTimeout()); }, READ_TIMEOUT);
       video.addEventListener(event, ready, { once: true });
       video.addEventListener('error', failed, { once: true });
       signal?.addEventListener('abort', aborted, { once: true });
@@ -185,12 +200,12 @@ const root = globalThis;
     });
   }
 
-  async function withVideo(file, signal, action) {
+  async function withVideo(file, signal, action, preload = 'metadata') {
     const video = root.document.createElement('video');
     const url = root.URL.createObjectURL(file);
     video.muted = true;
     video.playsInline = true;
-    video.preload = 'auto';
+    video.preload = preload;
     try {
       const metadata = mediaEvent(video, 'loadedmetadata', signal);
       video.src = url;
@@ -232,7 +247,7 @@ const root = globalThis;
         frames.push(canvas.toDataURL('image/jpeg', 0.8));
       }
       return frames;
-    });
+    }, 'auto');
   }
 
   const isVideo = name => /\.(mp4|m4v|mov|webm|mkv|avi|wmv|mpeg|mpg|mts|m2ts|3gp|flv|ts)$/i.test(name);
@@ -506,7 +521,31 @@ const root = globalThis;
       const observations = [];
       const files = new Map();
       const originals = new Map();
+      const previousManifest = { ...this.record.manifest };
+      this.record.manifest = { ...previousManifest };
+      this.files = files;
+      this.originalFiles = originals;
       let complete = true;
+      const ready = [];
+      let registering;
+      const registerReady = () => {
+        if (registering || !ready.length) return;
+        const batch = ready.splice(0);
+        registering = this._register(batch.flatMap(entry => entry.clips), token)
+          .then(() => { this._guard(token); this._ready(); this._schedule(0, token); })
+          .catch(error => {
+            if (!this.active || token !== this.generation || isAbort(error)) return;
+            complete = false;
+            for (const entry of batch) {
+              if (entry.clips.every(clip => this.registered.has(clip.id))) continue;
+              this._queueRepair(entry.relativePath, originals.get(entry.relativePath), { reinspect: true });
+              this._error(entry.relativePath, error);
+            }
+          }).finally(() => {
+            registering = null;
+            if (this.active && token === this.generation) registerReady();
+          });
+      };
       try {
         try {
           if (this.record.handle) {
@@ -529,26 +568,29 @@ const root = globalThis;
             const index = cursor++, item = candidates[index];
             let file;
             try {
-              file = item.file || await item.handle.getFile();
+              file = item.file || await readLocal(() => item.handle.getFile(), this.abort.signal);
               this._guard(token);
               originals.set(item.relativePath, file);
-              const previous = this.record.manifest[item.relativePath];
+              const previous = previousManifest[item.relativePath];
               let entry, readable = file;
               if (previous?.repaired && previous.size === file.size && previous.lastModified === file.lastModified) {
                 readable = await this.store.getRepair?.(previous.assetId);
                 this._guard(token);
                 if (!readable) throw mediaError('压缩副本缓存已失效，已排到队尾重新生成');
                 // Check that the selected original still exists before reusing its cached copy.
-                await file.slice(0, 1).arrayBuffer();
+                await readLocal(() => file.slice(0, 1).arrayBuffer(), this.abort.signal);
                 this._guard(token);
                 entry = previous;
               } else {
                 entry = await inspectFile(item.relativePath, file, previous,
-                  current => this.readDuration(current, this.abort.signal), () => this._guard(token));
+                  current => this.readDuration(current, this.abort.signal), () => this._guard(token), this.abort.signal);
               }
               this._guard(token);
               observations[index] = { relativePath: item.relativePath, entry };
               files.set(item.relativePath, readable);
+              this.record.manifest[item.relativePath] = entry;
+              ready.push(entry);
+              registerReady();
             } catch (error) {
               this._guard(token);
               complete = false;
@@ -561,24 +603,14 @@ const root = globalThis;
               scanned: this.status.scanned + 1 });
           }
         }));
+        while (registering) await registering;
         this._guard(token);
-        const result = reconcileManifest(this.record.manifest, observations, complete, this.record.deferredRevocations || []);
+        const result = reconcileManifest(previousManifest, observations, complete, this.record.deferredRevocations || []);
         this.record.manifest = result.manifest;
         this.record.deferredRevocations = [...new Set([...result.deferredRevocations, ...result.revocations])];
         this.files = files;
         this.originalFiles = originals;
         await this._save(token);
-        const clips = observations.flatMap(item => item.entry?.clips || []);
-        try { await this._register(clips, token); }
-        catch (error) {
-          this._guard(token);
-          complete = false;
-          for (const { entry } of observations) {
-            if (!entry || entry.clips.every(clip => this.registered.has(clip.id))) continue;
-            this._queueRepair(entry.relativePath, originals.get(entry.relativePath), { reinspect: true });
-            this._error(entry.relativePath, error);
-          }
-        }
         this._guard(token);
         this.lastStateCheck = Date.now();
         if (complete) {
@@ -678,7 +710,7 @@ const root = globalThis;
     }
 
     _schedule(delay, token) {
-      if (!this.active || !this.connected || this.scanning || token !== this.generation || this.cycleToken === token) return;
+      if (!this.active || !this.connected || token !== this.generation || this.cycleToken === token) return;
       clearTimeout(this.timer);
       this.timer = setTimeout(() => this._cycle(token), delay);
     }
@@ -747,9 +779,9 @@ const root = globalThis;
           .flatMap(item => item.clips.filter(clip => this.registered.has(clip.id) && !this.workers.has(clip.id) &&
             ['pending', 'error'].includes(clip.state)).map(clip => ({ item, clip })));
         const fresh = candidates.filter(({ clip }) => !this.attempts.has(clip.id));
-        if (!fresh.length && !this.workers.size) this.processingDeferred = true;
+        if (!this.scanning && !fresh.length && !this.workers.size) this.processingDeferred = true;
         let queued = fresh;
-        if (!fresh.length && this.processingDeferred) {
+        if (!this.scanning && !fresh.length && this.processingDeferred) {
           const repairs = [...this.repairs.values()];
           const repairing = [...this.workers.keys()].some(key => key.startsWith('repair:'));
           const firstPassBusy = [...this.workers.keys()].some(key => !key.startsWith('repair:') && this.attempts.get(key) === 1) ||
@@ -854,11 +886,11 @@ const root = globalThis;
       } catch (error) {
         this._guard(token);
         clip.state = error.status === 409 ? 'indexing' : 'error';
-        if (sampling) {
+        if (sampling && error.code !== 'MEDIA_TIMEOUT') {
           this.unreadableFiles.add(item.assetId);
           this._queueRepair(item.relativePath, this.originalFiles.get(item.relativePath) || this.files.get(item.relativePath));
         }
-        if (!sampling && error.status !== 409 && this.attempts.get(clip.id) < MAX_ATTEMPTS) {
+        if ((!sampling || error.code === 'MEDIA_TIMEOUT') && error.status !== 409 && this.attempts.get(clip.id) < MAX_ATTEMPTS) {
           const delay = Math.min(60000, 15000 * 2 ** Math.min(2, (this.attempts.get(clip.id) || 1) - 1));
           this.retryAfter.set('clip:' + clip.id, Date.now() + delay);
         } else this.retryAfter.delete('clip:' + clip.id);
@@ -870,10 +902,10 @@ const root = globalThis;
     async _repairFile(repair, token) {
       const { relativePath } = repair;
       try {
-        const file = repair.reinspect && repair.handle ? await repair.handle.getFile() : repair.file;
+        const file = repair.reinspect && repair.handle ? await readLocal(() => repair.handle.getFile(), this.abort.signal) : repair.file;
         this._guard(token);
         if (repair.reinspect) {
-          await file.slice(0, 1).arrayBuffer();
+          await readLocal(() => file.slice(0, 1).arrayBuffer(), this.abort.signal);
           this._guard(token);
           repair.file = file;
           this.originalFiles.set(relativePath, file);

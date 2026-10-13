@@ -960,6 +960,131 @@ test('an unreadable unchanged file retains its old metadata and never starts ana
   } finally { controller.stop(); }
 });
 
+test('a slow metadata read cannot hold back indexing for readable files', async () => {
+  const backend = server();
+  let release, slowStarted = false, conversions = 0;
+  const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(),
+    readDuration: file => file.name === 'slow.mov' ? new Promise(resolve => {
+      slowStarted = true; release = () => resolve(2);
+    }) : Promise.resolve(2), sampleFrames: async () => ['frame'], repairVideo: async () => {
+      conversions++; return videoFile('big.mp4');
+    } });
+  const selecting = controller.selectFiles([videoFile('素材/slow.mov'), videoFile('素材/good.mp4'),
+    { name: 'big.mov', webkitRelativePath: '素材/big.mov', size: 600 * 1024 * 1024, lastModified: 1 }]);
+  try {
+    await eventually(() => slowStarted);
+    await eventually(() => controller.status.indexed === 1);
+    assert.equal(controller.scanning, true, 'the good file must finish before the slow scan');
+    assert.equal(controller.record.manifest['good.mp4'].clips[0].state, 'indexed');
+    await controller._cycle(controller.generation);
+    assert.equal(conversions, 0, 'tail repairs wait until the initial scan and normal analysis finish');
+    release(); await selecting;
+    await eventually(() => controller.status.indexed === 3);
+  } finally { controller.stop(); release?.(); await selecting; }
+});
+
+test('browser metadata reads use metadata preload and allow thirty seconds before a distinct timeout', async () => {
+  const original = { document: globalThis.document, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  let expire, timeout, video;
+  class Video extends EventTarget {
+    load() {}
+    pause() {}
+    removeAttribute() { this.src = ''; }
+  }
+  globalThis.document = { createElement: () => (video = new Video()) };
+  globalThis.setTimeout = (callback, delay) => { expire = callback; timeout = delay; return 1; };
+  globalThis.clearTimeout = () => {};
+  const reading = helpers.readDuration(new Blob(['video']));
+  const outcome = reading.catch(error => error);
+  try {
+    assert.equal(video.preload, 'metadata', 'metadata discovery must not preload whole network videos');
+    assert.equal(timeout, 30000);
+    expire();
+    assert.equal((await outcome).code, 'MEDIA_TIMEOUT');
+    assert.equal(video.src, '');
+  } finally { expire?.(); await outcome; Object.assign(globalThis, original); }
+});
+
+test('a stalled first-byte read has a deadline before metadata decoding begins', async () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  let expire, timeout, decodes = 0;
+  globalThis.setTimeout = (callback, delay) => { expire = callback; timeout = delay; return 1; };
+  globalThis.clearTimeout = () => {};
+  const file = { size: 20, lastModified: 1, slice: () => ({ arrayBuffer: () => new Promise(() => {}) }) };
+  const reading = helpers.inspectFile('slow.mov', file, null, async () => { decodes++; return 2; });
+  const outcome = reading.catch(error => error);
+  try {
+    assert.equal(typeof expire, 'function', 'network file reads must not wait forever');
+    assert.equal(timeout, 30000);
+    expire();
+    assert.equal((await outcome).code, 'MEDIA_TIMEOUT');
+    assert.equal(decodes, 0);
+  } finally { expire?.(); Object.assign(globalThis, original); }
+});
+
+test('a cancelled local file read cannot start decoding or persist a late result', async () => {
+  const abort = new AbortController();
+  let release, started, decodes = 0;
+  const began = new Promise(resolve => { started = resolve; });
+  const file = { size: 20, lastModified: 1, slice: () => ({ arrayBuffer: () => {
+    started(); return new Promise(resolve => { release = resolve; });
+  } }) };
+  const reading = helpers.inspectFile('slow.mov', file, null, async () => { decodes++; return 2; }, () => {}, abort.signal);
+  const rejected = assert.rejects(reading, error => error.name === 'AbortError');
+  await began;
+  abort.abort();
+  await rejected;
+  release(new ArrayBuffer(1));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(decodes, 0);
+});
+
+test('stopping a streaming scan prevents queued registrations and late status updates', async () => {
+  const backend = server(), statuses = [];
+  let release, registrations = 0;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    onStatus: status => statuses.push(status), api: async (path, options) => {
+      if (path.endsWith('/clips')) {
+        registrations++;
+        await new Promise(resolve => { release = resolve; });
+      }
+      return backend.api(path, options);
+    } });
+  const selecting = controller.selectFiles([videoFile('素材/a.mp4'), videoFile('素材/b.mp4')]);
+  try {
+    await eventually(() => !!release && controller.status.scanned === 2);
+    const count = statuses.length;
+    controller.stop(); release(); await selecting;
+    assert.equal(registrations, 1);
+    assert.equal(statuses.length, count);
+    assert.equal(backend.calls.some(call => call.path.endsWith('/analyze')), false);
+  } finally { controller.stop(); release?.(); await selecting; }
+});
+
+test('extraction timeouts retry after normal files without forcing video conversion', async () => {
+  const backend = server(), originalNow = Date.now;
+  let now = originalNow(), reads = 0, conversions = 0;
+  const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: async file => {
+      if (file.name === 'slow.mov' && ++reads === 1) throw Object.assign(new Error('读取视频超时'), { code: 'MEDIA_TIMEOUT' });
+      return ['frame'];
+    }, repairVideo: async () => { conversions++; throw new Error('unnecessary conversion'); } });
+  controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
+  try {
+    Date.now = () => now;
+    await controller.selectFiles([videoFile('素材/slow.mov'), videoFile('素材/good.mp4')]);
+    await cycle(); await cycle();
+    assert.equal(controller.status.indexed, 1);
+    assert.equal(conversions, 0, 'slow reads alone do not prove incompatible encoding');
+    now += 15000;
+    await cycle();
+    assert.equal(controller.status.indexed, 2);
+    assert.equal(reads, 2);
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); Date.now = originalNow; }
+});
+
 test('metadata scan runs five readers and fills freed slots without waiting for a slow file', async () => {
   const readers = new Map();
   let active = 0, peak = 0;
