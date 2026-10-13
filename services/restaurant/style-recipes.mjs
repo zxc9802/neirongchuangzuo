@@ -36,6 +36,17 @@ export function createStyleRecipes({ manifestUrl = new URL('manifest.json', asse
     return { bytes, mime: 'image/jpeg', path: fileURLToPath(path) };
   };
   return {
+    async directorReferences(binding) {
+      if (!binding) return [];
+      const data = await manifest();
+      if (binding.version !== data.version) throw new RestaurantError('图片风格参考已更新，请重新上传。', 409, 'STYLE_RECIPE_VERSION');
+      return Promise.all(binding.entries.map(async entry => {
+        const recipe = data.recipes.find(row => row.id === entry.recipeId);
+        if (!recipe) throw new RestaurantError('图片风格参考不可用。', 503, 'STYLE_REFERENCE_UNAVAILABLE');
+        return { ...await asset(recipe, 'reference'), id: `accepted-${entry.sourceImageId}`, sourceImageId: entry.sourceImageId,
+          approvedStyle: true, recipeId: recipe.id, style: recipe.style };
+      }));
+    },
     async match(sources) {
       const data = await manifest();
       if (!sources.length || sources.length > data.recipes.length) return null;

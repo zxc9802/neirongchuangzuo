@@ -2,10 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { createRequestLedger } from '../ai/request-ledger.mjs';
 import { RestaurantError, fingerprint, validateAnalysis, validateDirections, validateCopy, validateAudit, validateFoodAppearance, validateFoodRenderReview } from './rules.mjs';
-import { ANALYSIS_PROMPT, GALLERY_ANALYSIS_PROMPT, GALLERY_STORYBOARD_PROMPT, RECOMMEND_PROMPT, RECOMMEND_REPAIR_PROMPT, COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT, FOOD_IDENTITY_PROMPT, FOOD_RENDER_AUDIT_PROMPT } from './prompts.mjs';
+import { ANALYSIS_PROMPT, GALLERY_ANALYSIS_PROMPT, GALLERY_STORYBOARD_PROMPT, GALLERY_IMAGE_AUDIT_PROMPT, GALLERY_SET_AUDIT_PROMPT, RECOMMEND_PROMPT, RECOMMEND_REPAIR_PROMPT, COPY_PROMPT, COPY_REWRITE_PROMPT, AUDIT_PROMPT, FOOD_IDENTITY_PROMPT, FOOD_RENDER_AUDIT_PROMPT } from './prompts.mjs';
 import { recommendationQualityIssues } from './recommendation-quality.mjs';
 import { createFoodRenderer } from './food-renderer.mjs';
 import { parseStructuredOutput, structuredOutputError } from './structured-output.mjs';
+import { galleryEditPrompt, validateGalleryImageReview, validateGallerySetReview } from './art-direction.mjs';
+import { readCompletionStream } from './model-stream.mjs';
 
 /** Separate durable provider-attempt budget. User package charges live in the store. */
 export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, now = Date.now, timeoutMs = 90_000, ledger: injectedLedger,
@@ -14,11 +16,11 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
   const ready = ledger.ready;
   let stopping = false;
   const renderFood = createFoodRenderer({ config, ledger, fetchImpl, isStopping: () => stopping, sleepImpl, budgetWaitMaxMs, budgetWaitStepMs });
-  async function callOnce(prompt, input, photos = [], { onBudgetWait, temperature = 0.3, maxTokens = 8192 } = {}) {
+  async function callOnce(prompt, input, photos = [], { onBudgetWait, temperature = 0.3, maxTokens = 8192, requestTimeoutMs = timeoutMs, validateResult } = {}) {
     if (!config.apiKey) throw new RestaurantError('尚未配置内容分析接口，请联系管理员。', 503, 'MODEL_NOT_CONFIGURED');
     const id = randomUUID();
     const model = config.imageTextModel || config.chatModel;
-    const body = { model, messages: [{ role: 'system', content: prompt }, { role: 'user', content: photos.length ? [{ type: 'text', text: JSON.stringify(input) }, ...photos.map(photo => ({ type: 'image_url', image_url: { url: photo.dataUrl, detail: 'high' } }))] : JSON.stringify(input) }], response_format: { type: 'json_object' }, max_tokens: maxTokens, temperature };
+    const body = { model, messages: [{ role: 'system', content: prompt }, { role: 'user', content: photos.length ? [{ type: 'text', text: JSON.stringify(input) }, ...photos.map(photo => ({ type: 'image_url', image_url: { url: photo.dataUrl, detail: 'high' } }))] : JSON.stringify(input) }], response_format: { type: 'json_object' }, stream: true, stream_options: { include_usage: true }, max_tokens: maxTokens, temperature };
     let waitedMs = 0;
     async function beforeDispatch(operation) {
       while (true) {
@@ -37,22 +39,32 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
     try {
       if (stopping) throw new RestaurantError('服务正在关闭，尚未发送新的模型请求。', 503, 'SERVICE_CLOSING');
       await beforeDispatch(() => ledger.markDispatched(id)); dispatched = true;
-      timer = setTimeout(() => controller.abort(), timeoutMs); timer.unref?.();
+      timer = setTimeout(() => controller.abort(), requestTimeoutMs); timer.unref?.();
       const response = await fetchImpl(`${config.baseUrl}/chat/completions`, { method: 'POST', headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: controller.signal });
       responseReceived = true;
       responseOK = response.ok;
       if (!response.ok) throw Object.assign(new RestaurantError(response.status === 429 || response.status === 402 ? '内容分析服务额度不足或请求过于频繁。' : '内容分析服务暂时不可用，请联系管理员。', 502, 'PROVIDER_ERROR'), { providerStatus: response.status });
-      const chunks = []; let size = 0;
-      for await (const chunk of response.body) { size += chunk.length; if (size > 2 * 1024 * 1024) throw new RestaurantError('模型返回过大，已停止接收。', 502, 'MODEL_INVALID_OUTPUT'); chunks.push(chunk); }
-      bodyComplete = true;
-      try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-      catch { throw structuredOutputError('invalid_json'); }
+      if (response.headers.get('content-type')?.includes('text/event-stream')) {
+        payload = await readCompletionStream(response.body); bodyComplete = true;
+      } else {
+        const chunks = []; let size = 0;
+        for await (const chunk of response.body) { size += chunk.length; if (size > 2 * 1024 * 1024) throw new RestaurantError('模型返回过大，已停止接收。', 502, 'MODEL_INVALID_OUTPUT'); chunks.push(chunk); }
+        bodyComplete = true;
+        try { payload = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+        catch { throw structuredOutputError('invalid_json'); }
+      }
       const result = parseStructuredOutput(payload);
+      if (validateResult) try { validateResult(result); }
+      catch (cause) {
+        if (!['INVALID_GALLERY_STYLE', 'INVALID_GALLERY_STORYBOARD', 'MODEL_INVALID_OUTPUT'].includes(cause.code)) throw cause;
+        throw Object.assign(structuredOutputError('invalid_schema'), { validationIssue: cause.message });
+      }
       await ledger.finish(id, { status: 'completed', usage: payload.usage, providerRequestId: payload.id });
       return result;
     } catch (cause) {
+      if (cause.streamComplete === true) { bodyComplete = true; payload ||= cause.providerPayload; }
       if (cause.code === 'MODEL_INVALID_OUTPUT') cause.providerResponseComplete = bodyComplete;
-      const uncertain = dispatched && (!responseReceived || controller.signal.aborted || (responseOK && !bodyComplete && cause.code !== 'MODEL_INVALID_OUTPUT'));
+      const uncertain = dispatched && !cause.providerNotDispatched && (!responseReceived || controller.signal.aborted || (responseOK && !bodyComplete && cause.code !== 'MODEL_INVALID_OUTPUT'));
       await ledger.finish(id, { status: uncertain ? 'uncertain' : dispatched ? 'failed' : 'cancelled', code: uncertain ? 'PROVIDER_UNCERTAIN' : cause.code || 'PROVIDER_ERROR',
         ...(payload?.usage ? { usage: payload.usage } : {}), ...(payload?.id ? { providerRequestId: payload.id } : {}),
         ...(cause.outputIssue ? { outputIssue: cause.outputIssue } : {}) }).catch(() => {});
@@ -70,6 +82,7 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
         await options.onStructuredRetry?.({ attempt: attempt + 1, issue: cause.outputIssue });
         if (cause.outputIssue === 'truncated') maxTokens = Math.min(32768, maxTokens * 2);
         prompt += '\n上一轮未返回完整且符合约定的JSON。本次请完成所有必需字段、图片ID和指定张数，只返回一个JSON对象，不输出前言、解释或Markdown。字段文字保持简洁，不能用截断、省略号或缺少图片的结果代替完整输出。';
+        if (cause.validationIssue) prompt += `\n上一轮的具体问题：${cause.validationIssue}`;
       }
     }
   }
@@ -77,6 +90,19 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
     ready,
     enabled: Boolean(config.apiKey),
     renderFood,
+    async renderGalleryPhoto({ photo, context = [], style, shot, appearance, taskId, attempt = 0, corrections = [] }, options) {
+      return renderFood({ photo, storeReferences: context, promptOverride: galleryEditPrompt({ style, shot, appearance, corrections,
+        context: context.map(item => ({ imageId: item.id, ...(item.approvedStyle ? { role: 'accepted-style-target-for-this-original' } : {}) })) }), scene: { type: shot.kind, name: shot.name }, plan: shot,
+        taskId, imageId: `${shot.imageId}-${shot.sourceImageId}`, attempt, requestNamespace: 'restaurant-gallery-v2', nativeSize: '960x1280' }, options);
+    },
+    async reviewGalleryPhoto({ photos, ...input }, options) {
+      return validateGalleryImageReview(await call(GALLERY_IMAGE_AUDIT_PROMPT, input, photos, { ...options, validateResult: validateGalleryImageReview }));
+    },
+    async reviewGallerySet({ photos, ...input }, options) {
+      const ids = input.shots.map(shot => shot.imageId);
+      return validateGallerySetReview(await call(GALLERY_SET_AUDIT_PROMPT, input, photos, { ...options, requestTimeoutMs: 180_000,
+        validateResult: value => validateGallerySetReview(value, ids) }), ids);
+    },
     async renderStylePhoto({ photo, reference, context = [], prompt, style, taskId, imageId, recipeId, recipeVersion, attempt = 0, corrections = [] }, options) {
       const instruction = `${prompt}\n\nThe LAST image is the accepted finished version of this SAME original. It is the authoritative STYLE TARGET, not a new scene or a new subject. Keep its palette, exposure balance, light temperature, contrast, photographic texture and overall framing. Small natural detail differences are allowed. Do not reinterpret this as a new aesthetic, change time of day, introduce a different filter, or homogenize the bar and riverside nightscape. Image 1 remains the source of the real subjects and their identities. Any middle images are optional real context. Never add or remove primary subjects or regenerate a visible person's face.\nFixed style: ${JSON.stringify(style)}${corrections.length ? `\nRequired style corrections: ${JSON.stringify(corrections)}` : ''}`;
       return renderFood({ photo, storeReferences: [...context.slice(0, 2), reference], promptOverride: instruction,
@@ -92,8 +118,11 @@ export function createRestaurantModel({ config, storageDir, fetchImpl = fetch, n
     },
     async identifyFood({ analysis, photos, subjectScope, subjectFocus }, options) { return validateFoodAppearance(await call(FOOD_IDENTITY_PROMPT, { imageId: analysis.imageId,
       ...(subjectScope ? { subjectScope } : {}), ...(subjectFocus ? { subjectFocus } : {}) }, photos, options)); },
-    async planGallery({ analysis, profile, outputCount, photos = [] }, options) { return call(GALLERY_STORYBOARD_PROMPT,
-      { profile, images: analysis, requestedOutputCount: outputCount, visualImageIds: photos.map(photo => photo.id) }, photos, { ...options, maxTokens: Math.max(8192, Math.min(16384, outputCount * 512 + 1024)) }); },
+    async planGallery({ analysis, profile, outputCount, photos = [], approvedStyles = [] }, options) { return call(GALLERY_STORYBOARD_PROMPT,
+      { profile, images: analysis, requestedOutputCount: outputCount, visualImageIds: [...new Set(photos.flatMap(photo => photo.imageIds || [photo.id]))],
+        ...(photos.some(photo => photo.imageIds) ? { contactSheets: photos.filter(photo => photo.imageIds).map(photo => ({ sheetId: photo.id, imageIds: photo.imageIds })) } : {}),
+        ...(approvedStyles.length ? { approvedStyles } : {}) },
+      photos, { ...options, requestTimeoutMs: 240_000, maxTokens: Math.max(8192, Math.min(16384, outputCount * 512 + 1024)) }); },
     async reviewFoodRender({ photos, ...input }, options) { return validateFoodRenderReview(await call(FOOD_RENDER_AUDIT_PROMPT, input, photos, options)); },
     async analyse(photos, profile, options) { return validateAnalysis(await call(options?.gallery ? GALLERY_ANALYSIS_PROMPT : ANALYSIS_PROMPT, { profile, images: photos.map(photo => ({ imageId: photo.id, width: photo.width, height: photo.height })) }, photos, options), photos.map(photo => photo.id)); },
     async recommend(analysis, profile, options) {

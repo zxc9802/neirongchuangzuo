@@ -108,11 +108,11 @@ async function markCompleted(
   let chargedPoints =
     (task.billing?.source === "workspace" ? undefined : results.chargedPoints) ??
     (task.billing?.isExternalUser
-      ? calculateRequiredPoints(duration, task.billing.source)
+      ? calculateRequiredPoints(duration, task.billing.source, task.billing.mode)
       : undefined);
-  const costCny =
+  let costCny =
     results.costCny ??
-    (task.billing?.isExternalUser ? calculateCostCny(duration, task.billing.source) : undefined);
+    (task.billing?.isExternalUser ? calculateCostCny(duration, task.billing.source, task.billing.mode) : undefined);
 
   let pointsBalanceAfter = task.billing?.pointsBalanceAfter;
   if (task.billing?.isExternalUser) {
@@ -135,6 +135,7 @@ async function markCompleted(
     });
     pointsBalanceAfter = settlement.pointsBalance;
     chargedPoints = settlement.chargedPoints;
+    costCny = settlement.costCny;
   }
 
   TaskStore.addLog(taskId, message, "success", "成片已恢复，任务已完成");

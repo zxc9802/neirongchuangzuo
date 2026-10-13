@@ -21,7 +21,7 @@ const CONFIG = { enabled: true, publicOrigin: 'https://workspace.example', signi
 const META = { duration: 4, width: 512, height: 768, audio: true };
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-replica-'));
-  const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null });
+  const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode:options.costMode===true });
   await wallet.ready;
   const state = { creates: [], queries: 0, generations: 0, done: false, failed: false, review: 2, source: null };
   const provider = {
@@ -1228,4 +1228,45 @@ test('missing reference voice or lip-sync configuration fails before reserving c
   const response = await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
   assert.equal(response.status, 503); assert.equal((await response.json()).code, 'VIDEO_VOICE_NOT_CONFIGURED');
   assert.equal((await app.current(id)).status, 'draft'); assert.equal(app.state.generations, 0);
+});
+
+test('actual-cost Seedance uses the confirmed 1 CNY per second contract and settles only once',async t=>{
+  const app=await fixture(t,{costMode:true}),id=await app.init();await app.upload(id);
+  assert.equal((await app.current(id)).estimatedPoints,500,'upload quote uses the new rule before starting');
+  assert.equal((await app.call(`/tasks/${id}/start`,{body:{}})).status,202);
+  await app.until(id,task=>task.status==='running');assert.equal((await app.wallet.snapshot('alice')).held,500);
+  app.state.done=true;const done=await app.until(id,task=>task.status==='completed'&&task.billing.status==='settled');
+  assert.equal(done.billing.mode,'api_cost');assert.equal(done.billing.chargedPoints,500);assert.equal(done.billing.costCny,4);
+  await app.call(`/tasks/${id}/start`,{body:{}});assert.equal(app.state.generations,1);assert.equal((await app.wallet.snapshot('alice')).available,500);
+});
+
+test('actual-cost Seedance stops an unaffordable video before any paid generation',async t=>{
+  const app=await fixture(t,{costMode:true,probe:async()=>({...META,duration:12})}),id=await app.init();await app.upload(id);
+  const response=await app.call(`/tasks/${id}/start`,{body:{}});assert.equal(response.status,402);
+  assert.equal(app.state.generations,0);assert.equal((await app.wallet.snapshot('alice')).available,1000);
+});
+
+test('unknown Seedance submission cannot turn its frozen cost into a free retry',async t=>{
+  const app=await fixture(t,{costMode:true,uncertain:true}),id=await app.init();await app.upload(id);
+  assert.equal((await app.call(`/tasks/${id}/start`,{body:{}})).status,202);
+  const failed=await app.until(id,task=>task.status==='failed'&&task.billing?.status==='release_pending');assert.equal(failed.billing.status,'release_pending');
+  assert.equal((await app.wallet.snapshot('alice')).held,500);assert.equal(app.state.generations,1);
+});
+test('replica includes IndexTTS and lip-sync in its 1 CNY per second cost, without a second fee',async t=>{
+  let mouths=0;
+  const app=await fixture(t,{costMode:true,speech:fakeSpeech(),voice:async(_input,output)=>{await writeFile(output,VIDEO);return{duration:5};},
+    narration:fakeNarration(),lipsync:fakeLipsync({submit:async()=>{mouths++;return{id:'aggregate-mouth'};}})});
+  const id=await app.init();await app.upload(id);await uploadVoice(app,id);
+  assert.equal((await app.call(`/tasks/${id}/start`,{body:{voiceEngine:'indextts2'}})).status,202);
+  await app.until(id,task=>task.status==='running');app.state.done=true;
+  const done=await app.until(id,task=>task.status==='completed'&&task.billing.status==='settled');
+  assert.equal(done.billing.chargedPoints,500);assert.equal(done.billing.costCny,4);assert.equal(mouths,1);
+  assert.equal(Object.keys((await app.wallet.reservation('alice',id)).costItems).length,1);
+});
+test('rejected replica materials release the aggregate hold before paid video generation',async t=>{
+  const app=await fixture(t,{costMode:true}),id=await app.init();await app.upload(id);app.state.review=3;
+  await app.call(`/tasks/${id}/start`,{body:{}});
+  const failed=await app.until(id,task=>task.status==='failed'&&task.billing.status==='settled');
+  assert.equal(failed.billing.chargedPoints,0);assert.equal(app.state.generations,0);
+  assert.equal((await app.wallet.snapshot('alice')).held,0);
 });

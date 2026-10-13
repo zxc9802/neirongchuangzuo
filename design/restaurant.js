@@ -152,6 +152,7 @@ function restaurantCreditEstimate(task, direction) {
 function restaurantImagePrice() {
   const snapshot = workspaceCreditsState().snapshot;
   if (snapshot?.unlimited === true) return '无限积分';
+  if(snapshot?.pricing?.mode==='api_cost') return '按实际算力计费';
   const unit = snapshot?.pricing?.imagePerUnit;
   return Number.isFinite(unit) ? `${unit} 积分 / 张` : '按图片张数计费，价格以服务器为准';
 }

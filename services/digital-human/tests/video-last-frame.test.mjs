@@ -77,6 +77,7 @@ test('narration recovery also holds the last frame when only the shorter origina
     } }).outputText;
     const module = { exports: {} };
     new Function('require', 'module', 'exports', code)(name => {
+      if(name==='./scene-tail') return {prepareSceneContinuation:async({inputPath})=>inputPath};
       assert.ok(name in deps, `unexpected dependency ${name}`); return deps[name];
     }, module, module.exports);
     const result = await module.exports.deliverNarrationFallback('job');

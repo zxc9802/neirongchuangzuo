@@ -11,6 +11,10 @@ export function normalizeCredits(value) {
   const data = value?.credits || value;
   const available = data?.available ?? data?.balance;
   const pricing = data?.pricing;
+  if (pricing?.mode==='api_cost') {
+    if (!whole(available) || !whole(data?.held) || !whole(data?.total) || pricing.pointsPerCny!==125) return null;
+    return {available,balance:available,held:data.held,total:data.total,unlimited:data.unlimited===true,initialPoints:data.initialPoints,pricing:{...pricing}};
+  }
   if (!whole(available) || !whole(data?.held) || !whole(data?.total)
     || !whole(pricing?.imagePerUnit) || pricing.imagePerUnit < 1
     || !whole(pricing?.videoPoints) || pricing.videoPoints < 1
@@ -29,9 +33,11 @@ function ensureOwner() {
 }
 export function workspaceCreditsState() { ensureOwner(); return { ...state, snapshot: state.snapshot && { ...state.snapshot, pricing: { ...state.snapshot.pricing } } }; }
 export function imagePoints(count, snapshot = workspaceCreditsState().snapshot) {
+  if(snapshot?.pricing?.mode==='api_cost') return null;
   return Number.isSafeInteger(count) && count > 0 && snapshot?.pricing?.imagePerUnit > 0 ? count * snapshot.pricing.imagePerUnit : null;
 }
 export function videoPoints(seconds, snapshot = workspaceCreditsState().snapshot) {
+  if(snapshot?.pricing?.mode==='api_cost') return null;
   return Number.isFinite(seconds) && seconds > 0 && snapshot?.pricing?.videoPoints > 0 && snapshot?.pricing?.videoSeconds > 0
     ? Math.ceil(seconds * snapshot.pricing.videoPoints / snapshot.pricing.videoSeconds) : null;
 }
@@ -46,6 +52,7 @@ export function creditInsufficiency(points, current = workspaceCreditsState()) {
 export function creditEstimateText(points) {
   const current = workspaceCreditsState();
   if (current.snapshot?.unlimited === true) return `无限积分${current.stale ? ' · 待刷新' : ''}`;
+  if(current.snapshot?.pricing?.mode==='api_cost') return '按实际算力计费';
   if (!Number.isFinite(points)) return current.error ? '积分价格暂时无法读取' : '正在读取积分价格…';
   return `预计 ${points} 积分${current.stale ? ' · 余额待刷新' : ''}`;
 }
@@ -54,6 +61,7 @@ export function videoCreditEstimateText(seconds) {
   if (current.snapshot?.unlimited === true) return `${Number.isFinite(seconds) && seconds > 0 ? `约 ${seconds} 秒 · ` : ''}${creditEstimateText(points)}`;
   if (!Number.isFinite(points)) {
     const p = current.snapshot?.pricing;
+    if(p?.mode==='api_cost') return '按实际算力计费';
     return p ? `${p.videoSeconds} 秒 ${p.videoPoints} 积分 · 按实际时长` : creditEstimateText(null);
   }
   return `约 ${seconds} 秒 · ${creditEstimateText(points)} · 按实际时长`;

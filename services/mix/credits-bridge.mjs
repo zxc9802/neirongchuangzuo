@@ -51,7 +51,9 @@ export function createMixCreditsBridge({ credits, dataDir, token }) {
       let record;
       switch (req.url) {
         case '/read': record = await credits.reservation(userId, body.taskId); break;
-        case '/reserve': record = await credits.reserve({ ...argument, kind: 'mix' }); break;
+        case '/reserve':
+          if(credits.costMode) throw Object.assign(new Error('混剪功能暂未开放。'),{status:503,code:'COST_PROVIDER_NOT_CONFIGURED'});
+          record = await credits.reserve({ ...argument, kind: 'mix' }); break;
         case '/extend': record = await credits.extendReservation(argument); break;
         case '/settle': record = await credits.settle(argument); break;
         case '/release': record = await credits.release(argument); break;

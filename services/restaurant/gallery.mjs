@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { foodPhotoPlan } from './scenes.mjs';
 import { RestaurantError } from './rules.mjs';
 import { preparePhotoPixels, inspectPhoto } from './images.mjs';
+import { validateVisualStyle } from './art-direction.mjs';
 
 export const GALLERY_WORKFLOW = 'store-gallery-v1';
 const sceneTypes = new Set(['interior', 'exterior', 'preparation', 'staff', 'owner', 'people', 'customers']);
@@ -15,11 +16,12 @@ function usableGalleryPool(task) {
     return item.imageType === 'food' || sceneTypes.has(item.imageType);
   }).sort((a, b) => b.qualityScore - a.qualityScore);
 }
-export function validateGalleryStoryboard(value, task, outputCount) {
+export function validateGalleryStoryboard(value, task, outputCount, { requireStyle = false } = {}) {
   const fail = message => { throw new RestaurantError(message, 502, 'INVALID_GALLERY_STORYBOARD'); };
   const short = (text, max) => typeof text === 'string' && text.trim().length > 0 && text.length <= max;
   if (!value || !short(value.theme, 120) || !Array.isArray(value.foodGroups) || value.foodGroups.length > 60
     || !Array.isArray(value.shots) || value.shots.length !== outputCount) fail('套图编排的主题或张数不完整。');
+  const visualStyle = value.visualStyle || requireStyle ? validateVisualStyle(value.visualStyle) : null;
   const pool = usableGalleryPool(task), excluded = new Set(task.foodReferenceExclusions || []);
   const foods = pool.filter(item => item.imageType === 'food' && !excluded.has(item.imageId));
   const scenes = pool.filter(item => sceneTypes.has(item.imageType));
@@ -35,27 +37,32 @@ export function validateGalleryStoryboard(value, task, outputCount) {
     && /桌|餐位|座位|墙|室内|店内|餐厅|柜台|椅|凳/.test(item.visibleObjects.join(' '))).map(item => item.imageId);
   environmentIds.push(...pool.filter(item => item.imageType === 'exterior').map(item => item.imageId));
   const shots = value.shots.map((shot, index) => {
+    const angle = shot?.angle || (visualStyle && shot?.kind === 'scene' ? 'original' : undefined);
     if (!shot || !['food','scene'].includes(shot.kind) || !short(shot.name, 40) || !short(shot.purpose, 200)
-      || !short(shot.camera, 400) || !short(shot.lighting, 200) || !['oblique','overhead','detail','table'].includes(shot.angle)) fail('套图分镜信息不完整。');
+      || !short(shot.camera, 400) || !short(shot.lighting, 200) || !(visualStyle && shot.kind === 'scene' ? ['original','oblique','overhead','detail','table'] : ['oblique','overhead','detail','table']).includes(angle)) fail('套图分镜信息不完整。');
     const source = pool.find(item => item.imageId === shot.sourceImageId);
     if (!source || shot.kind === 'food' && (source.imageType !== 'food' || excluded.has(source.imageId))
       || shot.kind === 'scene' && (!sceneTypes.has(source.imageType) || usedScenes.has(source.imageId))) fail('套图分镜使用了无关、重复或不可用素材。');
     const group = foodGroups.find(item => item.id === shot.foodGroupId);
+    if (visualStyle && (typeof shot.editInstructions !== 'string' || !shot.editInstructions.trim())) fail(`第${index + 1}张图片缺少editInstructions修图指令。`);
+    if (visualStyle && shot.editInstructions.length > 1200) fail(`第${index + 1}张图片的editInstructions超过1200字符，请保留具体修图要点并缩短。`);
     if (shot.kind === 'food') {
-      if (!group?.imageIds.includes(source.imageId) || !short(shot.focus, 160)) fail('食品分镜缺少对应的真实食品主体。');
+      if (!group?.imageIds.includes(source.imageId) || !short(shot.focus, 160)
+        || shot.subjectScope !== undefined && !['dish','spread','auto'].includes(shot.subjectScope)) fail('食品分镜缺少对应的真实食品主体。');
       counts.set(group.id, (counts.get(group.id) || 0) + 1);
     } else usedScenes.add(source.imageId);
     return { imageId: `shot-${String(index + 1).padStart(2,'0')}`, sourceImageId: source.imageId, kind: shot.kind,
-      shotIndex: index, name: shot.name, purpose: shot.purpose, ...(shot.kind === 'food' ? { foodGroupId: group.id, subjectFocus: shot.focus } : {}),
-      angle: shot.angle, camera: shot.camera, lighting: shot.lighting, referenceImageIds: shot.kind === 'food' ? environmentIds.slice(0,2) : [] };
+      shotIndex: index, name: shot.name, purpose: shot.purpose, ...(shot.kind === 'food' ? { foodGroupId: group.id, subjectFocus: shot.focus, subjectScope: shot.subjectScope || 'auto' } : {}),
+      angle, camera: shot.camera, lighting: shot.lighting, ...(visualStyle ? { editInstructions: shot.editInstructions } : {}),
+      referenceImageIds: visualStyle ? environmentIds.filter(id => id !== source.imageId).slice(0,2) : shot.kind === 'food' ? environmentIds.slice(0,2) : [] };
   });
-  if (foods.length && shots[0]?.kind !== 'food') fail('首张应优先展示食品主视觉。');
+  if (!visualStyle && foods.length && shots[0]?.kind !== 'food') fail('首张应优先展示食品主视觉。');
   if (scenes.length + foodGroups.length * 3 >= outputCount && [...counts.values()].some(count => count > 3)) fail('同一食品主题重复过多，应使用其他实拍丰富套图。');
   for (const [id, count] of counts) {
     const frames = shots.filter(shot => shot.foodGroupId === id);
     if (count >= 3 && new Set(frames.map(shot => shot.angle)).size < 2) fail('同一食品主题的景别和机位过于重复。');
   }
-  return { version: 1, outputCount, theme: value.theme, foodGroups, shots };
+  return { version: visualStyle ? 2 : 1, outputCount, theme: value.theme, ...(visualStyle ? { visualStyle } : {}), foodGroups, shots };
 }
 export function galleryDirection(analysis, profile) {
   const images = analysis.filter(item => item.usable && (item.imageType === 'food' || sceneTypes.has(item.imageType)));
@@ -115,7 +122,7 @@ export function createGalleryPlan(task, outputCount = 9) {
 export function storeSceneContext(task, shot) {
   const images = shot.referenceImageIds.map(id => task.analysis.find(item => item.imageId === id)).filter(Boolean);
   return { sourceImageIds: images.map(item => item.imageId), evidence: images.map(item => ({ imageType: item.imageType, visibleObjects: item.visibleObjects })),
-    look: '明亮、干净、整洁、暖白自然光、鲜明但不过饱和的食品摄影，同一门店的统一色调' };
+    look: task.galleryStoryboard?.visualStyle?.instructions || '明亮、干净、整洁、暖白自然光、鲜明但不过饱和的食品摄影，同一门店的统一色调' };
 }
 
 export function galleryShot(scene, shot) {

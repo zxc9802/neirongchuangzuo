@@ -171,6 +171,8 @@ class Jobs:
             if not data or data.get('status') == 'released':
                 seconds = estimate_seconds(spec['text'])
                 wallet = self.credits.snapshot(spec['owner'])
+                if wallet.get('pricing', {}).get('mode') == 'api_cost':
+                    raise CreditError('混剪功能暂未开放。', 503, 'COST_PROVIDER_NOT_CONFIGURED')
                 reserve_seconds = seconds * 1.25 + 2
                 if wallet.get('unlimited') is not True:
                     price = wallet['pricing']

@@ -7,7 +7,7 @@ let unsubscribeCredits = null;
 const API = '/api/ai';
 const PENDING_KEY = accountStorageKey('store-ai-pending-image-request');
 const UPLOAD_KEY = accountStorageKey('store-ai-image-upload-draft');
-const ACTIVE = new Set(['queued', 'running']);
+const ACTIVE = new Set(['queued', 'running', 'settling']);
 const QUALITY_NAMES = { auto: '自动', low: '快速', medium: '标准', high: '精细' };
 const GENERATION_MODES = {
   single: { label: '单张图片', hint: '基于你的原图，生成一张宣传图片。' },

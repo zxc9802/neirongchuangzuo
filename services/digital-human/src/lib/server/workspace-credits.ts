@@ -1,6 +1,7 @@
 import "server-only";
 import path from "node:path";
 import { createCreditsLedger, calculateCredits } from "../../../../credits/store.mjs";
+import { costPoints } from "../../../../credits/costs.mjs";
 
 let ledger: ReturnType<typeof createCreditsLedger> | undefined;
 
@@ -25,3 +26,8 @@ export function calculateWorkspacePoints(seconds: number): number {
 
 export const WORKSPACE_VIDEO_POINTS = 333;
 export const WORKSPACE_VIDEO_SECONDS = 30;
+export const WORKSPACE_CNY_PER_SECOND = 0.1;
+export const WORKSPACE_COST_POINTS_PER_SECOND = 12.5;
+export function calculateWorkspaceCostPoints(seconds: number): number {
+  return costPoints(seconds * WORKSPACE_CNY_PER_SECOND);
+}

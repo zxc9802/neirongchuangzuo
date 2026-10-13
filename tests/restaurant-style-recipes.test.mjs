@@ -47,23 +47,36 @@ test('recipes keep nine distinct originals, preserve the accepted order and reje
   assert.ok(analysis.at(-1).visibleObjects.some(f => f.includes('三艘游船')));
 });
 
-test('website regenerates nine without store details, corrects style, enhances the portrait and settles points once', async t => {
+test('website sends approved photos through Claude planning and Image 2.5 editing, corrects style and settles once', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'restaurant-style-'));
   const credits = createCreditsLedger({ storageDir: join(dir, 'credits'), databaseUrl: null });
   const calls = [], reviews = [], recipes = createStyleRecipes();
+  let plans = 0, analyses = 0, setReviews = 0;
+  const visualStyle = { name: '真实餐酒夜色', mood: '松弛温润', lighting: '保留暗部与局部光源', tone: '保留认可样本的色调关系', texture: '自然摄影质感', palette: ['琥珀', '深青'], instructions: '以已认可的样本为约束，不整体换滤镜。' };
   const model = { ready: Promise.resolve(), enabled: true,
-    async analyse() { throw new Error('Accepted source analysis must be stable'); },
-    async planGallery() { throw new Error('Accepted plan must be stable'); },
-    async renderStylePhoto(input) {
+    async analyse(photos) { analyses++; return photos.map(photo => { const row = manifest.recipes[Number(photo.id.split('-')[1]) - 1]; return { ...row.analysis, imageId: photo.id, imageType: row.id === 'river-01' ? 'exterior' : row.analysis.imageType }; }); },
+    async planGallery(input) {
+      plans++; assert.equal(input.analysis.length, 9); assert.equal(input.approvedStyles.length, 9);
+      assert.deepEqual(input.photos.filter(p => p.imageIds && p.id.startsWith('source')).flatMap(p => p.imageIds), input.analysis.map(item => item.imageId));
+      assert.equal(input.photos.filter(p => p.id.startsWith('accepted'))[0].imageIds.length, 9);
+      return { theme: '真实餐酒夜色', visualStyle, foodGroups: [{ id: 'snack', label: '真实食品', imageIds: ['photo-3'] }],
+        shots: input.analysis.map((item, i) => ({ sourceImageId: item.imageId, kind: item.imageType === 'food' ? 'food' : 'scene', foodGroupId: item.imageType === 'food' ? 'snack' : '',
+          name: `场景${i + 1}`, purpose: '展示真实氛围', focus: '原图中的食品', camera: '保持自然景别', angle: 'oblique', lighting: '真实局部光源', editInstructions: '保留已认可的色调与氛围。' })) };
+    },
+    async identifyFood() { return { description: '原图食品', portion: '一份', arrangement: '餐具中', vessel: '原图餐具', colors: ['金黄'], visibleComponents: ['食品'], texture: [], distinctiveFeatures: [], uncertainDetails: [], dishCount: null, pieceCount: null }; },
+    async renderGalleryPhoto(input) {
       calls.push(input);
-      assert.ok(input.reference.bytes.length); assert.match(input.prompt, /photographic|photograph/i);
-      return { bytes: input.reference.bytes, requestId: `new-provider-${calls.length}`, provider: 'test' };
+      const reference = input.context.find(photo => photo.approvedStyle);
+      assert.ok(reference.bytes.length); assert.equal(reference.sourceImageId, input.shot.sourceImageId); assert.deepEqual(input.style, visualStyle);
+      return { bytes: reference.bytes, requestId: `new-provider-${calls.length}`, provider: 'test' };
     },
-    async reviewStylePhoto(input) {
-      reviews.push(input); assert.equal(input.photos.length, 3);
-      return input.sourceImageId === 'photo-1' && reviews.filter(r => r.sourceImageId === 'photo-1').length === 1
-        ? { status: 'needs_revision', styleScore: 50, issues: ['暖琥珀色被改成了冷色'] } : { status: 'passed', styleScore: 95, issues: [] };
+    async reviewGalleryPhoto(input) {
+      reviews.push(input); assert.ok(input.photos.length <= 4); assert.ok(input.context.some(photo => photo.role === 'accepted-style-target-for-this-original'));
+      const revise = input.shot.sourceImageId === 'photo-1' && reviews.filter(r => r.shot.sourceImageId === 'photo-1').length === 1;
+      return { status: revise ? 'blocked' : 'passed', styleScore: revise ? 50 : 95, identityMatch: true, sceneMatch: true, shotMatch: true, compositionUsable: true,
+        styleMatch: !revise, marketingUseful: true, errors: revise ? ['暖琥珀色被改成了冷色'] : [], warnings: [] };
     },
+    async reviewGallerySet() { setReviews++; return { status: 'passed', reviseImageIds: [], errors: [], warnings: [] }; },
     async write() { assert.fail('Image-only tasks must not invent store details to write copy'); },
     async usage() { return {}; }, async close() {},
   };
@@ -87,20 +100,21 @@ test('website regenerates nine without store details, corrects style, enhances t
   for (let i = 0; i < 500; i++) { task = (await api(`/tasks/${id}`)).body.task; if (['completed', 'failed', 'awaiting_confirmation'].includes(task.status)) break; await new Promise(r => setTimeout(r, 20)); }
   assert.equal(task.status, 'awaiting_confirmation', task.error);
   assert.deepEqual(task.profileSnapshot, {}); assert.equal(task.copyStatus, 'not_requested');
-  assert.equal(task.galleryStoryboard.source, 'approved-style'); assert.equal(task.outputCount, 9);
-  assert.equal(task.styleRecipe, undefined); assert.equal(calls.length, 9); assert.equal(reviews.length, 9);
-  const corrected = calls.find(call => call.recipeId === 'bar-01' && call.attempt === 1);
+  assert.equal(task.galleryStoryboard.source, 'ai'); assert.equal(task.outputCount, 9); assert.deepEqual(task.galleryStoryboard.visualStyle, visualStyle);
+  assert.equal(analyses, 5); assert.equal(plans, 1); assert.equal(setReviews, 1);
+  assert.equal(task.styleRecipe, undefined); assert.equal(calls.length, 10); assert.equal(reviews.length, 10);
+  const corrected = calls.find(call => call.shot.sourceImageId === 'photo-1' && call.attempt === 1);
   assert.deepEqual(corrected.corrections, ['暖琥珀色被改成了冷色']);
-  assert.deepEqual(task.imageReviews.filter(r => r.imageId === 'shot-01').map(r => r.status), ['needs_revision', 'passed']);
+  assert.deepEqual(task.imageReviews.filter(r => r.imageId === 'shot-01').map(r => r.status), ['blocked', 'passed']);
   assert.equal(task.files.filter(f => /^image\//.test(f.mime)).length, 9);
-  assert.ok(!calls.some(c => c.recipeId === 'bar-07'));
+  assert.ok(calls.some(c => c.shot.sourceImageId === 'photo-7'), 'portrait must also use the image edit model instead of fixed Sharp filters');
   assert.equal((await api(`/tasks/${id}/confirm`, { confirmWarnings: true })).status, 200);
   const completed = (await api(`/tasks/${id}`)).body.task;
   assert.equal(completed.status, 'completed'); assert.equal(completed.billing.chargedPoints, 450);
   assert.equal((await api(`/tasks/${id}/generate`, { directionId: completed.selection.directionId, outputCount: 9, imageMode: 'cover' })).body.code, 'PROFILE_INCOMPLETE');
   await api(`/tasks/${id}/generate`, { workflow: 'store-gallery-v1', directionId: completed.selection.directionId, outputCount: 9, imageMode: 'promotional' });
   await api(`/tasks/${id}/confirm`, { confirmWarnings: true });
-  assert.equal(calls.length, 9); assert.equal((await credits.snapshot('style-owner')).balance, 550);
+  assert.equal(calls.length, 10); assert.equal((await credits.snapshot('style-owner')).balance, 550);
   const saved = await handler.store.getTask('style-owner', id), frames = saved.galleryCheckpoints;
   assert.equal(new Set(frames.map(f => f.composition.sourceImageId)).size, 9);
   const file = completed.files.find(f => f.mime === 'image/jpeg');

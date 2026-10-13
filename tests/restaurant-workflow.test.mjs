@@ -14,6 +14,9 @@ import * as processor from '../services/restaurant/images.mjs';
 import * as promotion from '../services/restaurant/promotion.mjs';
 import { COPY_PROMPT } from '../services/restaurant/prompts.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
+import { createGalleryPlan } from '../services/restaurant/gallery.mjs';
+
+const visualStyle = { name: '中性暮色', mood: '安静有层次', lighting: '保留光源层次与阴影', tone: '中性灰绿与食物本色', texture: '自然摄影颗粒', palette: ['灰绿', '金黄'], instructions: '保持克制的暗部，不统一增亮，不添加暖黄滤镜。' };
 
 const profile = { name: '竹里面馆', city: '武汉', address: '青山建设一路', category: '面食' };
 const config = { apiKey: 'test-only-not-a-secret', baseUrl: 'https://provider.invalid/v1', chatModel: 'test-luna', limits: { chatDaily: 100, imageDaily: 20, perMinute: 10 } };
@@ -49,6 +52,22 @@ function paddedCopy(items) {
 }
 function mockModel(overrides = {}) { const counts = { analyse: 0, recommend: 0, write: 0, audit: 0 }; return { ready: Promise.resolve(), enabled: true, counts,
   async analyse(photos) { counts.analyse++; return analysis(photos); }, async recommend(items) { counts.recommend++; return [direction(items)]; },
+  async planGallery(input) {
+    const task = { analysis: input.analysis, profileSnapshot: input.profile, sourceImages: input.analysis.map(item => ({ id: item.imageId, hash: item.imageId })) };
+    const shots = createGalleryPlan(task, input.outputCount);
+    return { theme: '实拍食品与环境', visualStyle, foodGroups: input.analysis.filter(item => item.imageType === 'food').map(item => ({ id: item.imageId, label: item.imageId, imageIds: [item.imageId] })),
+      shots: shots.map((shot, i) => ({ ...shot, name: `画面${i + 1}`, purpose: '展示真实主体', focus: '原图可见食品', subjectScope: /火锅/.test(input.profile?.category || '') ? 'spread' : 'auto', foodGroupId: shot.kind === 'food' ? shot.sourceImageId : '',
+        camera: '保留主体并自然构图', lighting: '遵循暮色层次', angle: ['oblique','overhead','detail','table'][i % 4], editInstructions: '遵循整组中性暮色，保留真实主体。' })) };
+  },
+  async renderGalleryPhoto(input) {
+    if (input.shot.kind === 'food' && this.renderFood) return this.renderFood({ ...input, imageId: input.shot.imageId, plan: input.shot, storeReferences: input.context });
+    return { bytes: await sharp(input.photo.bytes).resize(1080, 1440).jpeg().toBuffer(), requestId: input.shot.imageId, provider: 'mock-image' };
+  },
+  async reviewGalleryPhoto(input) {
+    const review = input.shot.kind === 'food' && this.reviewFoodRender ? await this.reviewFoodRender({ ...input, sourceImageId: input.shot.sourceImageId }) : foodReview;
+    return { ...review, styleScore: 95, styleMatch: true, marketingUseful: true };
+  },
+  async reviewGallerySet() { return { status: 'passed', reviseImageIds: [], errors: [], warnings: [] }; },
   async write(input) { counts.write++; return copy(input.analysis); }, async audit() { counts.audit++; return { status: 'passed', warnings: [], errors: [] }; },
   async usage() { return { day: '2026-10-07', used: { chat: 0 }, remaining: { chat: 100 }, limits: config.limits }; }, async close() {}, ...overrides }; }
 async function photos(count = 2) { return Promise.all(Array.from({ length: count }, async (_, index) => ({ name: `photo${index}.png`, dataUrl: `data:image/png;base64,${(await sharp({ create: { width: 300, height: 400, channels: 3, background: { r: 80 + (index * 15) % 176, g: 50, b: 120 } } }).png().toBuffer()).toString('base64')}` }))); }
@@ -338,10 +357,11 @@ test('the website plans a varied single-dish story from all uploads once and exe
   const names=['食品主视觉','加料摊盘','淋酱出餐','菜品质感','门店外观','蒸制工作','用餐环境','食品上桌','员工工作'];
   const ids=['photo-1','photo-5','photo-6','photo-2','photo-3','photo-7','photo-4','photo-1','photo-14'];
   const model=mockModel({async analyse(photos){return analysis(photos).map(item=>({...item,imageType:types[Number(item.imageId.split('-')[1])-1]}));},
-    async planGallery(input){plans++;assert.equal(input.analysis.length,14);assert.equal(input.outputCount,9);assert.equal(input.photos.length,4);
-      return {theme:'一盘面食从制作到上桌',foodGroups:[{id:'same-dish',label:'同一碗面食',imageIds:['photo-1','photo-2']}],shots:ids.map((id,index)=>{
+    async planGallery(input){plans++;assert.equal(input.analysis.length,14);assert.equal(input.outputCount,9);assert.equal(input.photos.length,3);
+      assert.deepEqual(input.photos.filter(p=>p.imageIds).flatMap(p=>p.imageIds),input.analysis.map(item=>item.imageId));
+      return {theme:'一盘面食从制作到上桌',visualStyle,foodGroups:[{id:'same-dish',label:'同一碗面食',imageIds:['photo-1','photo-2']}],shots:ids.map((id,index)=>{
         const kind=types[Number(id.split('-')[1])-1]==='food'?'food':'scene';return {sourceImageId:id,kind,foodGroupId:kind==='food'?'same-dish':'',
-          name:names[index],purpose:'展示实际菜品或门店过程',focus:'完整面食',angle:index%2?'overhead':'oblique',camera:'按实际主体调整机位与景别',lighting:'明亮自然光'};})};},
+          name:names[index],purpose:'展示实际菜品或门店过程',focus:'完整面食',angle:index%2?'overhead':'oblique',camera:'按实际主体调整机位与景别',lighting:'中性暮色',editInstructions:'保留整组灰绿暮色与真实食品质感。'};})};},
     async identifyFood(){return foodAppearance;},async renderFood(input){renders++;return{bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};},
     async reviewFoodRender(){return foodReview;}});
   const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});const id=randomUUID(),inputs=await photos(14);
@@ -359,24 +379,66 @@ test('the website plans a varied single-dish story from all uploads once and exe
   assert.equal((await app.api(`/tasks/${id}`)).body.task.galleryStoryboard.source,'ai');
 });
 
-test('an uncertain optional planning call is not replayed and the fallback retains varied real scenes',async t=>{
-  let plans=0;
+test('an uncertain Claude planning call stops without a rule fallback, image dispatch or charge',async t=>{
+  let plans=0,renders=0;
   const model=mockModel({async analyse(photos){return analysis(photos).map(item=>({...item,imageType:item.imageId==='photo-1'?'food':'preparation'}));},
     async planGallery(){plans++;throw Object.assign(Error('response lost'),{code:'PROVIDER_UNCERTAIN'});},async identifyFood(){return foodAppearance;},
-    async renderFood(input){return{bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};},async reviewFoodRender(){return foodReview;}});
-  const app=await setup(t,{model});await app.api('/profile',{profile});const id=randomUUID(),inputs=await photos(9);
+    async renderGalleryPhoto(){renders++;throw Error('must not dispatch');}});
+  const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});const id=randomUUID(),inputs=await photos(9);
   await app.api('/tasks',{requestId:id,imageCount:9,rightsConfirmed:true,autoGenerate:true,outputCount:9});
   for(let startIndex=0;startIndex<9;startIndex+=3)await app.api(`/tasks/${id}/photos`,{startIndex,images:inputs.slice(startIndex,startIndex+3)});
   await app.api(`/tasks/${id}/analyse`,{});const task=await app.wait(id,['completed','failed']);
-  assert.equal(task.status,'completed',task.error);assert.equal(plans,1);assert.equal(task.galleryStoryboard.source,'rules');
-  assert.equal(task.selection.shots.filter(shot=>shot.kind==='food').length,3);
-  assert.equal(new Set(task.selection.shots.filter(shot=>shot.kind==='scene').map(shot=>shot.sourceImageId)).size,6);
+  assert.equal(task.status,'failed');assert.equal(task.code,'PROVIDER_UNCERTAIN');assert.equal(plans,1);assert.equal(renders,0);
+  assert.equal(task.galleryStoryboard,undefined);assert.equal(task.files.length,0);
+  assert.equal((await app.credits.snapshot('owner')).balance,1000);assert.equal((await app.credits.snapshot('owner')).held,0);
+  assert.equal((await app.api(`/tasks/${id}/retry`,{})).status,409);assert.equal(plans,1);
+  const fork = await app.api(`/tasks/${id}/fork`, { requestId: randomUUID() });
+  assert.equal(fork.status, 200); assert.equal(fork.body.task.status, 'awaiting_selection');
+  assert.equal(fork.body.task.analysis.length, 9); assert.equal(fork.body.task.directions[0].id, 'store-gallery');
+  assert.equal(plans, 1, 'explicitly creating a new task reuses analysis and does not replay the unknown plan');
 });
 
 test('auto gallery rejects invalid frame counts before creating a paid task', async t => {
   const app=await setup(t,{withCredits:true}); await app.api('/profile',{profile});
   for(const outputCount of [0,-1,31,1.5,'9']) assert.equal((await app.api('/tasks',{requestId:randomUUID(),imageCount:2,rightsConfirmed:true,autoGenerate:true,outputCount})).body.code,'INVALID_OUTPUT_COUNT');
   assert.equal((await app.credits.snapshot('owner')).balance,1000); assert.equal(app.model.counts.analyse,0);
+});
+
+test('scene photos use the image model and shared Claude style; set review repairs only the nominated frame', async t => {
+  const renders = [], audits = []; let setReviews = 0;
+  const model = mockModel({ async analyse(photos) { return analysis(photos).map(item => ({ ...item, imageType: item.imageId === 'photo-1' ? 'interior' : 'exterior' })); },
+    async renderGalleryPhoto(input) {
+      renders.push(input); assert.deepEqual(input.style, visualStyle); assert.ok(input.shot.editInstructions);
+      assert.equal(input.context.length, 0, 'scene edits use only their original and do not merge signs or architecture from other views');
+      return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: `${input.shot.imageId}-${input.attempt}`, provider: 'image-test' };
+    }, async reviewGalleryPhoto(input) { audits.push(input); assert.deepEqual(input.visualStyle, visualStyle); return { ...foodReview, styleScore: 94, styleMatch: true, marketingUseful: true }; },
+    async reviewGallerySet(input) {
+      assert.deepEqual(input.visualStyle, visualStyle); assert.deepEqual(input.photos.flatMap(p => p.imageIds), ['shot-01','shot-02']);
+      return ++setReviews === 1 ? { status: 'blocked', reviseImageIds: ['shot-02'], errors: ['shot-02色温偏暖，恢复中性暮色'], warnings: [] }
+        : { status: 'passed', reviseImageIds: [], errors: [], warnings: [] };
+    } });
+  const app = await setup(t, { model, withCredits: true }); const id = randomUUID();
+  await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 2 });
+  const task = await app.wait(id, ['completed','failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(renders.length, 3); assert.equal(audits.length, 3); assert.equal(setReviews, 2);
+  const repair = renders.find(input => input.attempt === 2); assert.equal(repair.shot.imageId, 'shot-02'); assert.match(repair.corrections[0], /色温偏暖/);
+  const files = task.files.filter(file => file.role === 'image');
+  assert.ok(files.every(file => file.composition.method === 'claude-directed-scene-edit' && file.composition.modelEdited));
+  assert.equal(new Set(files.map(file => file.composition.styleFingerprint)).size, 1);
+  assert.deepEqual(files.map(file => file.composition.imageRequestId), ['shot-01-0', 'shot-02-2']);
+  assert.equal(task.gallerySetReview.status, 'passed'); assert.equal(task.billing.chargedPoints, 100); assert.equal((await app.credits.snapshot('owner')).balance, 900);
+});
+
+test('persistent whole-set style drift withholds the package and releases all held points', async t => {
+  let renders = 0, reviews = 0;
+  const model = mockModel({ async analyse(photos) { return analysis(photos).map(item => ({ ...item, imageType: 'interior' })); },
+    async renderGalleryPhoto(input) { renders++; return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.shot.imageId }; },
+    async reviewGallerySet() { reviews++; return { status: 'blocked', reviseImageIds: ['shot-01'], errors: ['shot-01明显换滤镜'], warnings: [] }; } });
+  const app = await setup(t, { model, withCredits: true }); const id = randomUUID();
+  await app.api('/tasks', { requestId: id, images: await photos(1), rightsConfirmed: true, autoGenerate: true, outputCount: 1 });
+  const task = await app.wait(id, ['failed']);
+  assert.equal(task.code, 'GALLERY_SET_REVIEW_FAILED'); assert.equal(renders, 2); assert.equal(reviews, 2); assert.equal(task.files.length, 0);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404); assert.equal((await app.credits.snapshot('owner')).balance, 1000); assert.equal((await app.credits.snapshot('owner')).held, 0);
 });
 
 test('gallery renders and audits the identical cropped primary dish, keeping the complete original for task evidence', async t => {

@@ -1,5 +1,6 @@
 import { accountStorageKey } from './account-storage.js';
 import { displayModelName, brandModelText } from './model-labels.js';
+import { refreshWorkspaceCredits } from './workspace-credits.js';
 const STORAGE_KEY = accountStorageKey('store-ai-agent-conversations-v1');
 const MAX_LENGTH = 2000;
 const MAX_CONTEXT_MESSAGES = 20;
@@ -304,6 +305,7 @@ async function answerSession(session, message, ctx) {
     message.errorCode = controller.signal.aborted ? 'cancelled' : error.code || 'connection_failed';
   } finally {
     clearTimeout(timeout);
+    void refreshWorkspaceCredits({ afterCurrent: true });
     if (pendingRequests.get(session.id) === request) {
       pendingRequests.delete(session.id);
       persist(ctx);

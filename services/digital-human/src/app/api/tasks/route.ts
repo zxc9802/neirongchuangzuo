@@ -133,10 +133,11 @@ export async function POST(req: NextRequest) {
       progress: 0,
       billing: {
         source: reservation.source,
+        mode: reservation.mode,
         exempt: reservation.exempt === true,
         isExternalUser: reservation.chargeRequired,
-        ratePerSecond: reservation.source === "workspace" ? 333 / 30 : POINTS_PER_SECOND,
-        costCnyPerSecond: reservation.source === "workspace" ? 0 : CNY_PER_SECOND,
+        ratePerSecond: reservation.source === "workspace" ? reservation.mode === "api_cost" ? 12.5 : 333 / 30 : POINTS_PER_SECOND,
+        costCnyPerSecond: reservation.source === "workspace" ? reservation.mode === "api_cost" ? 0.1 : 0 : CNY_PER_SECOND,
         requestId: reservation.requestId,
         estimatedDuration,
         estimatedPoints: reservation.requiredPoints,
@@ -173,6 +174,7 @@ export async function POST(req: NextRequest) {
       source: reservation.source, sessionToken: session?.token };
     const task = workspaceTask
       ? TaskStore.update(workspaceTask.id, { billing: { ...workspaceTask.billing!, status: "reserved",
+        mode: reservation.mode, costCny: reservation.costCny,
         exempt: reservation.exempt === true, estimatedPoints: reservation.requiredPoints,
         reservedPoints: reservation.reservedPoints, pointsBalanceBefore: reservation.pointsBalance } })
       : createTask(reservation);

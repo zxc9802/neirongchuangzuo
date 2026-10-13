@@ -14,7 +14,9 @@ export async function GET(request: NextRequest) {
   }
   return NextResponse.json(session ? {
     success: true,
-    data: { user: session.user, authMode: "standalone", credits, billing: { source: "workspace", isExternal: true, ratePerSecond: 333 / 30, cnyPerSecond: 0, videoPoints: 333, videoSeconds: 30 } },
+    data: { user: session.user, authMode: "standalone", credits, billing: credits?.pricing?.mode === "api_cost"
+      ? { source: "workspace", mode: "api_cost", isExternal: true, ratePerSecond: 12.5, cnyPerSecond: 0.1 }
+      : { source: "workspace", isExternal: true, ratePerSecond: 333 / 30, cnyPerSecond: 0, videoPoints: 333, videoSeconds: 30 } },
   } : { error: "请先登录", code: "UNAUTHENTICATED" }, {
     status: session ? 200 : 401, headers: { "Cache-Control": "no-store" },
   });

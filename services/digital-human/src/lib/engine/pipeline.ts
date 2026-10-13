@@ -143,7 +143,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       log(
         task.billing.source === "workspace"
           ? task.billing.exempt === true ? "🎟️ 无限积分，本次任务免扣积分"
-            : `💳 共用积分：30秒333积分，按实际时长向上取整；已预留 ${task.billing.reservedPoints} 积分`
+            : task.billing.mode === "api_cost" ? `💳 已预留 ${task.billing.reservedPoints} 积分`
+              : `💳 共用积分：30秒333积分，按实际时长向上取整；已预留 ${task.billing.reservedPoints} 积分`
           : `💳 外部用户计费：费率 ${POINTS_PER_SECOND}积分/秒 (0.20元/秒)，已预留 ${task.billing.estimatedPoints} 积分 (预估 ${task.billing.estimatedDuration}s)`,
         "info"
       );
@@ -268,8 +269,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         if (!currentTaskData.billing.requestId || !currentTaskData.userId) {
           throw new Error("外部用户任务缺少主站积分结算标识");
         }
-        chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source);
-        costCny = calculateCostCny(actualDuration, currentTaskData.billing.source);
+        chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
+        costCny = calculateCostCny(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
         // Save the actual MP3 before settlement so recovery never needs another paid TTS call.
         TaskStore.update(taskId, { results: { exactAudioUrl: mp3Path, audioFormat: "mp3", audioDuration: actualDuration,
           sha256Audio: mp3Hash, billingDuration: actualDuration } });
@@ -636,8 +637,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         throw new Error("外部用户任务缺少主站积分结算标识");
       }
       const actualDuration = finalProbe.durationSeconds;
-      chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source);
-      costCny = calculateCostCny(actualDuration, currentTaskData.billing.source);
+      chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
+      costCny = calculateCostCny(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
       log(
         currentTaskData.billing.source === "workspace"
           ? currentTaskData.billing.exempt === true ? "💳 正在确认任务结算"

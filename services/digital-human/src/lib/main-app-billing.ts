@@ -4,6 +4,7 @@ import { estimateScriptDuration } from "./billing-estimate";
 import {
   getWorkspaceCreditsLedger, calculateWorkspacePoints, workspaceCreditsSnapshot,
   WORKSPACE_VIDEO_POINTS, WORKSPACE_VIDEO_SECONDS,
+  WORKSPACE_CNY_PER_SECOND, WORKSPACE_COST_POINTS_PER_SECOND, calculateWorkspaceCostPoints,
 } from "./server/workspace-credits";
 export { CHARACTERS_PER_SECOND, estimateScriptDuration } from "./billing-estimate";
 import {
@@ -75,20 +76,21 @@ export function isExternallyBilledUser(
 /**
  * 根据视频/音频时长计算所需积分（20 积分/秒 = 0.20 元/秒，向上取整）
  */
-export function calculateRequiredPoints(durationSeconds: number, source?: BillingSource): number {
+export function calculateRequiredPoints(durationSeconds: number, source?: BillingSource, mode?: "api_cost"): number {
   const seconds = Math.max(0, Number(durationSeconds) || 0);
-  if (source === "workspace") return calculateWorkspacePoints(seconds);
+  if (source === "workspace") return mode === "api_cost" ? calculateWorkspaceCostPoints(seconds) : calculateWorkspacePoints(seconds);
   return Math.ceil(seconds * POINTS_PER_SECOND);
 }
 
 export function assertTaskCreditCoverage(
-  billing: { isExternalUser: boolean; status: string; reservedPoints?: number; source?: BillingSource } | undefined,
+  billing: { isExternalUser: boolean; status: string; reservedPoints?: number; source?: BillingSource; mode?: "api_cost" } | undefined,
   durationSeconds: number,
 ): void {
   if (!billing?.isExternalUser) return;
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 ||
     billing.status !== "reserved" || !Number.isSafeInteger(billing.reservedPoints) ||
-    (billing.reservedPoints || 0) < calculateRequiredPoints(durationSeconds, billing.source)) {
+    (billing.reservedPoints || 0) < (billing.source === "workspace" && billing.mode === "api_cost"
+      ? calculateWorkspaceCostPoints(durationSeconds) : calculateRequiredPoints(durationSeconds, billing.source))) {
     throw new MainAppBillingError(
       "实际配音超出预留额度，请缩短文案后重试",
       402,
@@ -114,13 +116,17 @@ export async function extendTaskCreditCoverage(input: {
     throw new MainAppBillingError("实际配音时长无效，不能继续生成", 400, "BILLING_DURATION_INVALID");
   }
   try {
-    const result = await getWorkspaceCreditsLedger().extendReservation({
-      userId: input.userId, taskId: current.requestId, units: input.durationSeconds,
-    });
+    const ledger = getWorkspaceCreditsLedger();
+    const record = await ledger.reservation(input.userId, current.requestId);
+    const actualCost = record?.kind === "api-cost";
+    const result = actualCost ? await ledger.extendCostCall({
+      userId: input.userId, taskId: current.requestId, receiptId: "digital-human",
+      quoteCny: input.durationSeconds * WORKSPACE_CNY_PER_SECOND,
+    }) : await ledger.extendReservation({ userId: input.userId, taskId: current.requestId, units: input.durationSeconds });
     assertLedgerReservationActive(result);
     // Only the ledger response can exempt this task; the persisted task flag is display metadata.
     if (result.exempt !== true) {
-      assertTaskCreditCoverage({ ...current, reservedPoints: result.reservedPoints }, input.durationSeconds);
+      assertTaskCreditCoverage({ ...current, ...(actualCost ? { mode: "api_cost" as const } : {}), reservedPoints: result.reservedPoints }, input.durationSeconds);
     }
     return result.reservedPoints;
   } catch (error) {
@@ -144,8 +150,8 @@ export async function assertWorkspaceReservationActive(userId: string, requestId
 /**
  * 根据视频/音频时长计算人民币金额（0.20 元/秒）
  */
-export function calculateCostCny(durationSeconds: number, source?: BillingSource): number {
-  if (source === "workspace") return 0;
+export function calculateCostCny(durationSeconds: number, source?: BillingSource, mode?: "api_cost"): number {
+  if (source === "workspace") return mode === "api_cost" ? Math.max(0, Number(durationSeconds) || 0) * WORKSPACE_CNY_PER_SECOND : 0;
   const seconds = Math.max(0, Number(durationSeconds) || 0);
   return Number((seconds * CNY_PER_SECOND).toFixed(2));
 }
@@ -275,9 +281,10 @@ export async function reserveMainAppCredits(input: {
   estimatedDuration: number;
   minimumDuration?: number;
   beforeReserve?: (reservation: { source: "workspace"; requestId: string; chargeRequired: true;
-    requiredPoints: number; reservedPoints: number; estimatedDuration: number; costCny: number; exempt?: boolean }) => void | Promise<void>;
+    requiredPoints: number; reservedPoints: number; estimatedDuration: number; costCny: number; exempt?: boolean; mode?: "api_cost" }) => void | Promise<void>;
 }): Promise<{
   source: BillingSource;
+  mode?: "api_cost";
   requestId: string;
   chargeRequired: boolean;
   requiredPoints: number;
@@ -313,11 +320,34 @@ export async function reserveMainAppCredits(input: {
     if (!input.user.id || !Number.isFinite(input.estimatedDuration) || input.estimatedDuration <= 0) {
       throw new MainAppBillingError("任务缺少有效计费信息", 400, "BILLING_IDENTITY_MISSING");
     }
-    // Persist the request identity before the ledger can commit, including lost-response failures.
+    let wallet;
+    try { wallet = await workspaceCreditsSnapshot(input.user.id); }
+    catch (error) { throw workspaceBillingError(error); }
+    const actualCost = wallet.pricing?.mode === "api_cost";
+    const estimatedPoints = actualCost ? calculateWorkspaceCostPoints(input.estimatedDuration) : requiredPoints;
     await input.beforeReserve?.({ source: "workspace", requestId, chargeRequired: true,
-      requiredPoints, reservedPoints: 0, estimatedDuration: input.estimatedDuration, costCny: 0 });
+      requiredPoints: estimatedPoints, reservedPoints: 0, estimatedDuration: input.estimatedDuration,
+      costCny: actualCost ? input.estimatedDuration * WORKSPACE_CNY_PER_SECOND : 0,
+      ...(actualCost ? { mode: "api_cost" } : {}) });
     try {
-      const wallet = await workspaceCreditsSnapshot(input.user.id);
+      if (actualCost) {
+        const minimumPoints = calculateWorkspaceCostPoints(input.minimumDuration ?? input.estimatedDuration);
+        if (wallet.unlimited !== true && wallet.available < minimumPoints) {
+          throw new MainAppBillingError(`积分余额不足：本次预计至少需要 ${minimumPoints} 积分`, 402, "INSUFFICIENT_POINTS");
+        }
+        const seconds = wallet.unlimited === true || estimatedPoints <= wallet.available ? input.estimatedDuration
+          : wallet.available / WORKSPACE_COST_POINTS_PER_SECOND - 1e-8;
+        const ledger = getWorkspaceCreditsLedger();
+        await ledger.reserveCost({ userId: input.user.id, taskId: requestId });
+        const reserved = await ledger.prepareCostCall({ userId: input.user.id, taskId: requestId,
+          receiptId: "digital-human", provider: "digital-human", quoteCny: seconds * WORKSPACE_CNY_PER_SECOND,
+          metadata: { currency: "CNY", unitPrice: WORKSPACE_CNY_PER_SECOND } });
+        assertLedgerReservationActive(reserved);
+        return { source, mode: "api_cost", requestId, chargeRequired: true, requiredPoints: reserved.exempt === true ? 0 : estimatedPoints,
+          reservedPoints: reserved.reservedPoints, estimatedDuration: input.estimatedDuration,
+          costCny: input.estimatedDuration * WORKSPACE_CNY_PER_SECOND,
+          pointsBalance: reserved.wallet.available, exempt: reserved.exempt === true };
+      }
       const minimumPoints = calculateRequiredPoints(input.minimumDuration ?? input.estimatedDuration, source);
       if (wallet.unlimited !== true && wallet.available < minimumPoints) {
         throw new MainAppBillingError(`积分余额不足：本次预计至少需要 ${minimumPoints} 积分`, 402, "INSUFFICIENT_POINTS");
@@ -426,7 +456,16 @@ export async function settleMainAppCredits(input: {
 
   if (input.source === "workspace") {
     try {
-      const result = await getWorkspaceCreditsLedger().settle({
+      const ledger = getWorkspaceCreditsLedger();
+      const record = await ledger.reservation(input.userId, input.requestId);
+      if (record?.kind === "api-cost") {
+        const costCny = actualDuration * WORKSPACE_CNY_PER_SECOND;
+        await ledger.finishCostCall({ userId: input.userId, taskId: input.requestId,
+          receiptId: "digital-human", costCny });
+        const result = await ledger.settleCost({ userId: input.userId, taskId: input.requestId });
+        return { chargedPoints: result.chargedPoints, costCny, actualDuration, pointsBalance: result.wallet.available };
+      }
+      const result = await ledger.settle({
         userId: input.userId, taskId: input.requestId, units: actualDuration,
       });
       return { chargedPoints: result.chargedPoints, costCny: 0, actualDuration, pointsBalance: result.wallet.available };
@@ -479,7 +518,12 @@ export async function releaseMainAppCredits(input: {
 
   if (input.source === "workspace") {
     try {
-      await getWorkspaceCreditsLedger().release({ userId: input.userId, taskId: input.requestId });
+      const ledger = getWorkspaceCreditsLedger();
+      const record = await ledger.reservation(input.userId, input.requestId);
+      if (record?.kind === "api-cost" && record.status === "reserved" && record.costItems["digital-human"]?.status === "pending") {
+        await ledger.finishCostCall({ userId: input.userId, taskId: input.requestId, receiptId: "digital-human", costCny: 0 });
+      }
+      await ledger.release({ userId: input.userId, taskId: input.requestId });
       return;
     } catch {
       throw new MainAppBillingError("积分释放暂未完成，请稍后重试", 503, "BILLING_RELEASE_FAILED");

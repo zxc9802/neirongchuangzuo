@@ -25,6 +25,7 @@ function loadSource(relative, deps) {
   }).outputText;
   const module = { exports: {} };
   new Function("require", "module", "exports", code)(name => {
+    if(name==='./scene-tail') return {prepareSceneContinuation:async({inputPath})=>inputPath};
     assert.ok(name in deps, `unexpected dependency ${name}`); return deps[name];
   }, module, module.exports);
   return module.exports;
@@ -411,6 +412,7 @@ test("workspace pipeline settles lip-sync but releases holds for clearly labelle
       deps["./narration-fallback"] = loadSource("../src/lib/engine/narration-fallback.ts", deps);
       const module = { exports: {} };
       new Function("require", "module", "exports", compiled)(name => {
+        if(name==='./scene-tail') return {prepareSceneContinuation:async({inputPath})=>inputPath};
         assert.ok(name in deps, name); return deps[name];
       }, module, module.exports);
       await module.exports.runDigitalHumanPipeline(task.id);

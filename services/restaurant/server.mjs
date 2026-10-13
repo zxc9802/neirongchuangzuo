@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { loadAIConfig } from '../ai/server.mjs';
+import { createApiCostMeter } from '../credits/meter.mjs';
 import { createRestaurantStore, FILES_TTL_MS } from './store.mjs';
 import { createRestaurantMedia } from './media.mjs';
 import * as images from './images.mjs';
@@ -12,7 +13,8 @@ import { createStyleRecipes } from './style-recipes.mjs';
 import { createGalleryQueue, GALLERY_CONCURRENCY } from './gallery-queue.mjs';
 import { displayModelName } from '../../design/model-labels.js';
 import { inspectCopyQuality } from './copy-quality.mjs';
-import { GALLERY_WORKFLOW, galleryDirection, createGalleryPlan, validateGalleryStoryboard, storeSceneContext, galleryShot, enhanceStorePhoto, prepareGalleryReference, isolateDishReference } from './gallery.mjs';
+import { GALLERY_WORKFLOW, galleryDirection, createGalleryPlan, validateGalleryStoryboard, storeSceneContext, galleryShot, prepareGalleryReference, isolateDishReference } from './gallery.mjs';
+import { galleryContactSheets, validateGalleryImageReview, validateGallerySetReview } from './art-direction.mjs';
 import { RestaurantError, UUID, fingerprint, normalizeProfile, requireProfile, normalizeFacts, resolveDirectionFacts, pendingFacts, validateAnalysis, validateDirections, validateCopy, validateAudit, localReview, validateFoodAppearance, validateFoodRenderReview } from './rules.mjs';
 
 const MB = 1024 * 1024;
@@ -50,6 +52,8 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   store: injectedStore, media: injectedMedia, model: injectedModel, providerLedger, credits, mediaEnv = process.env, imageProcessor = images, promotionalProcessor = promotion, subjectMasker: injectedMasker, packageDailyLimit = Number(process.env.RESTAURANT_PACKAGE_DAILY_LIMIT || 20), cleanupIntervalMs = 60_000,
   requireAuth = process.env.NODE_ENV === 'production', logger = console, styleRecipes = createStyleRecipes(), galleryConcurrency = GALLERY_CONCURRENCY } = {}) {
   const galleryQueue = createGalleryQueue(galleryConcurrency);
+  const costMeter = createApiCostMeter({credits,config,fetchImpl});
+  fetchImpl = costMeter.fetch;
   const store = injectedStore ?? createRestaurantStore({ dataDir, databaseUrl, now, packageDailyLimit });
   const rawMedia = injectedMedia ?? createRestaurantMedia({ dataDir, now, env: mediaEnv });
   const scopedKey = (userId, taskId, key) => `${fingerprint(userId).slice(0, 32)}/${taskId}/${key}`;
@@ -122,6 +126,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   }
   async function reserveTaskCredits(userId, task, units) {
     if (!credits) return task;
+    if (costMeter.enabled && (!task.billing || task.billing.mode==='api_cost' || ['released','settled'].includes(task.billing.status))) return ensureCostTask(userId,task);
     if (task.billing?.source === 'workspace' && !['released', 'settled'].includes(task.billing.status)) await releaseTaskCredits(userId, task);
     const attempt = (task.generationAttempt || 0) + 1;
     const taskId = `${task.id}-generation-${attempt}`;
@@ -141,8 +146,9 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (!credits || task.billing?.source !== 'workspace' || ['settled', 'released'].includes(task.billing.status)) return;
     const saved = await credits.reservation(userId, task.billing.taskId);
     if (saved?.status === 'settled') { await store.patchTask(userId, task.id, { billing: { ...task.billing, status: 'settled', chargedPoints: saved.chargedPoints, exempt: saved.exempt === true } }); return; }
-    if (saved) await credits.release({ userId, taskId: task.billing.taskId });
-    await store.patchTask(userId, task.id, { billing: { ...task.billing, status: 'released', chargedPoints: 0 } });
+    const record = saved ? await credits.release({ userId, taskId: task.billing.taskId }) : null;
+    await store.patchTask(userId, task.id, { billing: { ...task.billing, status: record?.status || 'released', chargedPoints: record?.chargedPoints || 0,
+      ...(record?.kind==='api-cost'?{mode:'api_cost',costCny:(record.settledUnits||0)/1e6}:{}) } });
   }
   async function completeWithCredits(userId, id, patch = {}) {
     const task = await taskFor(userId, id);
@@ -152,8 +158,9 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     const units = files.filter(file => /^image\//.test(file.mime)).length;
     if (!units || files.some(file => file.expired || file.expiresAt <= now())) throw new RestaurantError('成品已过期，无法结算，请重新生成。', 410, 'FILES_EXPIRED');
     const pending = await store.patchTask(userId, id, { ...patch, status: 'generating', progress: { stage: 'credits_settlement' }, billing: { ...task.billing, status: 'settle_pending', deliveredUnits: units } });
-    const record = await credits.settle({ userId, taskId: task.billing.taskId, units });
-    return store.completeTask(userId, id, { billing: { ...pending.billing, status: 'settled', chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints, exempt: record.exempt === true }, progress: null, error: null, code: null, completedAt: now() });
+    const record = task.billing.mode==='api_cost' ? await credits.settleCost({userId,taskId:task.billing.taskId}) : await credits.settle({ userId, taskId: task.billing.taskId, units });
+    return store.completeTask(userId, id, { billing: { ...pending.billing, status: 'settled', chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints, exempt: record.exempt === true,
+      ...(record.kind==='api-cost'?{costCny:(record.settledUnits||0)/1e6}:{}) }, progress: null, error: null, code: null, completedAt: now() });
   }
   async function fail(userId, id, cause) {
     const current = await store.getTask(userId, id);
@@ -166,8 +173,23 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     await store.patchTask(userId, id, { status: 'failed', error: cause instanceof RestaurantError || cause.status || cause.statusCode ? cause.message : '任务处理失败，请稍后重试。', code: cause.code ?? 'PROCESSING_FAILED', retryable: cause.code !== 'PROVIDER_UNCERTAIN' });
     report(cause.code ?? 'PROCESSING_FAILED');
   }
+  async function ensureCostTask(userId,task) {
+    if (task.billing?.mode==='api_cost' && !['settled','released'].includes(task.billing.status)) return task;
+    const attempt=(task.costAttempt||0)+1, taskId=`${task.id}-cost-${attempt}`;
+    const record=await credits.reserveCost({userId,taskId});
+    return store.patchTask(userId,task.id,{costAttempt:attempt,billing:{source:'workspace',mode:'api_cost',taskId,status:record.status,
+      reservedPoints:record.reservedPoints,chargedPoints:record.chargedPoints,exempt:record.exempt===true}});
+  }
   function launch(userId, id, operation) {
-    const work = Promise.resolve().then(operation).catch(cause => fail(userId, id, cause)).catch(() => report('TASK_SAVE_FAILED'));
+    const work = Promise.resolve().then(async()=>{
+      if (!costMeter.enabled) return operation();
+      let task=await taskFor(userId,id);
+      const legacy=task.billing?.source==='workspace' && task.billing.mode!=='api_cost' && !['released','settled'].includes(task.billing.status);
+      if (!legacy) task=await ensureCostTask(userId,task);
+      await costMeter.run({userId,taskId:task.billing?.taskId,legacy},operation);
+      const after=await taskFor(userId,id);
+      if(after.status==='failed') await releaseTaskCredits(userId,after);
+    }).catch(cause => fail(userId, id, cause)).catch(() => report('TASK_SAVE_FAILED'));
     running.add(work); work.finally(() => running.delete(work));
   }
   async function loadSources(userId, task) {
@@ -250,33 +272,32 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     return claimed ?? await taskFor(userId, task.id);
   }
   async function ensureGalleryStoryboard(userId, task, outputCount) {
-    if (task.styleRecipe) return store.patchTask(userId, task.id, { galleryStoryboard: await styleRecipes.plan(task.styleRecipe, outputCount) });
     const excluded = new Set(task.foodReferenceExclusions || []);
-    if (task.galleryStoryboard?.outputCount === outputCount && task.galleryStoryboard.shots.every(shot => shot.kind !== 'food' || !excluded.has(shot.sourceImageId))) return task;
+    if (task.galleryStoryboard?.visualStyle && task.galleryStoryboard.outputCount === outputCount && task.galleryStoryboard.shots.every(shot => shot.kind !== 'food' || !excluded.has(shot.sourceImageId))) return task;
     task = { ...task, galleryStoryboard: null };
-    if (!model.planGallery) return task;
+    if (!model.planGallery) throw new RestaurantError('尚未配置套图摄影策划服务。', 503, 'MODEL_NOT_CONFIGURED');
     await store.patchTask(userId, task.id, { progress: { stage: 'planning', message: '正在编排整套宣传图片。' } });
     let storyboard;
     try {
       const sources = await loadSources(userId, task);
       const usable = task.analysis.filter(item => item.usable && item.privacyRisk !== 'high' && item.textRisk !== 'high'
         && (item.imageType !== 'food' || !excluded.has(item.imageId)));
-      const attachments = [...usable.filter(item=>item.imageType==='food').slice(0,2), ...usable.filter(item=>item.imageType==='preparation').slice(0,2)];
-      const photos = await Promise.all(attachments.map(async item => {
-        const source = sources.find(photo => photo.id === item.imageId), prepared = await imageProcessor.prepareAnalysisPhoto(source.bytes);
-        return { ...prepared, id: source.id, dataUrl: `data:${prepared.mime};base64,${prepared.bytes.toString('base64')}` };
-      }));
-      storyboard = { ...validateGalleryStoryboard(await model.planGallery({ analysis: usable, profile: task.profileSnapshot, outputCount, photos }, {
-        onBudgetWait: () => store.patchTask(userId, task.id, { progress: { stage: 'planning', message: '正在排队编排套图。' } }) }), task, outputCount), source: 'ai' };
+      const photos = await galleryContactSheets(sources.filter(source => usable.some(item => item.imageId === source.id)));
+      const accepted = await styleRecipes.directorReferences?.(task.styleRecipe) ?? [];
+      const acceptedSheets = accepted.length ? await galleryContactSheets(accepted, 'accepted') : [];
+      photos.push(...acceptedSheets);
+      const food = usable.find(item => item.imageType === 'food');
+      if (food && photos.length < 4) {
+        const source = sources.find(photo => photo.id === food.imageId), prepared = await imageProcessor.prepareAnalysisPhoto(source.bytes);
+        photos.push({ ...prepared, id: source.id, dataUrl: `data:${prepared.mime};base64,${prepared.bytes.toString('base64')}` });
+      }
+      storyboard = { ...validateGalleryStoryboard(await model.planGallery({ analysis: usable, profile: task.profileSnapshot, outputCount, photos,
+        approvedStyles: accepted.map(photo => ({ sourceImageId: photo.sourceImageId, style: photo.style })) }, {
+        validateResult: value => validateGalleryStoryboard(value, task, outputCount, { requireStyle: true }),
+        onBudgetWait: () => store.patchTask(userId, task.id, { progress: { stage: 'planning', message: '正在排队编排套图。' } }) }), task, outputCount, { requireStyle: true }), source: 'ai' };
     } catch (cause) {
-      logger.warn({ event: 'gallery-storyboard-fallback', code: cause.code || 'PLANNING_UNAVAILABLE' });
-      const shots = createGalleryPlan({ ...task, galleryStoryboard: null }, outputCount).map(shot => {
-        const analysis = task.analysis.find(item=>item.imageId===shot.sourceImageId), plan = foodPhotoPlan(foodScene(analysis,task.profileSnapshot,{}),shot.shotIndex);
-        const names = { exterior:'门店外观',interior:'用餐环境',preparation:'制作过程',staff:'员工工作',customers:'用餐场景',people:'门店日常',owner:'门店日常' };
-        return { ...shot, name: shot.kind === 'food' ? plan.name : names[analysis.imageType] || '门店实拍',
-          purpose: shot.kind === 'food' ? '展示可见菜品的食欲与质感' : '用实际场景丰富门店的视觉故事' };
-      });
-      storyboard = { version:1,outputCount,source:'rules',theme:'菜品与门店的日常',foodGroups:[],shots };
+      logger.warn({ event: 'gallery-planning-failed', code: cause.code || 'PLANNING_UNAVAILABLE' });
+      throw cause;
     }
     return store.patchTask(userId, task.id, { galleryStoryboard: storyboard });
   }
@@ -285,7 +306,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     const sources = await loadSources(userId, task);
     if (task.autoGenerate && !task.styleRecipe && !task.analysis?.length) {
       const binding = await styleRecipes.match(sources);
-      if (binding) task = await store.patchTask(userId, id, { styleRecipe: binding, analysis: validateAnalysis({ images: await styleRecipes.analysis(binding) }, sources.map(item => item.id)) });
+      if (binding) task = await store.patchTask(userId, id, { styleRecipe: binding });
     }
     const analysis = [...(task.analysis ?? [])];
     const onBudgetWait = () => store.patchTask(userId, id, { progress: { stage: 'waiting_for_budget', current: analysis.length, total: sources.length, message: '共享请求较多，正在排队等待继续分析。' } });
@@ -473,8 +494,12 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   }
   async function generateGalleryTask(userId, task) {
     const { id, selection } = task;
-    const sources = await loadSources(userId, task), processed = new Map(), appearances = new Map(), reviews = [];
-    const planFingerprint = fingerprint({ selection, version: 1, ...(task.styleRecipe ? { styleRecipe: task.styleRecipe.fingerprint } : {}) });
+    const visualStyle = task.galleryStoryboard?.visualStyle;
+    if (!visualStyle) throw new RestaurantError('这项任务缺少摄影风格方案，请复用素材新建套图。', 409, 'GALLERY_STYLE_REQUIRED');
+    if (!model.renderGalleryPhoto || !model.reviewGalleryPhoto || !model.reviewGallerySet) throw new RestaurantError('尚未配置套图生成与审美检查服务。', 503, 'MODEL_NOT_CONFIGURED');
+    const sources = await loadSources(userId, task), processed = new Map(), appearances = new Map(), reviews = [...(task.imageReviews || [])];
+    const acceptedReferences = await styleRecipes.directorReferences?.(task.styleRecipe) ?? [];
+    const planFingerprint = fingerprint({ selection, version: 2, visualStyle, ...(task.styleRecipe ? { styleRecipe: task.styleRecipe.fingerprint } : {}) });
     const checkpoints = [...(task.galleryCheckpoints || [])];
     const successfulSources = new Set();
     const foods = task.analysis.filter(item => item.usable && item.imageType === 'food' && !(task.foodReferenceExclusions || []).includes(item.imageId));
@@ -504,11 +529,24 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
       processed.set(shot.imageId, result); successfulSources.add(result.composition.sourceImageId);
       await store.patchTask(userId, id, { status: 'generating', progress: progress('gallery_image', '正在制作套图') });
     });
-    const processShot = async (originalShot, index) => {
+    const editReferences = async shot => {
+      const real = shot.kind === 'scene' ? [] : await Promise.all(shot.referenceImageIds.slice(0,2).map(referenceFor));
+      const accepted = acceptedReferences.find(photo => photo.sourceImageId === shot.sourceImageId);
+      if (!accepted) return real;
+      const prepared = await imageProcessor.prepareAnalysisPhoto(accepted.bytes);
+      return [...real.slice(0,1), { ...accepted, ...prepared, dataUrl: `data:${prepared.mime};base64,${prepared.bytes.toString('base64')}` }];
+    };
+    const reviewFrame = async (shot, reference, context, rendered, appearance) => {
+      const preview = await imageProcessor.prepareAnalysisPhoto(rendered.bytes);
+      return validateGalleryImageReview(await model.reviewGalleryPhoto({ visualStyle, shot, context: context.map(photo => ({ imageId: photo.id,
+        ...(photo.approvedStyle ? { role: 'accepted-style-target-for-this-original', style: photo.style } : { role: 'real-environment' }) })), ...(appearance ? { foodAppearance: appearance } : {}),
+        photos: [reference, ...context, { id: shot.imageId, dataUrl: `data:${preview.mime};base64,${preview.bytes.toString('base64')}` }] }, { onBudgetWait }));
+    };
+    const processShot = async (originalShot, index, { skipCheckpoint = false, initialCorrections = [], attemptBase = 0 } = {}) => {
       const shot = { ...originalShot };
       await updateGallery(() => store.patchTask(userId, id, { status: 'generating', progress: progress('gallery_image', '正在制作套图') }));
       const saved = checkpoints.find(item => item.imageId === shot.imageId && item.planFingerprint === planFingerprint && ['ready','pending'].includes(item.status) && !item.expired && item.expiresAt > now());
-      if (saved) {
+      if (saved && !skipCheckpoint) {
         const bytes = await media.get(userId, id, saved.key);
         if (bytes && saved.hash === fingerprint(bytes.toString('base64'))) {
           if (saved.status === 'pending') await updateGallery(async () => { saved.status = 'ready'; await store.patchTask(userId,id,{galleryCheckpoints:checkpoints}); });
@@ -517,30 +555,28 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
         }
       }
       let result;
-      if (shot.recipeId) {
-        let corrections = [];
-        for (let attempt = 0; attempt < 3; attempt++) {
+      if (shot.kind === 'scene') {
+        const reference = await referenceFor(shot.sourceImageId), context = await editReferences(shot);
+        let corrections = initialCorrections;
+        for (let attempt = 0; attempt < 2; attempt++) {
           if (failure) throw failure;
-          try {
-            result = await styleRecipes.render({ binding: task.styleRecipe, shot, sources, model, taskId: `${id}-gallery-${task.generationAttempt || 1}`, attempt, corrections, onBudgetWait });
-            if (result.composition.styleReview) {
-              await saveReview({ imageId: shot.imageId, sourceImageId: shot.sourceImageId, attempt, ...result.composition.styleReview });
-            }
+          const rendered = await model.renderGalleryPhoto({ photo: reference, context, style: visualStyle, shot,
+            taskId: `${id}-gallery-${task.generationAttempt || 1}`, attempt: attemptBase + attempt, corrections }, { onBudgetWait });
+          const review = await reviewFrame(shot, reference, context, rendered);
+          await saveReview({ imageId: shot.imageId, sourceImageId: shot.sourceImageId, attempt: attemptBase + attempt, ...review });
+          if (review.status === 'passed') {
+            result = { bytes: rendered.bytes, width: 1080, height: 1440, format: 'jpeg', composition: { version: GALLERY_WORKFLOW,
+              method: 'claude-directed-scene-edit', sourceImageId: shot.sourceImageId, referenceImageIds: context.filter(photo=>!photo.approvedStyle).map(photo=>photo.id),
+              visualStyle, styleFingerprint: fingerprint(visualStyle), generatedScene: false, modelEdited: true,
+              styleReview: review, imageRequestId: rendered.requestId, provider: rendered.provider } };
             break;
-          } catch (cause) {
-            if (cause.review) {
-              await saveReview({ imageId: shot.imageId, sourceImageId: shot.sourceImageId, attempt, ...cause.review });
-            }
-            if (cause.code !== 'STYLE_REVIEW_FAILED' || attempt === 2) throw cause;
-            corrections = cause.corrections;
-            await updateGallery(() => store.patchTask(userId, id, { status: 'retrying', progress: progress('style_consistency', `正在调整第${index + 1}张图片的风格`) }));
           }
+          corrections = review.errors;
+          await updateGallery(() => store.patchTask(userId,id,{status:'retrying',progress:progress('style_consistency',`正在调整第${index+1}张图片的风格`)}));
         }
-      } else if (shot.kind === 'scene') {
-        const analysis = task.analysis.find(item => item.imageId === shot.sourceImageId), source = sources.find(item => item.id === shot.sourceImageId);
-        result = await enhanceStorePhoto(source.bytes, analysis);
+        if (!result) throw new RestaurantError('场景图片的风格或内容检查未通过，未交付残缺套图。',502,'GALLERY_IMAGE_REVIEW_FAILED');
       } else {
-        if (!model.renderFood || !model.identifyFood || !model.reviewFoodRender) throw new RestaurantError('图片重拍服务尚未配置。', 503, 'MODEL_NOT_CONFIGURED');
+        if (!model.identifyFood) throw new RestaurantError('图片重拍服务尚未配置。', 503, 'MODEL_NOT_CONFIGURED');
         const groupIds = task.galleryStoryboard?.foodGroups?.find(group=>group.id===shot.foodGroupId)?.imageIds;
         const alternatives = [shot.sourceImageId, ...foods.filter(item => item.imageId !== shot.sourceImageId && !successfulSources.has(item.imageId)
           && (!groupIds || groupIds.includes(item.imageId))).map(item => item.imageId)].slice(0, 2);
@@ -548,12 +584,13 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
           const analysis = task.analysis.find(item => item.imageId === sourceImageId), fullReference = await referenceFor(sourceImageId);
           shot.sourceImageId = sourceImageId;
           const scene = { ...foodScene(analysis, task.profileSnapshot, selection.facts), storeContext: storeSceneContext(task, shot) };
-          const appearanceKey = `${sourceImageId}:${shot.subjectFocus || ''}`;
+          const wholeSpread = shot.subjectScope === 'spread' || scene.type === 'hotpot' && !shot.subjectFocus;
+          const appearanceKey = `${sourceImageId}:${shot.subjectFocus || ''}:${shot.subjectScope || ''}`;
           if (!appearances.has(appearanceKey)) {
             appearances.set(appearanceKey, (async () => {
               const identified = validateFoodAppearance((!shot.subjectFocus && analysis.foodAppearance) || await model.identifyFood({ analysis,
-                subjectScope: scene.type === 'hotpot' && !shot.subjectFocus ? 'spread' : 'auto', subjectFocus: shot.subjectFocus || '', photos: [fullReference] }, { onBudgetWait }));
-              if (scene.type === 'hotpot' && !shot.subjectFocus) {
+                subjectScope: wholeSpread ? 'spread' : shot.subjectScope || 'auto', subjectFocus: shot.subjectFocus || '', photos: [fullReference] }, { onBudgetWait }));
+              if (wholeSpread) {
                 delete identified.subjectBox; delete identified.subjectConfidence;
                 identified.identityScope = 'spread';
               }
@@ -563,20 +600,19 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
           const appearance = await appearances.get(appearanceKey);
           const reference = await isolateDishReference(fullReference, appearance);
           const plan = galleryShot(scene, shot);
-          const storeReferences = await Promise.all(shot.referenceImageIds.map(referenceFor));
-          let corrections = [];
+          const storeReferences = await editReferences(shot);
+          let corrections = initialCorrections;
           for (let attempt = 0; attempt < 2; attempt++) {
             if (failure) throw failure;
-            const rendered = await model.renderFood({ scene, photo: reference, appearance, plan, storeReferences, taskId: `${id}-gallery-${task.generationAttempt || 1}`,
-              imageId: `${shot.imageId}-${sourceImageId}`, attempt, corrections }, { onBudgetWait });
-            const preview = await imageProcessor.prepareAnalysisPhoto(rendered.bytes);
-            const review = validateFoodRenderReview(await model.reviewFoodRender({ sourceImageId, foodAppearance: appearance, scene, plan,
-              photos: [reference, ...storeReferences, { id: 'generated-food', dataUrl: `data:${preview.mime};base64,${preview.bytes.toString('base64')}` }] }, { onBudgetWait }));
-            await saveReview({ imageId: shot.imageId, sourceImageId, attempt, ...review });
+            const rendered = await model.renderGalleryPhoto({ photo: reference, appearance, context: storeReferences, style: visualStyle, shot,
+              taskId: `${id}-gallery-${task.generationAttempt || 1}`, attempt: attemptBase + attempt, corrections }, { onBudgetWait });
+            const review = await reviewFrame(shot, reference, storeReferences, rendered, appearance);
+            await saveReview({ imageId: shot.imageId, sourceImageId, attempt: attemptBase + attempt, ...review });
             if (review.status === 'passed') {
               result = { bytes: rendered.bytes, width: 1080, height: 1440, format: 'jpeg', composition: { version: GALLERY_WORKFLOW,
-                method: 'reference-rephotography', sourceImageId, referenceImageIds: shot.referenceImageIds, cameraAngle: plan.angle,
-                shotName: plan.name, generatedScene: true, foodRecreated: true, subjectBox: appearance.subjectBox || null, identityReview: review, imageRequestId: rendered.requestId } };
+                method: 'reference-rephotography', sourceImageId, referenceImageIds: storeReferences.filter(photo=>!photo.approvedStyle).map(photo=>photo.id), cameraAngle: plan.angle,
+                shotName: plan.name, generatedScene: true, foodRecreated: true, subjectBox: appearance.subjectBox || null, identityReview: review,
+                visualStyle, styleFingerprint: fingerprint(visualStyle), modelEdited: true, imageRequestId: rendered.requestId, provider: rendered.provider } };
               break;
             }
             corrections = review.errors;
@@ -612,11 +648,31 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     }));
     if (failure) throw failure;
     if (closing) throw new RestaurantError('服务正在关闭，尚未开始的图片已停止生成。', 503, 'SERVICE_CLOSING');
-    const evidence = task.analysis.filter(item => successfulSources.has(item.imageId));
+    const reviewSet = async () => {
+      await store.patchTask(userId,id,{progress:progress('gallery_set_review','正在检查整套摄影风格')});
+      const photos = await galleryContactSheets(selection.shots.map(shot => ({ id: shot.imageId, bytes: processed.get(shot.imageId).bytes })), 'finished');
+      const review = validateGallerySetReview(await model.reviewGallerySet({ visualStyle, shots: selection.shots, photos }, { onBudgetWait }), selection.shots.map(shot => shot.imageId));
+      await store.patchTask(userId,id,{gallerySetReview:review});return review;
+    };
+    let setReview = await reviewSet();
+    if (setReview.status === 'blocked') {
+      await store.patchTask(userId,id,{status:'retrying',progress:progress('gallery_set_review','正在调整整套摄影风格')});
+      await Promise.all(setReview.reviseImageIds.map(imageId => galleryQueue(async () => {
+        if (failure) return;
+        const index = selection.shots.findIndex(shot=>shot.imageId===imageId), shot = { ...selection.shots[index], sourceImageId: processed.get(imageId).composition.sourceImageId };
+        try { await processShot(shot,index,{skipCheckpoint:true,attemptBase:2,initialCorrections:setReview.errors}); }
+        catch(cause){if (!failure || cause.code === 'PROVIDER_UNCERTAIN') failure = cause;}
+      })));
+      if (failure) throw failure;
+      setReview = await reviewSet();
+      if (setReview.status !== 'passed') throw new RestaurantError('套图风格或重复画面检查未通过，请调整素材后重试。',502,'GALLERY_SET_REVIEW_FAILED');
+    }
+    const finalSources = new Set([...processed.values()].map(image => image.composition.sourceImageId));
+    const evidence = task.analysis.filter(item => finalSources.has(item.imageId));
     let copy = { titles: [], body: '', tags: [], coverText: '', claims: [], imageOrder: selection.shots.map(shot => shot.imageId) };
     const hasCopyProfile = ['name', 'city', 'address', 'category'].every(field => task.profileSnapshot?.[field]?.trim());
     let copyStatus = hasCopyProfile ? 'unavailable' : 'not_requested';
-    const warningSet = new Set(evidence.filter(item => item.privacyRisk === 'low' || item.textRisk === 'warning').flatMap(item => item.riskReasons));
+    const warningSet = new Set([...setReview.warnings, ...evidence.filter(item => item.privacyRisk === 'low' || item.textRisk === 'warning').flatMap(item => item.riskReasons)]);
     if (hasCopyProfile) try {
       await store.patchTask(userId, id, { status: 'generating', progress: { stage: 'copy', message: '套图已生成，正在整理配套文案。' } });
       const photos = await Promise.all(evidence.slice(0, 4).map(item => referenceFor(item.imageId)));
@@ -649,7 +705,9 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     const existing = await store.getTask(userId, requestId);
     const fp = fingerprint({ forkFrom: old.id, ...(reuseCompletedImages ? { reuseCompletedImages: true } : {}) });
     if (existing) { if (existing.fingerprint !== fp) throw new RestaurantError('请求标识已用于其他任务。', 409, 'REQUEST_ID_CONFLICT'); return existing; }
-    if (!['completed', 'awaiting_selection', 'awaiting_facts', 'awaiting_confirmation', 'failed'].includes(old.status) || !old.directions?.length) throw new RestaurantError('当前任务尚不能选择新方向，请等待分析完成。', 409, 'TASK_STATE');
+    const directions = old.directions?.length ? old.directions : old.autoGenerate && old.analysis?.length === old.sourceImages.length
+      ? validateDirections({ directions: [galleryDirection(old.analysis, old.profileSnapshot)] }, old.analysis, old.profileSnapshot) : [];
+    if (!['completed', 'awaiting_selection', 'awaiting_facts', 'awaiting_confirmation', 'failed'].includes(old.status) || !directions.length) throw new RestaurantError('当前任务尚不能选择新方向，请等待分析完成。', 409, 'TASK_STATE');
     const reusable = reuseCompletedImages && old.status === 'failed' ? (old.galleryCheckpoints || []).filter(item => item.status === 'ready' && !item.expired && item.expiresAt > now()) : [];
     const excludedFoods = new Set(old.foodReferenceExclusions || []);
     if (!reusable.length && old.status === 'failed') {
@@ -666,7 +724,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     let created;
     return protectMediaGroup([...sourceImages, ...galleryCheckpoints].map(source => source.key), async () => { try {
       created = await store.createTask(userId, { id: requestId, fingerprint: fp, forkFrom: old.id, profileSnapshot: old.profileSnapshot, sourceImages,
-        analysis: old.analysis, directions: old.directions, sparsePhotos: old.sparsePhotos, rightsConfirmed: true, status: 'uploading', files: [],
+        analysis: old.analysis, directions, sparsePhotos: old.sparsePhotos, rightsConfirmed: true, status: 'uploading', files: [],
         foodReferenceExclusions: [...excludedFoods], ...(old.styleRecipe ? { styleRecipe: old.styleRecipe } : {}), ...(reuseCompletedImages && old.galleryStoryboard ? { galleryStoryboard: old.galleryStoryboard } : {}), ...(galleryCheckpoints.length ? { galleryCheckpoints } : {}) });
       for (const source of old.sourceImages) {
         const bytes = await media.get(userId, old.id, source.key);

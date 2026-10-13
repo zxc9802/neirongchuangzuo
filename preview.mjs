@@ -83,6 +83,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
  const dataRoot = workspaceDataRoot(runtimeSettings);
  const unlimitedLocal = localUnlimitedCredits === true && !authRequired && process.env.NODE_ENV !== 'production';
  const credits = injectedCredits ?? (authRequired || creditsOptions || unlimitedLocal ? createCreditsLedger({
+   costMode: runtimeSettings.CREDITS_BILLING_MODE === 'api_cost',
    databaseUrl: authRequired ? runtimeSettings.AUTH_DATABASE_URL || process.env.AUTH_DATABASE_URL : null,
    storageDir: join(dataRoot, 'credits'), ...creditsOptions }) : null);
  const creditsReady = Promise.resolve(credits?.ready).then(() => unlimitedLocal ? credits.setUnlimited('local-dev', true) : undefined);

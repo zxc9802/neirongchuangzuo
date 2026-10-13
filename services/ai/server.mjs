@@ -11,6 +11,8 @@ import { displayModelName } from '../../design/model-labels.js';
 import { GENERATION_MODES, imagePlan, imageRequestId, selectImageReferences } from './image-sets.mjs';
 import { createImageUploads } from './image-uploads.mjs';
 import { imageWithFallback, FAL_IMAGE_MODEL } from './image-fallback.mjs';
+import { createApiCostMeter } from '../credits/meter.mjs';
+import { CreditsError } from '../credits/store.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const MB = 1024 * 1024;
@@ -24,7 +26,7 @@ class ApiError extends Error {
 export function loadAIConfig(env = process.env) {
   let local = {};
   try {
-    local = Object.fromEntries(readFileSync(join(ROOT, '.env.local'), 'utf8').split(/\r?\n/).filter(line => /^(OPENLUX|AI|FAL)_[A-Z_]+=/.test(line)).map(line => {
+    local = Object.fromEntries(readFileSync(join(ROOT, '.env.local'), 'utf8').split(/\r?\n/).filter(line => /^(OPENLUX|AI|FAL|CREDITS)_[A-Z_]+=/.test(line)).map(line => {
       const index = line.indexOf('='); return [line.slice(0, index), line.slice(index + 1).trim().replace(/^(['"])(.*)\1$/, '$2')];
     }));
   } catch { /* Optional local configuration. */ }
@@ -38,6 +40,7 @@ export function loadAIConfig(env = process.env) {
   };
   return { apiKey: value('OPENLUX_API_KEY'), chatModel: value('OPENLUX_CHAT_MODEL') || 'gpt-6-luna',
     imageTextModel: value('OPENLUX_IMAGE_TEXT_MODEL') || 'claude-opus-5-5',
+    imageBillingGroup: value('OPENLUX_IMAGE_BILLING_GROUP'), imageTextBillingGroup: value('OPENLUX_IMAGE_TEXT_BILLING_GROUP'), chatBillingGroup: value('OPENLUX_CHAT_BILLING_GROUP'),
     imageModel: value('OPENLUX_IMAGE_MODEL') || 'gpt-image-2.5-sunburst-c', falImageKey: value('FAL_IMAGE_KEY'), falImageModel: value('FAL_IMAGE_MODEL') || FAL_IMAGE_MODEL, baseUrl: 'https://api.openlux.ai/v1', limits: { imageDaily: limit('AI_IMAGE_DAILY_LIMIT', null), chatDaily: limit('AI_CHAT_DAILY_LIMIT', 100), perMinute: limit('AI_REQUESTS_PER_MINUTE', 10) } };
 }
 
@@ -160,6 +163,8 @@ async function downloadResult(url, hops, signal) {
 }
 
 export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROOT, '.data', 'ai'), credits, fetchImpl = fetch, downloadImpl = downloadImage, now = Date.now, cleanupIntervalMs = 60_000, bodyTimeoutMs = 30_000, logger = console, retentionOptions = {}, rateLimitWait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+  const costMeter = createApiCostMeter({credits,config,fetchImpl});
+  fetchImpl = costMeter.fetch;
   let jobs = new Map(); let busy = false; let chatCount = 0; let closing = false;
   let retention, uploads; let unhealthy = false; let shutdownPromise;
   const posts = new Set(); const running = new Set();
@@ -217,11 +222,12 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     if (task.billing?.source === 'workspace' && task.status === 'completed' && !retention.isExpired(task) && task.billing.status !== 'settled') {
       Object.assign(output, { status: 'running', images: [], completedCount: 0, code: 'CREDITS_SETTLEMENT_PENDING', error: '成品已保存，正在确认积分结算，请稍后查询原任务。' });
     }
+    if(task.billing?.mode==='api_cost' && task.status==='completed' && task.billing.status!=='settled') {output.status='settling';output.images=[];delete output.text;}
     return output;
   };
   const publicUsage = usage => ({ ...usage, recent: (usage.recent ?? []).map(record => ({ ...record, model: displayModelName(record.model, record.kind === 'chat' ? 'Plus模型' : 'Max模型') })) });
   const safeError = error => {
-    if (error instanceof ApiError) return error;
+    if (error instanceof ApiError || error instanceof CreditsError) return error;
     if (error?.status && (String(error.code || '').startsWith('CREDITS_') || ['INSUFFICIENT_POINTS', 'INSUFFICIENT_CREDITS'].includes(error.code))) return error;
     if (typeof error?.code === 'string' && error.code.startsWith('UPLOAD_')) return error;
     if (['AI_INSTANCE_LOCKED', 'AI_LEDGER_UNAVAILABLE', 'DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED', 'REQUEST_ID_CONFLICT'].includes(error?.code)) return error;
@@ -250,10 +256,12 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       // An expired deliverable cannot be newly charged, and an existing charge
       // must never be refunded just because the downloadable file has expired.
       const record = ['settled', 'released'].includes(saved.status) ? saved
+        : saved.kind === 'api-cost' && ['completed','failed'].includes(task.status) ? await credits.settleCost(input)
         : retention.isExpired(task) || task.status === 'failed' ? await credits.release(input)
         : task.status === 'completed' ? await credits.settle({ ...input, units: task.images.length }) : null;
       if (!record) return;
-      task.billing = { ...task.billing, status: record.status, chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints, exempt: record.exempt === true };
+      task.billing = { ...task.billing, status: record.status, chargedPoints: record.chargedPoints, reservedPoints: record.reservedPoints, exempt: record.exempt === true,
+        ...(record.kind==='api-cost'?{mode:'api_cost',costCny:(record.settledUnits||0)/1e6}:{}) };
       await persist(task);
     } catch (error) {
       task.billing.status = task.status === 'completed' && !retention.isExpired(task) ? 'settle_pending' : 'release_pending';
@@ -273,7 +281,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       if (data.error) throw providerError(502);
       return { data, providerRequestId: response.headers?.get('x-request-id') || response.headers?.get('request-id') || undefined };
     } catch (error) {
-      if (error instanceof ApiError) throw error;
+      if (error instanceof ApiError || error instanceof CreditsError) throw error;
       throw new ApiError('模型请求中断或超时，上游可能已经执行。请查询原任务，避免重复提交。', 502, 'UPSTREAM_UNCERTAIN');
     } finally { clearTimeout(timer); }
   }
@@ -292,8 +300,8 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
   function failed(task, error) {
     task.status = 'failed'; task.images = []; delete task.text;
     if (task.kind !== 'chat') task.completedCount = 0;
-    task.error = error instanceof ApiError || ['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error?.code) ? error.message : '结果保存或下载失败，上游可能已完成。请先核对供应商记录，避免重复生成。';
-    task.code = error?.code && (error instanceof ApiError || ['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error.code)) ? error.code : 'RESULT_FAILED';
+    task.error = error instanceof ApiError || error instanceof CreditsError || ['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error?.code) ? error.message : '结果保存或下载失败，上游可能已完成。请先核对供应商记录，避免重复生成。';
+    task.code = error?.code && (error instanceof ApiError || error instanceof CreditsError || ['DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED'].includes(error.code)) ? error.code : 'RESULT_FAILED';
     task.failedAt = new Date(now()).toISOString();
   }
   async function dispatch(id, task, operation = () => ledger.markDispatched(id)) {
@@ -360,7 +368,8 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     const plans = imagePlan(task.generationMode, task.outputCount, task.prompt);
     let firstResult, lastError;
     const terminal = new Set();
-    const stopCodes = new Set(['UPSTREAM_UNCERTAIN', 'PROVIDER_AUTH', 'PROVIDER_LIMIT', 'STORAGE_FAILED', 'DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED']);
+    const stopCodes = new Set(['UPSTREAM_UNCERTAIN', 'PROVIDER_AUTH', 'PROVIDER_LIMIT', 'STORAGE_FAILED', 'DAILY_QUOTA_EXCEEDED', 'RATE_LIMITED',
+      'INSUFFICIENT_POINTS','COST_CONFIRMATION_PENDING','COST_PRICING_UNAVAILABLE','COST_PROVIDER_NOT_CONFIGURED']);
     async function finishRequest(id, details) {
       try { await ledger.finish(id, details); terminal.add(id); }
       catch { failStorage(); throw new ApiError('调用记录无法保存，已停止后续图片生成。', 503, 'STORAGE_FAILED'); }
@@ -441,6 +450,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
     finally { try { await finalize(task, info); } finally { chatCount--; } }
   }
   function chatResult(res, task) {
+    if(task.billing?.mode==='api_cost' && task.status==='completed' && task.billing.status!=='settled') {json(res,202,{requestId:task.id,status:'settling'});return;}
     if (retention.isExpired(task)) { json(res, 410, { error: '这份回答已超过 3 天保留期。', code: 'RESULT_EXPIRED', requestId: task.id }); return; }
     if (task.status === 'completed') { json(res, 200, { text: task.text, model: displayModelName(task.model, 'Plus模型'), requestId: task.id, status: task.status }); return; }
     if (task.status === 'failed') { json(res, 502, { error: task.error, code: task.code, requestId: task.id, status: task.status }); return; }
@@ -560,12 +570,13 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
           : await ledger.reserve({ id: body.requestId, kind, fingerprint, model });
         if (!reservation.created) throw new ApiError('此任务已有调用记录，无法重复提交；请核对原记录。', 409, 'REQUEST_ALREADY_RECORDED');
         task = { id: body.requestId, userId, kind, status: 'queued', model, createdAt: new Date(now()).toISOString(), images: [], fingerprint,
-          ...(kind === 'image' && credits ? { billing: { source: 'workspace', userId: userId || 'local-dev', taskId: body.requestId, status: 'reserving', requestedUnits: outputCount, reservedPoints: 0, chargedPoints: 0 } } : {}),
+          ...(credits && (kind === 'image' || costMeter.enabled) ? { billing: { source: 'workspace', userId: userId || 'local-dev', taskId: body.requestId, status: 'reserving', requestedUnits: outputCount, reservedPoints: 0, chargedPoints: 0, ...(costMeter.enabled?{mode:'api_cost'}:{}) } } : {}),
           ...(kind === 'image' ? { prompt: body.prompt.trim(), ratio: body.ratio, quality: body.quality, size: SIZES[body.ratio], generationMode, outputCount, completedCount: 0, inputCount: images.length } : {}) };
         await persist(task);
         jobs.set(task.id, task);
-        if (kind === 'image' && credits) {
-          pointsReservation = await credits.reserve({ userId: userId || 'local-dev', taskId: body.requestId, kind: 'image', units: outputCount });
+        if (credits && (kind === 'image' || costMeter.enabled)) {
+          pointsReservation = costMeter.enabled ? await credits.reserveCost({userId:userId||'local-dev',taskId:body.requestId})
+            : await credits.reserve({ userId: userId || 'local-dev', taskId: body.requestId, kind: 'image', units: outputCount });
           if (pointsReservation.status !== 'reserved') throw new ApiError('此任务的积分记录已结束，请重新开始创作。', 409, 'CREDITS_TASK_ENDED');
           task.billing = { ...task.billing, status: 'reserved', reservedPoints: pointsReservation.reservedPoints, exempt: pointsReservation.exempt === true };
           await persist(task);
@@ -581,8 +592,9 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
         if (error?.code === 'AI_LEDGER_UNAVAILABLE') failStorage();
         throw error;
       }
-      if (kind === 'image') { json(res, 202, { task: publicTask(task) }); track(outputCount > 1 ? runImageSet(task, images) : runImage(task, images)); }
-      else { await track(runChat(task, messages)); chatResult(res, task); }
+      const costScope={userId:userId||'local-dev',taskId:body.requestId};
+      if (kind === 'image') { json(res, 202, { task: publicTask(task) }); track(costMeter.run(costScope,()=>outputCount > 1 ? runImageSet(task, images) : runImage(task, images))); }
+      else { await track(costMeter.run(costScope,()=>runChat(task, messages))); chatResult(res, task); }
     } catch (error) {
       const safe = safeError(error);
       if (!res.headersSent && !res.destroyed) json(res, safe.status || 503, { error: safe.message, code: safe.code });

@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import { getAppConfig } from "../config";
 import { CosService } from "../cos";
-import { releaseMainAppCredits } from "../main-app-billing";
+import { releaseMainAppCredits, settleMainAppCredits } from "../main-app-billing";
 import { resolveAllowedLocalMediaPath } from "../media-path-policy";
 import { downloadTrustedMediaToFile } from "../server/media-response";
 import { withTaskBillingGuard } from "../server/task-worker";
@@ -80,7 +80,7 @@ export async function deliverNarrationFallback(taskId: string, sessionToken?: st
         audio: { duration_seconds: audio.durationSeconds, sha256: sha256Audio } },
     }, null, 2));
 
-    // Do not charge the lip-sync price for a video whose mouth was not adjusted.
+    let chargedPoints = 0, costCny = 0;
     await withTaskBillingGuard(taskId, async () => {
       const current = TaskStore.get(taskId);
       if (!current || TaskStore.isDeleted(taskId)) throw new Error("任务已删除");
@@ -88,9 +88,17 @@ export async function deliverNarrationFallback(taskId: string, sessionToken?: st
       if (!["reserved", "provider_committed", "released"].includes(current.billing.status)) throw new Error("任务结算状态已变化");
       if (current.billing.status !== "released") {
         if (!current.userId || !current.billing.requestId) throw new Error("任务缺少积分预留标识");
-        await releaseMainAppCredits({ userId: current.userId, requestId: current.billing.requestId,
-          source: current.billing.source, sessionToken });
-        TaskStore.update(taskId, { billing: { ...current.billing, status: "released", chargedPoints: 0, costCny: 0 } });
+        if (current.billing.source === "workspace" && current.billing.mode === "api_cost") {
+          const result = await settleMainAppCredits({ userId: current.userId, requestId: current.billing.requestId,
+            actualDuration: audio.durationSeconds, source: "workspace", sessionToken });
+          chargedPoints = result.chargedPoints; costCny = result.costCny;
+          TaskStore.update(taskId, { billing: { ...current.billing, status: "settled", chargedPoints, costCny,
+            actualDuration: audio.durationSeconds, pointsBalanceAfter: result.pointsBalance } });
+        } else {
+          await releaseMainAppCredits({ userId: current.userId, requestId: current.billing.requestId,
+            source: current.billing.source, sessionToken });
+          TaskStore.update(taskId, { billing: { ...current.billing, status: "released", chargedPoints: 0, costCny: 0 } });
+        }
       }
     });
 
@@ -110,10 +118,10 @@ export async function deliverNarrationFallback(taskId: string, sessionToken?: st
     const updated = TaskStore.update(taskId, { status: "completed", step: "done", progress: 100,
       error: undefined, errorCode: undefined, failedStep: undefined,
       results: { deliveryMode: "narration_fallback", finalVideoUrl, previewVideoUrl, exactAudioUrl, evidenceJsonUrl,
-        chargedPoints: 0, costCny: 0, videoDuration: probe.durationSeconds, audioDuration: audio.durationSeconds,
+        chargedPoints, costCny, billingDuration: audio.durationSeconds, videoDuration: probe.durationSeconds, audioDuration: audio.durationSeconds,
         resolution: `${probe.width}x${probe.height}`, fps: probe.fps, sha256Video, sha256Audio },
     });
-    log("基础配音视频已生成：保留原画面，已配上本次声音，未调整口型，本次免扣积分", "success");
+    log(task.billing?.mode === "api_cost" ? "基础配音视频已生成，按配音时长结算" : "基础配音视频已生成：保留原画面，已配上本次声音，未调整口型，本次免扣积分", "success");
     return updated;
   } finally {
     fs.rmSync(candidate, { force: true });

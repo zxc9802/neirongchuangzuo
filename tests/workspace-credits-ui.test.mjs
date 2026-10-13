@@ -5,6 +5,12 @@ import { renderImageGenerationOptions } from '../design/image-generation.js';
 import { renderDigitalHuman } from '../design/digital-human.js';
 
 const balance = (available = 1000, held = 0, pricing = {}) => ({ initialPoints: 1000, available, balance: available, held, total: available + held, pricing: { initialPoints: 1000, imagePerUnit: 50, videoPoints: 333, videoSeconds: 30, version: '2026-10-08', ...pricing } });
+
+test('actual-cost wallets show the cost rule without quoting legacy per-image or per-second rates',()=>{
+  const snapshot=credits.normalizeCredits({initialPoints:1000,available:900,held:100,total:1000,pricing:{mode:'api_cost',pointsPerCny:125,version:'2026-10-13-api-cost'}});
+  assert.ok(snapshot);assert.equal(snapshot.pricing.pointsPerCny,125);
+  assert.equal(credits.imagePoints(9,snapshot),null);assert.equal(credits.videoPoints(30,snapshot),null);
+});
 const freshModule = () => import(`../design/workspace-credits.js?credits-test-${crypto.randomUUID()}`);
 function workspace(t, fetch) {
   const saved = Object.fromEntries(['workspaceUser', 'workspaceCreditOwner', 'fetch'].map(key => [key, globalThis[key]]));
