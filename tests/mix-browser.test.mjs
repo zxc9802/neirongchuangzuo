@@ -1367,19 +1367,33 @@ test('failed compression moves behind other files, retries three times, then per
 
 test('converted files that still fail extraction use bounded repair retries before manual recovery', async () => {
   const backend = server();
+  const originalNow = Date.now;
+  let now = originalNow();
   let repairs = 0;
   const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(), readDuration: async () => 2,
     repairVideo: async () => { repairs++; return videoFile('bad.mp4'); },
     sampleFrames: async () => { throw new Error('decode failed'); } });
   controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
   try {
+    Date.now = () => now;
     await controller.selectFiles([videoFile('素材/bad.mov')]);
-    for (let i = 0; i < 12; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
+    await cycle(); await cycle(); await cycle();
+    for (const delay of [15000, 30000, 60000]) {
+      const before = repairs;
+      now += delay - 1;
+      await cycle();
+      assert.equal(repairs, before, 'converted decode failures must wait before retrying');
+      now++;
+      await cycle(); await cycle();
+      assert.equal(repairs, before + 1);
+    }
+    await cycle();
     assert.equal(repairs, 4, 'converted decode failures also get three extra attempts');
     assert.equal(controller.status.processing, false);
     assert.match(controller.status.error, /decode failed/);
     assert.equal(backend.calls.some(call => call.path.endsWith('/analyze')), false);
-  } finally { controller.stop(); }
+  } finally { controller.stop(); Date.now = originalNow; }
 });
 
 test('unreadable retained indexing records do not block retries for current readable files', async () => {

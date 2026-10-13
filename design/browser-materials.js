@@ -806,6 +806,9 @@ const root = globalThis;
       else if (repair.attempted) {
         repair.failed = true;
         if (!reinspect) repair.reinspect = false;
+        const key = 'repair:' + relativePath, attempt = this.attempts.get(key);
+        if (attempt < MAX_ATTEMPTS) this.retryAfter.set(key, Date.now() + 15000 * 2 ** (attempt - 1));
+        else this.retryAfter.delete(key);
       }
     }
 
