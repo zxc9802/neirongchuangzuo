@@ -7,6 +7,8 @@ const destination = () => {
   return next && /^\/(?!\/)/.test(next) && !/[\\\u0000-\u0020]/.test(next) && !/^\/(login|register)(?:[/?#]|$)/.test(next) ? next : '/';
 };
 if (register) {
+  document.querySelector('#account-label').textContent = '用户名';
+  form.elements.account.placeholder = '设置用户名';
   document.title = '邀请码注册 · 起芽内容创作';
   document.querySelector('#auth-title').textContent = '邀请码注册';
   document.querySelector('#auth-description').textContent = '每个邀请码仅可注册一次。';

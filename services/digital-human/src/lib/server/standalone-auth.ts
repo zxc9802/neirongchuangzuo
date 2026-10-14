@@ -4,6 +4,7 @@ import { Pool, type PoolClient } from "pg";
 import type { MainAppSession } from "../main-app-sso";
 import { authenticateInternal, internalAccountExists, internalIdentity, internalRevision, validateInternalAccount } from "./internal-auth";
 import { hashInviteCode, normalizeInviteCode, REGISTRATION_INVITES_SCHEMA_SQL } from "./registration-invites.mjs";
+import { ACCOUNT_PHONES_SCHEMA_SQL, ACCOUNT_IDENTITY_LOCK_SQL, ACCOUNT_LOOKUP_SQL } from "./account-phones.mjs";
 
 export const AUTH_COOKIE = "digital_human_session";
 const SESSION_MS = 30 * 24 * 60 * 60_000;
@@ -44,6 +45,7 @@ async function db() {
         );
       `);
       await client.query(REGISTRATION_INVITES_SCHEMA_SQL);
+      await client.query(ACCOUNT_PHONES_SCHEMA_SQL);
       await client.query("COMMIT");
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
@@ -147,6 +149,9 @@ export async function registerAccount(email: string, nickname: unknown, password
       if (!invite || invite.redeemed_at !== null || (invite.expires_at !== null && Number(invite.expires_at) <= Date.now())) {
         throw new AuthError(INVALID_INVITE, 403);
       }
+      await client.query(ACCOUNT_IDENTITY_LOCK_SQL);
+      const occupied = await client.query(ACCOUNT_LOOKUP_SQL, [email]);
+      if (occupied.rowCount) throw new AuthError("这个账号已注册，请直接登录", 409);
       if (await internalAccountExists(email)) throw new AuthError("此账号已有内部账号记录，请使用原账号登录", 409);
       const encoded = await hashPassword(password);
       const id = `account_${randomUUID()}`;
@@ -162,8 +167,10 @@ export async function registerAccount(email: string, nickname: unknown, password
 
 export async function loginAccount(email: string, password: unknown) {
   if (typeof password !== "string" || password.length < 1 || password.length > 128) throw new AuthError("请输入有效的密码");
-  const { rows: [user] } = await (await db()).query<UserRow>("SELECT * FROM digital_human_auth.users WHERE email = $1", [email]);
+  const { rows } = await (await db()).query<UserRow>(ACCOUNT_LOOKUP_SQL, [email]);
+  const user = rows.length === 1 ? rows[0] : undefined;
   const localMatch = await matches(password, user?.password);
+  if (rows.length > 1) throw new AuthError("账号或密码不正确", 401);
   if (!user) {
     const internal = await authenticateInternal(email, password);
     if (!internal) throw new AuthError("账号或密码不正确", 401);
@@ -178,7 +185,9 @@ export async function loginAccount(email: string, password: unknown) {
   }
   if (!localMatch) throw new AuthError("账号或密码不正确", 401);
   return transaction(async client => {
-    const result = await client.query("SELECT id FROM digital_human_auth.users WHERE id = $1 AND password = $2 FOR UPDATE", [user.id, user.password]);
+    const result = await client.query(`SELECT u.id FROM digital_human_auth.users u WHERE u.id=$1 AND u.password=$2
+      AND (u.email=$3 OR EXISTS (SELECT 1 FROM digital_human_auth.account_phones p WHERE p.user_id=u.id AND p.phone=$3))
+      FOR UPDATE OF u`, [user.id, user.password, email]);
     if (!result.rowCount) throw new AuthError("密码已变更，请重新登录", 401);
     return issueSession(client, user.id);
   });
