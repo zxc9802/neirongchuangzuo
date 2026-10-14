@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Client } from "pg";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes, scryptSync } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { NextRequest } from "next/server.js";
 
@@ -176,6 +176,18 @@ test("ambiguous legacy phone identities fail closed instead of authenticating an
     SELECT $1,$2,'legacy collision',password,created_at FROM digital_human_auth.users WHERE id=$3`, ['legacy_collision', '19900000006', owner.user.id]);
   assert.equal((await post('login', { account: '19900000006', password: 'correct horse 123' })).status, 401);
   assert.equal((await post('login', { account: 'legacy_phone_user', password: 'correct horse 123' })).status, 200);
+});
+
+test("an administrator-reset legacy short password can be replaced from the account password form", async () => {
+  const registered=await signup('reset_short_password');
+  const owner=await auth.readStandaloneSession(tokenOf(registered));
+  const current='987654321',salt=randomBytes(16).toString('hex');
+  const encoded=salt+':'+scryptSync(current,salt,64,{N:32768,r:8,p:1,maxmem:64*1024*1024}).toString('hex');
+  await database.query('UPDATE digital_human_auth.users SET password=$1 WHERE id=$2',[encoded,owner.user.id]);
+  const response=await post('password',{currentPassword:current,password:'replacement pass 123'},{cookie:tokenOf(registered)});
+  assert.equal(response.status,200);
+  assert.equal((await post('login',{account:'reset_short_password',password:current})).status,401);
+  assert.equal((await post('login',{account:'reset_short_password',password:'replacement pass 123'})).status,200);
 });
 
 test("password and input validation reject malformed requests", async () => {

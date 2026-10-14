@@ -228,7 +228,7 @@ export async function revokeSession(token?: string): Promise<void> {
 
 export async function changePassword(userId: string, current: unknown, next: unknown) {
   if (userId.startsWith("internal_")) throw new AuthError("内部账号请前往原系统修改密码", 403);
-  validatePassword(current);
+  if (typeof current !== "string" || current.length < 1 || current.length > 128) throw new AuthError("请输入当前密码");
   validatePassword(next);
   const { rows: [user] } = await (await db()).query<UserRow>("SELECT * FROM digital_human_auth.users WHERE id = $1", [userId]);
   if (!user || !await matches(current, user.password)) throw new AuthError("当前密码不正确", 400);
