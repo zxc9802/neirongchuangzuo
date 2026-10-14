@@ -310,6 +310,7 @@ test('double click submits one analysis task; interrupted submission only querie
     await settle(() => markup.includes('真实面馆 · 武汉'));
     listeners['restaurant-file-input:change']({ target: { files: [photo()], value: '' } });
     listeners['restaurant-rights:change']({ target: { checked: true } });
+    module.handleRestaurantAction('rest-content-type', {dataset:{id:'store-intro'}}, ctx);
     module.handleRestaurantAction('rest-analyse', {}, ctx);
     module.handleRestaurantAction('rest-analyse', {}, ctx);
     await settle(() => !!releasePost);

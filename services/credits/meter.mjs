@@ -29,7 +29,7 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
         if (method==='POST' && ['api.302.ai','api.302ai.cn','openspeech.bytedance.com'].includes(target.hostname)) throw notReady();
         return fetchImpl(url,options);
       }
-      if (!scope) throw notReady();
+      if (!scope) throw Object.assign(notReady(),{providerNotDispatched:true});
       if (fal && method === 'GET') {
         const response = await fetchImpl(url,options);
         const requestId = cleanId(/\/requests\/([^/]+)/.exec(target.pathname)?.[1]);

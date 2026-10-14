@@ -11,6 +11,15 @@ import { withDailyCallPolicy } from '../services/ai/call-policy.mjs';
 const input = (id, overrides = {}) => ({ id, kind: 'image', fingerprint: `hash-${id}`, model: 'mock-model', ...overrides });
 const at = Date.parse('2026-09-30T08:00:00Z');
 
+test('explicit unlimited daily and minute budgets still persist every billable dispatch', async t => {
+  const f = await fixture(t, {limits:{imageDaily:null,chatDaily:null,perMinute:null}});
+  const ledger=f.create();await ledger.ready;
+  for(let i=0;i<12;i++) {await ledger.reserve(input(`unlimited-${i}`,{kind:i%2?'chat':'image'}));await ledger.markDispatched(`unlimited-${i}`);}
+  const status=await ledger.summary();assert.deepEqual(status.limits,{imageDaily:null,chatDaily:null,perMinute:null});
+  assert.deepEqual(status.used,{image:6,chat:6});assert.deepEqual(status.remaining,{image:null,chat:null});
+  assert.equal(status.recent.length,12);
+});
+
 test('trusted account exemption bypasses both daily caps, persists and still obeys dispatch rate limits', async t => {
   const f = await fixture(t, { limits: { imageDaily: 1, chatDaily: 0, perMinute: 3 } });
   const ledger = f.create(); await ledger.ready;

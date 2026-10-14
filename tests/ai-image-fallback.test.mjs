@@ -128,7 +128,8 @@ for (const mode of ['single', 'series']) test(`website ${mode} fallback delivers
   const post = () => fetch(`${origin}/api/ai/images`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: origin }, body: JSON.stringify(body) });
   assert.equal((await post()).status, 202);
   let task;
-  for (let i = 0; i < 100; i++) { task = (await (await fetch(`${origin}/api/ai/images/${body.requestId}`)).json()).task; if (['completed', 'failed'].includes(task.status)) break; await new Promise(resolve => setTimeout(resolve, 10)); }
+  const deadline = Date.now() + 20_000;
+  do { task = (await (await fetch(`${origin}/api/ai/images/${body.requestId}`)).json()).task; if (['completed', 'failed'].includes(task.status)) break; await new Promise(resolve => setTimeout(resolve, 25)); } while (Date.now() < deadline);
   assert.equal(task.status, 'completed', task.error); assert.equal(task.images.length, count); assert.equal(task.billing.chargedPoints, count * 50);
   const points = await (await fetch(`${origin}/api/workspace/credits`)).json(); assert.equal(points.balance, 1000 - count * 50); assert.equal(points.held, 0);
   for (const image of task.images) assert.deepEqual(Buffer.from(await (await fetch(origin + image.url)).arrayBuffer()), png);

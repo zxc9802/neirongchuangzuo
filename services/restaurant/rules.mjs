@@ -6,7 +6,7 @@ export class RestaurantError extends Error {
 }
 export const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export const PROFILE_FIELDS = ['name', 'city', 'address', 'category', 'hours', 'signatureDishes', 'averagePrice', 'parking', 'groupBuy', 'features', 'history', 'craft', 'ingredients'];
-export const FACT_FIELDS = [...PROFILE_FIELDS, 'dishName', 'price', 'ingredients', 'portion', 'taste', 'setMeal', 'conditions', 'verifiedHistory'];
+export const FACT_FIELDS = [...PROFILE_FIELDS, 'dishName', 'price', 'ingredients', 'portion', 'taste', 'setMeal', 'conditions', 'verifiedHistory', 'sellingPoints', 'occasion', 'capacity', 'privateRoom', 'booking', 'delivery'];
 const bad = message => { throw new RestaurantError(message, 502, 'MODEL_INVALID_OUTPUT'); };
 const text = (value, maximum = 3000) => typeof value === 'string' && value.length <= maximum;
 const strings = (value, maximum = 20) => Array.isArray(value) && value.length <= maximum && value.every(item => text(item, 500));
@@ -201,8 +201,8 @@ export function localReview(copy, profile, facts, selectedAnalysis) {
   const confirmed = { ...profile, ...facts };
   if (ABSOLUTE.test(all)) errors.push('文案含夸张、绝对化、健康功效或顾客探店表述。');
   for (const word of CONDITIONAL) if (all.includes(word) && !JSON.stringify({ profile, facts }).includes(word)) errors.push(`“${word}”缺少已确认的门店资料依据。`);
-  const unitFields = { 元: ['price', 'averagePrice', 'groupBuy', 'setMeal', 'conditions'], 块: ['price', 'averagePrice', 'groupBuy', 'setMeal'], 折: ['groupBuy', 'conditions'], 年: ['verifiedHistory'], 份: ['portion', 'setMeal'], 位: ['portion', 'setMeal', 'features'], 点: ['hours', 'conditions'], ':': ['hours', 'conditions'] };
-  for (const match of all.matchAll(/(\d+(?:\.\d+)?)\s*(元|块|折|年|份|位|点|:)/g)) {
+  const unitFields = { 元: ['price', 'averagePrice', 'groupBuy', 'setMeal', 'conditions'], 块: ['price', 'averagePrice', 'groupBuy', 'setMeal'], 折: ['groupBuy', 'conditions'], 年: ['verifiedHistory'], 份: ['portion', 'setMeal'], 位: ['portion', 'setMeal', 'features', 'capacity'], 人: ['capacity', 'features'], 点: ['hours', 'conditions'], ':': ['hours', 'conditions'] };
+  for (const match of all.matchAll(/(\d+(?:\.\d+)?)\s*(元|块|折|年|份|位|人|点|:)/g)) {
     const supported = unitFields[match[2]].some(key => {
       const numeric = String(confirmed[key] ?? '').match(/\d+(?:\.\d+)?/g) ?? [];
       return numeric.includes(match[1]) && copy.claims.some(claim => claim.factKeys.includes(key) && claim.text.includes(match[1]));

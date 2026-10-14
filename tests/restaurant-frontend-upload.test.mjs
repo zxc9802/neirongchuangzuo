@@ -59,7 +59,7 @@ async function restaurantPage(t, { count = 30, interruptBatch = false, merchantP
   const files = originals(count);
   const select = () => { listeners.get('restaurant-file-input:change')({ target: { files, value: '' } }); listeners.get('restaurant-rights:change')({ target: { checked: true } }); };
   t.after(() => { module.disposeRestaurant(); URL.createObjectURL = originalCreate; URL.revokeObjectURL = originalRevoke; for (const [key, value] of Object.entries(originalGlobals)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value; });
-  module.renderRestaurant(ctx); module.bindRestaurant(ctx); await settle(() => /data-action="rest-analyse"\s*>/.test(markup));
+  module.renderRestaurant(ctx); module.bindRestaurant(ctx); module.handleRestaurantAction('rest-content-type', {dataset:{id:'store-intro'}},ctx); await settle(() => /data-action="rest-analyse"\s*>/.test(markup));
   return { module, ctx, calls, tasks, saved, files, listeners, select, settle, markup: () => markup };
 }
 
@@ -78,25 +78,21 @@ test('restaurant counts only usable supporting photos and rejects inflated or un
   assert.equal(restaurantCanGenerate(task, shortDirection, { outputCount: 6, acceptSparse: true }), false);
 });
 
-test('one-click upload does not require a store profile or save an untouched empty form', async t => {
-  const app = await restaurantPage(t, { count: 9, merchantProfile: null });
-  assert.match(app.markup(), /门店资料 <small>选填<\/small>/);
-  assert.ok(!app.markup().includes('id="restaurant-profile-form"'));
+test('typed one-click uses six default pages and reuses an unchanged saved profile', async t => {
+  const app = await restaurantPage(t, { count: 9 });
+  assert.match(app.markup(), /门店介绍/); assert.match(app.markup(), /value="6" selected/);
   app.select(); app.module.handleRestaurantAction('rest-analyse', {}, app.ctx);
   await app.settle(() => app.markup().includes('选择一个内容方向'));
   const created = app.calls.find(call => call.url.endsWith('/tasks') && call.method === 'POST');
-  assert.equal(created.body.autoGenerate, true); assert.equal(created.body.outputCount, 9);
+  assert.equal(created.body.contentType, 'store-intro'); assert.equal(created.body.autoGenerate, true); assert.equal(created.body.outputCount, 6);
   assert.equal(app.calls.filter(call => call.url.endsWith('/profile') && call.method === 'PUT').length, 0);
-  assert.ok(!app.markup().includes('请填写门店'));
 });
-
-test('partial store details stay collapsed and all profile fields remain optional', async t => {
+test('store introduction requires city and category and keeps additional facts optional', async t => {
   const app = await restaurantPage(t, { merchantProfile: { name: '真实酒馆' } });
-  assert.ok(!app.markup().includes('id="restaurant-profile-form"'));
-  app.module.handleRestaurantAction('rest-profile-toggle', {}, app.ctx);
-  assert.ok(app.markup().includes('id="restaurant-profile-form"'));
-  const form = app.markup().split('id="restaurant-profile-form"')[1].split('</form>')[0];
-  assert.ok(!form.includes(' required')); assert.ok(!form.includes('aria-label="必填"'));
+  assert.match(app.markup(), /rest-content-name/); assert.match(app.markup(), /rest-content-city/); assert.match(app.markup(), /补充信息（选填）/);
+  app.select(); app.module.handleRestaurantAction('rest-analyse', {}, app.ctx);
+  await app.settle(() => app.markup().includes('请填写城市 / 商圈、主营品类'));
+  assert.equal(app.calls.filter(call => call.url.endsWith('/tasks') && call.method === 'POST').length, 0);
 });
 
 test('thirty restaurant originals compress into ten batches and the selected package count reaches generation', async t => {
@@ -118,7 +114,7 @@ test('thirty restaurant originals compress into ten batches and the selected pac
   assert.equal(app.calls.filter(call => call.url.endsWith('/analyse') && call.method === 'POST').length, 1);
   assert.match(app.markup(), /value="30" selected/);
   assert.match(app.markup(), /value="15"/);
-  assert.equal(init[0].body.autoGenerate, true); assert.equal(init[0].body.outputCount, 30);
+  assert.equal(init[0].body.autoGenerate, true); assert.equal(init[0].body.outputCount, 6);
   app.listeners.get('restaurant-output-count:change')({ target: { value: '6' } });
   app.module.handleRestaurantAction('rest-generate', {}, app.ctx);
   await app.settle(() => app.calls.some(call => call.url.endsWith('/generate') && call.method === 'POST'));
@@ -152,6 +148,7 @@ test('starting a fresh restaurant upload explicitly cancels the paused draft bef
   await app.settle(() => !app.saved.has('restaurant-upload-draft'));
   assert.equal(app.calls.filter(call => call.url.endsWith('/cancel-upload') && call.method === 'POST').length, 1);
   assert.equal(app.tasks.get(id).code, 'UPLOAD_CANCELLED');
+  app.module.handleRestaurantAction('rest-content-type', { dataset: { id: 'store-intro' } }, app.ctx);
   assert.match(app.markup(), /0 \/ 30/);
   assert.equal(app.calls.filter(call => call.url.endsWith('/analyse')).length, 0);
 });

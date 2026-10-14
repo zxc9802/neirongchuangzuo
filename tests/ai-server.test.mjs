@@ -250,9 +250,11 @@ test('image configuration defaults to unlimited and preserves explicit finite or
   const baseline = { AI_IMAGE_DAILY_LIMIT: '', AI_CHAT_DAILY_LIMIT: '', AI_REQUESTS_PER_MINUTE: '' };
   assert.deepEqual(loadAIConfig(baseline).limits, { imageDaily: null, chatDaily: 100, perMinute: 10 });
   assert.equal(loadAIConfig({ ...baseline, AI_IMAGE_DAILY_LIMIT: 'unlimited' }).limits.imageDaily, null);
+  assert.deepEqual(loadAIConfig({...baseline,AI_IMAGE_DAILY_LIMIT:'unlimited',AI_CHAT_DAILY_LIMIT:'unlimited',AI_REQUESTS_PER_MINUTE:'unlimited'}).limits,
+    {imageDaily:null,chatDaily:null,perMinute:null});
   assert.equal(loadAIConfig({ ...baseline, AI_IMAGE_DAILY_LIMIT: '20' }).limits.imageDaily, 20);
   assert.equal(loadAIConfig({ ...baseline, AI_IMAGE_DAILY_LIMIT: '0' }).limits.imageDaily, 0);
-  assert.throws(() => loadAIConfig({ ...baseline, AI_CHAT_DAILY_LIMIT: 'unlimited' }), { code: 'INVALID_LIMIT_CONFIG' });
+  assert.throws(() => loadAIConfig({ ...baseline, AI_CHAT_DAILY_LIMIT: 'unlimited-typo' }), { code: 'INVALID_LIMIT_CONFIG' });
 });
 
 test('default unlimited image quota generates and serves more than twenty outputs while reporting counted usage', async t => {

@@ -57,7 +57,7 @@ export function validateGalleryStoryboard(value, task, outputCount, { requireSty
       referenceImageIds: visualStyle ? environmentIds.filter(id => id !== source.imageId).slice(0,2) : shot.kind === 'food' ? environmentIds.slice(0,2) : [] };
   });
   if (!visualStyle && foods.length && shots[0]?.kind !== 'food') fail('首张应优先展示食品主视觉。');
-  if (scenes.length + foodGroups.length * 3 >= outputCount && [...counts.values()].some(count => count > 3)) fail('同一食品主题重复过多，应使用其他实拍丰富套图。');
+  if (task.contentType !== 'signature-dish' && scenes.length + foodGroups.length * 3 >= outputCount && [...counts.values()].some(count => count > 3)) fail('同一食品主题重复过多，应使用其他实拍丰富套图。');
   for (const [id, count] of counts) {
     const frames = shots.filter(shot => shot.foodGroupId === id);
     if (count >= 3 && new Set(frames.map(shot => shot.angle)).size < 2) fail('同一食品主题的景别和机位过于重复。');

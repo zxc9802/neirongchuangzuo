@@ -34,7 +34,7 @@ export function loadAIConfig(env = process.env) {
   const limit = (name, fallback) => {
     const raw = value(name);
     if (raw === '') return fallback;
-    if (fallback === null && raw === 'unlimited') return null;
+    if (raw === 'unlimited') return null;
     if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) throw new ApiError('调用上限配置无效，请联系管理员。', 503, 'INVALID_LIMIT_CONFIG');
     return Number(raw);
   };

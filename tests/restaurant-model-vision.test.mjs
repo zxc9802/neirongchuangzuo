@@ -289,6 +289,24 @@ test('unknown write or audit transport failure is charged as uncertain once and 
   });
 });
 
+test('a completed photo analysis with an invalid array field is corrected once without accepting malformed evidence', async () => {
+  const valid = { images: analysis.map(item => ({ ...item, possibleScene: [], rejectionReason: '', visibleTexts: [], textRisk: 'none', riskReasons: [] })) };
+  const invalid = structuredClone(valid); invalid.images[0].visibleTexts = 'wrong scalar';
+  let calls = 0;
+  const app = harness(null, undefined, () => new Response(JSON.stringify({ id: `analysis-${++calls}`, usage: { prompt_tokens: 30, completion_tokens: 20 },
+    choices: [{ message: { content: JSON.stringify(calls === 1 ? invalid : valid) }, finish_reason: 'stop' }] })));
+  const output = await app.model.analyse(photos, profile, { gallery: true });
+  assert.equal(output.length, 2); assert.deepEqual(output[0].visibleTexts, []);
+  assert.equal(calls, 2); assert.equal(app.finishes[0].status, 'failed'); assert.equal(app.finishes[1].status, 'completed');
+  assert.match(app.requests[1].body.messages[0].content, /上一轮的具体问题/);
+});
+
+test('a photo analysis transport failure remains uncertain and is never automatically replayed', async () => {
+  const app = harness(null, new TypeError('connection lost after dispatch'));
+  await assert.rejects(app.model.analyse(photos, profile, { gallery: true }), {code:'PROVIDER_UNCERTAIN'});
+  assert.equal(app.requests.length, 1); assert.equal(app.finishes[0].status, 'uncertain');
+});
+
 test('HTTP 200 followed by a broken response stream is uncertain for both writing and audit', async t => {
   for (const operation of ['write', 'audit']) await t.test(operation, async () => {
     let chunksRead = 0;

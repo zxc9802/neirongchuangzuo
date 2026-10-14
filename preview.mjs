@@ -27,6 +27,7 @@ const files = new Map([
   ['/vendor/ffmpeg/ffmpeg-core.wasm', ['node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm', 'application/wasm']],
   ['/style.css', ['design/style.css', 'text/css; charset=utf-8']],
   ['/restaurant.js', ['design/restaurant.js', 'text/javascript; charset=utf-8']],
+  ['/restaurant-types.js', ['design/restaurant-types.js', 'text/javascript; charset=utf-8']],
   ['/restaurant.css', ['design/restaurant.css', 'text/css; charset=utf-8']],
   ['/video-replica.js', ['design/video-replica.js', 'text/javascript; charset=utf-8']],
   ['/video-replica.css', ['design/video-replica.css', 'text/css; charset=utf-8']],
