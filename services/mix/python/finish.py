@@ -188,6 +188,7 @@ def deliver(plan, output, width=1920, height=1080, catalog='data/catalog', music
             plan['cover_seconds'] = .5
             video = render_presentation(plan, output, video, width, height)
             write_json(output/'plan.json', plan)
+        log('正在检查成片画面与字幕…')
         report = quality.review(video, plan, output, models, log)
         write_json(output/f'quality-attempt-{attempt}.json', report)
         if report['passed']:

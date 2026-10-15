@@ -263,7 +263,7 @@ class MaterialBrokerTests(unittest.TestCase):
             return value
 
         model.embed.side_effect = lambda **kwargs: complete([1, 0])
-        model.json.side_effect = lambda *args: complete({'description': '游泳池'})
+        model.json.side_effect = lambda *args, **kwargs: complete({'description': '游泳池'})
 
         def analyze():
             try:
@@ -326,3 +326,147 @@ class MaterialBrokerTests(unittest.TestCase):
         self.broker.revoke(self.device, self.owner)
         with self.assertRaises(HTTPException):
             self.broker.authenticate(self.token)
+
+    def analyze_proxy(self, device=None, clip=None, embed=(1, 0), description='游泳池画面'):
+        device, clip = device or self.device, clip or self.clip
+        content = b'video'
+        result = self.broker.begin_upload(device, clip['id'], 'proxy', len(content),
+                                          hashlib.sha256(content).hexdigest())
+        self.broker.append_upload(device, result['id'], 0, content)
+        model = Mock()
+        model.embed.return_value = list(embed)
+        model.json.return_value = {'description': description}
+        with patch('api.Models', return_value=model), patch('media.duration', return_value=8):
+            self.broker.complete_upload(device, result['id'])
+        return model
+
+    def test_identical_content_reuses_paid_analysis_within_the_same_workspace_only(self):
+        keyed = {**self.clip, 'id': 'e' * 64, 'content_key': 'f' * 64}
+        self.broker.register_clips(self.device, [keyed])
+        self.analyze_proxy(clip=keyed)
+        with self.broker.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM vector_cache').fetchone()[0], 1)
+        reselected, _ = self.pair(self.owner)
+        moved = {**keyed, 'id': '1' * 64, 'asset_id': '2' * 64, 'name': 'renamed.mp4'}
+        self.assertEqual(self.broker.register_clips(reselected, [moved])['clips'][0]['state'], 'indexed')
+        clip = self.broker.indexed_clips(reselected)[0]
+        self.assertEqual(clip['description'], '游泳池画面')
+        self.assertEqual(clip['vector'].tolist(), [1, 0])
+        stranger, _ = self.pair('9' * 64)
+        self.assertEqual(self.broker.register_clips(stranger, [moved])['clips'][0]['state'], 'pending')
+        with self.assertRaises(HTTPException):
+            self.broker.register_clips(self.device, [{**keyed, 'id': '3' * 64, 'content_key': 'not-hex'}])
+
+    def test_vectors_are_float32_blobs_and_legacy_json_rows_still_search(self):
+        self.analyze_proxy(embed=(3, 4))
+        with self.broker.connect() as db:
+            stored = db.execute('SELECT vector FROM clips').fetchone()[0]
+            self.assertIsInstance(stored, bytes)
+            self.assertEqual(len(stored), 8)
+            db.execute("UPDATE clips SET vector='[0.6,0.8]'")
+        self.assertEqual([round(value, 3) for value in self.broker.indexed_clips(self.device)[0]['vector'].tolist()],
+                         [.6, .8])
+
+    def test_storage_uses_wal_and_index_cache_follows_every_change(self):
+        with self.broker.connect() as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+        self.analyze_proxy()
+        first = self.broker.indexed_clips(self.device)
+        self.assertIs(first[0]['vector'], self.broker.indexed_clips(self.device)[0]['vector'],
+                      'Unchanged index is served from memory')
+        with self.broker.connect() as db:
+            db.execute("UPDATE clips SET description='新的描述'")
+        self.assertEqual(self.broker.indexed_clips(self.device)[0]['description'], '新的描述')
+
+    def test_hot_path_cleanup_is_throttled_and_old_terminal_rows_are_pruned(self):
+        with patch.object(self.broker, '_cleanup', wraps=self.broker._cleanup) as scan:
+            self.broker.cleanup()
+            self.broker.maybe_cleanup()
+            self.assertEqual(scan.call_count, 1)
+            with patch('local_materials.time.time', return_value=time.time() + materials.CLEANUP_INTERVAL + 1):
+                self.broker.maybe_cleanup()
+            self.assertEqual(scan.call_count, 2)
+        self.analyze_proxy()
+        request = self.broker.request_clip(self.device, self.clip['id'], 'source', 'd' * 32)
+        with self.broker.connect() as db:
+            db.execute("UPDATE requests SET state='cancelled',expires=? WHERE id=?",
+                       (time.time() - materials.TERMINAL_TTL - 1, request['id']))
+        self.broker.cleanup()
+        with self.broker.connect() as db:
+            self.assertIsNone(db.execute('SELECT 1 FROM requests WHERE id=?', (request['id'],)).fetchone())
+
+    def test_description_queue_retries_with_backoff_then_requests_new_frames(self):
+        self.broker.register_clips(self.device, [self.clip])
+        retained = self.broker.folder / 'describe' / 'queued.mp4'
+        retained.parent.mkdir(exist_ok=True)
+        retained.write_bytes(b'frames')
+        with self.broker.connect() as db:
+            db.execute("UPDATE clips SET state='indexed',vector=?", (materials.pack_vector([1, 0]),))
+            db.execute('INSERT INTO description_queue VALUES(?,?,?,0,0,NULL)', (self.device, self.clip['id'], str(retained)))
+        with patch.object(materials.MaterialBroker, '_describe', side_effect=RuntimeError('busy')):
+            self.assertTrue(self.broker.describe_next())
+            self.assertFalse(self.broker.describe_next(), 'A failed description waits for its backoff')
+            with self.broker.connect() as db:
+                row = db.execute('SELECT attempts,next_try FROM description_queue').fetchone()
+            self.assertEqual(row['attempts'], 1)
+            self.assertGreater(row['next_try'], time.time() + 20)
+            for attempt in range(materials.DESCRIBE_ATTEMPTS - 1):
+                with self.broker.connect() as db:
+                    db.execute('UPDATE description_queue SET next_try=0')
+                self.assertTrue(self.broker.describe_next())
+        with self.broker.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM description_queue').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT state FROM clips').fetchone()[0], 'pending')
+            self.assertIsNotNone(db.execute('SELECT vector FROM clips').fetchone()[0], 'The paid vector is kept')
+        self.assertFalse(retained.exists())
+
+    def test_restart_recovers_description_leases_and_resets_lost_copies(self):
+        self.broker.register_clips(self.device, [self.clip])
+        with self.broker.connect() as db:
+            db.execute("UPDATE clips SET state='indexed',vector=?", (materials.pack_vector([1, 0]),))
+            db.execute('INSERT INTO description_queue VALUES(?,?,?,0,0,?)',
+                       (self.device, self.clip['id'], str(self.broker.folder / 'describe' / 'gone.mp4'), time.time() + 600))
+        self.broker.recover_descriptions()
+        with self.broker.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM description_queue').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT state FROM clips').fetchone()[0], 'pending')
+
+
+class ModelConfigTests(unittest.TestCase):
+    def setUp(self):
+        import api
+        self.api = api
+        api._unsupported_config.clear()
+        self.addCleanup(api._unsupported_config.clear)
+
+    def test_description_speed_options_fall_back_once_when_gateway_rejects_them(self):
+        payloads = []
+
+        def post(model, url, key_name, payload):
+            payloads.append(payload['generationConfig'])
+            if 'thinkingConfig' in payload['generationConfig']:
+                raise RuntimeError('HTTP 400: unknown field thinkingConfig')
+            return {'candidates': [{'content': {'parts': [{'text': '{"description":"池"}'}]}}]}
+
+        with patch('api.Models.post', new=post):
+            model = self.api.Models()
+            self.assertEqual(model.json('p', config=self.api.DESCRIBE_CONFIG), {'description': '池'})
+            self.assertEqual(model.json('p', config=self.api.DESCRIBE_CONFIG), {'description': '池'})
+        self.assertEqual(len(payloads), 3, 'Rejected options are remembered and not retried')
+        self.assertIn('thinkingConfig', payloads[0])
+        self.assertNotIn('thinkingConfig', payloads[2])
+
+    def test_other_errors_are_not_retried_without_options(self):
+        with patch('api.Models.post', side_effect=RuntimeError('HTTP 500: busy')) as post:
+            with self.assertRaises(RuntimeError):
+                self.api.Models().json('p', config=self.api.DESCRIBE_CONFIG)
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(self.api._unsupported_config, set())
+
+    def test_each_thread_reuses_its_own_session(self):
+        sessions = []
+        worker = threading.Thread(target=lambda: sessions.extend([self.api.Models().session, self.api.Models().session]))
+        worker.start()
+        worker.join()
+        self.assertIs(sessions[0], sessions[1])
+        self.assertIsNot(sessions[0], self.api.Models().session)

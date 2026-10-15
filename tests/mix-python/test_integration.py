@@ -33,7 +33,7 @@ class Models:
     def rerank(self, query, candidates):
         return sorted(candidates, key=lambda item: -item['origin_start'])
 
-    def json(self, prompt, videos=None):
+    def json(self, prompt, videos=None, config=None):
         if '"scenes"' in prompt:
             script = json.loads(prompt.split('\n')[-1])['script']
             return {'scenes': [{'text': script, 'query': '园区散步'}]}

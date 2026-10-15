@@ -4,6 +4,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -92,6 +93,23 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(restarted.state.jobs.get(job_id)['state'], 'interrupted')
         self.assertEqual((folder / 'plan.json').read_text(encoding='utf-8'), '{"script":"散步。"}')
         self.assertFalse(restarted.state.jobs.run_one(lambda *args: self.fail('must not auto replay')))
+
+    def test_worker_publishes_progress_before_the_first_model_request(self):
+        job_id = self.submit(body={**self.spec, 'voice_mode': 'original'}).json()['id']
+        observed = []
+
+        def blocked_model(*args, **kwargs):
+            observed.extend(self.app.state.jobs.get(job_id)['logs'])
+            raise ValueError('测试模型不可用')
+
+        with patch('app.readiness', return_value={'configured': True}), \
+             patch('matcher.create_plan', side_effect=blocked_model):
+            self.app.state.jobs.run_one()
+        self.assertTrue(any('任务已开始' in line for line in observed), observed)
+        self.assertTrue(any('拆解文案' in line for line in observed), observed)
+        result = self.client.get('/v1/mix/jobs/' + job_id, headers=self.headers).json()
+        self.assertEqual(result['state'], 'failed')
+        self.assertIn('测试模型不可用', result['error'])
 
     def test_quality_gate_and_local_authenticated_stream(self):
         job_id = self.submit().json()['id']

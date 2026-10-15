@@ -1,4 +1,4 @@
-import { getMixState, renderMixMaterials, renderMixAudio, bindMixMaterials, mixReadiness, mixFolderLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
+import { getMixState, renderMixMaterials, renderMixAudio, renderMixProgress, bindMixMaterials, mixReadiness, mixFolderLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
 
 import { estimatedSpeechSeconds, videoCreditEstimateText } from './workspace-credits.js';
 
@@ -53,8 +53,8 @@ function mixPreview(media, ctx) {
   const videoUrl = finished ? safeMixArtifactUrl(job.video_url) : '';
   return `<section class="studio-preview mix-preview" aria-labelledby="mix-preview-title">
     <div class="studio-preview-heading"><h2 id="mix-preview-title">${result ? '成片预览' : active ? '素材预览' : '视频预览'}</h2><div class="mix-preview-actions">${button('mix-show-result', '查看成片', 'studio-ratio-button', finished && !result ? '' : 'hidden')}${button('settings', `${esc(c.ratio)} ${icon('chevron')}`, 'studio-ratio-button', 'aria-label="调整视频比例与分辨率"')}</div></div>
-    <div class="mix-screen ${result && videoUrl || !result && active ? 'has-video' : ''}">${result ? videoUrl ? `<video id="studio-video-preview" src="${esc(videoUrl)}" controls playsinline preload="metadata" aria-label="混剪成片"></video>` : `<div class="mix-screen-empty"><span class="studio-film-mark">${icon('video')}</span><h3 id="mix-job-progress">${esc(mixJobLabel(job))}</h3><p>${esc(job.error || '制作时请保持网页连接。')}</p></div>` : active ? `<video id="studio-video-preview" src="${esc(active.url)}" controls playsinline preload="metadata" aria-label="${esc(active.name)}"></video>` : `<div class="mix-screen-empty"><span class="studio-film-mark">${icon('video')}</span><h3>暂无视频</h3>${button('mix-choose-folder', icon('folder') + '选择素材文件夹', 'studio-screen-button')}</div>`}</div>
-    <div class="studio-preview-caption"><span>${result ? esc(mixJobLabel(job)) : active ? `${icon('video')} ${esc(active.name)}` : ''}</span>${result && videoUrl ? `<a class="mix-download" href="${esc(videoUrl)}" download>下载成片 ${icon('arrow')}</a>` : `<small>${!result && active ? '本机原始视频' : `${esc(c.quality)} · ${esc(c.ratio)}`}</small>`}</div>
+    <div class="mix-screen ${result && videoUrl || !result && active ? 'has-video' : ''}">${result ? videoUrl ? `<video id="studio-video-preview" src="${esc(videoUrl)}" controls playsinline preload="metadata" aria-label="混剪成片"></video>` : `<div class="mix-screen-empty mix-screen-progress"><span class="studio-film-mark">${icon('video')}</span><h3 id="mix-job-progress">${esc(mixJobLabel(job))}</h3><div id="mix-job-details">${renderMixProgress(job)}</div></div>` : active ? `<video id="studio-video-preview" src="${esc(active.url)}" controls playsinline preload="metadata" aria-label="${esc(active.name)}"></video>` : `<div class="mix-screen-empty"><span class="studio-film-mark">${icon('video')}</span><h3>暂无视频</h3>${button('mix-choose-folder', icon('folder') + '选择素材文件夹', 'studio-screen-button')}</div>`}</div>
+    <div class="studio-preview-caption"><span ${result ? `data-mix-job-label="${esc(job.id)}"` : ''}>${result ? esc(mixJobLabel(job)) : active ? `${icon('video')} ${esc(active.name)}` : ''}</span>${result && videoUrl ? `<a class="mix-download" href="${esc(videoUrl)}" download>下载成片 ${icon('arrow')}</a>` : `<small>${!result && active ? '本机原始视频' : `${esc(c.quality)} · ${esc(c.ratio)}`}</small>`}</div>
   </section>`;
 }
 
@@ -82,7 +82,7 @@ function mixTimeline(ctx) {
   const { button, icon, esc } = ctx;
   const mix = getMixState();
   return `<section class="studio-timeline" aria-labelledby="mix-timeline-title"><div class="studio-timeline-toolbar"><div><h2 id="mix-timeline-title">制作记录</h2></div>${mix.job ? button('mix-refresh-job', icon('refresh') + '刷新任务', 'studio-text-button') : ''}</div>
-    <div class="mix-job-history">${mix.jobs.length ? mix.jobs.map(job => button('mix-open-job', `${icon('video')}<strong>${esc(mixJobLabel(job))}</strong><small>${esc(job.id.slice(0, 8))}</small>`, `mix-job-card ${job.id === mix.job?.id ? 'selected' : ''}`, `data-id="${esc(job.id)}"`)).join('') : `<div class="mix-job-empty">${icon('video')}<span>暂无制作记录</span></div>`}</div>
+    <div class="mix-job-history">${mix.jobs.length ? mix.jobs.map(job => button('mix-open-job', `${icon('video')}<strong data-mix-job-label="${esc(job.id)}">${esc(mixJobLabel(job))}</strong><small>${esc(job.id.slice(0, 8))}</small>`, `mix-job-card ${job.id === mix.job?.id ? 'selected' : ''}`, `data-id="${esc(job.id)}"`)).join('') : `<div class="mix-job-empty">${icon('video')}<span>暂无制作记录</span></div>`}</div>
 
   </section>`;
 }
