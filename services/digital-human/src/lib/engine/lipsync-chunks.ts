@@ -23,7 +23,10 @@ export function planLipsyncChunks(
   for (let i = 0; i < count; i++) {
     const startSeconds = i * maxChunkSeconds;
     const durationSeconds = Math.min(maxChunkSeconds, totalSeconds - startSeconds);
-    if (durationSeconds < 0.4) break;
+    if (durationSeconds < 0.4 && chunks.length) {
+      chunks[chunks.length - 1].durationSeconds += durationSeconds;
+      break;
+    }
     chunks.push({ index: i, startSeconds, durationSeconds });
   }
   return chunks;

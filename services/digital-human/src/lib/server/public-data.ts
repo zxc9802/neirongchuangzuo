@@ -29,6 +29,7 @@ const PUBLIC_ERRORS: Record<string, string> = {
   LIPSYNC_MEDIA: "口型画面时长或位置异常，成片未交付，请联系管理员检查",
   LIPSYNC_RUNTIME: "口型检查服务暂时不可用，请稍后恢复任务或联系管理员",
   MEDIA_FIT_MISMATCH: "素材视频长于配音，请选择智能适配后重试",
+  LIPSYNC_DURATION_MISMATCH: "成片画面时长与配音不一致，请重新获取或生成成片",
 };
 
 const PUBLIC_LOG_FALLBACK = {

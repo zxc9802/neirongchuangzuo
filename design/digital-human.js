@@ -505,6 +505,12 @@ function showMedia(kind, id, ctx) {
   const cover = kind === 'avatar' ? safeUrl(item.coverUrl) : '';
   ctx.openModal(title, kind === 'avatar' ? '原始视频形象 · 可重复用于新的口播内容' : `${shortDate(item.createdAt)} · ${taskLabel(item)}`, `${fallbackNotice(item)}<div class="dh-modal-video"><video controls playsinline preload="metadata" src="${ctx.esc(url)}" ${cover ? `poster="${ctx.esc(cover)}"` : ''} aria-label="${ctx.esc(title)}"></video></div>${kind === 'task' ? `<p class="dh-modal-script">${ctx.esc(item.inputs?.scriptText || '').replace(/\n/g, '<br>')}</p>` : ''}<footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${kind === 'avatar' ? ctx.button('dh-use-preview-avatar', '使用此形象', 'primary', `data-id="${ctx.esc(id)}"`) : `<a class="primary dh-modal-download" href="${ctx.esc(api.downloadUrl(item, 'preview'))}" download>${ctx.icon('save')}快速下载（小文件）</a><a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(item, 'video'))}" download>下载原片</a>${ctx.button('dh-task-details', '任务详情', 'secondary', `data-id="${ctx.esc(id)}"`)}`}</footer>`, true);
   const dialog = document.querySelector('dialog[open]'), video = dialog?.querySelector('video');
+  if (kind === 'task' && item.results?.deliveryMode !== 'narration_fallback') {
+    const hint = document.createElement('p');
+    hint.className = 'muted';
+    hint.textContent = '请预览确认逐字口型与配音是否一致，再下载使用。';
+    dialog?.querySelector('.dh-modal-video')?.after(hint);
+  }
   dialog?.addEventListener('close', () => { if (video) { video.pause(); video.removeAttribute('src'); video.load(); } }, { once: true });
 }
 function scrollGenerator() { root?.querySelector('#dh-generator')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }

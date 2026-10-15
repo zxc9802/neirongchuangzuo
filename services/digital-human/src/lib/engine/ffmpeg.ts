@@ -395,9 +395,14 @@ export async function concatVideos(
   }
 
   const listPath = `${outputPath}.concat.txt`;
-  const listBody = inputPaths
-    .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
-    .join("\n");
+  // The container may include an audio tail. Advance each segment by picture duration.
+  const probes = await Promise.all(inputPaths.map(probeMedia));
+  const listBody = inputPaths.map((p, index) => {
+    const probe = probes[index];
+    const duration = probe.videoDurationSeconds ?? (!probe.hasAudio ? probe.durationSeconds : undefined);
+    if (!duration) throw new Error("无法确认对口型分段的画面时长");
+    return `file '${p.replace(/'/g, "'\\''")}'\nduration ${duration}`;
+  }).join("\n");
   fs.writeFileSync(listPath, listBody, "utf-8");
 
   try {
@@ -444,6 +449,20 @@ export async function finalizeVideo(
   }
   if (!fs.existsSync(exactWavPath)) {
     throw new Error(`Exact IndexTTS WAV not found: ${exactWavPath}`);
+  }
+
+  const [videoProbe, audioProbe] = await Promise.all([
+    probeMedia(heygenVideoPath),
+    probeMedia(exactWavPath),
+  ]);
+  const pictureDuration = videoProbe.videoDurationSeconds
+    ?? (!videoProbe.hasAudio ? videoProbe.durationSeconds : undefined);
+  const tolerance = Math.max(0.12, 2 / (videoProbe.fps || 25));
+  if (!videoProbe.width || !pictureDuration
+    || Math.abs(pictureDuration - audioProbe.durationSeconds) > tolerance) {
+    throw Object.assign(new Error(
+      `对口型视频画面时长与配音不一致（画面 ${pictureDuration?.toFixed(2) ?? "未知"} 秒，配音 ${audioProbe.durationSeconds.toFixed(2)} 秒），请重新获取或生成成片。`
+    ), { code: "LIPSYNC_DURATION_MISMATCH" });
   }
 
   const args = [
