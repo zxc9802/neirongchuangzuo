@@ -86,6 +86,65 @@ test('primary success never calls the fallback or changes the existing voice', a
   });
 });
 
+for (const complete of [true, false]) {
+  test(`audio-only pipeline uses Doubao fallback and ${complete ? 'exports the complete MP3' : 'rejects incomplete audio'}`, async () => {
+    await harness(async h => {
+      if (!complete) h.respond(() => response(undefined, false));
+      const text = '第一句话成功。第二句话失败。第三句话成功。';
+      let task = {id: 'audio-only', userId: 'owner', status: 'pending', logs: [],
+        inputs: {outputType: 'audio', videoPath: '', scriptText: text,
+          speakerVoiceId: 'selected-voice', speakerAudioUrl: h.options.speakerAudioUrl}, results: {}};
+      const noVideo = () => assert.fail('audio-only tasks must not invoke video generation');
+      const pipeline = load('../src/lib/engine/pipeline.ts', {
+        fs, path, crypto,
+        '../server/safe-log': {logServerError() {}},
+        './task-execution': {withTaskExecution: async (_id, action) => action()},
+        '../server/task-worker': {},
+        '../store/task-store': {TaskStore: {get: () => task, isDeleted: () => false,
+          addLog: (_id, message, level, publicMessage) => task.logs.push({message, level, publicMessage}),
+          update: (_id, update) => task = {...task, ...update, results: {...task.results, ...update.results}}}},
+        '../config': {getAppConfig: () => ({storageDir: path.join(h.dir, 'jobs'),
+          publicBaseUrl: 'https://media.example.test', indexttsApiKey: h.options.apiKey,
+          doubaoTtsApiKey: h.options.fallback.apiKey,
+          doubaoTtsVoiceMap: {'selected-voice': h.options.fallback.speakerId}})},
+        './indextts': {generateIndexTTS: h.generate}, './ffmpeg': {...media, prepareSourceVideo: noVideo},
+        './video-preview': {createVideoPreview: noVideo},
+        './face-lipsync': {prepareFaceLipsync: noVideo, finalizeFaceLipsync: noVideo},
+        './narration-fallback': {deliverNarrationFallback: noVideo},
+        './scene-tail': {prepareSceneContinuation: noVideo},
+        '../mcp/heygen-adapter': {HeyGenMcpAdapter: {execute: noVideo}},
+        './openlux-lipsync': {OpenLuxLipsyncAdapter: {execute: noVideo}},
+        './fal-veed-lipsync': {FalVeedLipsyncAdapter: {execute: noVideo}},
+        '../cos': {CosService: {isConfigured: () => false}}, '../lipsync-provider': {},
+        '../media-path-policy': {},
+        '../server/media-response': {getTrustedExternalMediaUrl: async source => source},
+        '../main-app-billing': {assertTaskCreditCoverage() {}, extendTaskCreditCoverage: async () => 0},
+      });
+      await pipeline.runDigitalHumanPipeline(task.id);
+      const fallback = h.posts.filter(p => p.url.includes('openspeech.bytedance.com'));
+      assert.ok(fallback.length > 0, 'audio-only tasks must receive the configured fallback');
+      assert.ok(fallback.every(p => p.payload.req_params.speaker === 'S_test'));
+      assert.equal(task.logs.filter(log => log.publicMessage?.includes('已自动切换备用配音')).length, 1);
+      assert.equal(task.results.finalVideoUrl, undefined);
+      if (complete) {
+        assert.equal(task.status, 'completed', task.error);
+        assert.equal(fallback.map(p => p.payload.req_params.text).join(''), text);
+        assert.equal(task.results.audioFormat, 'mp3');
+        assert.match(task.results.exactAudioUrl, /voice-track\.mp3$/);
+        const probe = await media.probeMedia(task.results.exactAudioUrl);
+        assert.equal(probe.hasAudio, true);
+        assert.ok(probe.durationSeconds > 1.5, 'MP3 must include all three fallback sentences');
+        assert.equal(task.results.sha256Audio, await media.sha256File(task.results.exactAudioUrl));
+      } else {
+        assert.equal(task.status, 'failed');
+        assert.match(task.error, /豆包/);
+        assert.equal(task.results.exactAudioUrl, undefined);
+        assert.equal(fs.existsSync(path.join(h.dir, 'jobs', task.id, 'voice-track.mp3')), false);
+      }
+    });
+  });
+}
+
 for (const toneProfile of [undefined, 'low', 'high']) {
   test(`a failed IndexTTS sentence switches the entire script to Doubao at 1.2x (${toneProfile || 'default'})`, async () => {
     await harness(async h => {
