@@ -98,6 +98,8 @@ class FinishTests(unittest.TestCase):
             mix.assert_not_called()
             models.return_value.json.assert_not_called()
             self.assertEqual(review.call_args.args[0], result)
+            self.assertIn('正在检查成片画面与字幕…', messages)
+            self.assertLess(messages.index('导出画面、配音与字幕…'), messages.index('正在检查成片画面与字幕…'))
 
     def test_selected_user_music_is_mixed_and_reviewed(self):
         with tempfile.TemporaryDirectory() as tmp, patch('finish.Models') as models, \

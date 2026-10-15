@@ -10,7 +10,7 @@ const emptyAudio = () => ({ voice: [], music: [], configured: null, missing: [],
 const audioBindings = new WeakSet();
 const state = { ownerKey: null, ctx: null, client: null, status: emptyStatus(), health: null, media: [], fileCount: 0,
   audio: emptyAudio(),
-  job: null, jobs: [], pending: null, busy: false, error: '', view: 'materials', revision: 0, started: false,
+  job: null, jobs: [], pending: null, busy: false, error: '', jobError: '', view: 'materials', revision: 0, started: false,
   timer: null, loading: null, refreshPanels: null, controllers: new Set(), urls: new Map() };
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const storageKey = () => accountStorageKey('mix-active-job');
@@ -49,7 +49,7 @@ export function stopMixMaterials() {
   state.urls.clear();
   if (state.ctx?.configs?.mix) Object.assign(state.ctx.configs.mix, { voice_id: '', music_id: '', music: false });
   Object.assign(state, { ownerKey: null, status: emptyStatus(), health: null, media: [], fileCount: 0, job: null,
-    jobs: [], pending: null, busy: false, error: '', view: 'materials', loading: null, refreshPanels: null, audio: emptyAudio() });
+    jobs: [], pending: null, busy: false, error: '', jobError: '', view: 'materials', loading: null, refreshPanels: null, audio: emptyAudio() });
   updateAudio();
   updateStatus();
 }
@@ -83,7 +83,7 @@ async function request(path, options = {}, raw = false) {
   if (options.signal?.aborted) abort();
   state.controllers.add(controller);
   let timedOut = false;
-  const timer = setTimeout(() => { timedOut = true; abort(); }, /\/(analyze|frames|complete)$/.test(path) ? 600000 : 45000);
+  const timer = setTimeout(() => { timedOut = true; abort(); }, /\/(analyze|frames|complete|plan)$/.test(path) ? 600000 : 45000);
   try {
     const response = await fetch(path, { ...options, credentials: 'same-origin', cache: 'no-store',
       headers: { 'Content-Type': 'application/json', 'X-Workbench-Request': '1', ...options.headers }, signal: controller.signal });
@@ -305,7 +305,7 @@ async function deleteAudio(kind, id) {
 export function renderMixMaterials() {
   const status = state.status;
   const uploading = !status.needsPermission && (state.client?.scanning || status.uploadTotal || status.connected && status.processing);
-  const text = status.needsPermission ? '请点击上方按钮重新连接素材文件夹' : uploading ? '素材正在上传' : status.connected ? status.error ? '部分素材上传失败，请重试' : status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
+  const text = status.needsPermission ? '请点击上方按钮重新连接素材文件夹，并在浏览器提示中选择“每次访问时都允许”，以后打开网站会自动连接' : uploading ? '素材正在上传' : status.connected ? status.error ? '部分素材上传失败，请重试' : status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
   const progress = status.uploadTotal ? `<progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="素材上传进度"></progress>` : state.client?.scanning ? '<progress aria-label="素材上传进度"></progress>' : status.totalFiles && !status.needsPermission ? `<progress max="${status.totalFiles}" value="${status.readyFiles}" aria-label="素材上传进度"></progress>` : '';
   const locked = mixFolderLocked();
   const disabled = locked ? 'disabled title="制作时请保持原素材文件夹连接"' : '';
@@ -320,6 +320,29 @@ export function renderMixMaterials() {
 export function mixJobLabel(job = state.job) {
   const labels = { queued: '任务已提交', matching: '正在匹配素材', waiting_materials: '正在等待本机素材', running: '正在制作视频', rendering: '正在合成视频', done: '成片已完成', completed: '成片已完成', failed: '制作失败', error: '制作失败', cancelled: '任务已取消', interrupted: '制作已中断', expired: '任务已过期' };
   return labels[job?.state] || '正在制作视频';
+}
+
+function durationLabel(seconds) {
+  const total = Math.max(0, Math.floor(seconds));
+  return total < 60 ? `${total} 秒` : `${Math.floor(total / 60)} 分 ${total % 60} 秒`;
+}
+
+export function renderMixProgress(job = state.job, now = Date.now()) {
+  if (!job) return '';
+  const logs = (Array.isArray(job.logs) ? job.logs : []).filter(line => typeof line === 'string').slice(-12).map(line => message(line));
+  const active = !terminal(job);
+  const created = Number(job.created), updated = Number(job.updated);
+  const age = Number.isFinite(updated) && updated > 0 ? Math.max(0, now / 1000 - updated) : null;
+  const elapsed = Number.isFinite(created) && created > 0
+    ? durationLabel((active || !updated ? now / 1000 : updated) - created) : '';
+  const detail = job.error || (job.state === 'queued' ? '正在排队，等待开始制作；请勿重复提交。'
+    : job.state === 'waiting_materials' ? '等待本机传输命中的素材，请保持网页与素材文件夹连接。'
+    : logs.at(-1) || (active ? '制作已开始，等待下一条进展。' : mixJobLabel(job)));
+  return `<div class="mix-progress-current" role="status" aria-live="polite"><small>${active ? '当前步骤' : '任务结果'}</small><p>${escape(detail)}</p></div>
+    <div class="mix-progress-time">${elapsed ? `<span>已用时 ${elapsed}</span>` : ''}${age !== null ? `<span>最近进展：${age < 1 ? '刚刚' : durationLabel(age) + '前'}</span>` : ''}</div>
+    ${state.jobError ? `<p class="mix-progress-warning" role="alert">进度暂时无法更新：${escape(state.jobError)}。正在重连，以下为最后一次收到的进度。</p>`
+      : active && age >= 120 ? '<p class="mix-progress-warning" role="status">暂无新进展，仍在查询任务状态；处理或外部服务等待可能较久，请勿重复提交。</p>' : ''}
+    ${logs.length ? `<details class="mix-progress-history"><summary>最近制作日志（${logs.length} 条）</summary><ol class="mix-progress-logs">${logs.map(line => `<li>${escape(line)}</li>`).join('')}</ol></details>` : ''}`;
 }
 
 function updateStatus() {
@@ -339,6 +362,20 @@ function updateStatus() {
   if (timingNode) timingNode.textContent = state.ctx?.configs?.mix?.voice_mode === 'original' ? '按文案阅读速度估算' : '文案与配音自动确定';
   const jobNode = root.querySelector('#mix-job-progress');
   if (jobNode && state.job) jobNode.textContent = mixJobLabel();
+  root.querySelectorAll('[data-mix-job-label]').forEach(node => {
+    const job = state.jobs.find(item => item.id === node.dataset.mixJobLabel);
+    if (job) node.textContent = mixJobLabel(job);
+  });
+  const details = root.querySelector('#mix-job-details');
+  if (details) {
+    const expanded = details.querySelector?.('details')?.open;
+    const scroll = details.querySelector?.('.mix-progress-logs')?.scrollTop || 0;
+    details.innerHTML = renderMixProgress();
+    const history = details.querySelector?.('details');
+    if (history) history.open = !!expanded;
+    const logList = details.querySelector?.('.mix-progress-logs');
+    if (logList) logList.scrollTop = scroll;
+  }
   const resultButton = root.querySelector('[data-action="mix-show-result"]');
   if (resultButton) resultButton.hidden = !complete(state.job) || state.view === 'result';
   root.querySelectorAll('[data-action="mix-choose-folder"], [data-action="mix-disconnect"], [data-action="mix-scan"]').forEach(button => {
@@ -357,6 +394,7 @@ function acceptJob(job, revision) {
   if (!JOB_ID.test(job?.id || '')) throw new Error('服务器未返回有效任务，请重试这次提交。');
   const previous = state.job;
   state.job = job;
+  state.jobError = '';
   state.jobs = [job, ...state.jobs.filter(item => item.id !== job.id)].slice(0, 20);
   state.pending = { id: job.id };
   try { remember(state.pending); } catch { state.error = '浏览器无法保存任务编号，重新打开时可在制作记录中查看。'; }
@@ -386,6 +424,7 @@ async function pollJob(revision = state.revision) {
     acceptJob(job, revision);
   } catch (error) {
     if (revision !== state.revision || error.name === 'AbortError') return;
+    state.jobError = message(error);
     state.error = message(error);
     if (error.status === 404 && state.pending?.id) {
       acceptJob({ id: state.pending.id, state: 'expired', error: '任务已过期，填写文案后可重新制作。' }, revision);

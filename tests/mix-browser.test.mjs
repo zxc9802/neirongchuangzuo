@@ -290,11 +290,39 @@ test('transfer stops after an asynchronous read when its run has been cancelled'
 });
 
 function memoryStore(record = null) {
-  const repairs = new Map();
-  return { value: record, repairs, async get() { return this.value; }, async put(value) { this.value = value; },
-    async getRepair(id) { return repairs.get(id); }, async putRepair(id, file) { repairs.set(id, file); },
-    async deleteRepair(id) { repairs.delete(id); }, async clearRepairs() { repairs.clear(); },
+  return { value: record, async get() { return this.value; }, async put(value) { this.value = value; },
     async clear() { this.value = null; } };
+}
+
+// A multi-gigabyte file whose bytes are generated on demand: `header` at the start, zeros after it.
+function largeFile(path, size, header = new Uint8Array(0), modified = 1) {
+  const reads = [];
+  return { name: path.split('/').pop(), webkitRelativePath: path, size, lastModified: modified, reads,
+    slice(start = 0, end = size) {
+      end = Math.min(end, size);
+      reads.push([start, end]);
+      const bytes = new Uint8Array(Math.max(0, end - start));
+      if (start < header.length) bytes.set(header.subarray(start, Math.min(end, header.length)));
+      return new Blob([bytes]);
+    } };
+}
+
+function box(kind, size, largesize) {
+  const bytes = new Uint8Array(largesize === undefined ? Math.max(8, Math.min(size, 64)) : 16);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, largesize === undefined ? size : 1);
+  for (let i = 0; i < 4; i++) bytes[4 + i] = kind.charCodeAt(i);
+  if (largesize !== undefined) view.setBigUint64(8, BigInt(largesize));
+  return bytes;
+}
+
+// ftyp(24) + moov(100) + mdat with a 64-bit size that runs to the end of the file.
+function mp4Header(size) {
+  const header = new Uint8Array(140);
+  header.set(box('ftyp', 24), 0);
+  header.set(box('moov', 100), 24);
+  header.set(box('mdat', 0, size - 124), 124);
+  return header;
 }
 
 function videoFile(path, modified = 1, content = 'video') {
@@ -315,25 +343,31 @@ function directory(name, files, permission = 'granted') {
 function server() {
   const calls = [];
   const states = new Map();
+  const clips = new Map();
   return { calls, states, async api(path, options = {}) {
     const body = options.body && typeof options.body === 'string' ? JSON.parse(options.body) : options.body;
     calls.push({ path, method: options.method || 'GET', body, signal: options.signal });
     if (path.endsWith('/connect')) return { device_id: '1'.repeat(32) };
     if (path.endsWith('/clips')) return { clips: body.clips.map(clip => {
+      clips.set(clip.id, clip);
       if (!states.has(clip.id)) states.set(clip.id, 'pending');
       return { id: clip.id, state: states.get(clip.id) };
     }) };
     if (path.endsWith('/requests')) return { requests: [] };
+    if (path.endsWith('/analysis-source')) return { source_ready: true,
+      request: { ...clips.get(body.clip_id), id: '8'.repeat(32), clip_id: body.clip_id, kind: 'analysis' } };
     if (path.endsWith('/analyze')) { states.set(body.clip_id, 'indexed'); return { complete: true }; }
     return { ok: true };
   } };
 }
 
 async function eventually(predicate) {
-  for (let i = 0; i < 100; i++) {
+  // Deadline-based (performance.now, since tests freeze Date.now) so a busy machine does not fail slow timers.
+  for (const deadline = performance.now() + 3000; performance.now() < deadline;) {
     if (predicate()) return;
     await new Promise(resolve => setTimeout(resolve, 5));
   }
+  if (predicate()) return;
   assert.fail('controller did not finish expected work');
 }
 
@@ -497,7 +531,7 @@ test('matching requests and queued analysis both complete without reanalyzing in
   } finally { controller.stop(); }
 });
 
-test('a stalled mix source upload leaves all five analysis slots running and new clips advancing', async () => {
+test('a stalled mix source upload leaves all eight analysis slots running and new clips advancing', async () => {
   const backend = server(), releases = new Map();
   const source = videoFile('素材/source.mp4', 1, Buffer.alloc(helpers.CHUNK_SIZE + 7));
   let releaseUpload, cycle, uploading = false, completed = false, frames = 0, analyses = 0, peak = 0, creates = 0, polls = 0;
@@ -528,16 +562,16 @@ test('a stalled mix source upload leaves all five analysis slots running and new
     } });
   controller._schedule = () => {};
   try {
-    await controller.selectFiles([source, ...Array.from({ length: 12 }, (_, i) => videoFile(`素材/${i}.mp4`))]);
+    await controller.selectFiles([source, ...Array.from({ length: 20 }, (_, i) => videoFile(`素材/${i}.mp4`))]);
     cycle = controller._cycle(controller.generation);
     await eventually(() => uploading);
-    await eventually(() => analyses === 5 && frames === 10);
-    assert.equal(controller.workers.size, 10, 'the transfer must not occupy a background pipeline slot');
+    await eventually(() => analyses === 8 && frames === 13);
+    assert.equal(controller.workers.size, 13, 'the transfer must not occupy a background pipeline slot');
     for (const release of releases.values()) release();
-    await eventually(() => controller.status.indexed >= 6);
+    await eventually(() => controller.status.indexed >= 9);
     await controller._cycle(controller.generation);
-    await eventually(() => frames === 12);
-    assert.equal(peak, 5);
+    await eventually(() => frames === 20);
+    assert.equal(peak, 8);
     assert.equal(creates, 1, 'repeated cycles must not duplicate the active upload');
     assert.equal(polls, 1, 'do not poll overlapping copies of the same active transfer');
     for (let i = 0; i < 4; i++) {
@@ -545,7 +579,7 @@ test('a stalled mix source upload leaves all five analysis slots running and new
       await new Promise(resolve => setImmediate(resolve));
       await controller._cycle(controller.generation);
     }
-    await eventually(() => controller.status.indexed === 13);
+    await eventually(() => controller.status.indexed === 21);
     assert.equal(completed, false, 'indexing finished while the source upload was still waiting');
     const reports = [];
     controller.onStatus = status => reports.push(status);
@@ -668,26 +702,30 @@ test('calling start repeatedly while analysis is awaiting preserves a single wor
   } finally { controller.stop(); }
 });
 
-test('oversize sources surface a file error during scanning before indexing', async () => {
+test('multi-gigabyte sources are indexed after reading only a small fingerprint', async () => {
   const backend = server();
-  const file = { name: 'huge.mp4', webkitRelativePath: '素材/huge.mp4', size: 512 * 1024 * 1024 + 1,
-    lastModified: 1, slice() { throw new Error('oversize file must not be read'); } };
-  const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(), readDuration: async () => 2 });
+  const file = largeFile('素材/huge.mp4', 6 * 1024 ** 3);
+  const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(), readDuration: async () => 20 });
+  controller._schedule = () => {};
   try {
     await controller.selectFiles([file]);
-    assert.match(controller.status.error, /huge.mp4.*512 MiB/);
-    assert.equal(backend.calls.some(call => call.path.endsWith('/clips')), false);
+    assert.equal(controller.status.error, '');
+    const registered = backend.calls.find(call => call.path.endsWith('/clips')).body.clips;
+    assert.equal(registered.length, 3);
+    assert.ok(registered.every(clip => /^[a-f0-9]{64}$/.test(clip.content_key)));
+    assert.ok(file.reads.reduce((total, [start, end]) => total + end - start, 0) <= 3 * 65536 + 1,
+      'scanning must not read the whole video');
   } finally { controller.stop(); }
 });
 
-test('a video that times out does not repeatedly block the remaining files and can be retried on rescan', async () => {
+test('MOV clips bypass native browser timeouts and reselecting the folder reuses indexed clips', async () => {
   const backend = server();
   const attempts = [];
   const originalNow = Date.now;
   let now = originalNow();
   let broken = true;
   const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(), readDuration: async () => 16,
-    repairVideo: async () => { throw new Error('读取视频超时'); },
+    wasmMedia: { probe: async () => { throw new Error('读取视频超时'); } },
     sampleFrames: async file => {
       attempts.push(file.name);
       if (broken && file.name === 'bad.mov') {
@@ -702,9 +740,9 @@ test('a video that times out does not repeatedly block the remaining files and c
     Date.now = () => now;
     await controller.selectFiles(files);
     for (let i = 0; i < 5; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
-    assert.deepEqual(attempts, ['bad.mov', 'bad.mov', 'good.mp4', 'good.mp4']);
-    assert.equal(controller.status.indexed, 2);
-    assert.match(controller.status.error, /bad.mov.*读取视频超时/);
+    assert.deepEqual(attempts, ['good.mp4', 'good.mp4']);
+    assert.equal(controller.status.indexed, 4);
+    assert.equal(controller.status.error, '');
     broken = false;
     await controller.selectFiles(files);
     for (let i = 0; i < 2; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
@@ -719,7 +757,7 @@ test('slow model failures are retried after fresh clips instead of starving the 
   const originalNow = Date.now;
   let now = originalNow();
   let failing = true;
-  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 48,
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 64,
     sampleFrames: async () => ['frame'], api: async (path, options) => {
       if (path.endsWith('/analyze')) {
         const id = JSON.parse(options.body).clip_id;
@@ -981,7 +1019,7 @@ test('metadata scan runs five readers and fills freed slots without waiting for 
   } finally { controller.stop(); for (const finish of readers.values()) finish(); await selecting; }
 });
 
-test('five readers continue extracting while five analysis requests await and bound prepared frames', async () => {
+test('five readers continue extracting while eight analysis requests await and bound prepared frames', async () => {
   const backend = server();
   const frames = new Map(), analysis = new Map();
   let reading = 0, analyzing = 0, peakReaders = 0, peakAnalysis = 0;
@@ -1002,28 +1040,30 @@ test('five readers continue extracting while five analysis requests await and bo
       return backend.api(path, options);
     } });
   try {
-    await controller.selectFiles(Array.from({ length: 13 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+    await controller.selectFiles(Array.from({ length: 20 }, (_, i) => videoFile(`素材/${i}.mp4`)));
     await eventually(() => frames.size === 5);
     frames.get('0.mp4')();
     await eventually(() => analysis.size === 1 && frames.has('5.mp4'));
     for (const release of frames.values()) release();
-    await eventually(() => analysis.size === 5 && frames.size === 10);
+    await eventually(() => analysis.size === 6 && frames.size === 11);
+    for (const release of frames.values()) release();
+    await eventually(() => analysis.size === 8 && frames.size === 13);
     for (const release of frames.values()) release();
     await eventually(() => reading === 0);
-    assert.equal(analysis.size, 5, 'prepared frames must wait when all analysis slots are occupied');
-    assert.equal(frames.size, 10, 'do not pre-extract the rest of the directory into memory');
+    assert.equal(analysis.size, 8, 'prepared frames must wait when all analysis slots are occupied');
+    assert.equal(frames.size, 13, 'do not pre-extract the rest of the directory into memory');
     controller.start(); controller.start();
     const first = [...analysis.values()][0]; first();
-    await eventually(() => analysis.size === 6 && frames.has('10.mp4'));
-    for (let i = 0; i < 30 && controller.status.indexed < 13; i++) {
+    await eventually(() => analysis.size === 9 && frames.has('13.mp4'));
+    for (let i = 0; i < 40 && controller.status.indexed < 20; i++) {
       for (const release of frames.values()) release();
       for (const release of analysis.values()) release();
       await new Promise(resolve => setTimeout(resolve, 5));
     }
-    assert.equal(controller.status.indexed, 13);
+    assert.equal(controller.status.indexed, 20);
     assert.equal(peakReaders, 5);
-    assert.equal(peakAnalysis, 5);
-    assert.equal(analysis.size, 13, 'each clip is submitted only once');
+    assert.equal(peakAnalysis, 8);
+    assert.equal(analysis.size, 20, 'each clip is submitted only once');
   } finally {
     controller.stop();
     for (const release of frames.values()) release();
@@ -1046,14 +1086,14 @@ test('stopping cancels waiting extraction and analysis work without late request
         return backend.api(path, options);
       } });
     try {
-      await controller.selectFiles(Array.from({ length: 10 }, (_, i) => videoFile(`素材/${i}.mp4`)));
-      await eventually(() => phase === 'frames' ? samples === 5 : samples === 10 && analyses === 5);
+      await controller.selectFiles(Array.from({ length: 20 }, (_, i) => videoFile(`素材/${i}.mp4`)));
+      await eventually(() => phase === 'frames' ? samples === 5 : samples === 13 && analyses === 8);
       const count = statuses.length;
       controller.stop();
       for (const release of releases) release();
       await Promise.all(controller.workers.values());
-      assert.equal(samples, phase === 'frames' ? 5 : 10);
-      assert.equal(analyses, phase === 'frames' ? 0 : 5);
+      assert.equal(samples, phase === 'frames' ? 5 : 13);
+      assert.equal(analyses, phase === 'frames' ? 0 : 8);
       assert.equal(statuses.length, count);
       assert.equal(controller.workers.size, 0);
     } finally { controller.stop(); for (const release of releases) release(); }
@@ -1093,46 +1133,56 @@ test('analysis failures stop after three automatic retries for permanent and tem
   } finally { Date.now = originalNow; }
 });
 
-test('failed analysis waits until every compression and repaired first analysis has finished', async () => {
+const undecodable = async file => {
+  if (/\.mov$/.test(file.name)) throw Object.assign(new Error('MOV decode failed'), { code: 'MEDIA_DECODE' });
+  return 2;
+};
+
+test('failed analysis waits until every compatibility probe and server first analysis has finished', async () => {
   const backend = server(), events = [], releases = [];
   const originalNow = Date.now;
-  let now = originalNow(), failedId, releaseAnalysis;
-  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
-    sampleFrames: async () => ['frame'], repairVideo: file => {
-      events.push('repair:' + file.name);
-      return new Promise(resolve => releases.push(() => resolve(videoFile(file.name.replace('.mov', '.mp4')))));
-    }, api: async (path, options) => {
+  let now = originalNow(), failedId, releaseAnalysis, blockedName;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: undecodable,
+    sampleFrames: async () => ['frame'], wasmMedia: {
+      probe: file => {
+        events.push('probe:' + file.name);
+        return new Promise(resolve => releases.push(() => resolve({ duration: 2 })));
+      }, sampleFrames: async () => ['frame'] },
+    api: async (path, options) => {
       if (path.endsWith('/analyze')) {
         const id = JSON.parse(options.body).clip_id;
         events.push('analyze:' + id);
         if (id === failedId) throw Object.assign(new Error('gateway unavailable'), { status: 503 });
-        if (id === controller.record.manifest['two.mov']?.clips[0].id) await new Promise(resolve => { releaseAnalysis = resolve; });
+        if (id === controller.record.manifest[blockedName]?.clips[0].id) await new Promise(resolve => { releaseAnalysis = resolve; });
       }
       return backend.api(path, options);
     } });
   controller._schedule = () => {};
   const cycle = async () => { await controller._cycle(controller.generation); };
-  const big = name => ({ name, webkitRelativePath: '素材/' + name, size: 600 * 1024 * 1024, lastModified: 1 });
   try {
     Date.now = () => now;
-    await controller.selectFiles([videoFile('素材/failed.mp4'), big('one.mov'), big('two.mov')]);
+    await controller.selectFiles([videoFile('素材/failed.mp4'), videoFile('素材/one.mov'), videoFile('素材/two.mov')]);
+    // Parallel metadata reads may finish in either order. Exercise the reverse order.
+    controller.repairs = new Map([...controller.repairs].sort(([a], [b]) => b.localeCompare(a)));
+    blockedName = [...controller.repairs.keys()].at(-1);
     failedId = controller.record.manifest['failed.mp4'].clips[0].id;
     await cycle(); await Promise.all(controller.workers.values());
     now += 60000;
-    for (const name of ['one.mov', 'two.mov']) {
-      await cycle(); await eventually(() => events.includes('repair:' + name));
+    for (const name of controller.repairs.keys()) {
+      await cycle(); await eventually(() => events.includes('probe:' + name));
       await cycle();
-      assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 1, 'no retries while compression is active');
+      assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 1, 'no retries while probing is active');
       releases.shift()(); await Promise.all(controller.workers.values());
       await cycle();
-      if (name === 'two.mov') {
+      if (name === blockedName) {
         await eventually(() => !!releaseAnalysis);
         await cycle();
-        assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 1, 'no retries while repaired first analysis is active');
+        assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 1, 'no retries while server first analysis is active');
         releaseAnalysis();
       }
       await Promise.all(controller.workers.values());
-      assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 1, 'repaired clips must finish their first attempt before retries');
+      assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 1, 'server clips must finish their first attempt before retries');
+      assert.equal(controller.record.manifest[name].decoder, 'server');
     }
     await cycle(); await Promise.all(controller.workers.values());
     assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 2);
@@ -1140,54 +1190,59 @@ test('failed analysis waits until every compression and repaired first analysis 
   } finally { controller.stop(); for (const release of releases) release(); releaseAnalysis?.(); Date.now = originalNow; }
 });
 
-test('failed compression moves behind other files, retries three times, then permits manual recovery', async () => {
-  const backend = server(), repairs = [], store = memoryStore();
+test('failed compatibility probing moves behind other files, retries three times, then permits manual recovery', async () => {
+  const backend = server(), probes = [], store = memoryStore();
   const originalNow = Date.now;
   let now = originalNow(), broken = true;
-  const controller = new BrowserMaterials({ api: backend.api, store, readDuration: async () => 2,
-    sampleFrames: async () => ['frame'], repairVideo: async file => {
-      repairs.push(file.name);
-      if (broken && file.name === 'bad.mov') throw new Error('conversion failed');
-      return videoFile(file.name.replace('.mov', '.mp4'));
-    } });
+  const controller = new BrowserMaterials({ api: backend.api, store, readDuration: undecodable,
+    sampleFrames: async () => ['frame'], wasmMedia: { probe: async file => {
+      probes.push(file.name);
+      if (broken && file.name === 'bad.mov') throw new Error('wasm probe failed');
+      return { duration: 2 };
+    }, sampleFrames: async () => ['frame'] } });
   controller._schedule = () => {};
   const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
-  const files = ['bad.mov', 'good.mov'].map(name => ({ name, webkitRelativePath: '素材/' + name,
-    size: 600 * 1024 * 1024, lastModified: 1, slice: () => new Blob(['original']) }));
+  const files = [videoFile('素材/bad.mov'), videoFile('素材/good.mov')];
   try {
     Date.now = () => now;
     await controller.selectFiles(files);
     await cycle(); await cycle(); await cycle();
-    assert.deepEqual(repairs, ['bad.mov', 'good.mov']);
+    assert.deepEqual(probes, ['bad.mov', 'good.mov']);
     assert.equal(controller.status.indexed, 1);
-    assert.equal(controller.status.processing, true, 'failed conversion should wait for an automatic retry');
+    assert.equal(controller.status.processing, true, 'failed probing should wait for an automatic retry');
     for (let i = 0; i < 3; i++) { now += 60000; await cycle(); }
     for (let i = 0; i < 3; i++) { now += 60000; await cycle(); }
-    assert.deepEqual(repairs, ['bad.mov', 'good.mov', 'bad.mov', 'bad.mov', 'bad.mov']);
+    assert.deepEqual(probes, ['bad.mov', 'good.mov', 'bad.mov', 'bad.mov', 'bad.mov']);
     assert.equal(controller.status.processing, false);
-    assert.match(controller.status.error, /bad.mov.*conversion failed/);
+    assert.match(controller.status.error, /bad.mov.*wasm probe failed/);
     broken = false;
     await controller.selectFiles(files);
     await cycle(); await cycle();
     assert.equal(controller.status.indexed, 2);
-    assert.equal(repairs.filter(name => name === 'good.mov').length, 1, 'manual retry must reuse completed files');
+    assert.equal(probes.filter(name => name === 'good.mov').length, 1, 'manual retry must reuse completed files');
+    assert.equal(store.value.manifest['good.mov'].decoder, 'server');
     assert.equal(controller.status.error, '');
   } finally { controller.stop(); Date.now = originalNow; }
 });
 
-test('converted files that still fail extraction use bounded repair retries before manual recovery', async () => {
+test('server proxy failures retry without probing or decoding the original again', async () => {
   const backend = server();
-  let repairs = 0;
-  const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(), readDuration: async () => 2,
-    repairVideo: async () => { repairs++; return videoFile('bad.mp4'); },
-    sampleFrames: async () => { throw new Error('decode failed'); } });
+  let probes = 0, prepared = 0;
+  const controller = new BrowserMaterials({ api: async (path, options) => {
+    if (path.endsWith('/analysis-source')) { prepared++; throw new Error('server decode failed'); }
+    return backend.api(path, options);
+  }, store: memoryStore(), readDuration: undecodable,
+    sampleFrames: async () => { throw new Error('browser decode failed'); },
+    wasmMedia: { probe: async () => { probes++; return { duration: 2 }; },
+      sampleFrames: async () => { throw new Error('wasm decode failed'); } } });
   controller._schedule = () => {};
   try {
     await controller.selectFiles([videoFile('素材/bad.mov')]);
     for (let i = 0; i < 12; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
-    assert.equal(repairs, 4, 'converted decode failures also get three extra attempts');
+    assert.equal(probes, 1, 'metadata probing is retained across proxy retries');
+    assert.equal(prepared, 4);
     assert.equal(controller.status.processing, false);
-    assert.match(controller.status.error, /decode failed/);
+    assert.match(controller.status.error, /server decode failed/);
     assert.equal(backend.calls.some(call => call.path.endsWith('/analyze')), false);
   } finally { controller.stop(); }
 });
@@ -1252,52 +1307,465 @@ test('temporary analysis failures recover after two attempts without rescanning 
   } finally { controller.stop(); Date.now = originalNow; }
 });
 
-test('oversize and unreadable MOV repair waits for normal indexing and reuses cached MP4 copies', async () => {
+test('duration repair probes metadata once then uses server analysis without copying originals', async () => {
   const backend = server(), events = [];
   const store = memoryStore();
-  const big = { name: 'big.mov', webkitRelativePath: '素材/big.mov', size: 600 * 1024 * 1024, lastModified: 7,
-    slice: () => new Blob(['x']) };
+  const big = largeFile('素材/big.mp4', 3 * 1024 ** 3, new Uint8Array(0), 7);
   const bad = videoFile('素材/bad.mov');
   const good = videoFile('素材/good.mp4');
-  const options = { store, readDuration: async file => {
-    if (file.name === 'bad.mov') throw Object.assign(new Error('MOV decode failed'), { code: 'MEDIA_DECODE' });
-    return 2;
-  }, sampleFrames: async file => { events.push('frames:' + file.name); return ['frame']; },
-  repairVideo: async file => { events.push('repair:' + file.name); return videoFile(file.name.replace(/\.mov$/, '.mp4')); },
-  api: async (path, options) => { if (path.endsWith('/analyze')) events.push('indexed'); return backend.api(path, options); } };
+  const options = { store, readDuration: undecodable,
+    sampleFrames: async file => { events.push('frames:' + file.name); return ['frame']; },
+    wasmMedia: { probe: async file => { events.push('probe:' + file.name); return { duration: 2 }; },
+      sampleFrames: async file => { events.push('wasm:' + file.name); return ['frame']; } },
+    api: async (path, options) => { if (path.endsWith('/analyze')) events.push('indexed'); return backend.api(path, options); } };
   let controller = new BrowserMaterials(options);
   try {
     await controller.selectFiles([big, bad, good]);
     await eventually(() => controller.status.indexed === 3);
-    assert.ok(events.indexOf('indexed') < events.indexOf('repair:big.mov'));
-    assert.ok(events.indexOf('indexed') < events.indexOf('repair:bad.mov'));
-    assert.equal(controller.record.manifest['big.mov'].assetId, await helpers.assetId('big.mov', big.size, 7));
-    assert.equal(controller.files.get('big.mov').name, 'big.mp4');
+    assert.ok(events.indexOf('indexed') < events.indexOf('probe:bad.mov'));
+    assert.deepEqual(events.filter(event => event.endsWith('bad.mov')), ['probe:bad.mov']);
+    assert.equal(controller.files.get('bad.mov'), bad, 'the original file is read in place');
+    assert.equal(controller.record.manifest['bad.mov'].decoder, 'server');
+    assert.equal(controller.record.manifest['big.mp4'].decoder, undefined);
+    assert.equal(controller.record.manifest['big.mp4'].assetId, await helpers.assetId('big.mp4', big.size, 7));
     assert.equal(controller.status.error, '');
     controller.stop();
     controller = new BrowserMaterials(options);
     await controller.selectFiles([big, bad, good]);
     assert.equal(controller.status.indexed, 3);
-    assert.equal(controller.files.get('big.mov').name, 'big.mp4');
     assert.equal(controller.status.error, '');
-    assert.equal(events.filter(event => event.startsWith('repair:')).length, 2);
+    assert.equal(events.filter(event => event.startsWith('probe:')).length, 1, 'the saved decoder choice is reused');
     assert.equal(events.filter(event => event === 'indexed').length, 3);
     await controller.disconnect();
-    assert.equal(store.repairs.size, 0);
   } finally { controller.stop(); }
 });
 
-test('stopping during repair cannot save a converted copy or register stale clips', async () => {
+test('stopping during compatibility probing cannot register stale clips', async () => {
   const backend = server(), store = memoryStore();
   let release, started = false;
-  const controller = new BrowserMaterials({ api: backend.api, store, readDuration: async () => 2,
-    repairVideo: () => { started = true; return new Promise(resolve => { release = resolve; }); } });
+  const controller = new BrowserMaterials({ api: backend.api, store, readDuration: undecodable,
+    wasmMedia: { probe: () => { started = true; return new Promise(resolve => { release = resolve; }); } } });
   try {
-    await controller.selectFiles([{ name: 'big.mov', webkitRelativePath: '素材/big.mov', size: 600 * 1024 * 1024, lastModified: 1 }]);
+    await controller.selectFiles([videoFile('素材/big.mov')]);
     await eventually(() => started);
-    controller.stop(); release(videoFile('big.mp4'));
+    controller.stop(); release({ duration: 2 });
     await new Promise(resolve => setTimeout(resolve, 10));
-    assert.equal(store.repairs.size, 0);
     assert.equal(backend.calls.some(call => call.path.endsWith('/clips')), false);
-  } finally { controller.stop(); release?.(videoFile('big.mp4')); }
+    assert.deepEqual(store.value.manifest, {});
+  } finally { controller.stop(); release?.({ duration: 2 }); }
+});
+
+test('MP4 index scan keeps every box except media payloads and rejects other layouts', async () => {
+  const size = 5 * 1024 ** 3;
+  assert.deepEqual(await helpers.mp4Index(largeFile('a.mp4', size, mp4Header(size))), [[0, 140]]);
+  const tail = new Uint8Array(300);
+  tail.set(box('ftyp', 24), 0);
+  tail.set(box('mdat', 200), 24);
+  tail.set(box('moov', 76), 224);
+  assert.deepEqual(await helpers.mp4Index(largeFile('b.mov', 300, tail)), [[0, 32], [224, 300]], 'camera files put moov last');
+  const open = new Uint8Array(200);
+  open.set(box('ftyp', 24), 0);
+  open.set(box('moov', 40), 24);
+  open.set(box('mdat', 0), 64);
+  assert.deepEqual(await helpers.mp4Index(largeFile('c.mp4', 200, open)), [[0, 72]], 'a zero size runs to the end');
+  const fragmented = new Uint8Array(200);
+  fragmented.set(box('ftyp', 24), 0);
+  fragmented.set(box('moov', 40), 24);
+  fragmented.set(box('moof', 36), 64);
+  fragmented.set(box('mdat', 100), 100);
+  assert.equal(await helpers.mp4Index(largeFile('d.mp4', 200, fragmented)), null);
+  assert.equal(await helpers.mp4Index(largeFile('e.mkv', 1000, new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]))), null);
+  const truncated = new Uint8Array(100);
+  truncated.set(box('ftyp', 24), 0);
+  truncated.set(box('mdat', 500), 24);
+  assert.equal(await helpers.mp4Index(largeFile('f.mp4', 100, truncated)), null);
+  const noMovie = new Uint8Array(100);
+  noMovie.set(box('ftyp', 24), 0);
+  noMovie.set(box('mdat', 76), 24);
+  assert.equal(await helpers.mp4Index(largeFile('g.mp4', 100, noMovie)), null);
+});
+
+function sourceHarness(file, handlers, options = {}, request = { id: '2'.repeat(32), kind: 'source', start: 3, end: 5 }) {
+  const backend = server(), patches = [], posts = [];
+  let fulfilled = false;
+  const store = memoryStore();
+  const controller = new BrowserMaterials({ store, readDuration: async () => 20, sampleFrames: async () => ['frame'], ...options,
+    api: async (path, config = {}) => {
+      if (path.endsWith('/clips')) {
+        const result = await backend.api(path, config);
+        result.clips.forEach(clip => { clip.state = 'indexed'; });
+        return result;
+      }
+      if (path.endsWith('/requests')) {
+        return { requests: fulfilled ? [] : [{ ...request, asset_id: store.value.manifest[file.name].assetId }] };
+      }
+      if (config.method === 'PATCH') {
+        assert.equal(config.headers['Upload-Checksum'], digest(Buffer.from(config.body)));
+        assert.ok(config.body.byteLength <= helpers.CHUNK_SIZE);
+        const offset = Number(config.headers['Upload-Offset']);
+        patches.push([path.split('/').pop(), offset, config.body.byteLength]);
+        return { offset: offset + config.body.byteLength };
+      }
+      const name = path.split('/').pop();
+      if (['file', 'sparse', 'segment', 'plan', 'complete', 'frames'].includes(name)) {
+        posts.push(name);
+        const result = await handlers[name](JSON.parse(config.body));
+        if (name === 'complete' || name === 'frames') fulfilled = true;
+        return result;
+      }
+      return backend.api(path, config);
+    } });
+  return { controller, patches, posts, done: () => fulfilled };
+}
+
+test('large MP4 sources upload only the index and the planned packet ranges', async () => {
+  const size = 3 * 1024 ** 3;
+  const file = largeFile('素材/long.mp4', size, mp4Header(size));
+  const bodies = {}, id = '4'.repeat(32);
+  const { controller, patches, posts, done } = sourceHarness(file, {
+    sparse: body => { bodies.sparse = body; return { id, ranges: [[0, 140]] }; },
+    plan: () => ({ id, ranges: [[1000, 1000 + helpers.CHUNK_SIZE + 9]] }),
+    complete: () => ({ complete: true }) });
+  try {
+    await controller.selectFiles([file]);
+    await eventually(done);
+    assert.deepEqual(bodies.sparse, { size, ranges: [[0, 140]] });
+    assert.deepEqual(posts, ['sparse', 'plan', 'complete']);
+    assert.deepEqual(patches, [[id, 0, 140], [id, 1000, helpers.CHUNK_SIZE], [id, 1000 + helpers.CHUNK_SIZE, 9]]);
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); }
+});
+
+test('a sparse plan the server cannot cut falls back to a wasm stream-copied segment', async () => {
+  const size = 3 * 1024 ** 3;
+  const file = largeFile('素材/long.mp4', size, mp4Header(size));
+  const segments = [], bodies = {};
+  const { controller, patches, posts, done } = sourceHarness(file, {
+    sparse: () => ({ id: '4'.repeat(32), ranges: [] }),
+    plan: () => { throw Object.assign(new Error('无法解析原视频索引'), { status: 422 }); },
+    segment: body => { bodies.segment = body; return { id: '5'.repeat(32), offset: 0 }; },
+    complete: () => ({ complete: true }) }, { wasmMedia: { extractSegment: async (source, start, end) => {
+    segments.push([source, start, end]);
+    return { file: new Blob(['segment-bytes']), origin: 1.5 };
+  } } });
+  try {
+    await controller.selectFiles([file]);
+    await eventually(done);
+    assert.deepEqual(segments, [[file, 3, 5]]);
+    assert.deepEqual(posts, ['sparse', 'plan', 'segment', 'complete']);
+    assert.deepEqual(bodies.segment, { size: 13, origin: 1.5 });
+    assert.deepEqual(patches, [['5'.repeat(32), 0, 13]]);
+  } finally { controller.stop(); }
+});
+
+test('native preview reuses a retained full source when sparse preparation asks for full resume', async () => {
+  const size = 50000, file = largeFile('素材/a.mov', size, mp4Header(size));
+  const { controller, posts, patches, done } = sourceHarness(file, {
+    sparse: () => { throw Object.assign(new Error('已有完整原片缓存'), { status: 422 }); },
+    file: () => ({ id: '5'.repeat(32), offset: size }), complete: () => ({ complete: true }) }, {},
+    { id: '2'.repeat(32), kind: 'proxy', start: 0, end: 2 });
+  try {
+    await controller.selectFiles([file]);
+    await eventually(done);
+    assert.deepEqual(posts, ['sparse', 'file', 'complete']);
+    assert.deepEqual(patches, [], 'the retained original bytes must not be uploaded again');
+  } finally { controller.stop(); }
+});
+
+test('large non-MP4 sources send only a segment around the requested clip', async () => {
+  const file = largeFile('素材/long.mkv', 2 * 1024 ** 3, new Uint8Array([0x1a, 0x45, 0xdf, 0xa3]));
+  const { controller, posts, done } = sourceHarness(file, {
+    segment: () => ({ id: '5'.repeat(32), offset: 0 }), complete: () => ({ complete: true }) },
+  { wasmMedia: { extractSegment: async () => ({ file: new Blob(['segment']), origin: 0 }) } });
+  try {
+    await controller.selectFiles([file]);
+    await eventually(done);
+    assert.deepEqual(posts, ['segment', 'complete']);
+    assert.ok(file.reads.every(([start, end]) => end - start <= 65536), 'the large original is never streamed');
+  } finally { controller.stop(); }
+});
+
+test('a preview request switches an indexed video to native transfer when browser sampling fails', async () => {
+  const file = videoFile('素材/a.mp4');
+  const { controller, done, posts } = sourceHarness(file, {
+    file: () => ({ id: '5'.repeat(32), offset: 0 }), complete: () => ({ complete: true }) }, {
+    sampleFrames: async () => { throw Object.assign(new Error('seek failed'), { code: 'MEDIA_DECODE' }); },
+    wasmMedia: { sampleFrames: async () => ['wasm-frame', 'wasm-frame'] } },
+  { id: '2'.repeat(32), kind: 'proxy', start: 0, end: 2 });
+  try {
+    await controller.selectFiles([file]);
+    await eventually(done);
+    assert.deepEqual(posts, ['file', 'complete']);
+    assert.equal(controller.record.manifest['a.mp4'].decoder, 'server');
+  } finally { controller.stop(); }
+});
+
+test('MOV and saved server or wasm entries submit cached native proxies without browser frames', async () => {
+  for (const decoder of [undefined, 'server', 'wasm']) {
+    const file = videoFile(decoder ? '素材/a.mp4' : '素材/a.MOV'), backend = server();
+    const entry = await helpers.inspectFile(file.name, file, null, async () => 2);
+    entry.decoder = decoder;
+    const store = memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32),
+      manifest: { [file.name]: entry }, uploads: {}, deferredRevocations: [] });
+    let sampled = 0;
+    const controller = new BrowserMaterials({ store, api: backend.api, readDuration: async () => 2,
+      sampleFrames: async () => { sampled++; return ['frame']; },
+      wasmMedia: { sampleFrames: async () => { sampled++; return ['frame']; } } });
+    try {
+      await controller.selectFiles([file]);
+      await eventually(() => controller.status.indexed === 1);
+      assert.equal(sampled, 0);
+      const body = backend.calls.find(call => call.path.endsWith('/analyze')).body;
+      assert.deepEqual(body, { clip_id: entry.clips[0].id, source_request_id: '8'.repeat(32) });
+      assert.equal(controller.files.get(file.name), file);
+      assert.equal(controller.record.manifest[file.name].assetId, entry.assetId);
+    } finally { controller.stop(); }
+  }
+});
+
+test('failed normal sampling starts native analysis while another normal reader is still blocked', async () => {
+  const backend = server();
+  let release;
+  const controller = new BrowserMaterials({ store: memoryStore(), api: backend.api, readDuration: async () => 2,
+    sampleFrames: file => file.name === 'bad.mp4' ? Promise.reject(new Error('cannot decode')) :
+      new Promise(resolve => { release = () => resolve(['frame']); }) });
+  try {
+    await controller.selectFiles([videoFile('素材/bad.mp4'), videoFile('素材/slow.mp4')]);
+    await eventually(() => controller.status.indexed === 1);
+    assert.equal(controller.record.manifest['bad.mp4'].decoder, 'server');
+    assert.equal(backend.calls.filter(call => call.path.endsWith('/analysis-source')).length, 1);
+    release();
+    await eventually(() => controller.status.indexed === 2);
+  } finally { controller.stop(); release?.(); }
+});
+
+test('small MOV native proxies prefer sparse packets and skip analysis requests in the render poller', async () => {
+  const file = largeFile('素材/a.mov', 50000, mp4Header(50000));
+  const backend = server(), steps = [], id = '6'.repeat(32);
+  let request, prepared = false;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: () => { throw new Error('browser frame path used'); }, api: async (path, options = {}) => {
+      if (path.endsWith('/analysis-source')) {
+        const clip = controller.record.manifest['a.mov'].clips[0];
+        request = { id: '7'.repeat(32), clip_id: clip.id, asset_id: clip.asset_id, start: 0, end: 2, kind: 'analysis' };
+        return { request, source_ready: false };
+      }
+      if (path.endsWith('/requests')) return { requests: request ? [request] : [] };
+      const name = path.split('/').pop();
+      if (['file', 'sparse', 'plan', 'complete'].includes(name)) steps.push(name);
+      if (name === 'sparse') return { id, ranges: [[0, 140]] };
+      if (name === 'plan') return { id, ranges: [[1000, 2000]] };
+      if (name === 'complete') { prepared = true; return { complete: true }; }
+      if (options.method === 'PATCH') return { offset: Number(options.headers['Upload-Offset']) + options.body.byteLength };
+      if (name === 'analyze') assert.equal(prepared, true);
+      return backend.api(path, options);
+    } });
+  try {
+    await controller.selectFiles([file]);
+    await eventually(() => controller.status.indexed === 1);
+    controller.lastRequests = 0;
+    controller._startRequests(controller.generation);
+    await controller.requestWorker;
+    assert.deepEqual(steps, ['sparse', 'plan', 'complete']);
+    assert.deepEqual(controller.requests, []);
+  } finally { controller.stop(); }
+});
+
+test('native analysis and render share one transfer stage and release it before model work', async () => {
+  const backend = server(), file = videoFile('素材/a.mov');
+  let transferActive = 0, peak = 0, releaseTransfer, releaseModel, modelStarted = false, completed = 0;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    api: async (path, options) => {
+      if (path.endsWith('/analysis-source')) {
+        const clip = controller.record.manifest['a.mov'].clips[0];
+        return { request: { id: '7'.repeat(32), clip_id: clip.id, asset_id: clip.asset_id, start: 0, end: 2, kind: 'analysis' }, source_ready: false };
+      }
+      if (path.endsWith('/analyze')) { modelStarted = true; await new Promise(resolve => { releaseModel = resolve; }); }
+      return backend.api(path, options);
+    } });
+  controller._sendFile = async () => {
+    transferActive++; peak = Math.max(peak, transferActive);
+    if (!releaseTransfer) await new Promise(resolve => { releaseTransfer = resolve; });
+    transferActive--; completed++;
+  };
+  try {
+    await controller.selectFiles([file]);
+    await eventually(() => !!releaseTransfer);
+    const entry = controller.record.manifest['a.mov'];
+    const rendering = controller._serve({ id: '9'.repeat(32), asset_id: entry.assetId, kind: 'source', start: 0, end: 2 }, controller.generation);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(completed, 0);
+    releaseTransfer();
+    await rendering;
+    await eventually(() => modelStarted);
+    assert.equal(peak, 1);
+    assert.equal(completed, 2, 'render must proceed while the model is pending');
+    releaseModel();
+    await eventually(() => controller.status.indexed === 1);
+  } finally { controller.stop(); releaseTransfer?.(); releaseModel?.(); }
+});
+
+test('stopping cancels queued native transfers before preparation or model submission', async () => {
+  const backend = server();
+  let release, preparations = 0;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    api: async (path, options) => {
+      if (path.endsWith('/analysis-source')) {
+        preparations++;
+        await new Promise(resolve => { release = resolve; });
+      }
+      return backend.api(path, options);
+    } });
+  try {
+    await controller.selectFiles([videoFile('素材/one.mov'), videoFile('素材/two.mov')]);
+    await eventually(() => !!release && controller.stages.transfer.waiting.length === 1);
+    const workers = [...controller.workers.values()];
+    controller.stop();
+    release();
+    await Promise.all(workers);
+    assert.equal(preparations, 1);
+    assert.equal(backend.calls.some(call => call.path.endsWith('/analyze')), false);
+  } finally { controller.stop(); release?.(); }
+});
+
+test('a saved folder reconnects with one permission prompt and keeps the site storage', async () => {
+  const originalPicker = globalThis.showDirectoryPicker;
+  const handle = directory('素材', [videoFile('a.mp4')], 'prompt');
+  let requested = 0, answer = 'denied', persisted = 0;
+  handle.requestPermission = options => { requested++; assert.deepEqual(options, { mode: 'read' }); return Promise.resolve(answer); };
+  const store = memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32), handle, manifest: {}, uploads: {} });
+  const backend = server(), pickers = [];
+  globalThis.showDirectoryPicker = async options => { pickers.push(options); return handle; };
+  Object.defineProperty(globalThis.navigator, 'storage', { value: { persist: async () => { persisted++; return true; } }, configurable: true });
+  const options = { store, api: backend.api, readDuration: async () => 2, sampleFrames: async () => ['frame'] };
+  let controller = new BrowserMaterials(options);
+  try {
+    await controller.restore();
+    assert.equal(controller.status.needsPermission, true);
+    const refused = controller.choose();
+    assert.equal(requested, 1, 'the permission prompt must open inside the click');
+    await refused;
+    assert.equal(controller.status.needsPermission, true);
+    assert.match(controller.status.error, /再次点击/);
+    assert.equal(backend.calls.length, 0);
+    await controller.choose();
+    assert.equal(requested, 1, 'after a refusal the next click opens the picker');
+    assert.deepEqual(pickers, [{ mode: 'read', id: 'mix-materials', startIn: handle }]);
+    assert.equal(controller.connected, true);
+    controller.stop();
+
+    controller = new BrowserMaterials(options);
+    await controller.restore();
+    answer = 'granted';
+    const reconnecting = controller.choose();
+    assert.equal(requested, 2);
+    await reconnecting;
+    assert.equal(pickers.length, 1, 'a granted permission needs no picker');
+    assert.equal(controller.connected, true);
+    assert.equal(controller.status.needsPermission, false);
+    assert.equal(controller.status.error, '');
+    await eventually(() => controller.status.indexed === 1);
+    assert.ok(persisted >= 1, 'ask the browser to keep the saved folder handle');
+  } finally {
+    controller.stop();
+    globalThis.showDirectoryPicker = originalPicker;
+    delete globalThis.navigator.storage;
+  }
+});
+
+test('content keys follow the video bytes so moved or renamed files reuse paid analysis', async () => {
+  const a = await helpers.inspectFile('a.mp4', videoFile('a.mp4', 1, 'same video'), null, async () => 10);
+  const b = await helpers.inspectFile('folder/b.mp4', videoFile('b.mp4', 9, 'same video'), null, async () => 10);
+  const c = await helpers.inspectFile('a.mp4', videoFile('a.mp4', 1, 'edit video'), null, async () => 10);
+  assert.notEqual(a.assetId, b.assetId);
+  assert.deepEqual(a.clips.map(clip => clip.content_key), b.clips.map(clip => clip.content_key));
+  assert.notDeepEqual(a.clips.map(clip => clip.content_key), c.clips.map(clip => clip.content_key));
+  assert.notEqual(a.clips[0].content_key, a.clips[1].content_key);
+  const legacy = structuredClone(a);
+  delete legacy.fingerprint;
+  legacy.clips.forEach(clip => { delete clip.content_key; });
+  legacy.repaired = true;
+  const upgraded = await helpers.inspectFile('a.mp4', videoFile('a.mp4', 1, 'same video'), legacy,
+    async () => { throw new Error('unchanged file decoded'); });
+  assert.equal(upgraded, legacy, 'saved entries are upgraded in place');
+  assert.equal(upgraded.repaired, undefined);
+  assert.deepEqual(upgraded.clips.map(clip => clip.content_key), a.clips.map(clip => clip.content_key));
+});
+
+test('opening the folder store drops the old transcoded-copy cache', async () => {
+  const original = globalThis.indexedDB;
+  const versions = [], deleted = [], created = [];
+  globalThis.indexedDB = { open(name, version) {
+    versions.push(version);
+    const request = {};
+    queueMicrotask(() => {
+      request.result = { objectStoreNames: { contains: store => ['folder', 'repairs'].includes(store) },
+        createObjectStore: store => created.push(store), deleteObjectStore: store => deleted.push(store),
+        transaction() {
+          const tx = { objectStore: () => ({ get: () => ({ result: null }) }) };
+          queueMicrotask(() => tx.oncomplete());
+          return tx;
+        } };
+      request.onupgradeneeded();
+      request.onsuccess();
+    });
+    return request;
+  } };
+  try {
+    const store = helpers.createFolderStore('materials-test');
+    assert.equal(await store.get(), null);
+    assert.deepEqual(versions, [3]);
+    assert.deepEqual(deleted, ['repairs']);
+    assert.deepEqual(created, []);
+    assert.equal(store.putRepair, undefined);
+  } finally { globalThis.indexedDB = original; }
+});
+
+function lockManager() {
+  const queue = [];
+  let held = false;
+  const grant = () => {
+    if (held || !queue.length) return;
+    const item = queue.shift();
+    held = true;
+    Promise.resolve().then(item.callback).then(item.resolve, item.reject).finally(() => { held = false; grant(); });
+  };
+  return { request(name, options, callback) {
+    return new Promise((resolve, reject) => {
+      const item = { callback, resolve, reject };
+      options.signal?.addEventListener('abort', () => {
+        const index = queue.indexOf(item);
+        if (index >= 0) { queue.splice(index, 1); reject(Object.assign(new Error('aborted'), { name: 'AbortError' })); }
+      }, { once: true });
+      queue.push(item);
+      grant();
+    });
+  } };
+}
+
+test('only one tab of an account processes materials and another tab takes over when it stops', async () => {
+  const locks = lockManager(), backend = server(), analyses = [], polls = [];
+  const create = name => new BrowserMaterials({ store: memoryStore(), locks, readDuration: async () => 2,
+    sampleFrames: async () => ['frame'], api: async (path, options = {}) => {
+      if (path.endsWith('/analyze')) analyses.push(name);
+      if (path.endsWith('/requests')) polls.push(name);
+      return backend.api(path, options);
+    } });
+  const first = create('first'), second = create('second');
+  try {
+    await first.selectFiles([videoFile('素材/a.mp4')]);
+    await eventually(() => first.status.indexed === 1);
+    await second.selectFiles([videoFile('素材/b.mp4')]);
+    await new Promise(resolve => setTimeout(resolve, 30));
+    assert.equal(first.leading, true);
+    assert.equal(second.leading, false);
+    assert.equal(second.status.follower, true);
+    assert.match(second.status.text, /另一个标签页正在处理素材/);
+    assert.deepEqual(analyses, ['first']);
+    assert.equal(polls.includes('second'), false, 'a following tab must not serve upload requests');
+    first.stop();
+    await eventually(() => second.status.indexed === 1);
+    assert.equal(second.leading, true);
+    assert.deepEqual(analyses, ['first', 'second']);
+  } finally { first.stop(); second.stop(); }
 });

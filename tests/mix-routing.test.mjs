@@ -142,6 +142,18 @@ test('chunk uploads and authenticated video bytes stream without JSON conversion
   assert.deepEqual(Buffer.from(await video.arrayBuffer()), Buffer.from([0, 1, 2, 255]));
 });
 
+test('large-source sparse, segment and plan steps are forwarded only as POST requests', async t => {
+  const { base, received } = await fixture(t);
+  const device = '/devices/' + 'a'.repeat(32);
+  const steps = ['/analysis-source', `/requests/${'b'.repeat(32)}/sparse`, `/requests/${'b'.repeat(32)}/segment`, `/files/${'c'.repeat(32)}/plan`];
+  const headers = { cookie: 'session=a', Origin: 'https://studio.example', 'Content-Type': 'application/json' };
+  for (const step of steps) {
+    assert.equal((await fetch(base + '/api/browser-materials' + device + step, { method: 'POST', headers, body: '{}' })).status, 200, step);
+    assert.equal((await fetch(base + '/api/browser-materials' + device + step, { method: 'PATCH', headers, body: '{}' })).status, 404, step);
+  }
+  assert.deepEqual(received.map(item => item.path), steps.map(step => '/v1/browser-materials' + device + step));
+});
+
 test('only the documented mix service paths are reachable through the proxy', async t => {
   const { base, received } = await fixture(t);
   for (const path of ['/api/mix/admin', '/api/mix/jobs/invalid/video', '/api/browser-materials/pair']) {

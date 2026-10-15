@@ -27,7 +27,7 @@ function route(path, method) {
   if (/^\/api\/mix\/jobs\/[a-f0-9]{32}\/resume$/.test(path) && method === 'POST') return path.replace('/api/mix', '/v1/mix');
   if (path === '/api/browser-materials/connect' && method === 'POST') return '/v1/browser-materials/connect';
   if (/^\/api\/browser-materials\/devices\/[a-f0-9]{32}$/.test(path) && method === 'DELETE') return path.replace('/api/browser-materials', '/v1/browser-materials');
-  const match = /^\/api\/browser-materials\/devices\/[a-f0-9]{32}\/(heartbeat|clips|analyze|requests|assets\/[a-f0-9]{64}|requests\/[a-f0-9]{32}\/(frames|file)|files\/[a-f0-9]{32}(?:\/complete)?)$/.exec(path);
+  const match = /^\/api\/browser-materials\/devices\/[a-f0-9]{32}\/(heartbeat|clips|analyze|analysis-source|requests|assets\/[a-f0-9]{64}|requests\/[a-f0-9]{32}\/(frames|file|sparse|segment)|files\/[a-f0-9]{32}(?:\/complete|\/plan)?)$/.exec(path);
   if (!match) return null;
   const action = match[1];
   const allowed = action === 'requests' ? ['GET'] : action.startsWith('assets/') ? ['DELETE'] : /^files\/[a-f0-9]{32}$/.test(action) ? ['HEAD', 'PATCH'] : ['POST'];

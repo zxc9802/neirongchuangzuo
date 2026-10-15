@@ -1,6 +1,7 @@
 """Read-only access to source media; derived clips are written to local output."""
 import json
 import math
+import os
 import re
 import struct
 import subprocess
@@ -14,6 +15,8 @@ from time import perf_counter
 SDR_FLAGS = ['-color_primaries', 'bt709', '-color_trc', 'bt709',
              '-colorspace', 'bt709', '-color_range', 'tv']
 FFMPEG_SLOTS = threading.BoundedSemaphore(2)
+# Probes and tiny 1 FPS analysis encodes must not queue behind long final renders.
+LIGHT_SLOTS = threading.BoundedSemaphore(max(1, int(os.environ.get('MIX_LIGHT_FFMPEG_SLOTS') or 6)))
 FINAL_CRF = '16'
 
 
@@ -49,8 +52,8 @@ def sdr_filter(info):
             'setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709'), mode
 
 
-def run(args, cwd=None):
-    with FFMPEG_SLOTS:
+def run(args, cwd=None, slots=None):
+    with slots or FFMPEG_SLOTS:
         result = subprocess.run(args, cwd=cwd, stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 encoding='utf-8', errors='replace')

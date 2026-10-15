@@ -89,6 +89,246 @@ class BrowserMaterialBackendTests(unittest.TestCase):
             content=content[upload['offset']:]).status_code, 200)
         return url
 
+    def analysis_source(self, clip=None):
+        response = self.client.post(self.base + '/analysis-source', headers=self.headers,
+                                    json={'clip_id': (clip or self.clip)['id']})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_analysis_proxy_is_native_small_silent_and_raw_cache_is_released(self):
+        source = self.root / 'original.mov'
+        media.run(['ffmpeg', '-v', 'error', '-y', '-f', 'lavfi', '-i',
+                   'testsrc2=s=1280x720:r=60:d=4', '-f', 'lavfi', '-i', 'sine=duration=4',
+                   '-c:v', 'libx264', '-preset', 'ultrafast', '-c:a', 'aac', str(source)])
+        content = source.read_bytes()
+        before = hashlib.sha256(content).hexdigest()
+        prepared = self.analysis_source()
+        self.assertFalse(prepared['source_ready'])
+        self.assertEqual(prepared['request']['kind'], 'analysis')
+        self.assertEqual(self.analysis_source(), prepared)
+        self.assertEqual(self.client.get(self.base + '/requests', headers=self.headers).json(), {'requests': []})
+        url, sent = self.sparse_transfer(prepared['request'], content)
+        with patch('api.Models') as models:
+            response = self.client.post(url + '/complete', headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        models.assert_not_called()
+        path = self.broker.wait_clip(prepared['request']['id'], timeout=0)
+        info = json.loads(media.run(['ffprobe', '-v', 'error', '-show_streams', '-of', 'json', str(path)]))
+        self.assertEqual(len(info['streams']), 1)
+        video = info['streams'][0]
+        self.assertEqual((video['codec_name'], video['avg_frame_rate'], video['width'], video['height']),
+                         ('h264', '1/1', 640, 360))
+        self.assertEqual(video['color_space'], 'bt709')
+        self.assertAlmostEqual(media.duration(path), 2, delta=.05)
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(), before)
+        self.assertTrue(self.analysis_source()['source_ready'])
+        self.assertEqual(self.client.head(url, headers=self.headers).status_code, 410)
+        self.assertEqual(list(self.adapter.folder.glob('*.mp4')), [])
+        restarted = browser_materials.BrowserMaterials(self.broker)
+        self.assertTrue(restarted.analysis_source(self.device, self.clip['id'])['source_ready'])
+
+    def test_analysis_proxy_survives_partial_model_retry_without_transfer_or_device_lock(self):
+        prepared = self.analysis_source()
+        url = self.transfer(prepared['request'], self.source())
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        path = self.broker.wait_clip(prepared['request']['id'], timeout=0)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        model, together = Mock(), threading.Barrier(2)
+        def embed(*, video):
+            self.assertEqual(Path(video), path)
+            lock = self.adapter.device_lock(self.device)
+            self.assertTrue(lock.acquire(blocking=False), 'paid model must not hold the transfer lock')
+            lock.release()
+            together.wait(5)
+            return [1, 0]
+        def describe(*args, **kwargs):
+            if model.json.call_count == 1:
+                together.wait(5)
+                raise RuntimeError('provider interrupted')
+            return {'description': 'blue'}
+        model.embed.side_effect, model.json.side_effect = embed, describe
+        body = {'clip_id': self.clip['id'], 'source_request_id': prepared['request']['id']}
+        with patch('api.Models', return_value=model):
+            self.assertEqual(self.client.post(self.base + '/analyze', headers=self.headers, json=body).status_code, 503)
+            self.assertTrue(self.analysis_source()['source_ready'])
+            result = self.client.post(self.base + '/analyze', headers=self.headers, json=body)
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual((model.embed.call_count, model.json.call_count), (1, 2))
+        self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), digest)
+        self.assertEqual(self.analysis_source(), {'complete': True})
+
+    def test_analysis_request_checks_owner_clip_kind_and_live_file(self):
+        prepared = self.analysis_source()
+        request = prepared['request']
+        other = {**self.headers, 'X-Material-Owner': 'e' * 64}
+        self.assertEqual(self.client.post(self.base + '/analysis-source', headers=other,
+            json={'clip_id': self.clip['id']}).status_code, 404)
+        body = {'clip_id': self.clip['id'], 'source_request_id': request['id']}
+        self.assertEqual(self.client.post(self.base + '/analyze', headers=self.headers, json=body).status_code, 409)
+        later = {**self.clip, 'id': 'e' * 64, 'start': 0, 'end': 1}
+        self.broker.register_clips(self.device, [later])
+        with patch('api.Models') as models:
+            self.assertEqual(self.client.post(self.base + '/analyze', headers=self.headers,
+                json={**body, 'clip_id': later['id']}).status_code, 409)
+            with self.broker.connect() as db:
+                db.execute("UPDATE requests SET kind='source' WHERE id=?", (request['id'],))
+            self.assertEqual(self.client.post(self.base + '/analyze', headers=self.headers, json=body).status_code, 409)
+        models.assert_not_called()
+
+    def test_analysis_missing_expired_and_revoked_proxies_recover_without_losing_index(self):
+        first = self.analysis_source()['request']
+        url = self.transfer(first, self.source())
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        self.broker.wait_clip(first['id'], timeout=0).unlink()
+        second = self.analysis_source()
+        self.assertFalse(second['source_ready'])
+        self.assertNotEqual(first['id'], second['request']['id'])
+        with self.broker.connect() as db:
+            db.execute('UPDATE requests SET expires=0 WHERE id=?', (second['request']['id'],))
+        third = self.analysis_source()
+        self.assertNotEqual(second['request']['id'], third['request']['id'])
+        self.assertEqual(self.client.delete(self.base + '/assets/' + self.clip['asset_id'], headers=self.headers).status_code, 200)
+        self.assertEqual(self.client.post(self.base + '/analyze', headers=self.headers,
+            json={'clip_id': self.clip['id'], 'source_request_id': third['request']['id']}).status_code, 410)
+
+    def test_analysis_proxy_does_not_replace_source_export_or_evict_render_raw_cache(self):
+        prepared = self.analysis_source()
+        content = self.source()
+        url = self.transfer(prepared['request'], content)
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        proxy = self.broker.wait_clip(prepared['request']['id'], timeout=0)
+        self.analyze()
+        source_request = self.request()
+        url = self.transfer(source_request, content)
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        exported = self.broker.wait_clip(source_request['id'], timeout=0)
+        self.assertNotEqual(proxy, exported)
+        self.assertGreater(len(self.frame_hashes(exported)), len(self.frame_hashes(proxy)))
+        self.assertEqual(self.client.head(url, headers=self.headers).status_code, 200)
+        with self.broker.connect() as db:
+            db.execute('UPDATE requests SET expires=0 WHERE kind=\'analysis\'')
+        self.adapter.cleanup()
+        self.assertFalse(proxy.exists())
+        self.assertTrue(exported.exists())
+        self.assertEqual(len(self.broker.indexed_clips(self.device)), 1)
+
+    def test_render_preview_reuses_analysis_proxy_and_never_accepts_it_as_an_analysis_request(self):
+        prepared = self.analysis_source()
+        url = self.transfer(prepared['request'], self.source())
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        proxy = self.broker.wait_clip(prepared['request']['id'], timeout=0)
+        self.analyze()
+        preview = self.request(kind='proxy')
+        self.assertEqual(self.client.get(self.base + '/requests', headers=self.headers).json(), {'requests': []})
+        self.assertEqual(proxy.read_bytes(), self.broker.wait_clip(preview['id'], timeout=0).read_bytes())
+        with patch('api.Models') as models:
+            response = self.client.post(self.base + '/analyze', headers=self.headers,
+                json={'clip_id': self.clip['id'], 'source_request_id': preview['id']})
+        self.assertEqual(response.status_code, 409)
+        models.assert_not_called()
+
+    def test_render_poller_does_not_wait_on_native_proxy_transfer(self):
+        lock = self.adapter.device_lock(self.device)
+        lock.acquire()
+        finished = threading.Event()
+        def poll():
+            self.adapter.requests(self.device)
+            finished.set()
+        worker = threading.Thread(target=poll)
+        try:
+            worker.start()
+            self.assertTrue(finished.wait(1), 'request polling must not wait behind native decoding')
+        finally:
+            lock.release()
+            worker.join(5)
+
+    def test_subsecond_analysis_proxy_has_a_complete_frame(self):
+        short = {**self.clip, 'id': 'e' * 64, 'start': 3.9, 'end': 4}
+        self.broker.register_clips(self.device, [short])
+        prepared = self.analysis_source(short)
+        url = self.transfer(prepared['request'], self.source())
+        response = self.client.post(url + '/complete', headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        proxy = self.broker.wait_clip(prepared['request']['id'], timeout=0)
+        self.assertEqual(len(self.frame_hashes(proxy)), 1)
+
+    def test_restart_releases_raw_bytes_left_after_analysis_proxy_commit(self):
+        request = self.analysis_source()['request']
+        content = self.source()
+        url = self.transfer(request, content)
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        with self.broker.connect() as db:
+            raw = Path(db.execute('SELECT path FROM browser_files').fetchone()[0])
+            raw.write_bytes(content)
+            db.execute("UPDATE browser_files SET state='uploading'")
+        browser_materials.BrowserMaterials(self.broker)
+        self.assertFalse(raw.exists())
+        self.assertTrue(self.analysis_source()['source_ready'])
+
+    def test_interrupted_native_proxy_finalization_can_retry(self):
+        request = self.analysis_source()['request']
+        content = self.source()
+        url = self.transfer(request, content)
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        # Crash after writing a valid upload, before its processing transaction committed.
+        with self.broker.connect() as db:
+            db.execute("UPDATE requests SET state='pending',path=NULL WHERE id=?", (request['id'],))
+            db.execute("UPDATE uploads SET state='processing' WHERE request_id=?", (request['id'],))
+        self.assertFalse(self.analysis_source()['source_ready'])
+        again = self.transfer(request, content)
+        response = self.client.post(again + '/complete', headers=self.headers)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(self.analysis_source()['source_ready'])
+
+    def test_analysis_source_rejects_other_device_and_changed_clip_version(self):
+        request = self.analysis_source()['request']
+        other = self.connect(key='f' * 64)['device_id']
+        self.broker.register_clips(other, [self.clip])
+        body = {'clip_id': self.clip['id'], 'source_request_id': request['id']}
+        self.assertEqual(self.client.post('/v1/browser-materials/devices/' + other + '/analyze',
+                                         headers=self.headers, json=body).status_code, 404)
+        with self.broker.connect() as db:
+            db.execute('UPDATE requests SET start=0 WHERE id=?', (request['id'],))
+        self.assertEqual(self.client.post(self.base + '/analyze', headers=self.headers, json=body).status_code, 410)
+
+    def test_analysis_transfer_replaces_expired_raw_cache_before_throttled_cleanup(self):
+        request = self.analysis_source()['request']
+        content = self.source()
+        url = self.transfer(request, content)
+        with self.broker.connect() as db:
+            db.execute('UPDATE browser_files SET expires=0')
+        self.adapter._last_cleanup = time.time()
+        response = self.client.post(self.base + '/requests/' + request['id'] + '/file',
+                                   headers=self.headers, json={'size': len(content)})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotEqual(response.json()['id'], url.split('/')[-1])
+        self.assertEqual(response.json()['offset'], 0)
+
+    def test_render_source_bytes_survive_analysis_of_another_clip_of_same_asset(self):
+        self.analyze()
+        source_request = self.request()
+        content = self.source()
+        source_url = self.transfer(source_request, content)
+        self.assertEqual(self.client.post(source_url + '/complete', headers=self.headers).status_code, 200)
+        later = {**self.clip, 'id': 'e' * 64, 'start': 0, 'end': 1}
+        self.broker.register_clips(self.device, [later])
+        request = self.analysis_source(later)['request']
+        # The browser prefers sparse transfer for analysis, including small MOV/MP4 files.
+        sparse = self.client.post(self.base + '/requests/' + request['id'] + '/sparse', headers=self.headers,
+                                  json={'size': len(content), 'ranges': self.index_ranges(content)})
+        self.assertEqual(sparse.status_code, 422, 'a cached full source must route back to resumable full transfer')
+        segment = self.client.post(self.base + '/requests/' + request['id'] + '/segment', headers=self.headers,
+                                   json={'size': 100, 'origin': 0})
+        self.assertEqual(segment.status_code, 422, 'a segment fallback must also preserve cached render source bytes')
+        # The raw full-file cache is already complete: native proxy preparation reuses it.
+        begin = self.client.post(self.base + '/requests/' + request['id'] + '/file', headers=self.headers,
+                                 json={'size': len(content)})
+        self.assertEqual(begin.json()['offset'], len(content))
+        self.assertEqual(self.client.post(source_url + '/complete', headers=self.headers).status_code, 200)
+        self.assertTrue(self.analysis_source(later)['source_ready'])
+        self.assertEqual(self.client.head(source_url, headers=self.headers).status_code, 200)
+        self.assertTrue(self.broker.wait_clip(source_request['id'], timeout=0).exists())
+
     def test_connection_is_persistent_idempotent_and_owner_scoped(self):
         self.assertEqual(self.connect()['device_id'], self.device)
         other = self.connect(owner='e' * 64)['device_id']
@@ -123,38 +363,46 @@ class BrowserMaterialBackendTests(unittest.TestCase):
                                                 headers=self.headers).status_code, 200)
         self.assertEqual(self.broker.status(self.owner)['devices'], [])
 
-    def test_heartbeat_waiting_for_transfer_lock_does_not_block_shared_event_loop(self):
-        heartbeat_done, health_done = threading.Event(), threading.Event()
-        responses = {}
-        with TestClient(self.app) as client:
-            self.assertEqual(client.get('/health', headers=self.headers).status_code, 200)
-            def heartbeat():
-                try:
-                    responses['heartbeat'] = client.post(self.base + '/heartbeat',
-                        headers=self.headers, json={'status': 'ready'})
-                finally:
-                    heartbeat_done.set()
-            def health():
-                try:
-                    responses['health'] = client.get('/health', headers=self.headers)
-                finally:
-                    health_done.set()
-            self.adapter.transfer_lock.acquire()
-            waiting = threading.Thread(target=heartbeat)
-            probe = threading.Thread(target=health)
-            try:
-                waiting.start()
-                self.assertFalse(heartbeat_done.wait(.2), 'Heartbeat must be waiting for the held transfer lock')
-                probe.start()
-                responsive = health_done.wait(.75)
-            finally:
-                self.adapter.transfer_lock.release()
-                waiting.join(5)
-                if probe.ident is not None:
-                    probe.join(5)
-            self.assertTrue(responsive, 'A blocked heartbeat must not prevent unrelated routes from running')
-            self.assertEqual(responses['health'].status_code, 200)
-            self.assertEqual(responses['heartbeat'].status_code, 200)
+    def test_heartbeat_never_waits_for_a_folder_transfer_and_keeps_its_file(self):
+        self.analyze()
+        request = self.request()
+        content = self.source()
+        upload = self.client.post(self.base + '/requests/' + request['id'] + '/file',
+                                  headers=self.headers, json={'size': len(content)}).json()
+        with self.broker.connect() as db:
+            db.execute('UPDATE browser_files SET expires=0')
+            path = Path(db.execute('SELECT path FROM browser_files').fetchone()[0])
+        lock = self.adapter.device_lock(self.device)
+        lock.acquire()
+        try:
+            self.adapter._last_cleanup = None
+            started = time.monotonic()
+            response = self.client.post(self.base + '/heartbeat', headers=self.headers, json={'status': 'ready'})
+            elapsed = time.monotonic() - started
+            self.assertTrue(path.exists(), 'Cleanup must skip a folder whose transfer holds its lock')
+        finally:
+            lock.release()
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertLess(elapsed, 2)
+        self.adapter.cleanup()
+        self.assertFalse(path.exists())
+        self.assertEqual(self.client.head(self.base + '/files/' + upload['id'], headers=self.headers).status_code, 410)
+
+    def test_transfers_of_different_folders_use_independent_locks(self):
+        other = self.connect(key='f' * 64)['device_id']
+        self.assertIsNot(self.adapter.device_lock(self.device), self.adapter.device_lock(other))
+        self.assertIs(self.adapter.device_lock(self.device), self.adapter.device_lock(self.device))
+
+    def test_hot_path_cleanup_is_throttled_but_explicit_cleanup_is_immediate(self):
+        with patch.object(self.adapter, '_cleanup', wraps=self.adapter._cleanup) as scan:
+            self.adapter._last_cleanup = time.time()
+            self.adapter.maybe_cleanup()
+            scan.assert_not_called()
+            self.adapter._last_cleanup = time.time() - local_materials.CLEANUP_INTERVAL - 1
+            self.adapter.maybe_cleanup()
+            scan.assert_called_once_with(blocking=False)
+            self.adapter.cleanup()
+            scan.assert_called_with(blocking=True)
 
     def test_routes_require_admin_owner_and_membership(self):
         other = {**self.headers, 'X-Material-Owner': 'e' * 64}
@@ -202,7 +450,7 @@ class BrowserMaterialBackendTests(unittest.TestCase):
             together.wait(3)
             return [1, 0]
 
-        def describe(*args):
+        def describe(*args, **kwargs):
             if model.json.call_count == 1:
                 together.wait(3)
                 raise RuntimeError('provider interrupted')
@@ -219,7 +467,7 @@ class BrowserMaterialBackendTests(unittest.TestCase):
                 self.assertEqual(db.execute('SELECT count(*) FROM browser_analysis').fetchone()[0], 0)
             self.assertEqual(clip['state'], 'error')
             self.assertIsNotNone(clip['vector'])
-            self.assertEqual(json.loads(clip['vector']), [1, 0])
+            self.assertEqual(local_materials.unpack_vector(clip['vector']).tolist(), [1, 0])
             self.assertIsNone(clip['description'])
             self.assertEqual(self.broker.indexed_clips(self.device), [])
             self.assertEqual(list(self.broker.folder.rglob('*.mp4')), [])
@@ -240,7 +488,7 @@ class BrowserMaterialBackendTests(unittest.TestCase):
                 raise RuntimeError('provider interrupted')
             return [1, 0]
 
-        def describe(*args):
+        def describe(*args, **kwargs):
             together.wait(3)
             return {'description': '蓝色'}
 
@@ -536,6 +784,201 @@ class BrowserMaterialBackendTests(unittest.TestCase):
         invalid = self.transfer(request, b'not-a-video')
         self.assertEqual(self.client.post(invalid + '/complete', headers=self.headers).status_code, 422)
 
+
+    def long_source(self, name='long-source.mp4', seconds=20):
+        path = self.root / name
+        media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-f', 'lavfi', '-i', f'testsrc2=s=320x240:r=25:d={seconds}',
+                   '-f', 'lavfi', '-i', f'sine=frequency=440:sample_rate=48000:duration={seconds}',
+                   '-c:v', 'libx264', '-g', '10', '-crf', '0', '-c:a', 'aac', str(path)])
+        return path
+
+    @staticmethod
+    def index_ranges(content):
+        """What the browser sends first: every top-level box except mdat payloads."""
+        ranges, offset = [], 0
+        while offset + 8 <= len(content):
+            size, kind, header = int.from_bytes(content[offset:offset + 4], 'big'), content[offset + 4:offset + 8], 8
+            if size == 1:
+                size, header = int.from_bytes(content[offset + 8:offset + 16], 'big'), 16
+            elif size == 0:
+                size = len(content) - offset
+            ranges.append([offset, offset + (header if kind == b'mdat' else size)])
+            offset += size
+        return ranges
+
+    def send_ranges(self, url, content, ranges):
+        sent = 0
+        for start, end in ranges:
+            for offset in range(start, end, local_materials.MAX_CHUNK):
+                chunk = content[offset:min(end, offset + local_materials.MAX_CHUNK)]
+                response = self.client.patch(url, headers={**self.headers, 'Upload-Offset': str(offset),
+                    'Upload-Checksum': hashlib.sha256(chunk).hexdigest()}, content=chunk)
+                self.assertEqual(response.status_code, 200, response.text)
+                sent += len(chunk)
+        return sent
+
+    def sparse_transfer(self, request, content):
+        response = self.client.post(self.base + '/requests/' + request['id'] + '/sparse', headers=self.headers,
+                                    json={'size': len(content), 'ranges': self.index_ranges(content)})
+        self.assertEqual(response.status_code, 200, response.text)
+        url = self.base + '/files/' + response.json()['id']
+        sent = self.send_ranges(url, content, response.json()['ranges'])
+        plan = self.client.post(url + '/plan', headers=self.headers)
+        self.assertEqual(plan.status_code, 200, plan.text)
+        return url, sent + self.send_ranges(url, content, plan.json()['ranges'])
+
+    def expected_cut(self, source, request, name):
+        output = self.root / name
+        color_filter, _ = media.sdr_filter(media.video_color(source))
+        self.adapter._extract(source, request, request['start'], color_filter, output)
+        return output
+
+    def frame_hashes(self, path, streams='0'):
+        output = path.with_suffix('.framemd5')
+        media.run(['ffmpeg', '-v', 'error', '-y', '-i', str(path), '-map', streams, '-f', 'framemd5', str(output)])
+        return [line.rsplit(',', 1)[1].strip() for line in output.read_text().splitlines()
+                if line and not line.startswith('#')]
+
+    def test_sparse_source_uploads_only_index_and_needed_packets_and_cuts_identically(self):
+        self.analyze()
+        source = self.long_source()
+        content = source.read_bytes()
+        request = self.request()
+        url, sent = self.sparse_transfer(request, content)
+        self.assertLess(sent, len(content) / 2, 'Only the index and the requested interval may be uploaded')
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        extracted = self.broker.wait_clip(request['id'], timeout=0)
+        expected = self.expected_cut(source, request, 'expected-sparse.mp4')
+        self.assertEqual(self.frame_hashes(extracted), self.frame_hashes(expected))
+        with self.broker.connect() as db:
+            row = db.execute('SELECT mode,size,offset FROM browser_files').fetchone()
+        self.assertEqual((row['mode'], row['size']), ('sparse', len(content)))
+        self.assertLess(row['offset'], len(content) / 2, 'Quota counts uploaded ranges, not the declared size')
+
+    def test_sparse_source_plans_new_requests_and_never_cuts_unplanned_ranges(self):
+        self.analyze()
+        later_clip = {'id': 'e' * 64, 'asset_id': self.clip['asset_id'], 'name': 'pool.mp4', 'start': 15, 'end': 17}
+        self.assertEqual(self.client.post(self.base + '/clips', headers=self.headers,
+                                          json={'clips': [later_clip]}).status_code, 200)
+        with self.broker.connect() as db:
+            db.execute("UPDATE clips SET state='indexed'")
+        source = self.long_source()
+        content = source.read_bytes()
+        first = self.request()
+        url, _ = self.sparse_transfer(first, content)
+        unplanned = self.request(job='2' * 32, clip=later_clip)
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        self.assertTrue(self.broker.wait_clip(first['id'], timeout=0).is_file())
+        pending = self.client.get(self.base + '/requests', headers=self.headers).json()['requests']
+        self.assertEqual([item['id'] for item in pending], [unplanned['id']])
+        again, _ = self.sparse_transfer(unplanned, content)
+        self.assertEqual(again, url, 'The same sparse file grows with the new ranges')
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        extracted = self.broker.wait_clip(unplanned['id'], timeout=0)
+        expected = self.expected_cut(source, {**unplanned, 'start': 15, 'end': 17}, 'expected-later.mp4')
+        self.assertEqual(self.frame_hashes(extracted), self.frame_hashes(expected))
+
+    def test_sparse_rejects_writes_outside_planned_ranges_and_incomplete_completion(self):
+        self.analyze()
+        content = self.long_source().read_bytes()
+        request = self.request()
+        response = self.client.post(self.base + '/requests/' + request['id'] + '/sparse', headers=self.headers,
+                                    json={'size': len(content), 'ranges': self.index_ranges(content)})
+        url = self.base + '/files/' + response.json()['id']
+        self.assertEqual(self.client.post(url + '/plan', headers=self.headers).status_code, 409)
+        self.send_ranges(url, content, response.json()['ranges'])
+        planned = self.client.post(url + '/plan', headers=self.headers).json()['ranges']
+        gaps = [end for (_, end), (start, _) in zip(planned, planned[1:]) if start - end > 10]
+        position = gaps[0] + 1 if gaps else planned[-1][1] + 1
+        self.assertLess(position + 8, len(content))
+        chunk = b'x' * 8
+        self.assertEqual(self.client.patch(url, headers={**self.headers, 'Upload-Offset': str(position),
+            'Upload-Checksum': hashlib.sha256(chunk).hexdigest()}, content=chunk).status_code, 409)
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 409)
+        for bad in ([[0, len(content) + 1]], [], [[5, 5]], 'x'):
+            self.assertEqual(self.client.post(self.base + '/requests/' + request['id'] + '/sparse', headers=self.headers,
+                                              json={'size': len(content), 'ranges': bad}).status_code, 400)
+
+    def test_unparseable_sparse_index_expires_upload_for_segment_fallback(self):
+        self.analyze()
+        content = b'\x00\x00\x00\x10ftypisom\x00\x00\x00\x00' + b'\x00' * 64
+        request = self.request()
+        response = self.client.post(self.base + '/requests/' + request['id'] + '/sparse', headers=self.headers,
+                                    json={'size': len(content), 'ranges': [[0, len(content)]]})
+        url = self.base + '/files/' + response.json()['id']
+        self.send_ranges(url, content, response.json()['ranges'])
+        self.assertEqual(self.client.post(url + '/plan', headers=self.headers).status_code, 422)
+        self.assertEqual(self.client.head(url, headers=self.headers).status_code, 410)
+        self.assertEqual(list(self.adapter.folder.glob('*.mp4')), [])
+
+    def test_wasm_style_stream_copy_segment_keeps_original_timeline(self):
+        self.analyze()
+        source = self.long_source()
+        segment = self.root / 'copy.mkv'
+        media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-ss', '0.5', '-t', '3.5', '-i', str(source),
+                   '-map', '0:v:0', '-map', '0:a:0?', '-c', 'copy', '-copyts', '-f', 'matroska', str(segment)])
+        content = segment.read_bytes()
+        request = self.request()
+        response = self.client.post(self.base + '/requests/' + request['id'] + '/segment', headers=self.headers,
+                                    json={'size': len(content), 'origin': 0})
+        self.assertEqual(response.status_code, 200, response.text)
+        url = self.base + '/files/' + response.json()['id']
+        self.send_ranges(url, content, [[0, len(content)]])
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 200)
+        extracted = self.broker.wait_clip(request['id'], timeout=0)
+        expected = self.expected_cut(source, request, 'expected-segment.mp4')
+        # Video is frame-identical; AAC differs only by decoder warm-up after the earlier seek.
+        self.assertEqual(self.frame_hashes(extracted, '0:v'), self.frame_hashes(expected, '0:v'))
+        self.assertTrue(media.has_audio(extracted))
+        later = self.request(job='2' * 32)
+        self.assertEqual(self.client.get(self.base + '/requests', headers=self.headers).json(), {'requests': []})
+        self.assertTrue(self.broker.wait_clip(later['id'], timeout=0).is_file())
+
+    def test_segment_that_misses_the_request_is_rejected(self):
+        self.analyze()
+        source = self.long_source()
+        segment = self.root / 'early.mkv'
+        media.run(['ffmpeg', '-v', 'error', '-nostdin', '-y', '-t', '1.5', '-i', str(source),
+                   '-map', '0:v:0', '-c', 'copy', '-copyts', '-f', 'matroska', str(segment)])
+        content = segment.read_bytes()
+        request = self.request()
+        for origin in ('0', None, 1e9):
+            self.assertEqual(self.client.post(self.base + '/requests/' + request['id'] + '/segment', headers=self.headers,
+                json={'size': len(content), 'origin': origin}).status_code, 400)
+        response = self.client.post(self.base + '/requests/' + request['id'] + '/segment', headers=self.headers,
+                                    json={'size': len(content), 'origin': 0})
+        url = self.base + '/files/' + response.json()['id']
+        self.send_ranges(url, content, [[0, len(content)]])
+        self.assertEqual(self.client.post(url + '/complete', headers=self.headers).status_code, 422)
+        self.assertEqual(self.client.get(self.base + '/requests', headers=self.headers).json()['requests'][0]['id'],
+                         request['id'])
+
+    def test_jpeg_size_reads_start_of_frame_without_probe(self):
+        image = io.BytesIO()
+        Image.new('RGB', (37, 21), 'red').save(image, format='JPEG', progressive=True)
+        self.assertEqual(browser_materials.jpeg_size(image.getvalue()), (37, 21))
+        for content in (b'\xff\xd8\xff\xd9', b'\xff\xd8\x00\x00\x00\x00', b'\xff\xd8\xff\xe0\x00\x01'):
+            with self.assertRaises(ValueError):
+                browser_materials.jpeg_size(content)
+
+    def test_deferred_analysis_indexes_on_vector_and_queue_completes_description(self):
+        import api
+        self.adapter.defer_descriptions = True
+        model = Mock()
+        model.embed.return_value = [1, 0]
+        model.json.return_value = {'description': '蓝色游泳池'}
+        with patch('api.Models', return_value=model):
+            response = self.client.post(self.base + '/analyze', headers=self.headers,
+                json={'clip_id': self.clip['id'], 'frames': self.frames()})
+            self.assertEqual(response.status_code, 200, response.text)
+            model.json.assert_not_called()
+            self.assertIsNone(self.broker.indexed_clips(self.device)[0]['description'])
+            self.assertEqual(self.broker.describe_backlog(), 1)
+            self.assertTrue(self.broker.describe_next())
+            self.assertFalse(self.broker.describe_next())
+        self.assertEqual(model.json.call_args.kwargs['config'], api.DESCRIBE_CONFIG)
+        self.assertEqual(self.broker.indexed_clips(self.device)[0]['description'], '蓝色游泳池')
+        self.assertEqual(list((self.broker.folder / 'describe').iterdir()), [])
 
 if __name__ == '__main__':
     unittest.main()

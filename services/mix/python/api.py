@@ -3,6 +3,7 @@ import base64
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -12,6 +13,15 @@ import requests
 EMBED_URL = 'https://api.openlux.ai/v1beta/models/gemini-embedding-2-preview:generateContent'
 LLM_URL = 'https://api.openlux.ai/v1beta/models/gemini-3.7-flash:generateContent'
 RERANK_URL = 'https://api.302.ai/v1/reranks'
+# All users share one process: bound concurrent provider calls instead of letting
+# many browser analysis requests fan out into rate-limit retries.
+MODEL_SLOTS = threading.BoundedSemaphore(max(1, int(os.environ.get('MIX_MODEL_CONCURRENCY') or 16)))
+# Clip descriptions only need visible facts: skip long reasoning and high-res media tokens.
+# gemini-3.7-flash on OpenLux allows only low/medium/high; 'minimal' is rejected with HTTP 400.
+DESCRIBE_CONFIG = {'thinkingConfig': {'thinkingLevel': os.environ.get('MIX_DESCRIBE_THINKING') or 'low'},
+                   'mediaResolution': os.environ.get('MIX_DESCRIBE_MEDIA_RESOLUTION') or 'MEDIA_RESOLUTION_LOW'}
+_local = threading.local()
+_unsupported_config = set()
 
 
 def clean_error(value):
@@ -38,12 +48,20 @@ def unit_vector(values):
     return v / np.linalg.norm(v)
 
 
+def thread_session():
+    """Reuse TLS connections per worker thread; requests.Session is not thread-safe."""
+    session = getattr(_local, 'session', None)
+    if session is None:
+        session = _local.session = requests.Session()
+    return session
+
+
 class Models:
     def __init__(self):
         self.embed_url = os.environ.get('EMBEDDING_URL') or EMBED_URL
         self.llm_url = os.environ.get('LLM_URL') or LLM_URL
         self.rerank_url = os.environ.get('RERANK_URL') or RERANK_URL
-        self.session = requests.Session()
+        self.session = thread_session()
 
     def post(self, url, key_name, payload):
         key = os.environ.get(key_name)
@@ -51,8 +69,9 @@ class Models:
             raise ValueError(f'请先设置进程环境变量 {key_name}，不要写入技能文件')
         for attempt in range(3):
             try:
-                r = self.session.post(url, headers={'Authorization': f'Bearer {key}'},
-                                      json=payload, timeout=(15, 180), allow_redirects=False)
+                with MODEL_SLOTS:
+                    r = self.session.post(url, headers={'Authorization': f'Bearer {key}'},
+                                          json=payload, timeout=(15, 180), allow_redirects=False)
             except requests.RequestException as exc:
                 if attempt < 2:
                     time.sleep(2 ** (attempt + 1))
@@ -81,13 +100,22 @@ class Models:
         data = self.post(self.embed_url, 'OPENLUX_API_KEY', payload)
         return unit_vector(data.get('embedding', {}).get('values', []))
 
-    def json(self, prompt, videos=()):
+    def json(self, prompt, videos=(), config=None):
         parts = [{'text': prompt}]
         for label, path in videos:
             parts.extend([{'text': f'候选片段 ID={label}'}, video_part(path)])
-        data = self.post(self.llm_url, 'OPENLUX_API_KEY', {
-            'contents': [{'role': 'user', 'parts': parts}],
-            'generationConfig': {'responseMimeType': 'application/json', 'maxOutputTokens': 8192}})
+        base = {'responseMimeType': 'application/json', 'maxOutputTokens': 8192}
+        extra = {k: v for k, v in (config or {}).items() if k not in _unsupported_config}
+        try:
+            data = self.post(self.llm_url, 'OPENLUX_API_KEY', {
+                'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': base | extra})
+        except RuntimeError as exc:
+            if not extra or not str(exc).startswith('HTTP 400'):
+                raise
+            # A gateway that rejects the speed options keeps working with the plain request.
+            data = self.post(self.llm_url, 'OPENLUX_API_KEY', {
+                'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': base})
+            _unsupported_config.update(extra)
         candidates = data.get('candidates', [])
         if not candidates or candidates[0].get('finishReason') not in ('STOP', None):
             raise ValueError('模型输出被截断或拦截，不能作为有效结果')
@@ -104,7 +132,7 @@ class Models:
             return []
         data = self.post(self.rerank_url, 'RERANK_API_KEY', {
             'model': 'qwen3-rerank', 'query': query,
-            'documents': [c['description'] for c in candidates],
+            'documents': [c.get('description') or '画面描述生成中' for c in candidates],
             'top_n': min(10, len(candidates)),
             'instruct': 'Find video descriptions whose visible subjects, setting and actions match the query.'})
         results = data.get('results', [])

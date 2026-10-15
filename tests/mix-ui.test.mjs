@@ -562,6 +562,79 @@ test('saved jobs resume polling without submitting another render request', asyn
   } finally { f.restore(); }
 });
 
+test('running mix exposes the latest real step, elapsed time and escaped logs', async () => {
+  const f = await fixture();
+  try {
+    const job = { id, state: 'running', created: 1000, updated: 1060,
+      logs: ['匹配 1/4: 门店环境', '生成配音 2/4：<img src=x onerror=alert(1)>'] };
+    assert.equal(typeof f.mod.renderMixProgress, 'function');
+    const html = f.mod.renderMixProgress(job, 1090000);
+    assert.match(html, /当前步骤/);
+    assert.match(html, /生成配音 2\/4/);
+    assert.match(html, /1 分 30 秒/);
+    assert.match(html, /30 秒前/);
+    assert.match(html, /匹配 1\/4/);
+    assert.doesNotMatch(html, /<img/);
+    assert.match(html, /&lt;img/);
+    const stale = f.mod.renderMixProgress(job, 1300000);
+    assert.match(stale, /暂无新进展/);
+    assert.doesNotMatch(stale, /制作失败|100%/);
+    const queued = f.mod.renderMixProgress({ ...job, state: 'queued' }, 1300000);
+    assert.match(queued, /正在排队，等待开始制作/);
+    const failed = f.mod.renderMixProgress({ ...job, state: 'failed', error: '配音查询失败' }, 1300000);
+    assert.match(failed, /配音查询失败/);
+    assert.doesNotMatch(failed, /暂无新进展/);
+  } finally { f.restore(); }
+});
+
+test('polls update progress, preview caption and history without replacing the editor', async () => {
+  let job = { id, state: 'queued', logs: [], created: Date.now() / 1000, updated: Date.now() / 1000 };
+  const f = await fixture({ useShared: true, pending: { id }, fetchJob: async url =>
+    Response.json(url === '/api/mix/jobs' ? { jobs: [job] } : job) });
+  const labels = [0, 1].map(() => ({ dataset: { mixJobLabel: id }, textContent: '任务已提交' }));
+  const previousQuery = f.root.querySelectorAll;
+  f.root.querySelectorAll = selector => selector === '[data-mix-job-label]' ? labels : previousQuery(selector);
+  f.nodes['#mix-job-details'] = { innerHTML: '' };
+  let refreshes = 0;
+  f.ctx.refresh = () => { refreshes++; };
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const before = refreshes;
+    job = { ...job, state: 'running', logs: ['匹配 2/5: 产品细节'] };
+    f.mod.handleMixMaterialAction('mix-refresh-job', { dataset: {} }, f.ctx);
+    await settle(() => f.mod.getMixState().job?.state === 'running');
+    assert.equal(refreshes, before);
+    assert.ok(labels.every(node => node.textContent === '正在制作视频'));
+    assert.match(f.nodes['#mix-job-details'].innerHTML, /匹配 2\/5/);
+    f.mod.getMixState().view = 'result';
+    const html = renderStudio('mix', f.ctx);
+    assert.match(html, /id="mix-job-details"/);
+    assert.equal((html.match(/data-mix-job-label=/g) || []).length, 2);
+    assert.equal(f.calls.some(call => call.method === 'POST' && call.url === '/api/mix/jobs'), false);
+  } finally { f.restore(); }
+});
+
+test('failed status polling stays visible beside the last known step despite material errors', async () => {
+  let failed = false;
+  const job = { id, state: 'running', logs: ['导出画面、配音与字幕…'] };
+  const f = await fixture({ pending: { id }, fetchJob: async url => failed
+    ? Response.json({ error: '服务器暂时不可用' }, { status: 503 })
+    : Response.json(url === '/api/mix/jobs' ? { jobs: [job] } : job) });
+  f.nodes['#mix-job-details'] = { innerHTML: '' };
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    f.mod.getMixState().status.error = '某个素材分析失败';
+    failed = true;
+    f.mod.handleMixMaterialAction('mix-refresh-job', { dataset: {} }, f.ctx);
+    await settle(() => f.mod.getMixState().error.includes('服务器暂时不可用'));
+    assert.match(f.nodes['#mix-job-details'].innerHTML, /进度暂时无法更新/);
+    assert.match(f.nodes['#mix-job-details'].innerHTML, /服务器暂时不可用/);
+    assert.match(f.nodes['#mix-job-details'].innerHTML, /导出画面/);
+    assert.equal(f.mod.getMixState().job.state, 'running');
+    assert.ok(f.mod.getMixState().timer);
+  } finally { f.restore(); }
+});
+
 test('source engine done and interrupted states stop polling and enable a new job', async () => {
   const f = await fixture({ pending: { id }, fetchJob: async url => Response.json(url === '/api/mix/jobs'
     ? { jobs: [] } : { id, state: 'done', video_url: `/api/mix/jobs/${id}/video` }) });

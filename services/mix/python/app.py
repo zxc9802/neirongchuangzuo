@@ -83,6 +83,7 @@ def generate(spec, folder, log, audio_library=None):
     write_json(catalog / 'remote.json', {'root': str(broker.root),
                'device_id': spec['device_id'], 'job_id': folder.name})
     saved = folder / 'plan.json'
+    log('正在恢复已保存的素材匹配…' if saved.exists() else '正在拆解文案并匹配分镜…')
     plan = json.loads(saved.read_text(encoding='utf-8')) if saved.exists() else create_plan(
         spec['text'], catalog, folder, log=log)
     if plan['script'] != spec['text']:
@@ -98,12 +99,16 @@ def generate(spec, folder, log, audio_library=None):
             scene.get('voice') and Path(scene['voice']).is_file() for scene in plan['scenes'])):
         log('复用已完成配音与时间轴')
     else:
+        log('正在准备音色并合成配音…')
         voice_config = dict(spec['voice_config'])
         if spec.get('voice_id'):
             voice_config.update(speaker_url=library.signed_url(spec['owner'], spec['voice_id']),
                                 speaker_cache_key='library:' + spec['voice_id'] + ':' + spec['voice_sha256'])
         synthesize_plan(plan, folder, log=log, **voice_config)
+    if spec.get('music_id'):
+        log('正在读取背景音乐…')
     music_file = library.download(spec['owner'], spec['music_id'], folder) if spec.get('music_id') else None
+    log('正在准备成片镜头…')
     return deliver(plan, folder, spec['width'], spec['height'], catalog=catalog, music_file=music_file, log=log)
 
 
@@ -194,7 +199,7 @@ class Jobs:
                        (json.dumps((logs + [clean_error(message)])[-100:], ensure_ascii=False), time.time(), job_id))
 
     def run_one(self, runner=generate):
-        self.materials.cleanup()
+        self.materials.maybe_cleanup()
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             row = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created LIMIT 1").fetchone()
@@ -206,6 +211,7 @@ class Jobs:
         folder.mkdir(parents=True, exist_ok=True)
         try:
             spec = json.loads(row['spec'])
+            self.log(job_id, '任务已开始，正在准备制作…')
             self.materials.device(spec['device_id'], spec['owner'])
             saved = folder / row['result'] if row['result'] else None
             result = (saved if saved and saved.is_file() and (folder / 'quality-report.json').is_file()
@@ -298,24 +304,44 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
                   if runner is generate else runner)
     stop = threading.Event()
 
-    def work():
-        last_cleanup = 0
+    def maintain():
         while not stop.is_set():
             try:
-                if time.monotonic() - last_cleanup >= 60:
-                    app.state.browser_materials.cleanup()
-                    jobs.cleanup()
-                    last_cleanup = time.monotonic()
+                app.state.browser_materials.cleanup()
+                jobs.cleanup()
+            except Exception as exc:
+                print('素材清理暂不可用：' + clean_error(exc), flush=True)
+            stop.wait(60)
+
+    def work():
+        while not stop.is_set():
+            try:
                 if not jobs.run_one(job_runner):
                     stop.wait(1)
             except Exception as exc:
                 print('混剪工作线程暂不可用：' + clean_error(exc), flush=True)
                 stop.wait(5)
 
+    def describe():
+        # Clips are searchable once their vector exists; descriptions finish here.
+        while not stop.is_set():
+            try:
+                if not jobs.materials.describe_next():
+                    stop.wait(2)
+            except Exception as exc:
+                print('素材画面描述暂不可用：' + clean_error(exc), flush=True)
+                stop.wait(5)
+
     @asynccontextmanager
     async def lifespan(app):
         if start_worker:
-            threading.Thread(target=work, name='browser-mixer', daemon=True).start()
+            jobs.materials.recover_descriptions()
+            app.state.browser_materials.defer_descriptions = True
+            threading.Thread(target=maintain, name='browser-mixer-cleanup', daemon=True).start()
+            for index in range(max(1, int(os.environ.get('MIX_JOB_WORKERS') or 2))):
+                threading.Thread(target=work, name=f'browser-mixer-{index}', daemon=True).start()
+            for index in range(max(1, int(os.environ.get('MIX_DESCRIBE_WORKERS') or 6))):
+                threading.Thread(target=describe, name=f'browser-describe-{index}', daemon=True).start()
         yield
         stop.set()
 

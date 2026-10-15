@@ -16,7 +16,7 @@
     "test:digital-human": "npm --prefix services/digital-human test",
     "build:digital-human": "npm --prefix services/digital-human run build",
     "test:restaurant": "node --test tests/restaurant-*.test.mjs",
-    "check:mix": "node --check design/browser-materials.js && node --check design/material-repair.js && node --check design/mix-materials.js && node --check services/mix/server.mjs"
+    "check:mix": "node --check design/browser-materials.js && node --check design/wasm-media.js && node --check design/mix-materials.js && node --check services/mix/server.mjs"
   },
   "engines": {
     "node": ">=20.19.0"
