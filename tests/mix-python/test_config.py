@@ -18,6 +18,19 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual((models.embed_url, models.llm_url, models.rerank_url),
                          (api.EMBED_URL, api.LLM_URL, api.RERANK_URL))
 
+    def test_embeddings_use_native_embed_content_route_without_changing_catalog_identity(self):
+        response = Mock(status_code=200)
+        response.json.return_value = {'embedding': {'values': [3, 4]}}
+        with patch.dict(os.environ, {'OPENLUX_API_KEY': 'test', 'EMBEDDING_URL': ''}):
+            models = api.Models()
+            with patch.object(models.session, 'post', return_value=response) as post:
+                vector = models.embed(text='酒店门口')
+        self.assertEqual(models.embed_url, api.EMBED_URL)
+        self.assertEqual(post.call_args.args[0],
+                         'https://api.openlux.ai/v1beta/models/gemini-embedding-2-preview:embedContent')
+        self.assertEqual(post.call_args.kwargs['json'], {'content': {'parts': [{'text': '酒店门口'}]}})
+        self.assertAlmostEqual(float(vector[0]), .6, places=5)
+
     def test_provider_errors_redact_index_tts_credential_alias(self):
         with patch.dict(os.environ, {'INDEXTTS_302_API_KEY': 'test-index-tts-private-key'}):
             self.assertEqual(api.clean_error('provider failed: test-index-tts-private-key'),

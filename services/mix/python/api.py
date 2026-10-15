@@ -48,6 +48,15 @@ def unit_vector(values):
     return v / np.linalg.norm(v)
 
 
+def embed_route(url):
+    """Post embeddings to the native embedContent method.
+
+    Some OpenLux channels pass generateContent through to Google verbatim, which rejects
+    singular content with HTTP 400. The configured URL stays the catalog's vector identity.
+    """
+    return re.sub(r':generateContent$', ':embedContent', url)
+
+
 def thread_session():
     """Reuse TLS connections per worker thread; requests.Session is not thread-safe."""
     session = getattr(_local, 'session', None)
@@ -91,13 +100,12 @@ class Models:
         if (text is None) == (video is None):
             raise ValueError('embedding 需要且只能提供 text 或 video')
         parts = [{'text': text}] if text is not None else [video_part(video)]
-        # Live-tested OpenLux route requires singular content for video inputs,
-        # even though its URL ends in generateContent. contents loses the video.
+        # Embeddings take singular content; contents loses the video on OpenLux.
         if video is not None:
             inline = parts[0]['inlineData']
             parts = [{'inline_data': {'mime_type': inline['mimeType'], 'data': inline['data']}}]
         payload = {'content': {'parts': parts}}
-        data = self.post(self.embed_url, 'OPENLUX_API_KEY', payload)
+        data = self.post(embed_route(self.embed_url), 'OPENLUX_API_KEY', payload)
         return unit_vector(data.get('embedding', {}).get('values', []))
 
     def json(self, prompt, videos=(), config=None):

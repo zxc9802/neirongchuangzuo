@@ -196,7 +196,7 @@ class MaterialBrokerTests(unittest.TestCase):
                 together.wait(3)
             except threading.BrokenBarrierError:
                 self.fail('Vector and description requests must overlap')
-            if url == model.embed_url:
+            if url != model.llm_url:
                 return {'embedding': {'values': [3, 4]}}
             return {'candidates': [{'content': {'parts': [{'text': '{"description":"游泳池"}'}]}}]}
 
