@@ -28,13 +28,13 @@ export async function POST(
     return taskNotFoundResponse();
   }
 
-  if (isTaskOutputDeliverable(task) && task.results?.finalVideoUrl) {
+  if (isTaskOutputDeliverable(task) && (task.results?.finalVideoUrl || task.inputs.outputType === "audio" && task.results?.exactAudioUrl)) {
     return NextResponse.json({ success: true, task: toPublicTask(task), alreadyCompleted: true });
   }
 
   if (!isRecoverableLipsyncTask(task)) {
     return NextResponse.json(
-      { error: "这个任务还没有已扣费的对口型结果，不能免费恢复" },
+      { error: "当前任务没有可恢复的结果，请重新创建任务" },
       { status: 400 }
     );
   }

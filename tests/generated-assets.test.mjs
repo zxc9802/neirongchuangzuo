@@ -130,8 +130,12 @@ test('asset loading paginates restaurant metadata without paid calls and keeps e
 test('the assets entry presents retention and generated type filters without an upload flow', () => {
   const ctx = { esc: value => String(value), icon: () => '', button: (action, label) => `<button data-action="${action}">${label}</button>` };
   const html = renderGeneratedAssets(ctx);
-  assert.match(html, /72 小时/);
-  assert.match(html, /到期自动清理/);
+  assert.match(html, /保留 <strong>3 天<\/strong>，请及时下载/);
+  assert.match(html, /及时下载/);
   assert.match(html, /成品类型/);
   assert.doesNotMatch(html, /type="file"|确认选择|本地上传/);
+});
+test('image assets use the same business title or generation-mode fallback as the work page', () => {
+  assert.equal(collectGeneratedAssets([image({ prompt: '设计3:4工厂海报\n主标题：真实样件，看细节' })], [], now)[0].title, '真实样件，看细节');
+  assert.equal(collectGeneratedAssets([image({ prompt: '内部排版与制作约束', generationMode: 'series' })], [], now)[0].title, '统一风格套图');
 });

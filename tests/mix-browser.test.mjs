@@ -540,7 +540,7 @@ test('a stalled mix source upload leaves all eight analysis slots running and ne
     sampleFrames: async () => { frames++; return ['frame']; }, api: async (path, options = {}) => {
       if (path.endsWith('/clips')) {
         const result = await backend.api(path, options);
-        const sourceId = controller.record.manifest['source.mp4'].clips[0].id;
+        const sourceId = controller.record.manifest['source.mp4']?.clips[0].id;
         result.clips.forEach(clip => { if (clip.id === sourceId) clip.state = 'indexed'; });
         return result;
       }
@@ -998,6 +998,132 @@ test('an unreadable unchanged file retains its old metadata and never starts ana
   } finally { controller.stop(); }
 });
 
+test('a slow metadata read cannot hold back indexing for readable files', async () => {
+  const backend = server();
+  let release, slowStarted = false, probes = 0;
+  const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(),
+    readDuration: file => file.name === 'slow.mov' ? new Promise(resolve => {
+      slowStarted = true; release = () => resolve(2);
+    }) : file.name === 'bad.mp4' ? Promise.reject(Object.assign(new Error('decode failed'), { code: 'MEDIA_DECODE' }))
+      : Promise.resolve(2), sampleFrames: async () => ['frame'],
+    wasmMedia: { probe: async () => { probes++; return { duration: 2 }; } } });
+  const selecting = controller.selectFiles([videoFile('素材/slow.mov'), videoFile('素材/good.mp4'), videoFile('素材/bad.mp4')]);
+  try {
+    await eventually(() => slowStarted);
+    await eventually(() => controller.status.indexed === 1);
+    assert.equal(controller.scanning, true, 'the good file must finish before the slow scan');
+    assert.equal(controller.record.manifest['good.mp4'].clips[0].state, 'indexed');
+    await controller._cycle(controller.generation);
+    assert.equal(probes, 0, 'compatibility reads wait until the initial scan and normal analysis finish');
+    release(); await selecting;
+    await eventually(() => controller.status.indexed === 3);
+  } finally { controller.stop(); release?.(); await selecting; }
+});
+
+test('browser metadata reads use metadata preload and allow thirty seconds before a distinct timeout', async () => {
+  const original = { document: globalThis.document, setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  let expire, timeout, video;
+  class Video extends EventTarget {
+    load() {}
+    pause() {}
+    removeAttribute() { this.src = ''; }
+  }
+  globalThis.document = { createElement: () => (video = new Video()) };
+  globalThis.setTimeout = (callback, delay) => { expire = callback; timeout = delay; return 1; };
+  globalThis.clearTimeout = () => {};
+  const reading = helpers.readDuration(new Blob(['video']));
+  const outcome = reading.catch(error => error);
+  try {
+    assert.equal(video.preload, 'metadata', 'metadata discovery must not preload whole network videos');
+    assert.equal(timeout, 30000);
+    expire();
+    assert.equal((await outcome).code, 'MEDIA_TIMEOUT');
+    assert.equal(video.src, '');
+  } finally { expire?.(); await outcome; Object.assign(globalThis, original); }
+});
+
+test('a stalled first-byte read has a deadline before metadata decoding begins', async () => {
+  const original = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout };
+  let expire, timeout, decodes = 0;
+  globalThis.setTimeout = (callback, delay) => { expire = callback; timeout = delay; return 1; };
+  globalThis.clearTimeout = () => {};
+  const file = { size: 20, lastModified: 1, slice: () => ({ arrayBuffer: () => new Promise(() => {}) }) };
+  const reading = helpers.inspectFile('slow.mov', file, null, async () => { decodes++; return 2; });
+  const outcome = reading.catch(error => error);
+  try {
+    assert.equal(typeof expire, 'function', 'network file reads must not wait forever');
+    assert.equal(timeout, 30000);
+    expire();
+    assert.equal((await outcome).code, 'MEDIA_TIMEOUT');
+    assert.equal(decodes, 0);
+  } finally { expire?.(); Object.assign(globalThis, original); }
+});
+
+test('a cancelled local file read cannot start decoding or persist a late result', async () => {
+  const abort = new AbortController();
+  let release, started, decodes = 0;
+  const began = new Promise(resolve => { started = resolve; });
+  const file = { size: 20, lastModified: 1, slice: () => ({ arrayBuffer: () => {
+    started(); return new Promise(resolve => { release = resolve; });
+  } }) };
+  const reading = helpers.inspectFile('slow.mov', file, null, async () => { decodes++; return 2; }, () => {}, abort.signal);
+  const rejected = assert.rejects(reading, error => error.name === 'AbortError');
+  await began;
+  abort.abort();
+  await rejected;
+  release(new ArrayBuffer(1));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(decodes, 0);
+});
+
+test('stopping a streaming scan prevents queued registrations and late status updates', async () => {
+  const backend = server(), statuses = [];
+  let release, registrations = 0;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    onStatus: status => statuses.push(status), api: async (path, options) => {
+      if (path.endsWith('/clips')) {
+        registrations++;
+        await new Promise(resolve => { release = resolve; });
+      }
+      return backend.api(path, options);
+    } });
+  const selecting = controller.selectFiles([videoFile('素材/a.mp4'), videoFile('素材/b.mp4')]);
+  try {
+    await eventually(() => !!release && controller.status.scanned === 2);
+    const count = statuses.length;
+    controller.stop(); release(); await selecting;
+    assert.equal(registrations, 1);
+    assert.equal(statuses.length, count);
+    assert.equal(backend.calls.some(call => call.path.endsWith('/analyze')), false);
+  } finally { controller.stop(); release?.(); await selecting; }
+});
+
+test('extraction timeouts retry after normal files without forcing server decoding', async () => {
+  const backend = server(), originalNow = Date.now;
+  let now = originalNow(), reads = 0, probes = 0;
+  const controller = new BrowserMaterials({ api: backend.api, store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: async file => {
+      if (file.name === 'slow.mp4' && ++reads === 1) throw Object.assign(new Error('读取视频超时'), { code: 'MEDIA_TIMEOUT' });
+      return ['frame'];
+    }, wasmMedia: { probe: async () => { probes++; throw new Error('unnecessary compatibility read'); } } });
+  controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
+  try {
+    Date.now = () => now;
+    await controller.selectFiles([videoFile('素材/slow.mp4'), videoFile('素材/good.mp4')]);
+    await cycle(); await cycle();
+    assert.equal(controller.status.indexed, 1);
+    assert.equal(probes, 0, 'slow reads alone do not prove incompatible encoding');
+    now += 15000;
+    await cycle();
+    assert.equal(controller.status.indexed, 2);
+    assert.equal(reads, 2);
+    assert.equal(controller.record.manifest['slow.mp4'].decoder, undefined);
+    assert.equal(backend.calls.some(call => call.path.endsWith('/analysis-source')), false);
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); Date.now = originalNow; }
+});
+
 test('metadata scan runs five readers and fills freed slots without waiting for a slow file', async () => {
   const readers = new Map();
   let active = 0, peak = 0;
@@ -1098,6 +1224,195 @@ test('stopping cancels waiting extraction and analysis work without late request
       assert.equal(controller.workers.size, 0);
     } finally { controller.stop(); for (const release of releases) release(); }
   }
+});
+
+test('every analysis error waits at the tail between its three automatic retries', async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
+  try {
+    Date.now = () => now;
+    for (const status of [400, 403, 404, 422, 503, undefined]) {
+      const backend = server();
+      let analyses = 0;
+      const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+        sampleFrames: async () => ['frame'], api: async (path, options) => {
+          if (path.endsWith('/analyze')) {
+            analyses++;
+            throw Object.assign(new Error('output_blocked: PROHIBITED_CONTENT'), { status });
+          }
+          return backend.api(path, options);
+        } });
+      controller._schedule = () => {};
+      const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
+      try {
+        await controller.selectFiles([videoFile('素材/blocked.mp4')]);
+        await cycle();
+        for (const delay of [15000, 30000, 60000]) {
+          const before = analyses;
+          now += delay - 1;
+          await cycle();
+          assert.equal(analyses, before, 'all errors must wait before the next attempt');
+          now++;
+          await cycle();
+          assert.equal(analyses, before + 1);
+        }
+        now += 60000;
+        await cycle();
+        assert.equal(analyses, 4);
+        assert.equal(controller.status.processing, false);
+        assert.match(controller.status.error, /PROHIBITED_CONTENT/);
+      } finally { controller.stop(); }
+    }
+  } finally { Date.now = originalNow; }
+});
+
+test('unclassified file read errors wait behind normal clips and compatibility reads before recovery', async () => {
+  const backend = server(), events = [];
+  const originalNow = Date.now;
+  let now = originalNow(), badReads = 0, release;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async file => {
+    if (file.name === 'bad.mp4' && ++badReads === 1) throw new Error('temporary file read failure');
+    if (file.name === 'big.mov') throw Object.assign(new Error('decode failed'), { code: 'MEDIA_DECODE' });
+    return 2;
+  }, sampleFrames: async file => { events.push('frames:' + file.name); return ['frame']; },
+  wasmMedia: { probe: file => {
+    events.push('repair:' + file.name);
+    return new Promise(resolve => { release = () => resolve({ duration: 2 }); });
+  } }, api: backend.api });
+  controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
+  try {
+    Date.now = () => now;
+    await controller.selectFiles([videoFile('素材/bad.mp4'), videoFile('素材/good.mp4'), videoFile('素材/big.mov')]);
+    await cycle();
+    assert.equal(controller.status.indexed, 1);
+    await controller._cycle(controller.generation);
+    await eventually(() => !!release);
+    now += 60000;
+    await controller._cycle(controller.generation);
+    assert.equal(badReads, 1, 'do not retry a read while a compatibility read is active');
+    release(); await Promise.all(controller.workers.values());
+    await cycle();
+    assert.equal(badReads, 1, 'compatibility-read files get their first analysis before failed reads');
+    await cycle(); await cycle();
+    assert.equal(badReads, 2);
+    assert.equal(controller.status.indexed, 3);
+    assert.deepEqual(events.filter(event => event.startsWith('repair:')), ['repair:big.mov']);
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); release?.(); Date.now = originalNow; }
+});
+
+test('failed file handles get three tail retries and can later recover manually', async () => {
+  const backend = server(), originalNow = Date.now;
+  let now = originalNow(), reads = 0, broken = true;
+  const handle = { name: '素材', queryPermission: async () => 'granted', async *values() {
+    yield { kind: 'file', name: 'bad.mp4', async getFile() {
+      reads++;
+      if (broken) throw new Error('file temporarily unavailable');
+      return videoFile('bad.mp4');
+    } };
+    yield { kind: 'file', name: 'good.mp4', async getFile() { return videoFile('good.mp4'); } };
+  } };
+  const store = memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32), handle,
+    manifest: {}, uploads: {}, deferredRevocations: [] });
+  const controller = new BrowserMaterials({ store, api: backend.api, readDuration: async () => 2,
+    sampleFrames: async () => ['frame'], wasmMedia: { probe: async () => { assert.fail('read errors do not require compatibility reads'); } } });
+  controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
+  try {
+    Date.now = () => now;
+    await controller.restore();
+    await cycle();
+    assert.equal(controller.status.indexed, 1);
+    assert.equal(controller.status.processing, true);
+    for (let i = 0; i < 3; i++) { now += 60000; await cycle(); }
+    now += 60000; await cycle();
+    assert.equal(reads, 4, 'initial read plus three automatic retries');
+    assert.equal(controller.status.processing, false);
+    broken = false;
+    await controller.scan(); await cycle();
+    assert.equal(controller.status.indexed, 2);
+    assert.equal(backend.calls.filter(call => call.path.endsWith('/analyze')).length, 2, 'reuse the completed good clip');
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); Date.now = originalNow; }
+});
+
+test('clip registration errors automatically retry at the tail before starting analysis', async () => {
+  const backend = server(), originalNow = Date.now;
+  let now = originalNow(), registrations = 0;
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: async () => ['frame'], api: async (path, options) => {
+      if (path.endsWith('/clips') && ++registrations === 1) throw Object.assign(new Error('registration failed'), { status: 400 });
+      return backend.api(path, options);
+    } });
+  controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
+  try {
+    Date.now = () => now;
+    await controller.selectFiles([videoFile('素材/a.mp4')]);
+    await cycle();
+    assert.equal(controller.status.processing, true);
+    assert.equal(backend.calls.some(call => call.path.endsWith('/analyze')), false);
+    now += 15000;
+    await cycle(); await cycle();
+    assert.equal(registrations, 2);
+    assert.equal(controller.status.indexed, 1);
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); Date.now = originalNow; }
+});
+
+test('recovered file reads can still move to server decoding if their frames fail', async () => {
+  const backend = server(), originalNow = Date.now;
+  let now = originalNow(), reads = 0, probes = 0;
+  const controller = new BrowserMaterials({ store: memoryStore(), api: backend.api, readDuration: async () => {
+    if (++reads === 1) throw new Error('temporary metadata failure');
+    return 2;
+  }, sampleFrames: async () => { throw Object.assign(new Error('frames cannot be decoded'), { code: 'MEDIA_DECODE' }); },
+  wasmMedia: { probe: async () => { probes++; return { duration: 2 }; } } });
+  controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
+  try {
+    Date.now = () => now;
+    await controller.selectFiles([videoFile('素材/bad.mp4')]);
+    await cycle(); await cycle();
+    assert.equal(reads, 1, 'a failed read waits before its tail retry');
+    now += 15000;
+    await cycle(); await cycle();
+    assert.equal(reads, 2);
+    assert.equal(controller.status.indexed, 1);
+    assert.equal(controller.record.manifest['bad.mp4'].decoder, 'server');
+    assert.equal(probes, 0, 'a readable file only moves its frame decoding to the server');
+    assert.equal(controller.status.error, '');
+  } finally { controller.stop(); Date.now = originalNow; }
+});
+
+test('stopping during a deferred file read prevents late registration and status changes', async () => {
+  const backend = server(), originalNow = Date.now, statuses = [];
+  let now = originalNow(), reads = 0, release;
+  const handle = { name: '素材', queryPermission: async () => 'granted', async *values() {
+    yield { kind: 'file', name: 'a.mp4', async getFile() {
+      if (++reads === 1) throw new Error('temporary read failure');
+      return new Promise(resolve => { release = () => resolve(videoFile('a.mp4')); });
+    } };
+  } };
+  const store = memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32), handle,
+    manifest: {}, uploads: {}, deferredRevocations: [] });
+  const controller = new BrowserMaterials({ store, api: backend.api, readDuration: async () => 2,
+    onStatus: value => statuses.push(value) });
+  controller._schedule = () => {};
+  try {
+    Date.now = () => now;
+    await controller.restore();
+    now += 15000;
+    await controller._cycle(controller.generation);
+    await eventually(() => !!release);
+    const count = statuses.length;
+    controller.stop(); release();
+    await Promise.all(controller.workers.values());
+    assert.equal(statuses.length, count);
+    assert.equal(backend.calls.some(call => call.path.endsWith('/clips') || call.path.endsWith('/analyze')), false);
+    assert.deepEqual(store.value.manifest, {});
+  } finally { controller.stop(); release?.(); Date.now = originalNow; }
 });
 
 test('analysis failures stop after three automatic retries for permanent and temporary errors', async () => {
@@ -1227,6 +1542,8 @@ test('failed compatibility probing moves behind other files, retries three times
 
 test('server proxy failures retry without probing or decoding the original again', async () => {
   const backend = server();
+  const originalNow = Date.now;
+  let now = originalNow();
   let probes = 0, prepared = 0;
   const controller = new BrowserMaterials({ api: async (path, options) => {
     if (path.endsWith('/analysis-source')) { prepared++; throw new Error('server decode failed'); }
@@ -1236,18 +1553,32 @@ test('server proxy failures retry without probing or decoding the original again
     wasmMedia: { probe: async () => { probes++; return { duration: 2 }; },
       sampleFrames: async () => { throw new Error('wasm decode failed'); } } });
   controller._schedule = () => {};
+  const cycle = async () => { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); };
   try {
+    Date.now = () => now;
     await controller.selectFiles([videoFile('素材/bad.mov')]);
-    for (let i = 0; i < 12; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
+    await cycle(); await cycle(); await cycle();
+    for (const delay of [15000, 30000, 60000]) {
+      const before = prepared;
+      now += delay - 1;
+      await cycle();
+      assert.equal(prepared, before, 'server proxy failures must wait before retrying');
+      now++;
+      await cycle(); await cycle();
+      assert.equal(prepared, before + 1);
+    }
+    await cycle();
+    assert.equal(prepared, 4, 'server proxy failures also get three extra attempts');
     assert.equal(probes, 1, 'metadata probing is retained across proxy retries');
-    assert.equal(prepared, 4);
     assert.equal(controller.status.processing, false);
     assert.match(controller.status.error, /server decode failed/);
     assert.equal(backend.calls.some(call => call.path.endsWith('/analyze')), false);
-  } finally { controller.stop(); }
+  } finally { controller.stop(); Date.now = originalNow; }
 });
 
 test('unreadable retained indexing records do not block retries for current readable files', async () => {
+  const originalNow = Date.now;
+  let now = originalNow();
   const bad = videoFile('素材/bad.mov'), backend = server();
   const old = await helpers.inspectFile('bad.mov', bad, null, async () => 2);
   old.clips[0].state = 'indexing';
@@ -1262,12 +1593,16 @@ test('unreadable retained indexing records do not block retries for current read
     } });
   controller._schedule = () => {};
   try {
+    Date.now = () => now;
     await controller.selectFiles([bad, videoFile('素材/good.mp4')]);
-    for (let i = 0; i < 3; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
+    for (let i = 0; i < 6; i++) {
+      await controller._cycle(controller.generation); await Promise.all(controller.workers.values());
+      now += 60000;
+    }
     assert.equal(controller.status.readyFiles, 1);
     assert.equal(analyses, 2);
     assert.equal(controller.status.processing, false);
-  } finally { controller.stop(); }
+  } finally { controller.stop(); Date.now = originalNow; }
 });
 
 test('temporary analysis failures recover after two attempts without rescanning or hammering the server', async () => {

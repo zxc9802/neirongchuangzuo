@@ -10,6 +10,7 @@ export interface MediaProbeInfo {
   width?: number;
   height?: number;
   displayAspectRatio?: string;
+  sampleAspectRatio?: string;
   fps?: number;
   videoCodec?: string;
   hasAudio: boolean;
@@ -31,7 +32,7 @@ export function sha256File(filePath: string): Promise<string> {
 export function execMediaCommand(
   command: string,
   args: string[],
-  options: { timeoutMs?: number; maxOutputBytes?: number } = {},
+  options: { timeoutMs?: number; maxOutputBytes?: number; returnStderr?: boolean } = {},
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const timeoutMs = options.timeoutMs ?? 20 * 60_000;
@@ -87,7 +88,7 @@ export function execMediaCommand(
       settled = true;
       clearTimeout(timer);
       if (code === 0) {
-        resolve(stdout);
+        resolve(options.returnStderr ? stderr : stdout);
       } else {
         reject(
           new Error(
@@ -117,7 +118,7 @@ export async function probeMedia(filePath: string): Promise<MediaProbeInfo> {
     "-v",
     "error",
     "-show_entries",
-    "format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,r_frame_rate,sample_rate,channels,duration:stream_tags=rotate:stream_side_data=rotation",
+    "format=duration,size,bit_rate:stream=index,codec_type,codec_name,width,height,display_aspect_ratio,sample_aspect_ratio,r_frame_rate,sample_rate,channels,duration:stream_tags=rotate:stream_side_data=rotation",
     "-of",
     "json",
     filePath,
@@ -134,6 +135,8 @@ export async function probeMedia(filePath: string): Promise<MediaProbeInfo> {
 
   let width: number | undefined;
   let height: number | undefined;
+  let displayAspectRatio: string | undefined;
+  let sampleAspectRatio: string | undefined;
   let fps: number | undefined;
   let videoCodec: string | undefined;
   let hasAudio = false;
@@ -146,6 +149,8 @@ export async function probeMedia(filePath: string): Promise<MediaProbeInfo> {
     if (stream.codec_type === "video" && width === undefined) {
       width = parseInt(stream.width, 10);
       height = parseInt(stream.height, 10);
+      displayAspectRatio = stream.display_aspect_ratio;
+      sampleAspectRatio = stream.sample_aspect_ratio;
       videoCodec = stream.codec_name;
       const streamDuration = Number(stream.duration);
       if (Number.isFinite(streamDuration) && streamDuration > 0) videoDurationSeconds = streamDuration;
@@ -174,6 +179,8 @@ export async function probeMedia(filePath: string): Promise<MediaProbeInfo> {
     videoDurationSeconds,
     width,
     height,
+    displayAspectRatio,
+    sampleAspectRatio,
     fps,
     videoCodec,
     hasAudio,
@@ -226,10 +233,17 @@ export async function prepareSourceVideo(
     throw new Error("Video has no valid dimensions");
   }
 
-  const videoDuration = probe.durationSeconds;
+  const videoDuration = probe.videoDurationSeconds ?? probe.durationSeconds;
   const maxEdge = 1920;
   let targetWidth = probe.width;
   let targetHeight = probe.height;
+
+  // FFmpeg autorotates the pixels before scaling; size the output for that display.
+  const [sarWidth, sarHeight] = (probe.sampleAspectRatio || "1:1").split(":").map(Number);
+  if (sarWidth > 0 && sarHeight > 0) targetWidth = Math.round(targetWidth * sarWidth / sarHeight);
+  if (Math.abs(probe.rotation || 0) % 180 === 90) {
+    [targetWidth, targetHeight] = [targetHeight, targetWidth];
+  }
 
   // Scale down if larger than 1920
   if (Math.max(targetWidth, targetHeight) > maxEdge) {
@@ -246,26 +260,17 @@ export async function prepareSourceVideo(
   targetWidth = targetWidth % 2 === 0 ? targetWidth : targetWidth - 1;
   targetHeight = targetHeight % 2 === 0 ? targetHeight : targetHeight - 1;
 
-  // Video filter: scale and set 30 fps
-  const vf = `scale=${targetWidth}:${targetHeight}:flags=lanczos,fps=30,format=yuv420p`;
+  // Keep the last decoded frame when narration outlasts the source; -t caps the padding.
+  const vf = `scale=${targetWidth}:${targetHeight}:flags=lanczos,setsar=1,fps=30,tpad=stop_mode=clone:stop_duration=${targetDurationSeconds},format=yuv420p`;
 
   const args: string[] = ["-hide_banner", "-loglevel", "error", "-y"];
 
-  if (videoDuration < targetDurationSeconds) {
-    // Video is shorter than audio -> loop video to match audio length
-    const loopCount = Math.ceil(targetDurationSeconds / videoDuration) + 1;
-    args.push("-stream_loop", `${loopCount}`, "-i", inputVideoPath);
-  } else if (videoDuration > targetDurationSeconds + 0.5) {
-    if (fitMode === "preserve") {
-      throw Object.assign(new Error(
-        `Video duration (${videoDuration.toFixed(1)}s) is longer than narration (${targetDurationSeconds.toFixed(1)}s), but fitMode is set to preserve.`
-      ), { code: "MEDIA_FIT_MISMATCH" });
-    }
-    // Smart trim to target duration
-    args.push("-i", inputVideoPath);
-  } else {
-    args.push("-i", inputVideoPath);
+  if (videoDuration > targetDurationSeconds + 0.5 && fitMode === "preserve") {
+    throw Object.assign(new Error(
+      `Video duration (${videoDuration.toFixed(1)}s) is longer than narration (${targetDurationSeconds.toFixed(1)}s), but fitMode is set to preserve.`
+    ), { code: "MEDIA_FIT_MISMATCH" });
   }
+  args.push("-i", inputVideoPath);
 
   // Declare every input before output options; otherwise -vf applies to lavfi.
   if (!probe.hasAudio) {
@@ -277,7 +282,7 @@ export async function prepareSourceVideo(
 
   // Keep original audio track or synthesize silent track (HeyGen requires audio track)
   if (probe.hasAudio) {
-    args.push("-c:a", "aac", "-b:a", "192k");
+    args.push("-af", "apad", "-c:a", "aac", "-b:a", "192k");
   } else {
     args.push("-c:a", "aac", "-b:a", "192k", "-shortest");
   }
@@ -346,10 +351,43 @@ export async function sliceMedia(params: {
 
 export async function concatVideos(
   inputPaths: string[],
-  outputPath: string
+  outputPath: string,
+  chunkDurations?: number[]
 ): Promise<void> {
   if (inputPaths.length === 0) {
     throw new Error("没有可拼接的视频分段");
+  }
+  if (chunkDurations) {
+    if (chunkDurations.length !== inputPaths.length ||
+        chunkDurations.some(seconds => !Number.isFinite(seconds) || seconds <= 0)) {
+      throw new Error("对口型分段时间轴无效");
+    }
+    const tempDir = fs.mkdtempSync(path.join(path.dirname(outputPath), ".lipsync-chunks-"));
+    try {
+      const normalized: string[] = [];
+      let boundary = 0;
+      for (const [index, input] of inputPaths.entries()) {
+        const seconds = chunkDurations[index];
+        const info = await probeMedia(input);
+        const duration = info.videoDurationSeconds ?? (!info.hasAudio ? info.durationSeconds : undefined);
+        if (!info.width || !Number.isFinite(duration) || Math.abs(duration! - seconds) > 0.15) {
+          throw Object.assign(new Error("对口型分段时长偏差过大，无法安全拼接"), { code: "LIPSYNC_MEDIA" });
+        }
+        // Native-face inputs use 30 fps. Keep every chunk on its submitted
+        // speech boundary; provider audio/container padding must not move it.
+        const frames = Math.round((boundary + seconds) * 30) - Math.round(boundary * 30);
+        boundary += seconds;
+        const file = path.join(tempDir, `${index}.mp4`);
+        await execCommand("ffmpeg", ["-v", "error", "-y", "-i", input, "-an", "-vf",
+          `fps=30,tpad=stop_mode=clone:stop_duration=0.15,trim=end_frame=${frames},setpts=N/(30*TB)`,
+          "-c:v", "libx264", "-threads", "2", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p", file]);
+        normalized.push(file);
+      }
+      await concatVideos(normalized, outputPath);
+      return;
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
   }
   if (inputPaths.length === 1) {
     fs.copyFileSync(inputPaths[0], outputPath);
@@ -357,9 +395,14 @@ export async function concatVideos(
   }
 
   const listPath = `${outputPath}.concat.txt`;
-  const listBody = inputPaths
-    .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
-    .join("\n");
+  // The container may include an audio tail. Advance each segment by picture duration.
+  const probes = await Promise.all(inputPaths.map(probeMedia));
+  const listBody = inputPaths.map((p, index) => {
+    const probe = probes[index];
+    const duration = probe.videoDurationSeconds ?? (!probe.hasAudio ? probe.durationSeconds : undefined);
+    if (!duration) throw new Error("无法确认对口型分段的画面时长");
+    return `file '${p.replace(/'/g, "'\\''")}'\nduration ${duration}`;
+  }).join("\n");
   fs.writeFileSync(listPath, listBody, "utf-8");
 
   try {
@@ -406,6 +449,20 @@ export async function finalizeVideo(
   }
   if (!fs.existsSync(exactWavPath)) {
     throw new Error(`Exact IndexTTS WAV not found: ${exactWavPath}`);
+  }
+
+  const [videoProbe, audioProbe] = await Promise.all([
+    probeMedia(heygenVideoPath),
+    probeMedia(exactWavPath),
+  ]);
+  const pictureDuration = videoProbe.videoDurationSeconds
+    ?? (!videoProbe.hasAudio ? videoProbe.durationSeconds : undefined);
+  const tolerance = Math.max(0.12, 2 / (videoProbe.fps || 25));
+  if (!videoProbe.width || !pictureDuration
+    || Math.abs(pictureDuration - audioProbe.durationSeconds) > tolerance) {
+    throw Object.assign(new Error(
+      `对口型视频画面时长与配音不一致（画面 ${pictureDuration?.toFixed(2) ?? "未知"} 秒，配音 ${audioProbe.durationSeconds.toFixed(2)} 秒），请重新获取或生成成片。`
+    ), { code: "LIPSYNC_DURATION_MISMATCH" });
   }
 
   const args = [

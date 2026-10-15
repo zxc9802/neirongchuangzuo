@@ -18,10 +18,13 @@ interface SessionData {
     pointsBalance?: number;
   };
   billing?: {
+    source?: "workspace" | "main-app" | "internal";
+    mode?: "api_cost";
     ratePerSecond: number;
     cnyPerSecond: number;
     isExternal: boolean;
   };
+  credits?: { available: number; held: number; unlimited?: boolean };
 }
 
 export default function Navbar() {
@@ -75,7 +78,9 @@ export default function Navbar() {
   ];
 
   const isExternal = session?.billing?.isExternal ?? (session?.user?.role !== "admin" && session?.user?.billingAudience !== "internal");
-  const points = session?.user?.pointsBalance;
+  const workspace = session?.authMode === "standalone" || session?.billing?.source === "workspace";
+  const unlimited = workspace && session?.credits?.unlimited === true;
+  const points = workspace ? session?.credits?.available : session?.user?.pointsBalance;
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-white/[0.08] bg-[#0a0b0e]/85 backdrop-blur-xl transition-all">
@@ -127,15 +132,15 @@ export default function Navbar() {
               {isExternal && (
                 <div
                   className="flex items-center gap-1.5 font-medium text-amber-300"
-                  title={`主站外部用户费率: ${session?.billing?.ratePerSecond ?? 20}积分/秒 (0.2元/秒)`}
+                  title={unlimited ? "无限积分" : workspace ? `冻结 ${session?.credits?.held ?? 0} 积分` : `主站外部用户费率: ${session?.billing?.ratePerSecond ?? 20}积分/秒 (0.2元/秒)`}
                 >
                   <Coins className="h-3.5 w-3.5 text-amber-400" />
                   <span className="font-mono font-bold">
-                    {typeof points === "number" ? points.toLocaleString() : "--"}
+                    {unlimited ? "无限积分" : typeof points === "number" ? points.toLocaleString() : "--"}
                   </span>
-                  <span className="text-[10px] text-amber-400/80 bg-amber-400/10 px-1.5 py-0.5 rounded">
-                    {session?.billing?.ratePerSecond ?? 20}分/秒
-                  </span>
+                  {!unlimited && <span className="text-[10px] text-amber-400/80 bg-amber-400/10 px-1.5 py-0.5 rounded">
+                    {workspace ? session?.billing?.mode === "api_cost" ? "12.5分/秒" : "333分/30秒" : <>{session?.billing?.ratePerSecond ?? 20}分/秒</>}
+                  </span>}
                 </div>
               )}
               {isExternal && <span className="text-zinc-500">|</span>}

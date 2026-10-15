@@ -11,7 +11,12 @@ import { createRestaurantHandler } from '../services/restaurant/server.mjs';
 import { createRestaurantModel } from '../services/restaurant/model.mjs';
 import { validateAnalysis, validateDirections, validateCopy, localReview } from '../services/restaurant/rules.mjs';
 import * as processor from '../services/restaurant/images.mjs';
+import * as promotion from '../services/restaurant/promotion.mjs';
 import { COPY_PROMPT } from '../services/restaurant/prompts.mjs';
+import { createCreditsLedger } from '../services/credits/store.mjs';
+import { createGalleryPlan } from '../services/restaurant/gallery.mjs';
+
+const visualStyle = { name: '中性暮色', mood: '安静有层次', lighting: '保留光源层次与阴影', tone: '中性灰绿与食物本色', texture: '自然摄影颗粒', palette: ['灰绿', '金黄'], instructions: '保持克制的暗部，不统一增亮，不添加暖黄滤镜。' };
 
 const profile = { name: '竹里面馆', city: '武汉', address: '青山建设一路', category: '面食' };
 const config = { apiKey: 'test-only-not-a-secret', baseUrl: 'https://provider.invalid/v1', chatModel: 'test-luna', limits: { chatDaily: 100, imageDaily: 20, perMinute: 10 } };
@@ -47,18 +52,35 @@ function paddedCopy(items) {
 }
 function mockModel(overrides = {}) { const counts = { analyse: 0, recommend: 0, write: 0, audit: 0 }; return { ready: Promise.resolve(), enabled: true, counts,
   async analyse(photos) { counts.analyse++; return analysis(photos); }, async recommend(items) { counts.recommend++; return [direction(items)]; },
+  async planGallery(input) {
+    const task = { analysis: input.analysis, profileSnapshot: input.profile, sourceImages: input.analysis.map(item => ({ id: item.imageId, hash: item.imageId })) };
+    const shots = createGalleryPlan(task, input.outputCount);
+    return { theme: '实拍食品与环境', visualStyle, foodGroups: input.analysis.filter(item => item.imageType === 'food').map(item => ({ id: item.imageId, label: item.imageId, imageIds: [item.imageId] })),
+      shots: shots.map((shot, i) => ({ ...shot, name: `画面${i + 1}`, purpose: '展示真实主体', focus: '原图可见食品', subjectScope: /火锅/.test(input.profile?.category || '') ? 'spread' : 'auto', foodGroupId: shot.kind === 'food' ? shot.sourceImageId : '',
+        camera: '保留主体并自然构图', lighting: '遵循暮色层次', angle: ['oblique','overhead','detail','table'][i % 4], editInstructions: '遵循整组中性暮色，保留真实主体。' })) };
+  },
+  async renderGalleryPhoto(input) {
+    if (input.shot.kind === 'food' && this.renderFood) return this.renderFood({ ...input, imageId: input.shot.imageId, plan: input.shot, storeReferences: input.context });
+    return { bytes: await sharp(input.photo.bytes).resize(1080, 1440).jpeg().toBuffer(), requestId: input.shot.imageId, provider: 'mock-image' };
+  },
+  async reviewGalleryPhoto(input) {
+    const review = input.shot.kind === 'food' && this.reviewFoodRender ? await this.reviewFoodRender({ ...input, sourceImageId: input.shot.sourceImageId }) : foodReview;
+    return { ...review, styleScore: 95, styleMatch: true, marketingUseful: true };
+  },
+  async reviewGallerySet() { return { status: 'passed', reviseImageIds: [], errors: [], warnings: [] }; },
   async write(input) { counts.write++; return copy(input.analysis); }, async audit() { counts.audit++; return { status: 'passed', warnings: [], errors: [] }; },
   async usage() { return { day: '2026-10-07', used: { chat: 0 }, remaining: { chat: 100 }, limits: config.limits }; }, async close() {}, ...overrides }; }
 async function photos(count = 2) { return Promise.all(Array.from({ length: count }, async (_, index) => ({ name: `photo${index}.png`, dataUrl: `data:image/png;base64,${(await sharp({ create: { width: 300, height: 400, channels: 3, background: { r: 80 + (index * 15) % 176, g: 50, b: 120 } } }).png().toBuffer()).toString('base64')}` }))); }
 async function setup(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'restaurant-flow-'));
   const model = options.model ?? mockModel();
-  const handler = createRestaurantHandler({ dataDir: root, databaseUrl: '', config, model, requireAuth: true, cleanupIntervalMs: 0, logger: { warn() {} }, ...options });
+  const credits = options.credits ?? (options.withCredits ? createCreditsLedger({ storageDir: join(root, 'points'), databaseUrl: null }) : undefined);
+  const handler = createRestaurantHandler({ dataDir: root, databaseUrl: '', config, model, credits, requireAuth: true, cleanupIntervalMs: 0, logger: { warn() {} }, ...options });
   await handler.ready;
   const server = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-user']; handler(req, res); });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}/api/restaurant`;
-  async function api(path, body, user = 'owner') { const response = await fetch(base + path, { method: body === undefined ? 'GET' : path === '/profile' ? 'PUT' : 'POST', headers: { ...(user ? { 'x-test-user': user } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, body: response.headers.get('content-type')?.includes('json') ? await response.json() : Buffer.from(await response.arrayBuffer()) }; }
+  async function api(path, body, user = 'owner', method) { const response = await fetch(base + path, { method: method || (body === undefined ? 'GET' : path === '/profile' ? 'PUT' : 'POST'), headers: { ...(user ? { 'x-test-user': user } : {}), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }); return { status: response.status, body: response.headers.get('content-type')?.includes('json') ? await response.json() : Buffer.from(await response.arrayBuffer()) }; }
   async function wait(id, states) {
     const deadline = performance.now() + 15_000;
     let last;
@@ -69,8 +91,8 @@ async function setup(t, options = {}) {
     } while (performance.now() < deadline);
     throw new Error(`task did not reach ${states.join('/')} within 15s; last status: ${last?.status}, stage: ${last?.progress?.stage}, code: ${last?.code}, error: ${last?.error}`);
   }
-  t.after(async () => { await handler.shutdown(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
-  return { api, wait, model, handler, root };
+  t.after(async () => { await handler.shutdown(); await new Promise(resolve => server.close(resolve)); await credits?.close(); assert.equal(join(tmpdir(), root.split(/[\\/]/).at(-1)), root); await rm(root, { recursive: true, force: true }); });
+  return { api, wait, model, handler, root, credits };
 }
 async function newTask(app, input = {}) { await app.api('/profile', { profile }); const id = randomUUID(); const result = await app.api('/tasks', { requestId: id, images: await photos(), rightsConfirmed: true, ...input }); assert.equal(result.status, 202); return { id, task: await app.wait(id, ['awaiting_selection', 'failed']) }; }
 async function uploadPool(app, count) {
@@ -82,6 +104,637 @@ async function uploadPool(app, count) {
   assert.equal((await app.api(`/tasks/${id}/analyse`, {})).status, 202);
   return { id, task: await app.wait(id, ['awaiting_selection', 'failed']), inputs };
 }
+
+test('deleting a completed task removes downloads and retains spent points and daily accounting', async t => {
+  const app = await setup(t, { withCredits: true });
+  const { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true, imageMode: 'natural' });
+  const completed = await app.wait(id, ['completed', 'failed']);
+  assert.equal(completed.status, 'completed', completed.error);
+  const original = completed.sourceImages[0].filename;
+  const balance = (await app.credits.snapshot('owner')).balance;
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'other', 'DELETE')).status, 200);
+  assert.equal((await app.api(`/tasks/${id}`)).status, 200);
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 200);
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 200);
+  assert.equal((await app.api(`/tasks/${id}`)).status, 404);
+  assert.equal((await app.api(`/tasks/${id}/files/${original}`)).status, 404);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
+  assert.equal((await app.api('/tasks')).body.tasks.some(task => task.id === id), false);
+  assert.equal((await app.credits.snapshot('owner')).balance, balance);
+  assert.equal((await app.api('/usage')).body.usage.used, 1);
+  assert.equal((await app.api('/tasks', { requestId: id, images: await photos(), rightsConfirmed: true })).status, 409);
+});
+
+test('deletion blocks an active upload until it is cancelled', async t => {
+  const app = await setup(t);
+  const id = randomUUID();
+  await app.api('/profile', { profile });
+  assert.equal((await app.api('/tasks', { requestId: id, imageCount: 1, rightsConfirmed: true })).status, 202);
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 409);
+  await app.api(`/tasks/${id}/cancel-upload`, {});
+  assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 200);
+});
+
+test('promotional package uses original photo evidence, produces six themed images and ZIP, and charges once', async t => {
+  let masks = 0, closed = 0, seen;
+  const model = mockModel({ async write(input) {
+    seen = input;
+    return { ...copy(input.analysis), imageCaptions: input.analysis.map(item => ({ imageId: item.imageId, text: '附近午餐看看这一碗面' })) };
+  } });
+  const app = await setup(t, { model, withCredits: true, subjectMasker: { mask() { masks++; throw new Error('should not mask non-food geometry'); }, close() { closed++; } } });
+  const { id } = await uploadPool(app, 6);
+  const body = { directionId: 'D01', imageMode: 'promotional', outputCount: 6 };
+  assert.equal((await app.api(`/tasks/${id}/generate`, body)).status, 202);
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(task.imageMode, 'promotional');
+  assert.equal(seen.imageMode, 'promotional'); assert.equal(seen.photos.length, 4);
+  for (const photo of seen.photos) {
+    const metadata = await sharp(Buffer.from(photo.dataUrl.split(',')[1], 'base64')).metadata();
+    assert.equal(metadata.width, 300); assert.equal(metadata.height, 400, 'model sees genuine scene instead of designed background');
+  }
+  assert.equal(task.files.filter(file => file.mime === 'image/jpeg').length, 6);
+  assert.ok(task.files.filter(file => file.mime === 'image/jpeg').every(file => file.width === 1080 && file.height === 1440 && file.composition.method === 'original-frame'));
+  assert.equal(new Set(task.files.filter(file => file.mime === 'image/jpeg').map(file => file.composition.palette)).size, 1);
+  assert.equal(masks, 0); assert.equal(task.billing.chargedPoints, 300);
+  const zip = await app.api(`/tasks/${id}/files/package.zip`);
+  assert.equal(zip.status, 200); assert.equal(Object.keys(unzipSync(zip.body)).filter(name => /\.jpg$/.test(name)).length, 6);
+  assert.equal((await app.api(`/tasks/${id}/generate`, body)).body.task.id, id);
+  assert.equal((await app.credits.snapshot('owner')).balance, 700);
+  await app.handler.shutdown(); assert.equal(closed, 1);
+});
+
+test('promotional processing failure retries locally and releases held credits without publishing a partial set', async t => {
+  let attempts = 0;
+  const app = await setup(t, { withCredits: true, promotionalProcessor: { ...promotion, processPromotionalPhoto() { attempts++; throw new Error('composition failed'); } } });
+  const { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true, imageMode: 'promotional' });
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'failed'); assert.equal(attempts, 6);
+  assert.equal(task.files.length, 0); assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0); assert.equal((await app.api('/usage')).body.usage.used, 0);
+});
+
+const foodAppearance={description:'圆碗中的食物',portion:'一碗',arrangement:'食物在碗内',vessel:'圆碗',colors:['浅色'],visibleComponents:['条状食物'],texture:['可见纹理'],distinctiveFeatures:['圆碗'],uncertainDetails:[],dishCount:1,pieceCount:null};
+const foodReview={status:'passed',identityMatch:true,sceneMatch:true,shotMatch:true,compositionUsable:true,errors:[],warnings:[]};
+
+async function waitUntil(check) {
+  const deadline = performance.now() + 15_000;
+  while (!await check()) { assert.ok(performance.now() < deadline, 'concurrent gallery did not reach the expected state'); await new Promise(resolve => setTimeout(resolve, 10)); }
+}
+function heldFoodModel(t, { failShot = 0 } = {}) {
+  const started = [], gates = new Map();
+  let active = 0, peak = 0, released = false, identities = 0;
+  t.after(() => { released = true; for (const gate of gates.values()) gate(); });
+  const model = mockModel({ async identifyFood() { identities++; return foodAppearance; },
+    async renderFood(input) {
+      const key = input.taskId + ':' + input.imageId, shot = Number(/shot-(\d+)/.exec(input.imageId)[1]);
+      started.push({ key, shot, taskId: input.taskId }); active++; peak = Math.max(peak, active);
+      try {
+        if (!released) await new Promise(resolve => gates.set(key, resolve));
+        if (shot === failShot) throw Object.assign(Error('explicit rejection'), { code: 'PROVIDER_ERROR' });
+        return { bytes: await sharp(input.photo.bytes).resize(1080, 1440).jpeg().toBuffer(), requestId: `request-${shot}` };
+      } finally { active--; }
+    }, async reviewFoodRender() { return foodReview; } });
+  return { model, started, release: entry => gates.get(entry.key)?.(), releaseAll() { released = true; for (const gate of gates.values()) gate(); },
+    get peak() { return peak; }, get active() { return active; }, get identities() { return identities; } };
+}
+
+test('three gallery images run concurrently, retain all out-of-order checkpoints and deliver in planned order once', async t => {
+  const held = heldFoodModel(t), app = await setup(t, { model: held.model, withCredits: true, galleryConcurrency: 3 });
+  const id = randomUUID();
+  await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 6 });
+  await waitUntil(() => held.started.length === 3); assert.equal(held.peak, 3);
+  for (const shot of [3, 4, 5, 6, 2]) {
+    await waitUntil(() => held.started.some(entry => entry.shot === shot));
+    held.release(held.started.find(entry => entry.shot === shot));
+    await waitUntil(async () => (await app.handler.store.getTask('owner', id)).galleryCheckpoints?.some(c => c.imageId === `shot-${String(shot).padStart(2, '0')}` && c.status === 'ready'));
+  }
+  const pending = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(pending.status, 'generating'); assert.equal(pending.progress.current, 5);
+  assert.match(pending.progress.message, /已完成 5 \/ 6/);
+  assert.equal(pending.files.length, 0); assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
+  assert.equal((await app.credits.snapshot('owner')).held, 300);
+  held.release(held.started.find(entry => entry.shot === 1));
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(held.started.length, 6);
+  assert.equal(held.identities, 2, 'concurrent shots share one identification per source');
+  assert.deepEqual(task.files.filter(f => f.role === 'image').map(f => f.composition.imageRequestId), [1, 2, 3, 4, 5, 6].map(n => `request-${n}`));
+  assert.equal((await app.handler.store.getTask('owner', id)).galleryCheckpoints.filter(c => c.status === 'ready').length, 6);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 200);
+  await app.api(`/tasks/${id}/generate`, { workflow: 'store-gallery-v1', directionId: task.selection.directionId, imageMode: 'promotional', outputCount: 6 });
+  assert.equal(held.started.length, 6); assert.equal((await app.credits.snapshot('owner')).balance, 700);
+});
+
+test('a failed concurrent shot stops queued work and waits for dispatched images before releasing credits', async t => {
+  const held = heldFoodModel(t, { failShot: 1 }), app = await setup(t, { model: held.model, withCredits: true });
+  const id = randomUUID();
+  await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 15 });
+  await waitUntil(() => held.started.length === 10);
+  held.release(held.started.find(entry => entry.shot === 1));
+  await waitUntil(() => held.active === 9);
+  const running = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(running.status, 'generating'); assert.equal((await app.credits.snapshot('owner')).held, 750);
+  held.releaseAll(); const failed = await app.wait(id, ['failed']);
+  assert.equal(failed.code, 'PROVIDER_ERROR'); assert.equal(held.started.length, 10); assert.equal(held.peak, 10); assert.equal(held.active, 0);
+  const saved = await app.handler.store.getTask('owner', id);
+  assert.equal(saved.galleryCheckpoints.filter(c => c.status === 'ready').length, 9);
+  assert.equal(failed.files.length, 0);
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000); assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('the three-image concurrency cap is shared across different merchants and tasks', async t => {
+  const held = heldFoodModel(t), app = await setup(t, { model: held.model, galleryConcurrency: 3 });
+  const id = randomUUID(), otherId = randomUUID(), inputs = await photos(3);
+  await app.api('/tasks', { requestId: id, images: inputs, rightsConfirmed: true, autoGenerate: true, outputCount: 6 });
+  await waitUntil(() => held.started.length === 3);
+  await app.api('/tasks', { requestId: otherId, images: inputs, rightsConfirmed: true, autoGenerate: true, outputCount: 3 }, 'other-owner');
+  await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'generating');
+  assert.equal(held.started.length, 3); assert.equal(held.peak, 3);
+  held.release(held.started[0]);
+  await waitUntil(() => held.started.some(entry => entry.taskId.startsWith(otherId)));
+  assert.equal(held.peak, 3);
+  held.releaseAll(); assert.equal((await app.wait(id, ['completed', 'failed'])).status, 'completed');
+  await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'completed');
+  assert.equal(held.started.length, 9); assert.equal(held.peak, 3);
+});
+
+test('default gallery concurrency allows ten images across merchants and queues the rest without losing results or charges', async t => {
+  const held = heldFoodModel(t), app = await setup(t, { model: held.model, withCredits: true });
+  const id = randomUUID(), otherId = randomUUID();
+  assert.equal((await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 15 })).status, 202);
+  await waitUntil(() => held.started.length === 10);
+  assert.equal(held.active, 10); assert.equal(held.peak, 10);
+  assert.equal((await app.api('/tasks', { requestId: otherId, images: await photos(3), rightsConfirmed: true, autoGenerate: true, outputCount: 3 }, 'other-owner')).status, 202);
+  await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'generating');
+  assert.equal(held.started.length, 10);
+  held.release(held.started.find(entry => entry.shot === 10));
+  await waitUntil(() => held.started.some(entry => entry.taskId.startsWith(otherId)));
+  assert.equal(held.peak, 10); assert.equal(held.active, 10);
+  held.releaseAll();
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  await waitUntil(async () => (await app.api(`/tasks/${otherId}`, undefined, 'other-owner')).body.task.status === 'completed');
+  assert.equal(held.started.length, 18); assert.equal(held.peak, 10);
+  assert.deepEqual(task.files.filter(file => file.role === 'image').map(file => file.composition.imageRequestId), Array.from({ length: 15 }, (_, i) => `request-${i + 1}`));
+  assert.equal((await app.handler.store.getTask('owner', id)).galleryCheckpoints.filter(item => item.status === 'ready').length, 15);
+  const zip = await app.api(`/tasks/${id}/files/package.zip`);
+  assert.equal(zip.status, 200); assert.equal(Object.keys(unzipSync(zip.body)).filter(name => /\.jpg$/.test(name)).length, 15);
+  assert.equal((await app.credits.snapshot('owner')).balance, 250); assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.equal((await app.credits.snapshot('other-owner')).balance, 850);
+  await app.api(`/tasks/${id}/generate`, { workflow: 'store-gallery-v1', directionId: task.selection.directionId, imageMode: 'promotional', outputCount: 15 });
+  assert.equal(held.started.length, 18); assert.equal((await app.credits.snapshot('owner')).balance, 250);
+});
+
+test('new food photos generate with empty or partial store details without requesting optional copy', async t => {
+  let renders = 0;
+  const model = mockModel({ async identifyFood() { return foodAppearance; },
+    async renderFood(input) { renders++; return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId }; },
+    async reviewFoodRender() { return foodReview; }, async write() { assert.fail('Store-specific copy must not run without its facts'); } });
+  const app = await setup(t, { model });
+  for (const partial of [false, true]) {
+    if (partial) assert.equal((await app.api('/profile', { profile: { name: '老板的小店' } })).status, 200);
+    const id = randomUUID();
+    assert.equal((await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 2 })).status, 202);
+    const task = await app.wait(id, ['completed', 'failed']);
+    assert.equal(task.status, 'completed', task.error);
+    assert.equal(task.files.filter(file => file.role === 'image').length, 2);
+    assert.equal(task.copyStatus, 'not_requested'); assert.equal(task.copy.body, '');
+    assert.equal(task.profileSnapshot.name || '', partial ? '老板的小店' : '');
+    assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 200);
+  }
+  assert.equal(renders, 4); assert.equal(model.counts.recommend, 0);
+});
+
+test('one-click gallery analyses the whole upload, expands two food references to six new frames, and delivers without optional copy', async t => {
+  let renders = 0, copies = 0;
+  const plans = [];
+  const model = mockModel({ async identifyFood() { return foodAppearance; },
+    async renderFood(input) { renders++; plans.push(input.plan.angle); return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId }; },
+    async reviewFoodRender() { return foodReview; }, async write() { copies++; throw Object.assign(Error('copy result uncertain'), { code: 'PROVIDER_UNCERTAIN' }); } });
+  const app = await setup(t, { model, withCredits: true }); await app.api('/profile', { profile });
+  const id = randomUUID(), inputs = await photos(2);
+  assert.equal((await app.api('/tasks', { requestId: id, imageCount: 2, rightsConfirmed: true, autoGenerate: true, outputCount: 6 })).status, 202);
+  await app.api(`/tasks/${id}/photos`, { startIndex: 0, images: inputs }); await app.api(`/tasks/${id}/analyse`, {});
+  const task = await app.wait(id, ['completed','failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(task.selection.workflow, 'store-gallery-v1');
+  assert.equal(task.analysis.length, 2); assert.equal(task.files.filter(file => file.role === 'image').length, 6);
+  assert.equal(renders, 6); assert.equal(new Set(plans).size, 4); assert.equal(copies, 1); assert.equal(model.counts.recommend, 0);
+  assert.equal(task.billing.chargedPoints, 300); assert.equal(task.copyStatus, 'unavailable');
+  assert.equal((await app.credits.snapshot('owner')).balance, 700);
+  const zipped = await app.api(`/tasks/${id}/files/package.zip`);
+  assert.equal(zipped.status, 200); assert.equal(Object.keys(unzipSync(zipped.body)).length, 6);
+  const again = await app.api(`/tasks/${id}/generate`, { directionId: task.selection.directionId, imageMode: 'promotional', workflow: 'store-gallery-v1', outputCount: 6 });
+  assert.equal(again.body.task.id, id); assert.equal(renders, 6); assert.equal((await app.credits.snapshot('owner')).balance, 700);
+});
+
+test('gallery sends real store environment alongside food and previews nine finished frames before one final settlement', async t => {
+  const references = [];
+  const types = ['food','interior','exterior','preparation','food'];
+  const model = mockModel({ async analyse(photos) { return analysis(photos).map(item => ({ ...item, imageType: types[Number(item.imageId.split('-')[1])-1],
+    textRisk: 'warning', riskReasons: ['请核对公开招牌文字'] })); }, async identifyFood() { return foodAppearance; },
+    async renderFood(input) { references.push(input.storeReferences.map(item => item.id)); return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId }; },
+    async reviewFoodRender(input) { assert.equal(input.photos.length, 4); return foodReview; } });
+  const app = await setup(t, { model, withCredits: true }); await app.api('/profile', { profile });
+  const id = randomUUID(), inputs = await photos(5);
+  await app.api('/tasks', { requestId:id,imageCount:5,rightsConfirmed:true,autoGenerate:true,outputCount:9 });
+  for (let startIndex=0;startIndex<5;startIndex+=3) await app.api(`/tasks/${id}/photos`, {startIndex,images:inputs.slice(startIndex,startIndex+3)});
+  await app.api(`/tasks/${id}/analyse`,{});
+  const task=await app.wait(id,['awaiting_confirmation','completed','failed']);
+  assert.equal(task.status,'awaiting_confirmation',task.error); assert.equal(task.files.filter(file=>file.role==='image').length,9);
+  assert.equal(references.length,6); assert.ok(references.every(ids=>ids.join() === 'photo-2,photo-3'));
+  assert.equal((await app.api(`/tasks/${id}/files/01.jpg`)).status,200);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status,404);
+  assert.equal((await app.api(`/tasks/${id}/files/01.jpg`,undefined,'another-owner')).status,404);
+  assert.equal(task.billing.reservedPoints,450); assert.equal(task.billing.chargedPoints,0);
+  const confirmed=await app.api(`/tasks/${id}/confirm`,{confirmWarnings:true}); assert.equal(confirmed.body.task.billing.chargedPoints,450);
+  await app.api(`/tasks/${id}/confirm`,{confirmWarnings:true}); assert.equal((await app.credits.snapshot('owner')).balance,550);
+});
+
+test('the website plans a varied single-dish story from all uploads once and executes that exact storyboard', async t => {
+  let plans=0,renders=0;
+  const types=['food','food','exterior','interior',...Array(9).fill('preparation'),'staff'];
+  const names=['食品主视觉','加料摊盘','淋酱出餐','菜品质感','门店外观','蒸制工作','用餐环境','食品上桌','员工工作'];
+  const ids=['photo-1','photo-5','photo-6','photo-2','photo-3','photo-7','photo-4','photo-1','photo-14'];
+  const model=mockModel({async analyse(photos){return analysis(photos).map(item=>({...item,imageType:types[Number(item.imageId.split('-')[1])-1]}));},
+    async planGallery(input){plans++;assert.equal(input.analysis.length,14);assert.equal(input.outputCount,9);assert.equal(input.photos.length,3);
+      assert.deepEqual(input.photos.filter(p=>p.imageIds).flatMap(p=>p.imageIds),input.analysis.map(item=>item.imageId));
+      return {theme:'一盘面食从制作到上桌',visualStyle,foodGroups:[{id:'same-dish',label:'同一碗面食',imageIds:['photo-1','photo-2']}],shots:ids.map((id,index)=>{
+        const kind=types[Number(id.split('-')[1])-1]==='food'?'food':'scene';return {sourceImageId:id,kind,foodGroupId:kind==='food'?'same-dish':'',
+          name:names[index],purpose:'展示实际菜品或门店过程',focus:'完整面食',angle:index%2?'overhead':'oblique',camera:'按实际主体调整机位与景别',lighting:'中性暮色',editInstructions:'保留整组灰绿暮色与真实食品质感。'};})};},
+    async identifyFood(){return foodAppearance;},async renderFood(input){renders++;return{bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};},
+    async reviewFoodRender(){return foodReview;}});
+  const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});const id=randomUUID(),inputs=await photos(14);
+  await app.api('/tasks',{requestId:id,imageCount:14,rightsConfirmed:true,autoGenerate:true,outputCount:9});
+  for(let startIndex=0;startIndex<14;startIndex+=3)await app.api(`/tasks/${id}/photos`,{startIndex,images:inputs.slice(startIndex,startIndex+3)});
+  await app.api(`/tasks/${id}/analyse`,{});const task=await app.wait(id,['completed','failed']);
+  assert.equal(task.status,'completed',task.error);assert.equal(plans,1);assert.equal(renders,3);
+  assert.equal(task.galleryStoryboard.source,'ai');assert.equal(task.galleryStoryboard.foodGroups.length,1);
+  assert.deepEqual(task.selection.shots.map(shot=>shot.name),names);assert.equal(task.files.filter(file=>file.role==='image').length,9);
+  assert.equal(task.billing.chargedPoints,450);
+  const repeated=await app.api(`/tasks/${id}/generate`,{directionId:'store-gallery',workflow:'store-gallery-v1',imageMode:'promotional',outputCount:9});
+  assert.equal(repeated.body.task.id,id);assert.equal(plans,1);assert.equal(renders,3);assert.equal((await app.credits.snapshot('owner')).balance,550);
+  const fresh=await app.api(`/tasks/${id}/fork`,{requestId:randomUUID()});
+  assert.equal(fresh.body.task.galleryStoryboard,undefined,'a new direction must get a fresh composition rather than retaining the old one');
+  assert.equal((await app.api(`/tasks/${id}`)).body.task.galleryStoryboard.source,'ai');
+});
+
+test('an uncertain Claude planning call stops without a rule fallback, image dispatch or charge',async t=>{
+  let plans=0,renders=0;
+  const model=mockModel({async analyse(photos){return analysis(photos).map(item=>({...item,imageType:item.imageId==='photo-1'?'food':'preparation'}));},
+    async planGallery(){plans++;throw Object.assign(Error('response lost'),{code:'PROVIDER_UNCERTAIN'});},async identifyFood(){return foodAppearance;},
+    async renderGalleryPhoto(){renders++;throw Error('must not dispatch');}});
+  const app=await setup(t,{model,withCredits:true});await app.api('/profile',{profile});const id=randomUUID(),inputs=await photos(9);
+  await app.api('/tasks',{requestId:id,imageCount:9,rightsConfirmed:true,autoGenerate:true,outputCount:9});
+  for(let startIndex=0;startIndex<9;startIndex+=3)await app.api(`/tasks/${id}/photos`,{startIndex,images:inputs.slice(startIndex,startIndex+3)});
+  await app.api(`/tasks/${id}/analyse`,{});const task=await app.wait(id,['completed','failed']);
+  assert.equal(task.status,'failed');assert.equal(task.code,'PROVIDER_UNCERTAIN');assert.equal(plans,1);assert.equal(renders,0);
+  assert.equal(task.galleryStoryboard,undefined);assert.equal(task.files.length,0);
+  assert.equal((await app.credits.snapshot('owner')).balance,1000);assert.equal((await app.credits.snapshot('owner')).held,0);
+  assert.equal((await app.api(`/tasks/${id}/retry`,{})).status,409);assert.equal(plans,1);
+  const fork = await app.api(`/tasks/${id}/fork`, { requestId: randomUUID() });
+  assert.equal(fork.status, 200); assert.equal(fork.body.task.status, 'awaiting_selection');
+  assert.equal(fork.body.task.analysis.length, 9); assert.equal(fork.body.task.directions[0].id, 'store-gallery');
+  assert.equal(plans, 1, 'explicitly creating a new task reuses analysis and does not replay the unknown plan');
+});
+
+test('auto gallery rejects invalid frame counts before creating a paid task', async t => {
+  const app=await setup(t,{withCredits:true}); await app.api('/profile',{profile});
+  for(const outputCount of [0,-1,31,1.5,'9']) assert.equal((await app.api('/tasks',{requestId:randomUUID(),imageCount:2,rightsConfirmed:true,autoGenerate:true,outputCount})).body.code,'INVALID_OUTPUT_COUNT');
+  assert.equal((await app.credits.snapshot('owner')).balance,1000); assert.equal(app.model.counts.analyse,0);
+});
+
+test('scene photos use the image model and shared Claude style; set review repairs only the nominated frame', async t => {
+  const renders = [], audits = []; let setReviews = 0;
+  const model = mockModel({ async analyse(photos) { return analysis(photos).map(item => ({ ...item, imageType: item.imageId === 'photo-1' ? 'interior' : 'exterior' })); },
+    async renderGalleryPhoto(input) {
+      renders.push(input); assert.deepEqual(input.style, visualStyle); assert.ok(input.shot.editInstructions);
+      assert.equal(input.context.length, 0, 'scene edits use only their original and do not merge signs or architecture from other views');
+      return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: `${input.shot.imageId}-${input.attempt}`, provider: 'image-test' };
+    }, async reviewGalleryPhoto(input) { audits.push(input); assert.deepEqual(input.visualStyle, visualStyle); return { ...foodReview, styleScore: 94, styleMatch: true, marketingUseful: true }; },
+    async reviewGallerySet(input) {
+      assert.deepEqual(input.visualStyle, visualStyle); assert.deepEqual(input.photos.flatMap(p => p.imageIds), ['shot-01','shot-02']);
+      return ++setReviews === 1 ? { status: 'blocked', reviseImageIds: ['shot-02'], errors: ['shot-02色温偏暖，恢复中性暮色'], warnings: [] }
+        : { status: 'passed', reviseImageIds: [], errors: [], warnings: [] };
+    } });
+  const app = await setup(t, { model, withCredits: true }); const id = randomUUID();
+  await app.api('/tasks', { requestId: id, images: await photos(2), rightsConfirmed: true, autoGenerate: true, outputCount: 2 });
+  const task = await app.wait(id, ['completed','failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(renders.length, 3); assert.equal(audits.length, 3); assert.equal(setReviews, 2);
+  const repair = renders.find(input => input.attempt === 2); assert.equal(repair.shot.imageId, 'shot-02'); assert.match(repair.corrections[0], /色温偏暖/);
+  const files = task.files.filter(file => file.role === 'image');
+  assert.ok(files.every(file => file.composition.method === 'claude-directed-scene-edit' && file.composition.modelEdited));
+  assert.equal(new Set(files.map(file => file.composition.styleFingerprint)).size, 1);
+  assert.deepEqual(files.map(file => file.composition.imageRequestId), ['shot-01-0', 'shot-02-2']);
+  assert.equal(task.gallerySetReview.status, 'passed'); assert.equal(task.billing.chargedPoints, 100); assert.equal((await app.credits.snapshot('owner')).balance, 900);
+});
+
+test('persistent whole-set style drift withholds the package and releases all held points', async t => {
+  let renders = 0, reviews = 0;
+  const model = mockModel({ async analyse(photos) { return analysis(photos).map(item => ({ ...item, imageType: 'interior' })); },
+    async renderGalleryPhoto(input) { renders++; return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.shot.imageId }; },
+    async reviewGallerySet() { reviews++; return { status: 'blocked', reviseImageIds: ['shot-01'], errors: ['shot-01明显换滤镜'], warnings: [] }; } });
+  const app = await setup(t, { model, withCredits: true }); const id = randomUUID();
+  await app.api('/tasks', { requestId: id, images: await photos(1), rightsConfirmed: true, autoGenerate: true, outputCount: 1 });
+  const task = await app.wait(id, ['failed']);
+  assert.equal(task.code, 'GALLERY_SET_REVIEW_FAILED'); assert.equal(renders, 2); assert.equal(reviews, 2); assert.equal(task.files.length, 0);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404); assert.equal((await app.credits.snapshot('owner')).balance, 1000); assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('gallery renders and audits the identical cropped primary dish, keeping the complete original for task evidence', async t => {
+  let renders = 0, audits = 0;
+  const renderedReferences = new Map(), fullSizes = new Map();
+  const model = mockModel({ async identifyFood(input) { fullSizes.set(input.analysis.imageId, await sharp(input.photos[0].bytes).metadata()); return { ...foodAppearance, identityScope: 'dish', subjectBox: { left: .2, top: .2, width: .6, height: .6 }, subjectConfidence: .95 }; },
+    async renderFood(input) {
+      renders++;
+      const meta = await sharp(input.photo.bytes).metadata();
+      const full = fullSizes.get(input.photo.id);
+      assert.ok(meta.width < full.width && meta.height < full.height);
+      renderedReferences.set(input.photo.id, input.photo.bytes);
+      return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId };
+    }, async reviewFoodRender(input) {
+      audits++; assert.deepEqual(input.photos[0].bytes, renderedReferences.get(input.sourceImageId)); return foodReview;
+    } });
+  const app = await setup(t, { model }); await app.api('/profile', { profile });
+  const id = randomUUID(), inputs = await photos(2);
+  await app.api('/tasks', { requestId:id, images:inputs, rightsConfirmed:true, autoGenerate:true, outputCount:6 });
+  const task = await app.wait(id, ['completed','failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(renders,6); assert.equal(audits,6);
+  assert.equal(task.sourceImages.length,2);
+  assert.ok(task.files.filter(file=>file.role==='image').every(file=>file.composition.subjectBox?.width===.6));
+});
+
+test('hotpot gallery keeps the complete spread even when vision selects a foreground side dish', async t => {
+  let fullReference, renders = 0;
+  const model = mockModel({ async identifyFood(input) {
+    assert.equal(input.subjectScope, 'spread'); fullReference = input.photos[0].bytes;
+    return { ...foodAppearance, identityScope: 'dish', subjectBox: { left: .2, top: .2, width: .6, height: .6 }, subjectConfidence: .95 };
+  }, async renderFood(input) {
+    renders++; assert.deepEqual(input.photo.bytes, fullReference); assert.equal(input.appearance.identityScope, 'spread');
+    assert.equal(input.appearance.subjectBox, undefined);
+    return { bytes: await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(), requestId: input.imageId };
+  }, async reviewFoodRender(input) { assert.deepEqual(input.photos[0].bytes, fullReference); return foodReview; } });
+  const app = await setup(t, { model }); await app.api('/profile', { profile: { ...profile, category: '火锅' } });
+  const id = randomUUID(); await app.api('/tasks', { requestId: id, images: await photos(1), rightsConfirmed: true, autoGenerate: true, outputCount: 9 });
+  const task = await app.wait(id, ['completed','failed']);
+  assert.equal(task.status, 'completed', task.error); assert.equal(renders, 9);
+  assert.ok(task.files.filter(file=>file.role==='image').every(file=>file.composition.subjectBox===null));
+});
+
+test('gallery persists approved frames privately and a known failure retries only the remaining frames', async t => {
+  let renders=0;
+  const model=mockModel({async identifyFood(){return foodAppearance;},async renderFood(input){
+    if(++renders===3)throw Object.assign(Error('explicit provider rejection'),{code:'PROVIDER_ERROR'});
+    return {bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};
+  },async reviewFoodRender(){return foodReview;},async write(){throw Error('optional copy unavailable');}});
+  const app=await setup(t,{model,withCredits:true,galleryConcurrency:3});await app.api('/profile',{profile});
+  const id=randomUUID();await app.api('/tasks',{requestId:id,images:await photos(2),rightsConfirmed:true,autoGenerate:true,outputCount:6});
+  const failed=await app.wait(id,['failed']);assert.equal(failed.code,'PROVIDER_ERROR');
+  const saved=await app.handler.store.getTask('owner',id);assert.equal(saved.galleryCheckpoints.filter(x=>x.status==='ready').length,2);
+  assert.equal(failed.galleryCheckpoints,undefined);
+  assert.equal((await app.api(`/tasks/${id}/files/${saved.galleryCheckpoints[0].key.split('/').at(-1)}`)).status,404);
+  assert.equal((await app.credits.snapshot('owner')).balance,1000);
+  await app.api(`/tasks/${id}/retry`,{});const completed=await app.wait(id,['completed','failed']);
+  assert.equal(completed.status,'completed',completed.error);assert.equal(renders,7);
+  assert.equal(completed.files.filter(x=>x.role==='image').length,6);assert.equal(completed.billing.chargedPoints,300);
+});
+
+test('an explicitly requested new gallery reuses known frames from an uncertain task without replaying its unknown call',async t=>{
+  let renders=0;
+  const model=mockModel({async identifyFood(){return foodAppearance;},async renderFood(input){
+    if(++renders===3)throw Object.assign(Error('unknown result'),{code:'PROVIDER_UNCERTAIN'});
+    return {bytes:await sharp(input.photo.bytes).resize(1080,1440).jpeg().toBuffer(),requestId:input.imageId};
+  },async reviewFoodRender(){return foodReview;},async write(){throw Error('optional copy unavailable');}});
+  const app=await setup(t,{model,withCredits:true,galleryConcurrency:3});await app.api('/profile',{profile});
+  const id=randomUUID();await app.api('/tasks',{requestId:id,images:await photos(2),rightsConfirmed:true,autoGenerate:true,outputCount:6});
+  await app.wait(id,['failed']);assert.equal((await app.api(`/tasks/${id}/retry`,{})).status,409);assert.equal(renders,3);
+  const next=randomUUID();await app.api(`/tasks/${id}/fork`,{requestId:next,reuseCompletedImages:true});
+  await app.api(`/tasks/${next}/generate`,{directionId:'store-gallery',imageMode:'promotional',workflow:'store-gallery-v1',outputCount:6});
+  const completed=await app.wait(next,['completed','failed']);assert.equal(completed.status,'completed',completed.error);
+  assert.equal(renders,7);assert.equal((await app.credits.snapshot('owner')).balance,700);
+  const again=await app.api(`/tasks/${id}/fork`,{requestId:next,reuseCompletedImages:true});assert.equal(again.body.task.id,next);
+});
+
+test('food rephotography changes angles, reuses completed calls during local retries and charges delivered images once', async t => {
+  let renders=0, attempts=0, identities=0;const plans=[],styles=[];
+  const model=mockModel({async identifyFood(){identities++;return foodAppearance;},async renderFood(input){renders++;plans.push(input.plan.angle);styles.push(Boolean(input.styleReference));return {bytes:input.photo.bytes,requestId:'render-id'};},async reviewFoodRender(input){assert.equal(input.photos.length,2);return foodReview;}});
+  const promotionalProcessor={...promotion,async processPromotionalPhoto(bytes,options){
+    assert.equal((await options.renderFood(options.analysis,{bytes})).requestId,'render-id');
+    if(++attempts===1)throw Error('local composition failed after successful rephotography');
+    return processor.processPhoto(bytes);
+  },async addPromotionalHeadline(result){return result;}};
+  const app=await setup(t,{model,withCredits:true,promotionalProcessor});const {id}=await newTask(app);
+  await app.api(`/tasks/${id}/generate`,{directionId:'D01',acceptSparse:true,imageMode:'promotional'});
+  const task=await app.wait(id,['completed','failed']);assert.equal(task.status,'completed',task.error);
+  assert.equal(renders,2);assert.equal(identities,2);assert.equal(attempts,3);assert.deepEqual(plans,['oblique','overhead']);assert.deepEqual(styles,[false,false]);
+  assert.equal(task.billing.chargedPoints,100);assert.equal((await app.credits.snapshot('owner')).balance,900);
+  assert.ok(task.analysis.every(image=>image.foodAppearance.description));
+  await app.api(`/tasks/${id}/generate`,{directionId:'D01',acceptSparse:true,imageMode:'promotional'});assert.equal(renders,2);
+});
+
+test('uncertain food-generation calls stop once, never get a quality retry and fully release the points', async t => {
+  let renders=0, attempts=0, reviews=0;
+  const model=mockModel({async identifyFood(){return foodAppearance;},async renderFood(){renders++;throw Object.assign(Error('result uncertain'),{code:'PROVIDER_UNCERTAIN'});},async reviewFoodRender(){reviews++;return foodReview;}});
+  const promotionalProcessor={...promotion,async processPromotionalPhoto(bytes,options){attempts++;await options.renderFood(options.analysis,{bytes});}};
+  const app=await setup(t,{model,withCredits:true,promotionalProcessor});const {id}=await newTask(app);
+  await app.api(`/tasks/${id}/generate`,{directionId:'D01',acceptSparse:true,imageMode:'promotional'});
+  const task=await app.wait(id,['completed','failed']);assert.equal(task.status,'failed');assert.equal(task.code,'PROVIDER_UNCERTAIN');
+  assert.equal(renders,1);assert.equal(attempts,1);assert.equal(reviews,0);assert.equal(task.files.length,0);
+  const wallet=await app.credits.snapshot('owner');assert.equal(wallet.balance,1000);assert.equal(wallet.held,0);
+});
+
+test('only completed food results with visible identity drift get a corrective generation; persistent drift releases all points',async t=>{
+  let renders=0;const attempts=[],corrections=[];
+  const model=mockModel({async identifyFood(){return foodAppearance;},async renderFood(input){renders++;attempts.push(input.attempt);corrections.push(input.corrections);return {bytes:input.photo.bytes,requestId:'render-id'};},async reviewFoodRender(){return {...foodReview,status:'blocked',identityMatch:false,errors:['多出一份食物']};}});
+  const app=await setup(t,{model,withCredits:true});const {id}=await newTask(app);
+  await app.api(`/tasks/${id}/generate`,{directionId:'D01',acceptSparse:true,imageMode:'promotional'});
+  const task=await app.wait(id,['completed','failed']);assert.equal(task.status,'failed');assert.equal(task.code,'FOOD_IDENTITY_MISMATCH');
+  assert.equal(renders,2);assert.deepEqual(attempts,[0,1]);assert.deepEqual(corrections,[[],['多出一份食物']]);
+  assert.equal(task.files.length,0);assert.equal((await app.credits.snapshot('owner')).balance,1000);
+});
+
+test('restaurant points: upload and analysis are free, cover replaces first photo, and repeated completion charges once', async t => {
+  const app = await setup(t, { withCredits: true }), { id } = await newTask(app);
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  const body = { directionId: 'D01', acceptSparse: true, imageMode: 'cover' };
+  assert.equal((await app.api(`/tasks/${id}/generate`, body)).status, 202);
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  assert.equal(task.files.filter(file => /^image\//.test(file.mime)).length, 2);
+  assert.equal(task.billing.chargedPoints, 100);
+  assert.equal(task.billing.status, 'settled');
+  assert.equal((await app.api(`/tasks/${id}/generate`, body)).body.task.id, id);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.equal((await app.credits.snapshot('another-owner')).balance, 1000);
+});
+
+test('restaurant unlimited account delivers a complete cover package with zero balance and no point charge', async t => {
+  const app = await setup(t, { withCredits: true });
+  await app.credits.reserve({ userId: 'owner', taskId: 'previous-images', kind: 'image', units: 20 });
+  await app.credits.settle({ userId: 'owner', taskId: 'previous-images', units: 20 });
+  await app.credits.setUnlimited('owner', true);
+  const { id } = await newTask(app);
+  assert.equal((await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true, imageMode: 'cover' })).status, 202);
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  assert.equal(task.files.filter(file => /^image\//.test(file.mime)).length, 2);
+  assert.equal(task.billing.status, 'settled'); assert.equal(task.billing.exempt, true);
+  assert.equal(task.billing.chargedPoints, 0); assert.equal(task.billing.reservedPoints, 0);
+  assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 200);
+  assert.equal((await app.credits.snapshot('owner')).available, 0);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.equal((await app.credits.snapshot('another-owner')).unlimited, false);
+});
+
+test('restaurant points: failed noncore photo refunds the difference and only the actual package photos are charged', async t => {
+  const imageProcessor = { ...processor, async processPhoto(bytes, options) {
+    if ((await sharp(bytes).stats()).channels[0].mean < 90) throw new Error('unavailable photo');
+    return processor.processPhoto(bytes, options);
+  } };
+  const app = await setup(t, { withCredits: true, imageProcessor }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  assert.equal(task.billing.chargedPoints, 50);
+  assert.equal((await app.credits.snapshot('owner')).balance, 950);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('restaurant points: risk confirmation keeps a reservation, then confirms and settles only once', async t => {
+  const model = mockModel({ async audit() { return { status: 'passed_with_warning', warnings: ['请核对真实照片后发布'], errors: [] }; } });
+  const app = await setup(t, { withCredits: true, model }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const task = await app.wait(id, ['awaiting_confirmation', 'failed']);
+  assert.equal(task.status, 'awaiting_confirmation', task.error);
+  const wallet = await app.credits.snapshot('owner');
+  assert.equal(wallet.balance, 900); assert.equal(wallet.held, 100); assert.equal(wallet.total, 1000);
+  assert.equal((await app.api(`/tasks/${id}/confirm`, { confirmWarnings: true })).body.task.status, 'completed');
+  await app.api(`/tasks/${id}/confirm`, { confirmWarnings: true });
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('restaurant points: insufficient balance stops writing and does not reserve provider or image points', async t => {
+  const app = await setup(t, { withCredits: true }), { id } = await newTask(app);
+  await app.credits.reserve({ userId: 'owner', taskId: 'previous-images', kind: 'image', units: 19 });
+  await app.credits.settle({ userId: 'owner', taskId: 'previous-images', units: 19 });
+  const result = await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  assert.equal(result.status, 402); assert.equal(result.body.code, 'INSUFFICIENT_POINTS');
+  assert.equal(app.model.counts.write, 0); assert.equal(app.model.counts.audit, 0);
+  assert.equal((await app.credits.snapshot('owner')).balance, 50);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('restaurant points: explicit failed generation refunds and manual retry uses a fresh reservation', async t => {
+  let attempts = 0;
+  const model = mockModel({ async write(input) { if (!attempts++) throw new Error('temporary failed response'); return copy(input.analysis); } });
+  const app = await setup(t, { withCredits: true, model }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const failed = await app.wait(id, ['failed']);
+  assert.equal(failed.billing.status, 'released');
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  await app.api(`/tasks/${id}/retry`, {});
+  const task = await app.wait(id, ['completed', 'failed']);
+  assert.equal(task.status, 'completed', task.error);
+  assert.notEqual(task.billing.taskId, failed.billing.taskId);
+  assert.equal(task.billing.chargedPoints, 100);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+});
+
+test('restaurant points: pending settlement blocks package download and restores without repeating model calls', async t => {
+  const app = await setup(t, { withCredits: true }), { id } = await newTask(app);
+  const settle = app.credits.settle; let offline = true;
+  app.credits.settle = async input => {
+    if (offline) throw Object.assign(new Error('credits temporarily unavailable'), { code: 'CREDITS_STORAGE_UNAVAILABLE', status: 503 });
+    return settle(input);
+  };
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  let task;
+  const deadline = performance.now() + 5000;
+  do {
+    task = (await app.api(`/tasks/${id}`)).body.task;
+    if (task?.billing?.status === 'settle_pending') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  } while (performance.now() < deadline);
+  assert.equal(task.billing.status, 'settle_pending');
+  assert.equal(task.status, 'generating');
+  assert.notEqual((await app.api(`/tasks/${id}/files/${task.files[0].filename}`)).status, 200);
+  const counts = { ...app.model.counts };
+  assert.equal((await app.credits.snapshot('owner')).held, 100);
+  offline = false;
+  const restored = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(restored.status, 'completed', restored.error);
+  assert.equal(restored.code, null);
+  assert.equal(restored.billing.chargedPoints, 100);
+  assert.deepEqual(app.model.counts, counts);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+test('restaurant points: expiring an unconfirmed package releases its image reservation', async t => {
+  let clock = Date.now();
+  const model = mockModel({ async audit() { return { status: 'passed_with_warning', warnings: ['请核对照片'], errors: [] }; } });
+  const app = await setup(t, { withCredits: true, model, now: () => clock }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  assert.equal((await app.wait(id, ['awaiting_confirmation', 'failed'])).status, 'awaiting_confirmation');
+  assert.equal((await app.credits.snapshot('owner')).held, 100);
+  clock += 3 * 24 * 60 * 60 * 1000 + 1000;
+  await app.api(`/tasks/${id}`);
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+});
+
+for (const committed of [false, true]) test(`restaurant points: expiry reconciles pending settlement with committed=${committed}`, async t => {
+  let clock = Date.now();
+  const app = await setup(t, { withCredits: true, now: () => clock }), { id } = await newTask(app);
+  const settle = app.credits.settle;
+  app.credits.settle = async input => {
+    if (committed) await settle(input);
+    throw Object.assign(new Error('lost settlement response'), { code: 'CREDITS_STORAGE_UNAVAILABLE', status: 503 });
+  };
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const deadline = performance.now() + 5000;
+  let pending;
+  do {
+    pending = (await app.api(`/tasks/${id}`)).body.task;
+    if (pending?.billing?.status === 'settle_pending') break;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  } while (performance.now() < deadline);
+  assert.equal(pending.billing.status, 'settle_pending');
+  const counts = { ...app.model.counts };
+  clock += 3 * 24 * 60 * 60 * 1000 + 1000;
+  const expired = (await app.api(`/tasks/${id}`)).body.task;
+  assert.equal(expired.status, 'failed'); assert.equal(expired.code, 'FILES_EXPIRED');
+  assert.equal(expired.billing.status, committed ? 'settled' : 'released');
+  assert.equal(expired.billing.chargedPoints, committed ? 100 : 0);
+  await app.api(`/tasks/${id}`);
+  assert.equal((await app.credits.snapshot('owner')).balance, committed ? 900 : 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.deepEqual(app.model.counts, counts);
+});
+
+test('restaurant points: task deletion keeps a durable cleanup reference until an offline wallet recovers', async t => {
+  let clock = Date.now();
+  const model = mockModel({ async audit() { return { status: 'passed_with_warning', warnings: ['请核对照片'], errors: [] }; } });
+  const app = await setup(t, { withCredits: true, model, now: () => clock }), { id } = await newTask(app);
+  await app.api(`/tasks/${id}/generate`, { directionId: 'D01', acceptSparse: true });
+  const task = await app.wait(id, ['awaiting_confirmation']);
+  const reservation = app.credits.reservation; let offline = true;
+  app.credits.reservation = async (...args) => { if (offline) throw new Error('database offline'); return reservation(...args); };
+  clock += 31 * 24 * 60 * 60 * 1000;
+  assert.equal((await app.api(`/tasks/${id}`)).status, 404);
+  assert.equal((await app.credits.snapshot('owner')).held, 100);
+  const swept = await app.handler.store.sweep();
+  assert.deepEqual(swept.pendingCredits, [{ userId: 'owner', taskId: id, creditId: task.billing.taskId }]);
+  assert.equal(await app.handler.store.getTask('owner', id), null);
+  offline = false;
+  assert.equal((await app.api(`/tasks/${id}`)).status, 404);
+  assert.equal((await app.credits.snapshot('owner')).balance, 1000);
+  assert.equal((await app.credits.snapshot('owner')).held, 0);
+  assert.equal((await app.handler.store.sweep()).pendingCredits.length, 0);
+});
 
 test('30-photo draft accepts contiguous resumable batches, detects changed deliveries, and analyse starts only once', async t => {
   const app = await setup(t); await app.api('/profile', { profile });
@@ -441,6 +1094,31 @@ test('one complete weak draft is rewritten with its original facts and photo evi
   assert.equal(usage.used, 1); assert.equal(usage.reserved, 0);
 });
 
+test('clinical food narration is rewritten before publication and only the delivered package consumes points', async t => {
+  const writes = [], audits = [];
+  const model = mockModel({
+    async write(input) {
+      writes.push(structuredClone(input));
+      const result = copy(input.analysis);
+      if (writes.length === 1) result.body = result.body.replace('圆碗里盛着面条', '圆碗里可见长条状食材');
+      return result;
+    },
+    async audit(input) { audits.push(input.copy); return { status: 'passed', warnings: [], errors: [] }; },
+  });
+  const app = await setup(t, { model, withCredits: true }), { id } = await newTask(app);
+  const selection = { directionId: 'D01', imageMode: 'natural', acceptSparse: true, outputCount: 2, facts: {} };
+  await app.api(`/tasks/${id}/generate`, selection);
+  const result = await app.wait(id, ['completed', 'failed']);
+  assert.equal(result.status, 'completed', result.error);
+  assert.equal(writes.length, 2);
+  assert.ok(writes[1].qualityIssues.some(issue => /食材.*分析描述/.test(issue)));
+  assert.equal(audits.length, 1);
+  assert.equal(result.copy.body, copy(result.analysis).body);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+  assert.equal((await app.api(`/tasks/${id}/generate`, selection)).body.task.id, id);
+  assert.equal((await app.credits.snapshot('owner')).balance, 900);
+});
+
 test('a model-only factual rejection rewrites the complete draft and reviews the replacement before delivery', async t => {
   const writes = [], audits = [];
   const parkingError = '文案出现免费停车位，但门店资料和照片分析均未确认停车信息。';
@@ -607,11 +1285,11 @@ test('publication blocks unsupported claims and privacy; no quota is charged', a
   assert.ok(localReview(copy([{ imageId: 'photo-1' }]), profile, {}, [{ imageId: 'photo-1', usable: false, privacyRisk: 'high', textRisk: 'none' }]).errors.length);
 });
 
-test('provider malformed JSON and uncertain transport failures consume internal attempts without auto replay', async t => {
+test('completed malformed JSON retries once; uncertain transport failures consume one attempt without replay', async t => {
   const root = await mkdtemp(join(tmpdir(), 'restaurant-model-')); let requests = 0;
   const model = createRestaurantModel({ config, storageDir: root, fetchImpl: async () => { requests++; return new Response(JSON.stringify({ choices: [{ message: { content: '{broken' }, finish_reason: 'stop' }] }), { status: 200 }); } });
   t.after(async () => { await model.close(); await rm(root, { recursive: true, force: true }); }); await model.ready;
-  await assert.rejects(model.recommend([], profile), error => error.code === 'MODEL_INVALID_OUTPUT'); assert.equal(requests, 1); assert.equal((await model.usage()).used.chat, 1);
+  await assert.rejects(model.recommend([], profile), error => error.code === 'MODEL_INVALID_OUTPUT'); assert.equal(requests, 2); assert.equal((await model.usage()).used.chat, 2);
   const secondRoot = await mkdtemp(join(tmpdir(), 'restaurant-model-uncertain-'));
   const uncertain = createRestaurantModel({ config, storageDir: secondRoot, fetchImpl: async () => { throw new Error('connection lost'); } });
   t.after(async () => { await uncertain.close(); await rm(secondRoot, { recursive: true, force: true }); }); await uncertain.ready;
@@ -677,6 +1355,7 @@ test('copy claims use explicit flat fact keys or exact visual image references',
   ]) assert.throws(() => validateCopy({ ...original, claims: [claim] }, ['photo-1']), /可追踪依据/);
   assert.match(COPY_PROMPT, /factKeys只允许以下平铺字段名/);
   assert.match(COPY_PROMPT, /纯视觉事实必须使用factKeys:\[\]/);
+  assert.match(COPY_PROMPT, /正文必须自然写出profile.name原值/);
 });
 
 test('asset task filter uses completion time and includes old tasks completed recently', async t => {

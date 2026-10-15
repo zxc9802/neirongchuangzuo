@@ -72,7 +72,7 @@
 .image-count-options select{min-height:36px;min-width:78px;border:1px solid #dce3ed;border-radius:7px;background:#fff;color:#4b6281;padding:5px 8px;font:inherit}
 .image-upload-progress{display:flex;flex-wrap:wrap;align-items:center;gap:7px 12px;margin:10px 3px 0;padding:10px 11px;background:#f1f6fd;border:1px solid #dbe7f6;border-radius:8px;font-size:11px;line-height:1.7;color:#5e7798}
 .image-upload-progress small{flex-basis:100%;font-size:10px;color:#7d8ca0}
-.image-quota-estimate{font-size:10px;color:#6b7788;line-height:1.6;white-space:nowrap}
+.image-quota-estimate{font-size:10px;color:#6b7788;line-height:1.6}
 .image-mode-description{font-size:10px;color:#788392;line-height:1.7;margin:10px 0 0}
 .image-mode-option:disabled,.image-count-options button:disabled{opacity:.65;cursor:default}
 .image-mode-option:focus-visible,.image-count-options button:focus-visible{outline:2px solid #4071b8;outline-offset:3px}
@@ -84,3 +84,5 @@
 .generated-image-grid figcaption>span{min-width:0;line-height:1.6;overflow-wrap:anywhere}
 .generated-image-grid figcaption>span>small{display:block;margin-top:3px;font-size:10px;color:#8c96a4}
 @media(max-width:760px){.image-mode-option{min-height:44px;font-size:10px;padding:7px 3px}.image-count-options button{min-height:40px}.image-output-settings{flex-wrap:wrap}.image-quota-estimate{margin-left:auto}.image-partial-notice{margin:0 13px 13px}}
+
+.rail-bottom .workspace-credits{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-height:45px;margin:0 7px;padding:7px 3px;background:#eaf3ed;border-radius:10px;color:#285c46}.workspace-credits strong{font-size:15px;font-weight:650;line-height:1.2}.workspace-credits small{font-size:10px}.workspace-credits[hidden]{display:none}.account-credit-section{margin:22px 0;padding:17px;background:#f3f6f4;border:1px solid #e1e9e3;border-radius:12px}.account-credit-section>div{display:flex;align-items:center;justify-content:space-between;gap:20px}.account-credit-section strong{font-size:14px}.account-credit-section p{font-size:12px;line-height:1.9;color:#66746c;margin:10px 0 0}.account-credit-section [role=alert]{color:#af553e}.credit-estimate{font-size:11px;line-height:1.7;color:#66746c;margin:8px 0}.credit-estimate.is-error{color:#af553e}

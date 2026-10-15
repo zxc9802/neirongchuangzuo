@@ -8,6 +8,8 @@ export interface AppConfig {
   indexttsSpeakerAudioUrl: string;
   indexttsEmotionAudioPath: string;
   indexttsEmotionAudioUrl: string;
+  doubaoTtsApiKey: string;
+  doubaoTtsVoiceMap: Record<string, string>;
   heygenApiKey: string;
   heygenApiBaseUrl: string;
   heygenMcpServerUrl: string;
@@ -48,6 +50,8 @@ const DEFAULT_CONFIG: AppConfig = {
     process.env.INDEXTTS_EMOTION_AUDIO_PATH || "",
   indexttsEmotionAudioUrl:
     process.env.INDEXTTS_EMOTION_AUDIO_URL || "",
+  doubaoTtsApiKey: process.env.DOUBAO_TTS_API_KEY || "",
+  doubaoTtsVoiceMap: JSON.parse(process.env.DOUBAO_TTS_VOICE_MAP || "{}"),
   heygenApiKey:
     process.env.HEYGEN_API_KEY || "",
   heygenApiBaseUrl:

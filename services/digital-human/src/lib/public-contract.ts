@@ -17,14 +17,18 @@ export interface PublicLogEntry {
 }
 
 export interface PublicTaskBilling {
+  source?: "workspace" | "main-app" | "internal";
+  exempt?: boolean;
   isExternalUser: boolean;
   estimatedDuration?: number;
   estimatedPoints?: number;
+  reservedPoints?: number;
   actualDuration?: number;
   chargedPoints?: number;
   costCny?: number;
   status:
     | "not_applicable"
+    | "reserving"
     | "reserved"
     | "provider_committed"
     | "settle_pending"
@@ -58,6 +62,7 @@ export interface PublicTaskItem {
     engine: PublicEngine;
   };
   results: {
+    deliveryMode?: "narration_fallback";
     downloadUrl?: string;
     originalVideoUrl?: string;
     finalVideoUrl?: string;

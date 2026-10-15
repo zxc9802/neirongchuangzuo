@@ -1,3 +1,4 @@
+import { taskOutputExpiresAt } from "@/lib/task-output-retention";
 import { NextRequest } from "next/server";
 import { TaskStore } from "@/lib/store/task-store";
 import { isTrustedTaskOutputSource, servePrivateMedia } from "@/lib/server/media-response";
@@ -45,7 +46,10 @@ export async function GET(
     if (!isTrustedTaskOutputSource(task.results.finalVideoUrl, id, ["final.mp4"])) {
       return taskNotFoundResponse();
     }
-    return servePrivateMedia(req, task.results.finalVideoUrl, { contentType: "video/mp4" });
+    const source = isTrustedTaskOutputSource(task.results.previewVideoUrl, id, ["preview.mp4"])
+      ? task.results.previewVideoUrl : task.results.finalVideoUrl;
+    return servePrivateMedia(req, source, { contentType: "video/mp4", direct: true,
+      expiresAt: taskOutputExpiresAt(task) });
   }
   if (kind === "voice") {
     if (!isTaskOutputDeliverable(task)) return taskNotFoundResponse();

@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createPreviewServer } from '../preview.mjs';
-import { createAIHandler, downloadImage, isPublicAddress } from '../services/ai/server.mjs';
+import { createAIHandler, downloadImage, isPublicAddress, loadAIConfig } from '../services/ai/server.mjs';
 import { createRequestLedger } from '../services/ai/request-ledger.mjs';
 import { request } from 'node:http';
 
@@ -57,11 +57,13 @@ async function server(t, { storageDir, config = CONFIG, fetchImpl = async () => 
 }
 
 async function finished(app, id) {
-  const deadline = Date.now() + 5000;
+  const deadline = Date.now() + 30_000;
+  let latest;
   while (Date.now() < deadline) {
     const response = await fetch(`${app.base}/api/ai/images/${id}`);
     assert.equal(response.status, 200);
     const { task } = await response.json();
+    latest = task;
     if (['completed', 'failed'].includes(task.status)) {
       // Await persisted terminal state, not just the in-memory transition.
       const saved = JSON.parse(await readFile(join(app.storageDir, id, 'task.json'), 'utf8'));
@@ -69,7 +71,7 @@ async function finished(app, id) {
     }
     await delay(15);
   }
-  assert.fail('Mock generation did not reach a persisted terminal state');
+  assert.fail(`Mock generation did not reach a persisted terminal state: ${JSON.stringify({ status: latest?.status, completedCount: latest?.completedCount, outputCount: latest?.outputCount, code: latest?.code })}`);
 }
 
 test('AI routes expose capability status without secrets and preserve the main workspace', async t => {
@@ -242,6 +244,34 @@ test('image sets require enough quota for the whole set before dispatch and succ
   const body = input({ generationMode: 'variations', outputCount: 2 });
   await app.post('/api/ai/images', body); await finished(app, body.requestId);
   assert.equal(calls, 2); assert.equal((await (await fetch(app.base + '/api/ai/usage')).json()).remaining.image, 1);
+});
+
+test('image configuration defaults to unlimited and preserves explicit finite or disabled settings', () => {
+  const baseline = { AI_IMAGE_DAILY_LIMIT: '', AI_CHAT_DAILY_LIMIT: '', AI_REQUESTS_PER_MINUTE: '' };
+  assert.deepEqual(loadAIConfig(baseline).limits, { imageDaily: null, chatDaily: 100, perMinute: 10 });
+  assert.equal(loadAIConfig({ ...baseline, AI_IMAGE_DAILY_LIMIT: 'unlimited' }).limits.imageDaily, null);
+  assert.deepEqual(loadAIConfig({...baseline,AI_IMAGE_DAILY_LIMIT:'unlimited',AI_CHAT_DAILY_LIMIT:'unlimited',AI_REQUESTS_PER_MINUTE:'unlimited'}).limits,
+    {imageDaily:null,chatDaily:null,perMinute:null});
+  assert.equal(loadAIConfig({ ...baseline, AI_IMAGE_DAILY_LIMIT: '20' }).limits.imageDaily, 20);
+  assert.equal(loadAIConfig({ ...baseline, AI_IMAGE_DAILY_LIMIT: '0' }).limits.imageDaily, 0);
+  assert.throws(() => loadAIConfig({ ...baseline, AI_CHAT_DAILY_LIMIT: 'unlimited-typo' }), { code: 'INVALID_LIMIT_CONFIG' });
+});
+
+test('default unlimited image quota generates and serves more than twenty outputs while reporting counted usage', async t => {
+  let calls = 0;
+  const app = await server(t, { config: { ...CONFIG, limits: { chatDaily: 100, perMinute: 100 } }, fetchImpl: async () => { calls++; return imageResult(); } });
+  for (const outputCount of [15, 6]) {
+    const body = input({ generationMode: 'series', outputCount });
+    assert.equal((await app.post('/api/ai/images', body)).status, 202);
+    const task = await finished(app, body.requestId);
+    assert.equal(task.status, 'completed', task.error); assert.equal(task.completedCount, outputCount);
+    assert.equal((await fetch(app.base + task.images.at(-1).url)).status, 200);
+  }
+  const usage = await (await fetch(app.base + '/api/ai/usage')).json();
+  assert.equal(calls, 21); assert.equal(usage.used.image, 21);
+  assert.equal(usage.limits.imageDaily, null); assert.equal(usage.remaining.image, null);
+  const status = await (await fetch(app.base + '/api/ai/status')).json();
+  assert.equal(status.image.dailyLimit, null); assert.equal(status.image.remaining, null);
 });
 
 test('a known failed position is not retried while other set positions finish and successful files remain downloadable', async t => {

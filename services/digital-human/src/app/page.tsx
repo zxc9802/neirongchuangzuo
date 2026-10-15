@@ -49,7 +49,7 @@ export default function StudioPage() {
   const [loading, setLoading] = useState(false);
   const [recovering, setRecovering] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [userSession, setUserSession] = useState<{ user?: any; billing?: any } | null>(null);
+  const [userSession, setUserSession] = useState<{ user?: any; billing?: any; credits?: { available: number; held: number; unlimited?: boolean } } | null>(null);
   const [videoInputKey, setVideoInputKey] = useState(0);
 
   // 1. Initial restore on mount
@@ -163,6 +163,13 @@ export default function StudioPage() {
 
     restoreTask();
   }, []);
+
+  useEffect(() => {
+    if (!["completed", "failed"].includes(currentTask?.status || "")) return;
+    void fetch(`/api/session?t=${Date.now()}`, { cache: "no-store" }).then(async response => {
+      if (response.ok) { const data = await response.json(); if (data.data) setUserSession(data.data); }
+    }).catch(() => undefined);
+  }, [currentTask?.id, currentTask?.status]);
 
   // 2. Continuous real-time status poller
   useEffect(() => {
@@ -360,18 +367,22 @@ export default function StudioPage() {
             {/* Dynamic Duration & Points Estimation */}
             {scriptText.trim().length > 0 && (() => {
               const estDuration = Math.max(3, Math.ceil(scriptText.trim().length / 4.4));
+              const workspace = userSession?.billing?.source === "workspace";
+              const unlimited = workspace && userSession?.credits?.unlimited === true;
               const estPoints = Math.ceil(estDuration * (userSession?.billing?.ratePerSecond ?? 20));
-              const reservedPoints = Math.ceil(estimateReservationDuration(scriptText) * (userSession?.billing?.ratePerSecond ?? 20));
+              const userBalance = workspace ? userSession?.credits?.available : userSession?.user?.pointsBalance;
+              const estimatedReserve = Math.ceil(estimateReservationDuration(scriptText) * (userSession?.billing?.ratePerSecond ?? 20));
+              const reservedPoints = workspace && typeof userBalance === "number" ? Math.min(estimatedReserve, userBalance) : estimatedReserve;
               const estCny = (estDuration * 0.2).toFixed(2);
               const isExternal =
                 userSession?.billing?.isExternal ??
                 (userSession?.user?.role !== "admin" &&
                   userSession?.user?.billingAudience !== "internal");
-              const userBalance = userSession?.user?.pointsBalance;
               const isInsufficient =
                 isExternal &&
+                !unlimited &&
                 typeof userBalance === "number" &&
-                userBalance < reservedPoints;
+                userBalance < (workspace ? estPoints : reservedPoints);
 
               return (
                 <div className="mt-2.5 space-y-2">
@@ -390,11 +401,11 @@ export default function StudioPage() {
                               isInsufficient ? "text-rose-400" : "text-amber-300"
                             }`}
                           >
-                            预计消耗: {estPoints.toLocaleString()} 积分
+                            {unlimited ? "无限积分 · 本次免扣" : `预计消耗: ${estPoints.toLocaleString()} 积分`}
                           </span>
-                          <span className="text-[10px] text-zinc-400">
-                            (¥{estCny} · {userSession?.billing?.ratePerSecond ?? 20}分/秒)
-                          </span>
+                          {!unlimited && <span className="text-[10px] text-zinc-400">
+                            {workspace ? "(333分/30秒)" : <>(¥{estCny} · {userSession?.billing?.ratePerSecond ?? 20}分/秒)</>}
+                          </span>}
                         </div>
                       ) : (
                         <span className="text-emerald-400 font-semibold text-[11px]">
@@ -404,7 +415,7 @@ export default function StudioPage() {
                     </div>
                   </div>
 
-                  {isExternal && <p className="text-[11px] text-zinc-400">先预留 {reservedPoints.toLocaleString()} 积分，按{audioOnly ? "配音" : "成片"}实际时长结算，多余积分退回。</p>}
+                  {isExternal && !unlimited && <p className="text-[11px] text-zinc-400">先预留 {reservedPoints.toLocaleString()} 积分，按{audioOnly ? "配音" : "成片"}实际时长结算，多余积分退回。</p>}
                   {isInsufficient && (
                     <div className="flex items-center gap-2 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/20 text-xs text-rose-300">
                       <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
@@ -414,7 +425,7 @@ export default function StudioPage() {
                           ? userBalance.toLocaleString()
                           : 0}{" "}
                         积分) 不足，本次需预留 {reservedPoints.toLocaleString()}{" "}
-                        积分，请先前往主站充值。
+                        积分，{workspace ? "请缩短文案或联系管理员补充积分。" : "请先前往主站充值。"}
                       </span>
                     </div>
                   )}
@@ -542,7 +553,7 @@ export default function StudioPage() {
                           : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
                       }`}
                     >
-                      智能适配 (循环/裁剪)
+                      智能适配 (尾帧延长/裁剪)
                     </button>
                     <button
                       type="button"
@@ -591,7 +602,10 @@ export default function StudioPage() {
           {/* Action Trigger */}
           {(() => {
             const estDuration = estimateReservationDuration(scriptText);
-            const estPoints = Math.ceil(estDuration * (userSession?.billing?.ratePerSecond ?? 20));
+            const unlimited = userSession?.billing?.source === "workspace" && userSession?.credits?.unlimited === true;
+            const estimate = Math.ceil(estDuration * (userSession?.billing?.ratePerSecond ?? 20));
+            const estPoints = userSession?.billing?.source === "workspace" && typeof userSession.credits?.available === "number"
+              ? Math.min(estimate, userSession.credits.available) : estimate;
             const isExternal =
               userSession?.billing?.isExternal ??
               (userSession?.user?.role !== "admin" &&
@@ -607,7 +621,7 @@ export default function StudioPage() {
                 <span>
                   {isRunning
                     ? "流水线正在运行中..."
-                    : isExternal && scriptText.trim()
+                    : isExternal && !unlimited && scriptText.trim()
                     ? `${audioOnly ? "生成配音 (MP3)" : "开始执行数字人对口型流水线"} (预留 ${estPoints.toLocaleString()} 积分)`
                     : audioOnly ? "生成配音 (MP3)" : "开始执行数字人对口型流水线"}
                 </span>
@@ -631,7 +645,9 @@ export default function StudioPage() {
           {canRecoverPaidJob && (
             <div className="rounded-2xl border border-amber-400/20 bg-amber-500/10 p-4">
               <p className="text-xs leading-relaxed text-amber-100">
-                对口型已经渲染完成并扣过费。如果卡在「下载成片」，点下面按钮取回成片，不会再扣一次钱。
+                {currentTask?.inputs.outputType === "audio"
+                  ? "配音已生成。点击恢复原任务并核对积分，不会重新生成配音；结算成功后可以试听和下载。"
+                  : "点击恢复原任务并核对积分，不会重新提交口型生成；结算成功后可以下载成片。"}
               </p>
               <button
                 onClick={handleRecoverPaidJob}
@@ -639,7 +655,7 @@ export default function StudioPage() {
                 className="mt-3 inline-flex items-center gap-2 rounded-xl bg-amber-400 px-4 py-2 text-xs font-bold text-zinc-950 hover:bg-amber-300 disabled:opacity-60"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${recovering ? "animate-spin" : ""}`} />
-                {recovering ? "正在取回成片..." : "取回已扣费成片"}
+                {recovering ? "正在恢复并核对积分..." : currentTask?.inputs.outputType === "audio" ? "恢复配音" : "恢复成片"}
               </button>
             </div>
           )}

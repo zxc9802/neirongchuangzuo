@@ -7,6 +7,7 @@ import { getAppConfig } from "@/lib/config";
 import { recoverStuckLipsyncTask } from "@/lib/engine/recover-lipsync";
 import { TaskStore } from "@/lib/store/task-store";
 import { toPublicTask } from "@/lib/server/public-data";
+import { reconcileWorkspaceTask } from "@/lib/server/workspace-task-recovery";
 import {
   canAccessTask,
   resolveAccessContext,
@@ -28,6 +29,7 @@ export async function GET(
   if (!task || !canAccessTask(access, task)) {
     return taskNotFoundResponse();
   }
+  task = await reconcileWorkspaceTask(task).catch(() => task!);
 
   const stuckDownloading =
     task.status === "processing" &&

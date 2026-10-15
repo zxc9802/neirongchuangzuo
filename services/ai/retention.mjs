@@ -17,7 +17,7 @@ const failure = task => task.status === 'failed' || task.status === 'interrupted
 
 // Only the fixed generated output filenames are disposable. Task records stay as
 // durable deduplication tombstones; uploads and unknown files are never removed.
-export function createImageRetention({ storageDir, now = Date.now, logger = console, cleanupIntervalMs = 60_000, fsOverrides = {} } = {}) {
+export function createImageRetention({ storageDir, now = Date.now, logger = console, cleanupIntervalMs = 60_000, fsOverrides = {}, onTaskExpired } = {}) {
   if (typeof storageDir !== 'string' || !storageDir) throw new Error('AI storage directory required');
   const fs = { ...defaultFs, ...fsOverrides };
   const root = resolve(storageDir);
@@ -195,8 +195,17 @@ export function createImageRetention({ storageDir, now = Date.now, logger = cons
           }
           normalizeTask(task);
           await attempt(id, async () => {
-            if (before !== JSON.stringify(task) || pending.has(id)) await save(task);
-            await removeResults(id);
+            let failure;
+            try {
+              if (before !== JSON.stringify(task) || pending.has(id)) await save(task);
+              await removeResults(id);
+            } catch (error) { failure = error; }
+            // File cleanup and credit reconciliation must both be attempted.
+            // Neither failed deletion nor a billing outage can renew access.
+            if (task.status === 'expired' && onTaskExpired) {
+              try { await onTaskExpired(task); } catch (error) { failure ||= error; }
+            }
+            if (failure) throw failure;
           });
         }
         for (const id of await fs.readdir(root)) {
@@ -218,8 +227,8 @@ export function createImageRetention({ storageDir, now = Date.now, logger = cons
   async function start(jobs) {
     if (disposed) return;
     await sweep(jobs);
-    if (disposed || timer) return;
-    timer = setInterval(() => { void sweep(jobs).catch(() => { pending.add('storage'); failures++; warn(); }); }, Math.max(1, cleanupIntervalMs));
+    if (disposed || timer || cleanupIntervalMs <= 0) return;
+    timer = setInterval(() => { void sweep(jobs).catch(() => { pending.add('storage'); failures++; warn(); }); }, cleanupIntervalMs);
     timer.unref?.();
   }
   function status() { return { retentionHours: IMAGE_RETENTION_HOURS, lastSweep, lastSuccess, pending: pending.size, failures, deletedFiles, warnings }; }

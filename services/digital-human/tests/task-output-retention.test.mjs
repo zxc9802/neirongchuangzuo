@@ -130,6 +130,7 @@ test('completed asset listing preserves owner isolation, excludes unfinished and
     '@/lib/store/avatar-store': {}, '@/lib/store/voice-store': {}, '@/lib/server/public-data': publicData,
     '@/lib/main-app-billing': {}, '@/lib/billing-estimate': {}, '@/lib/server/generation-limit': {},
     '@/lib/server/upload-policy': {}, '@/lib/server/media-response': {},
+    '@/lib/server/task-worker': {}, '@/lib/server/workspace-task-recovery': {reconcileWorkspaceTask: async task => task},
     '@/lib/access-control': {resolveAccessContext: async () => access, unauthorizedResponse: () => new Response(null, {status: 401})},
   };
   const {GET} = load('../src/app/api/tasks/route.ts', deps);
@@ -149,6 +150,7 @@ test('media and download routes reject expired or foreign outputs before opening
     'next/server': {NextRequest, NextResponse},
     '@/lib/store/task-store': {TaskStore: {getAsync: async () => task}},
     '@/lib/server/public-data': publicData,
+    '@/lib/task-output-retention': retention,
     '@/lib/server/media-response': {isTrustedTaskOutputSource: () => true, servePrivateMedia: () => {served++; return new Response('video');}},
     '@/lib/server/upload-policy': {}, '@/lib/store/avatar-store': {},
     '@/lib/access-control': {

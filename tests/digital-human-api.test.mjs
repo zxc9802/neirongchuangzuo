@@ -62,6 +62,7 @@ test('media and download URLs reject script schemes and require a completed outp
   assert.equal(api.safeMediaUrl('https://media.example.com/a.mp4'), 'https://media.example.com/a.mp4');
   assert.equal(api.downloadUrl({ id: 't', status: 'processing', results: { finalVideoUrl: '/preview' } }), '');
   assert.equal(api.downloadUrl({ id: 't/a', status: 'completed', results: { finalVideoUrl: '/preview' } }), '/api/tasks/t%2Fa/download/final.mp4');
+  assert.equal(api.downloadUrl({ id: 't/a', status: 'completed', results: { finalVideoUrl: '/preview' } }, 'preview'), '/api/tasks/t%2Fa/download/preview.mp4');
   assert.equal(api.downloadUrl({ id: 't', status: 'completed', results: { exactAudioUrl: '/voice', audioFormat: 'mp3' } }, 'audio'), '/api/tasks/t/download/voice-track.mp3');
 });
 

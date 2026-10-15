@@ -48,6 +48,15 @@ function checkedCrop(crop, width, height) {
 }
 
 /** No image generation or object removal. Crop coordinates require a trusted, reviewed subject box. */
+export async function preparePhotoPixels(bytes, { crop } = {}) {
+  const meta = await inspectPhoto(bytes);
+  let pipeline = input(bytes).autoOrient().flatten({ background: '#faf8f3' });
+  const area = checkedCrop(crop, meta.width, meta.height);
+  if (area) pipeline = pipeline.extract(area);
+  const result = await pipeline.resize(1600, 2000, { fit: 'inside', withoutEnlargement: true }).png().toBuffer({ resolveWithObject: true });
+  return { bytes: result.data, width: result.info.width, height: result.info.height };
+}
+
 export async function processPhoto(bytes, { coverText, crop } = {}) {
   const metadata = await inspectPhoto(bytes);
   let pipeline = input(bytes).autoOrient().flatten({ background: '#faf8f3' });
@@ -78,6 +87,7 @@ function renderCopy(copy) {
   if (!copy || typeof copy !== 'object') return '';
   const titles = Array.isArray(copy.titles) ? copy.titles : [];
   const topics = Array.isArray(copy.topics) ? copy.topics : Array.isArray(copy.hashtags) ? copy.hashtags : [];
+  if (copy.cleanExport) return ['标题备选', ...titles.map((title, index) => `${index + 1}. ${title}`), '', '正文', copy.body || copy.content || '', '', '话题', topics.join(' ')].join('\n');
   return ['标题备选', ...titles.map((title, index) => `${index + 1}. ${title}`), '', '正文', copy.body || copy.content || '', '', '话题',
     topics.join(' '), '', '待确认信息', JSON.stringify(copy.missingFacts || [], null, 2), '', '风险提示', JSON.stringify(copy.risks || copy.riskWarnings || [], null, 2)].join('\n');
 }
@@ -93,6 +103,6 @@ export function createPackageZip(results, copy) {
     const extension = (result.format || 'jpeg') === 'jpeg' ? 'jpg' : result.format;
     entries[`${String(index + 1).padStart(2, '0')}.${extension}`] = [result.bytes, { level: 0 }];
   });
-  entries['发布文案.txt'] = strToU8(renderCopy(copy));
+  if (!copy?.cleanExport || copy.body || copy.content || copy.titles?.length) entries['发布文案.txt'] = strToU8(renderCopy(copy));
   return Buffer.from(zipSync(entries, { level: 1 }));
 }

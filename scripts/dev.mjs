@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createPreviewServer } from '../preview.mjs';
 import { workspaceAuthRequired } from '../services/auth/workspace.mjs';
+import { loadWorkspaceSettings } from '../services/runtime-settings.mjs';
 
 const serviceDir = fileURLToPath(new URL('../services/digital-human/', import.meta.url));
 const nextBin = fileURLToPath(new URL('../services/digital-human/node_modules/next/dist/bin/next', import.meta.url));
@@ -12,7 +13,7 @@ if (!existsSync(nextBin)) {
 }
 let child;
 let stopping = false;
-const server = createPreviewServer({ authRequired: workspaceAuthRequired() });
+const server = createPreviewServer({ authRequired: workspaceAuthRequired(), localUnlimitedCredits: loadWorkspaceSettings().WORKSPACE_LOCAL_UNLIMITED_CREDITS === '1' });
 async function stop(code = 0) {
   if (stopping) return;
   stopping = true;

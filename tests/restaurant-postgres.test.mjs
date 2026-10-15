@@ -96,4 +96,10 @@ test('PostgreSQL storage persists account data, transactions, quota idempotency 
   assert.equal(retained.rows[0].charge, 'completed');
   assert.equal((await store.getProfile('alice')).name, '刘顺兴面馆');
   await assert.rejects(store.createTask('alice', { id: 'package_one' }), { code: 'task_expired' });
+  await store.createTask('bob', { id: 'deleted_pg', status: 'failed', sourceImages: [{ key: 'bob/deleted_pg/01.jpg', expiresAt: time + FILES_TTL_MS }] });
+  await store.deleteTask('bob', 'deleted_pg');
+  await shutdown(); await reopen();
+  assert.equal(await store.getTask('bob', 'deleted_pg'), null);
+  await assert.rejects(store.createTask('bob', { id: 'deleted_pg' }), { code: 'TASK_DELETED' });
+  assert.ok((await store.sweep()).expiredFiles.some(file => file.key === 'bob/deleted_pg/01.jpg'));
 });

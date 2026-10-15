@@ -13,19 +13,32 @@ const root = globalThis;
   const ANALYSIS_WORKERS = 8;
   const WASM_WORKERS = 2;
   const PIPELINE_WORKERS = FRAME_WORKERS + ANALYSIS_WORKERS;
-  const MEDIA_TIMEOUT = 15000;
   const FINGERPRINT_BYTES = 65536;
   const MAX_ATTEMPTS = 4; // First attempt plus three automatic retries.
+  const READ_TIMEOUT = 30000;
   const noop = () => {};
   const isAbort = error => error?.name === 'AbortError';
-  const retryable = error => error?.status === 408 || error?.status === 429 || error?.status >= 500 || error?.name === 'TypeError';
   const mediaError = message => Object.assign(new Error(message), { code: 'MEDIA_DECODE' });
+  const readTimeout = () => Object.assign(new Error('读取视频超时，已排到队尾重试'), { code: 'MEDIA_TIMEOUT' });
   const stopped = () => Object.assign(new Error('操作已停止'), { name: 'AbortError' });
   const wasmModule = () => import('./wasm-media.js');
   const wasmMedia = {
     probe: async (...args) => (await wasmModule()).wasmMedia.probe(...args),
     extractSegment: async (...args) => (await wasmModule()).wasmMedia.extractSegment(...args),
   };
+
+  function readLocal(action, signal) {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); };
+      const finish = (settle, value) => { cleanup(); settle(value); };
+      const cancel = () => finish(reject, stopped());
+      const timer = setTimeout(() => finish(reject, readTimeout()), READ_TIMEOUT);
+      signal?.addEventListener('abort', cancel, { once: true });
+      if (signal?.aborted) { cancel(); return; }
+      Promise.resolve().then(() => { if (!signal?.aborted) return action(); })
+        .then(value => finish(resolve, value), error => finish(reject, error));
+    });
+  }
 
   async function sha256(value) {
     if (!root.crypto?.subtle) throw new Error('请通过 HTTPS 或本机 localhost 打开网页后连接素材文件夹');
@@ -40,11 +53,11 @@ const root = globalThis;
 
   // Identifies the same video content across renames and reselected folders, so its paid
   // analysis can be reused. Reads the head, middle and tail instead of hashing gigabytes.
-  async function fingerprintFile(file, guard = noop) {
+  async function fingerprintFile(file, guard = noop, signal) {
     const size = file.size;
     const parts = [String(size)];
     for (const start of [0, Math.max(0, Math.floor(size / 2) - FINGERPRINT_BYTES / 2), Math.max(0, size - FINGERPRINT_BYTES)]) {
-      parts.push(await sha256(await file.slice(start, Math.min(size, start + FINGERPRINT_BYTES)).arrayBuffer()));
+      parts.push(await sha256(await readLocal(() => file.slice(start, Math.min(size, start + FINGERPRINT_BYTES)).arrayBuffer(), signal)));
       guard();
     }
     return sha256(parts.join(':'));
@@ -66,15 +79,15 @@ const root = globalThis;
     return clips;
   }
 
-  async function inspectFile(relativePath, file, previous, readDuration, guard = noop) {
+  async function inspectFile(relativePath, file, previous, readDuration, guard = noop, signal) {
     guard();
-    await file.slice(0, 1).arrayBuffer();
+    await readLocal(() => file.slice(0, 1).arrayBuffer(), signal);
     guard();
     if (previous && previous.size === file.size && previous.lastModified === file.lastModified) {
       // Earlier versions cached a transcoded copy; the original is now read in place.
       delete previous.repaired;
       if (!previous.fingerprint) {
-        const fingerprint = await fingerprintFile(file, guard);
+        const fingerprint = await fingerprintFile(file, guard, signal);
         const keys = [];
         for (const clip of previous.clips || []) { keys.push(await contentKey(fingerprint, clip.start, clip.end)); guard(); }
         previous.fingerprint = fingerprint;
@@ -86,7 +99,7 @@ const root = globalThis;
     guard();
     const duration = await readDuration(file);
     guard();
-    const fingerprint = await fingerprintFile(file, guard);
+    const fingerprint = await fingerprintFile(file, guard, signal);
     const clips = await makeClips(id, relativePath, duration, guard, fingerprint);
     guard();
     return { relativePath, assetId: id, size: file.size, lastModified: file.lastModified, duration, fingerprint, clips };
@@ -252,7 +265,7 @@ const root = globalThis;
       const ready = () => { cleanup(); resolve(); };
       const failed = () => { cleanup(); reject(mediaError('浏览器无法直接解码视频，已排到队尾用兼容模式读取')); };
       const aborted = () => { cleanup(); reject(stopped()); };
-      const timer = setTimeout(() => { cleanup(); reject(mediaError('读取视频超时，已排到队尾用兼容模式读取')); }, MEDIA_TIMEOUT);
+      const timer = setTimeout(() => { cleanup(); reject(readTimeout()); }, READ_TIMEOUT);
       video.addEventListener(event, ready, { once: true });
       video.addEventListener('error', failed, { once: true });
       signal?.addEventListener('abort', aborted, { once: true });
@@ -663,7 +676,31 @@ const root = globalThis;
       const observations = [];
       const files = new Map();
       const originals = new Map();
+      const previousManifest = { ...this.record.manifest };
+      this.record.manifest = { ...previousManifest };
+      this.files = files;
+      this.originalFiles = originals;
       let complete = true;
+      const ready = [];
+      let registering;
+      const registerReady = () => {
+        if (registering || !ready.length) return;
+        const batch = ready.splice(0);
+        registering = this._register(batch.flatMap(entry => entry.clips), token)
+          .then(() => { this._guard(token); this._ready(); this._schedule(0, token); })
+          .catch(error => {
+            if (!this.active || token !== this.generation || isAbort(error)) return;
+            complete = false;
+            for (const entry of batch) {
+              if (entry.clips.every(clip => this.registered.has(clip.id))) continue;
+              this._queueRepair(entry.relativePath, originals.get(entry.relativePath), { reinspect: true });
+              this._error(entry.relativePath, error);
+            }
+          }).finally(() => {
+            registering = null;
+            if (this.active && token === this.generation) registerReady();
+          });
+      };
       try {
         try {
           if (this.record.handle) {
@@ -686,34 +723,36 @@ const root = globalThis;
             const index = cursor++, item = candidates[index];
             let file;
             try {
-              file = item.file || await item.handle.getFile();
+              file = item.file || await readLocal(() => item.handle.getFile(), this.abort.signal);
               this._guard(token);
               originals.set(item.relativePath, file);
-              const entry = await inspectFile(item.relativePath, file, this.record.manifest[item.relativePath],
-                current => this.readDuration(current, this.abort.signal), () => this._guard(token));
+              const entry = await inspectFile(item.relativePath, file, previousManifest[item.relativePath],
+                current => this.readDuration(current, this.abort.signal), () => this._guard(token), this.abort.signal);
               this._guard(token);
               observations[index] = { relativePath: item.relativePath, entry };
               files.set(item.relativePath, file);
+              this.record.manifest[item.relativePath] = entry;
+              ready.push(entry);
+              registerReady();
             } catch (error) {
               this._guard(token);
               complete = false;
               observations[index] = { relativePath: item.relativePath, error: error.message };
-              if (file && error.code === 'MEDIA_DECODE') this._queueRepair(item.relativePath, file);
+              this._queueRepair(item.relativePath, file, { handle: item.handle, reinspect: !(file && error.code === 'MEDIA_DECODE') });
               this._error(item.relativePath, error);
             }
             this._report({ text: '并行扫描 ' + this.folderName + '：' + (this.status.scanned + 1) + '/' + candidates.length + ' 个视频',
               scanned: this.status.scanned + 1 });
           }
         }));
+        while (registering) await registering;
         this._guard(token);
-        const result = reconcileManifest(this.record.manifest, observations, complete, this.record.deferredRevocations || []);
+        const result = reconcileManifest(previousManifest, observations, complete, this.record.deferredRevocations || []);
         this.record.manifest = result.manifest;
         this.record.deferredRevocations = [...new Set([...result.deferredRevocations, ...result.revocations])];
         this.files = files;
         this.originalFiles = originals;
         await this._save(token);
-        const clips = observations.flatMap(item => item.entry?.clips || []);
-        await this._register(clips, token);
         this._guard(token);
         this.lastStateCheck = Date.now();
         if (complete) {
@@ -811,12 +850,13 @@ const root = globalThis;
     }
 
     _schedule(delay, token) {
-      if (!this.active || !this.connected || this.scanning || token !== this.generation || this.cycleToken === token) return;
+      if (!this.active || !this.connected || token !== this.generation || this.cycleToken === token) return;
       clearTimeout(this.timer);
       this.timer = setTimeout(() => this._cycle(token), delay);
     }
 
     _startRequests(token) {
+      // Rendering must not hold the indexing scheduler while waiting for local materials.
       if (this.requestWorker || (this.retryAfter.get('connection') || 0) > Date.now() ||
         Date.now() - this.lastRequests < 3000 && Date.now() - this.lastHeartbeat < 15000 &&
         !this.requests.some(item => (this.retryAfter.get('request:' + item.id) || 0) <= Date.now())) return;
@@ -882,9 +922,9 @@ const root = globalThis;
           .flatMap(item => item.clips.filter(clip => this.registered.has(clip.id) && !this.workers.has(clip.id) &&
             ['pending', 'error'].includes(clip.state)).map(clip => ({ item, clip })));
         const fresh = candidates.filter(({ clip }) => !this.attempts.has(clip.id));
-        if (!fresh.length && !this.workers.size) this.processingDeferred = true;
+        if (!this.scanning && !fresh.length && !this.workers.size) this.processingDeferred = true;
         let queued = fresh;
-        if (!fresh.length && this.processingDeferred) {
+        if (!this.scanning && !fresh.length && this.processingDeferred) {
           const repairs = [...this.repairs.values()];
           const repairing = [...this.workers.keys()].some(key => key.startsWith('repair:'));
           const firstPassBusy = [...this.workers.keys()].some(key => !key.startsWith('repair:') && this.attempts.get(key) === 1) ||
@@ -927,10 +967,24 @@ const root = globalThis;
       workers.set(key, work);
     }
 
-    _queueRepair(relativePath, file) {
+    _queueRepair(relativePath, file, { handle, reinspect = false } = {}) {
       const repair = this.repairs.get(relativePath);
-      if (!repair) this.repairs.set(relativePath, { relativePath, file, attempted: false });
-      else if (repair.attempted) repair.failed = true;
+      if (!repair) {
+        this.repairs.set(relativePath, { relativePath, file, handle, reinspect, attempted: reinspect, failed: reinspect });
+        if (reinspect) {
+          // The failed scan is the initial attempt; only three tail retries remain.
+          const key = 'repair:' + relativePath;
+          this.attempts.set(key, 1);
+          this.retryAfter.set(key, Date.now() + 15000);
+        }
+      }
+      else if (repair.attempted) {
+        repair.failed = true;
+        if (!reinspect) repair.reinspect = false;
+        const key = 'repair:' + relativePath, attempt = this.attempts.get(key);
+        if (attempt < MAX_ATTEMPTS) this.retryAfter.set(key, Date.now() + 15000 * 2 ** (attempt - 1));
+        else this.retryAfter.delete(key);
+      }
     }
 
     async _runStage(stage, action, token) {
@@ -973,6 +1027,7 @@ const root = globalThis;
           try { payload = { clip_id: clip.id, frames: await this._sample(item, clip.start, clip.end, token) }; }
           catch (error) {
             this._guard(token);
+            if (error.code === 'MEDIA_TIMEOUT') throw error;
             item.decoder = 'server';
             await this._save(token);
           }
@@ -998,7 +1053,7 @@ const root = globalThis;
       } catch (error) {
         this._guard(token);
         clip.state = error.status === 409 ? 'indexing' : 'error';
-        if (retryable(error) && this.attempts.get(clip.id) < MAX_ATTEMPTS) {
+        if (error.status !== 409 && this.attempts.get(clip.id) < MAX_ATTEMPTS) {
           const delay = Math.min(60000, 15000 * 2 ** Math.min(2, (this.attempts.get(clip.id) || 1) - 1));
           this.retryAfter.set('clip:' + clip.id, Date.now() + delay);
         } else this.retryAfter.delete('clip:' + clip.id);
@@ -1007,23 +1062,38 @@ const root = globalThis;
       await this._save(token);
     }
 
-    // Metadata-only compatibility probing; subsequent frame decoding runs on the server.
+    // Tail recovery: re-read files whose read failed, or probe undecodable files' metadata in
+    // compatibility mode so their frames are decoded on the server.
     async _repairFile(repair, token) {
-      const { relativePath, file } = repair;
+      const { relativePath } = repair;
       try {
+        const file = repair.reinspect && repair.handle ? await readLocal(() => repair.handle.getFile(), this.abort.signal) : repair.file;
+        this._guard(token);
+        if (repair.reinspect) {
+          await readLocal(() => file.slice(0, 1).arrayBuffer(), this.abort.signal);
+          this._guard(token);
+          repair.file = file;
+          this.originalFiles.set(relativePath, file);
+        }
         const previous = this.record.manifest[relativePath];
         const id = await assetId(relativePath, file.size, file.lastModified);
         this._guard(token);
-        this._report({ text: '正在用兼容模式读取视频：' + relativePath });
-        const info = await this._runStage('wasm', () => this.wasmMedia.probe(file, this.abort.signal), token);
-        this._guard(token);
-        if (!(info?.duration > 0)) throw new Error('兼容模式也无法读取视频时长，请检查文件');
         const unchanged = previous?.assetId === id;
-        const fingerprint = unchanged && previous.fingerprint || await fingerprintFile(file, () => this._guard(token));
-        const clips = unchanged ? previous.clips : await makeClips(id, relativePath, info.duration, () => this._guard(token), fingerprint);
+        let duration = unchanged ? previous.duration : 0, decoder = unchanged ? previous.decoder : undefined;
+        if (!repair.reinspect) {
+          this._report({ text: '正在用兼容模式读取视频：' + relativePath });
+          const info = await this._runStage('wasm', () => this.wasmMedia.probe(file, this.abort.signal), token);
+          this._guard(token);
+          if (!(info?.duration > 0)) throw new Error('兼容模式也无法读取视频时长，请检查文件');
+          duration = unchanged ? previous.duration : info.duration;
+          decoder = 'server';
+        } else if (!unchanged) duration = await this.readDuration(file, this.abort.signal);
+        this._guard(token);
+        const fingerprint = unchanged && previous.fingerprint || await fingerprintFile(file, () => this._guard(token), this.abort.signal);
+        const clips = unchanged ? previous.clips : await makeClips(id, relativePath, duration, () => this._guard(token), fingerprint);
         this._guard(token);
         this.record.manifest[relativePath] = { relativePath, assetId: id, size: file.size, lastModified: file.lastModified,
-          duration: unchanged ? previous.duration : info.duration, fingerprint, clips, decoder: 'server' };
+          duration, fingerprint, clips, ...decoder ? { decoder } : {} };
         this.files.set(relativePath, file);
         this.unreadableFiles.delete(id);
         if (previous && !unchanged) this.record.deferredRevocations.push(previous.assetId);
@@ -1035,6 +1105,7 @@ const root = globalThis;
         this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n') });
       } catch (error) {
         this._guard(token);
+        if (repair.reinspect && error.code === 'MEDIA_DECODE') repair.reinspect = false;
         repair.failed = true;
         const key = 'repair:' + relativePath, attempt = this.attempts.get(key);
         if (attempt < MAX_ATTEMPTS) this.retryAfter.set(key, Date.now() + 15000 * 2 ** (attempt - 1));

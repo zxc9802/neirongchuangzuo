@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
+import { SCENE_TYPES, CAMERA_ANGLES } from './scenes.mjs';
 
 export class RestaurantError extends Error {
   constructor(message, statusCode = 400, code = 'INVALID_REQUEST') { super(message); this.statusCode = statusCode; this.code = code; }
 }
 export const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 export const PROFILE_FIELDS = ['name', 'city', 'address', 'category', 'hours', 'signatureDishes', 'averagePrice', 'parking', 'groupBuy', 'features', 'history', 'craft', 'ingredients'];
-export const FACT_FIELDS = [...PROFILE_FIELDS, 'dishName', 'price', 'ingredients', 'portion', 'taste', 'setMeal', 'conditions', 'verifiedHistory'];
+export const FACT_FIELDS = [...PROFILE_FIELDS, 'dishName', 'price', 'ingredients', 'portion', 'taste', 'setMeal', 'conditions', 'verifiedHistory', 'sellingPoints', 'occasion', 'capacity', 'privateRoom', 'booking', 'delivery'];
 const bad = message => { throw new RestaurantError(message, 502, 'MODEL_INVALID_OUTPUT'); };
 const text = (value, maximum = 3000) => typeof value === 'string' && value.length <= maximum;
 const strings = (value, maximum = 20) => Array.isArray(value) && value.length <= maximum && value.every(item => text(item, 500));
@@ -22,6 +23,26 @@ function checkedSafeCrop(item) {
   return Object.fromEntries(['left', 'top', 'width', 'height'].map(key => [key, crop[key]]));
 }
 export const fingerprint = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+export function validateFoodAppearance(value) {
+  if (!value || !text(value.description, 400) || !value.description.trim() || !text(value.portion, 200)
+    || !text(value.arrangement, 300) || !text(value.vessel, 200) || !strings(value.colors, 8) || !strings(value.visibleComponents, 12)
+    || !strings(value.texture, 8) || !strings(value.distinctiveFeatures, 10) || !strings(value.uncertainDetails, 8)
+    || value.dishCount !== null && (!Number.isInteger(value.dishCount) || value.dishCount < 1 || value.dishCount > 12)
+    || value.pieceCount !== null && (!Number.isInteger(value.pieceCount) || value.pieceCount < 1 || value.pieceCount > 120)) bad('菜品视觉特征格式不正确。');
+  return { ...Object.fromEntries(['description','portion','arrangement','vessel','colors','visibleComponents','texture','distinctiveFeatures','uncertainDetails','dishCount','pieceCount'].map(key => [key,value[key]])),
+    ...(value.identityScope === 'dish' && rectangle(value.subjectBox) && value.subjectBox.width >= .15 && value.subjectBox.height >= .15
+      && Number.isFinite(value.subjectConfidence) && value.subjectConfidence >= .8 && value.subjectConfidence <= 1
+      ? { identityScope: 'dish', subjectBox: Object.fromEntries(['left','top','width','height'].map(key => [key,value.subjectBox[key]])), subjectConfidence: value.subjectConfidence } : {}) };
+}
+
+export function validateFoodRenderReview(value) {
+  if (!value || !['passed','blocked'].includes(value.status) || !strings(value.errors, 12) || !strings(value.warnings, 12)
+    || !['identityMatch','sceneMatch','shotMatch','compositionUsable'].every(key => typeof value[key] === 'boolean')) bad('菜品一致性检查格式不正确。');
+  const passed = value.status === 'passed' && !value.errors.length && value.identityMatch && value.sceneMatch && value.shotMatch && value.compositionUsable;
+  return { ...Object.fromEntries(['identityMatch','sceneMatch','shotMatch','compositionUsable'].map(key => [key,value[key]])), status: passed ? 'passed' : 'blocked',
+    errors: passed ? [] : value.errors.length ? value.errors : ['成品菜品或摄影构图未通过一致性检查。'], warnings: value.warnings };
+}
 export function normalizeProfile(body) {
   const source = body?.profile ?? body;
   if (!source || typeof source !== 'object' || Array.isArray(source)) throw new RestaurantError('请填写门店资料。');
@@ -80,11 +101,23 @@ export function validateAnalysis(value, imageIds) {
     // Descriptive text may negate a risk or refer to public store information.
     // Only the explicit severity can block a photo; keywords cannot establish it.
     const unsafeText = item.textRisk === 'high' && !crop;
+    let foodAppearance;
+    if (item.imageType === 'food' && item.foodAppearance) try { foodAppearance = validateFoodAppearance(item.foodAppearance); } catch { /* Selected food can be described again before rendering. */ }
     return { imageId: item.imageId, imageType: item.imageType, visibleObjects: item.visibleObjects, possibleScene: item.possibleScene, qualityScore: item.qualityScore,
       privacyRisk: item.privacyRisk, usable: item.usable && item.privacyRisk !== 'high' && !unsafeText,
       rejectionReason: item.privacyRisk === 'high' ? item.rejectionReason.trim() || '照片存在严重隐私风险，请换用已获授权且风险可控的素材。'
         : unsafeText ? item.rejectionReason.trim() || '图片存在无法安全处理的私人敏感信息或严重宣传风险，请换图。' : item.rejectionReason,
       visibleTexts: item.visibleTexts ?? [], textRisk: crop ? 'none' : unsafeText ? 'high' : item.textRisk, riskReasons: item.riskReasons ?? [],
+      ...([0, 90, 180, 270].includes(item.rotation) ? { rotation: item.rotation } : {}),
+      ...(item.imageType === 'food' && SCENE_TYPES.includes(item.presentation?.sceneType) && CAMERA_ANGLES.includes(item.presentation?.cameraAngle)
+        ? { presentation: { sceneType: item.presentation.sceneType, cameraAngle: item.presentation.cameraAngle } } : {}),
+      ...(foodAppearance ? { foodAppearance } : {}),
+      ...(Array.isArray(item.foodSubjects) && item.foodSubjects.length <= 12 && item.foodSubjects.every(subject => rectangle(subject?.box)
+        && Number.isFinite(subject.confidence) && subject.confidence >= 0 && subject.confidence <= 1 && text(subject.label ?? '', 80))
+        ? { foodSubjects: item.foodSubjects.map(subject => ({ box: Object.fromEntries(['left', 'top', 'width', 'height'].map(key => [key, subject.box[key]])), confidence: subject.confidence, label: subject.label ?? '',
+          ...(Array.isArray(subject.outline) && subject.outline.length >= 8 && subject.outline.length <= 24 && subject.outline.every(point => Number.isFinite(point?.x) && Number.isFinite(point?.y)
+            && point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1)
+            ? { outline: subject.outline.map(point => ({ x: point.x, y: point.y })) } : {}) })) } : {}),
       ...(crop ? { crop, safeCrop: item.safeCrop, subjectBox: item.subjectBox, riskyTextBoxes: item.riskyTextBoxes, cropReason: '保留至少75%画面及完整主体，裁除画面边缘风险文字。' } : {}) };
   });
   return output;
@@ -153,18 +186,23 @@ export function validateCopy(value, imageIds) {
     || value.imageOrder.some(id => !imageIds.includes(id)) || new Set(value.imageOrder).size !== value.imageOrder.length
     || !Array.isArray(value.claims) || value.claims.length > 30) bad('模型发布文案不符合约定格式。');
   for (const claim of value.claims) if (!text(claim?.text, 500) || !claim.text.trim() || !strings(claim.factKeys, 15) || claim.factKeys.some(key => !FACT_FIELDS.includes(key)) || !strings(claim.imageIds, 15) || claim.imageIds.some(id => !imageIds.includes(id)) || (!claim.factKeys.length && !claim.imageIds.length)) bad('文案事实缺少可追踪依据。');
-  return { titles, body: value.body.trim(), tags, coverText: value.coverText.trim(), imageOrder: value.imageOrder, claims: value.claims };
+  if (value.imageCaptions !== undefined && (!Array.isArray(value.imageCaptions) || value.imageCaptions.length !== imageIds.length
+    || new Set(value.imageCaptions.map(item => item?.imageId)).size !== imageIds.length
+    || value.imageCaptions.some(item => !imageIds.includes(item?.imageId) || !text(item?.text, 24) || /[\r\n\u0000-\u001f]/.test(item.text)
+      || (item.text.match(/\p{Script=Han}/gu)?.length ?? 0) < 8 || (item.text.match(/\p{Script=Han}/gu)?.length ?? 0) > 16))) bad('图片宣传文字需要覆盖本次每张照片，并控制在8—16个汉字。');
+  return { titles, body: value.body.trim(), tags, coverText: value.coverText.trim(), imageOrder: value.imageOrder, claims: value.claims,
+    ...(value.imageCaptions ? { imageCaptions: value.imageCaptions.map(item => ({ imageId: item.imageId, text: item.text.trim() })) } : {}) };
 }
 const ABSOLUTE = /全网第一|当地第一|最好吃|必吃|百分百|100[%％]|保证|一定|绝对|天天排队|场场爆满|明星来过|销量第一|回头客最多|顾客一致好评|减肥|养生|治疗|改善疾病|治愈|零添加|有机|非遗|独家配方|网红店|今天来探店|亲测|我来探店/;
 const CONDITIONAL = ['纯手工', '现杀', '现做', '当天采购', '进口', '手工', '新鲜', '预制', '冷冻'];
 export function localReview(copy, profile, facts, selectedAnalysis) {
   const errors = [], warnings = [];
-  const all = `${copy.titles.join('\n')}\n${copy.coverText}\n${copy.body}\n${copy.tags.join(' ')}`;
+  const all = `${copy.titles.join('\n')}\n${copy.coverText}\n${copy.body}\n${copy.tags.join(' ')}\n${(copy.imageCaptions ?? []).map(item => item.text).join('\n')}`;
   const confirmed = { ...profile, ...facts };
   if (ABSOLUTE.test(all)) errors.push('文案含夸张、绝对化、健康功效或顾客探店表述。');
   for (const word of CONDITIONAL) if (all.includes(word) && !JSON.stringify({ profile, facts }).includes(word)) errors.push(`“${word}”缺少已确认的门店资料依据。`);
-  const unitFields = { 元: ['price', 'averagePrice', 'groupBuy', 'setMeal', 'conditions'], 块: ['price', 'averagePrice', 'groupBuy', 'setMeal'], 折: ['groupBuy', 'conditions'], 年: ['verifiedHistory'], 份: ['portion', 'setMeal'], 位: ['portion', 'setMeal', 'features'], 点: ['hours', 'conditions'], ':': ['hours', 'conditions'] };
-  for (const match of all.matchAll(/(\d+(?:\.\d+)?)\s*(元|块|折|年|份|位|点|:)/g)) {
+  const unitFields = { 元: ['price', 'averagePrice', 'groupBuy', 'setMeal', 'conditions'], 块: ['price', 'averagePrice', 'groupBuy', 'setMeal'], 折: ['groupBuy', 'conditions'], 年: ['verifiedHistory'], 份: ['portion', 'setMeal'], 位: ['portion', 'setMeal', 'features', 'capacity'], 人: ['capacity', 'features'], 点: ['hours', 'conditions'], ':': ['hours', 'conditions'] };
+  for (const match of all.matchAll(/(\d+(?:\.\d+)?)\s*(元|块|折|年|份|位|人|点|:)/g)) {
     const supported = unitFields[match[2]].some(key => {
       const numeric = String(confirmed[key] ?? '').match(/\d+(?:\.\d+)?/g) ?? [];
       return numeric.includes(match[1]) && copy.claims.some(claim => claim.factKeys.includes(key) && claim.text.includes(match[1]));
@@ -176,7 +214,7 @@ export function localReview(copy, profile, facts, selectedAnalysis) {
   if (selectedAnalysis.some(item => item.privacyRisk === 'low' || item.textRisk === 'warning')) warnings.push('部分图片含人物或宣传文字，请确认授权与文字真实性后发布。');
   if (/进口|认证|资质|排名|经营\d+年|\d{4}年/.test(all)) warnings.push('文案涉及来源、资质或经营历史，请核对证明资料与真实性。');
   if (copy.titles.some(title => [...title].length < 12 || [...title].length > 22)) warnings.push('部分标题超出建议的12—22字，请发布前核对。');
-  if ([...copy.body].length < 250 || [...copy.body].length > 500) warnings.push('正文长度超出建议的250—500字，请发布前核对。');
+  if ([...copy.body.replace(/\s/gu, '')].length < 150 || [...copy.body.replace(/\s/gu, '')].length > 500) warnings.push('正文长度超出150—500字符，请发布前核对。');
   const coverHan = [...copy.coverText].filter(char => /\p{Script=Han}/u.test(char)).length;
   if (coverHan < 8 || coverHan > 16 || [...copy.coverText].length > 24) errors.push('封面文字需要控制在8—16个汉字，不超过24个字符。');
   return { errors: [...new Set(errors)], warnings: [...new Set(warnings)] };

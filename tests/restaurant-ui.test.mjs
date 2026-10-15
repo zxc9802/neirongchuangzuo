@@ -7,9 +7,50 @@ const id = '00000000-abcd-1234-5678-000000000000';
 const photo = (size = 1024, type = 'image/jpeg') => ({ size, type, name: '门店.jpg' });
 const direction = { id: 'food', supportingImageIds: ['photo-1'], missingFacts: [{ field: 'dishName', requiredForGeneration: true, reason: '确认菜名' }, { field: 'parking', requiredForGeneration: false, reason: '停车可不写' }] };
 
-test('restaurant entry requires four real merchant fields and validates original photos before upload', () => {
+test('history deletion confirms, removes the selected task and prevents stale refresh from restoring it', async () => {
+  const original = Object.fromEntries(['document', 'fetch', 'sessionStorage', 'location', 'matchMedia', 'confirm'].map(key => [key, globalThis[key]]));
+  let markup = '', accepted = false, deleted = 0;
+  const root = { contains: () => false, querySelector: () => null, querySelectorAll: () => [], set outerHTML(value) { markup = value; } };
+  globalThis.document = { activeElement: null, querySelector: selector => selector === '#restaurant-workspace' ? root : null, getElementById: () => null };
+  globalThis.location = { origin: 'http://127.0.0.1:5173' };
+  globalThis.matchMedia = () => ({ matches: true });
+  const memory = new Map([['restaurant-active-task', id]]);
+  globalThis.sessionStorage = { getItem: key => memory.get(key) || null, setItem: (key, value) => memory.set(key, value), removeItem: key => memory.delete(key) };
+  globalThis.confirm = () => accepted;
+  const task = { id, status: 'failed', createdAt: Date.now(), analysis: [], sourceImages: [], files: [] };
+  globalThis.fetch = async (url, options = {}) => {
+    if (options.method === 'DELETE') { deleted++; return Response.json({ deleted: true, taskId: id }); }
+    if (url.endsWith('/status')) return Response.json({ enabled: true });
+    if (url.endsWith('/profile')) return Response.json({ profile });
+    if (url.endsWith('/usage')) return Response.json({ usage: { remaining: 20 } });
+    return Response.json(url.endsWith('/' + id) ? { task } : { tasks: [task] });
+  };
+  const module = await import('../design/restaurant.js?ui-history-deletion');
+  const ctx = { icon: () => '', toast() {} };
+  const settle = async () => { for (let count = 0; count < 15; count++) await new Promise(resolve => setImmediate(resolve)); };
+  try {
+    module.renderRestaurant(ctx); module.bindRestaurant(ctx); await settle();
+    assert.match(markup, /rest-delete-task/);
+    module.handleRestaurantAction('rest-delete-task', { dataset: { id } }); await settle();
+    assert.equal(deleted, 0);
+    accepted = true;
+    module.handleRestaurantAction('rest-delete-task', { dataset: { id } }); await settle();
+    assert.equal(deleted, 1); assert.doesNotMatch(markup, new RegExp('data-id="' + id + '"'));
+    assert.equal(memory.has('restaurant-active-task'), false);
+    module.handleRestaurantAction('rest-history-refresh', { dataset: {} }); await settle();
+    assert.doesNotMatch(markup, new RegExp('data-id="' + id + '"'));
+  } finally {
+    module.disposeRestaurant();
+    for (const [key, value] of Object.entries(original)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value;
+  }
+});
+
+test('image-only profiles may be empty while copy profiles and original uploads retain validation', () => {
   assert.equal(validateRestaurantProfile(profile), '');
   assert.match(validateRestaurantProfile({ ...profile, address: '  ' }), /门店地址/);
+  assert.equal(validateRestaurantProfile({}, { required: false }), '');
+  assert.equal(validateRestaurantProfile({ name: '真实面馆' }, { required: false }), '');
+  assert.match(validateRestaurantProfile({ features: '字'.repeat(1501) }, { required: false }), /过长/);
   assert.match(validateRestaurantUploads([]), /至少.*1 张/);
   assert.match(validateRestaurantUploads(Array.from({ length: 31 }, () => photo())), /最多添加 30/);
   assert.match(validateRestaurantUploads([photo(1, 'image/svg+xml')]), /JPG/);
@@ -80,14 +121,14 @@ test('photo analysis distinguishes publication warnings from shooting quality an
     const cards = [...markup.matchAll(/<article class="restaurant-analysis-item[^]*?<\/article>/g)].map(match => match[0]);
     assert.equal(cards.length, 5);
     assert.match(cards[0], /<span>可用 · 发布前需确认<\/span>/);
-    assert.match(cards[0], /拍摄质量评分 12 · 仅供参考/);
+    assert.doesNotMatch(cards[0], /拍摄质量评分/);
     assert.match(cards[0], /请确认照片中人物授权/);
     assert.match(cards[0], /&lt;script&gt;alert\(1\)&lt;\/script&gt;/);
     assert.ok(!cards[0].includes('<script>'));
     assert.match(cards[1], /<span>可用 · 发布前需确认<\/span>/);
     assert.match(cards[1], /公开门头旁有收款码，请在发布前确认/);
     assert.match(cards[2], /<span>可用<\/span>/);
-    assert.match(cards[2], /拍摄质量评分 20 · 仅供参考/);
+    assert.doesNotMatch(cards[2], /拍摄质量评分/);
     assert.ok(!cards[2].includes('发布前需确认'));
     assert.match(cards[3], /<span>不采用<\/span>/);
     assert.match(cards[3], /主体只有联系方式 &lt;b&gt;请换图&lt;\/b&gt;/);
@@ -136,7 +177,7 @@ test('warning review provides read-only drafts and source references while keepi
   const settle = async predicate => { for (let count = 0; count < 60 && !predicate(); count++) await new Promise(resolve => setImmediate(resolve)); assert.ok(predicate()); };
   try {
     module.renderRestaurant(ctx); module.bindRestaurant(ctx);
-    await settle(() => markup.includes('今日剩余'));
+    await settle(() => markup.includes('真实面馆 · 武汉'));
     module.handleRestaurantAction('rest-open-task', { dataset: { id: warningId } }, ctx);
     await settle(() => markup.includes('确认照片中人物授权'));
     assert.ok(!markup.includes(`src="/api/restaurant/tasks/${warningId}/files/01.jpg"`));
@@ -145,7 +186,7 @@ test('warning review provides read-only drafts and source references while keepi
     assert.ok(markup.includes('待确认的封面文字'));
     assert.ok(markup.includes('已生成标题二'));
     assert.ok(markup.includes('#武汉面馆 #午餐'));
-    assert.ok(markup.includes('下方图片是原图参考'));
+    assert.ok(markup.includes('照片为原图参考'));
     assert.ok(markup.includes(`src="/api/restaurant/tasks/${warningId}/files/original-1.jpg"`));
     assert.ok(!markup.includes(`src="/api/restaurant/tasks/${warningId}/files/original-2.jpg"`));
     assert.ok(!markup.includes('data-action="rest-copy"'));
@@ -266,9 +307,10 @@ test('double click submits one analysis task; interrupted submission only querie
   const ctx = { icon: () => '', toast() {} };
   try {
     module.renderRestaurant(ctx); module.bindRestaurant(ctx);
-    await settle(() => markup.includes('今日剩余'));
+    await settle(() => markup.includes('真实面馆 · 武汉'));
     listeners['restaurant-file-input:change']({ target: { files: [photo()], value: '' } });
     listeners['restaurant-rights:change']({ target: { checked: true } });
+    module.handleRestaurantAction('rest-content-type', {dataset:{id:'store-intro'}}, ctx);
     module.handleRestaurantAction('rest-analyse', {}, ctx);
     module.handleRestaurantAction('rest-analyse', {}, ctx);
     await settle(() => !!releasePost);

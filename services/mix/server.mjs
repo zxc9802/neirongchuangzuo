@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createMixCreditsBridge } from './credits-bridge.mjs';
 
 const PYTHON_ROOT = fileURLToPath(new URL('./python/', import.meta.url));
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -41,11 +42,12 @@ async function freePort() {
 }
 
 // Only the Node gateway knows this process's token; the Python listener is private.
-export function createMixHandler({ dataDir, env = process.env, serviceUrl, token = randomBytes(32).toString('hex'), publicOrigin, requireOrigin = false } = {}) {
+export function createMixHandler({ dataDir, env = process.env, serviceUrl, token = randomBytes(32).toString('hex'), publicOrigin, requireOrigin = false, credits } = {}) {
   let endpoint = serviceUrl ? new URL(serviceUrl) : null;
   if (endpoint && (endpoint.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(endpoint.hostname))) throw new Error('Mix service must use loopback HTTP.');
   let child, exited, starting, closing = false;
   const transfers = new Set();
+  const creditBridge = credits ? createMixCreditsBridge({ credits, dataDir, token }) : null;
 
   async function start() {
     if (closing) throw new Error('Stopping');
@@ -53,12 +55,14 @@ export function createMixHandler({ dataDir, env = process.env, serviceUrl, token
     if (starting) return starting;
     starting = (async () => {
       const port = await freePort();
+      const creditsUrl = creditBridge ? await creditBridge.start() : null;
       if (closing) throw new Error('Stopping');
       const address = new URL(`http://127.0.0.1:${port}`);
       child = spawn(env.MIX_PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
         ['-m', 'uvicorn', 'app:create_app', '--factory', '--host', '127.0.0.1', '--port', String(port), '--log-level', 'warning', '--no-access-log'],
         { cwd: PYTHON_ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'],
-          env: { ...env, DATA_DIR: dataDir, MIXER_API_TOKEN: token, PYTHONUNBUFFERED: '1' } });
+          env: { ...env, DATA_DIR: dataDir, MIXER_API_TOKEN: token, PYTHONUNBUFFERED: '1',
+            MIX_CREDITS_ENABLED: creditBridge ? '1' : '0', MIX_CREDITS_URL: creditsUrl || '' } });
       let ended = false;
       exited = new Promise(resolve => {
         child.once('exit', () => { ended = true; endpoint = null; resolve(); });
@@ -94,6 +98,10 @@ export function createMixHandler({ dataDir, env = process.env, serviceUrl, token
       }
     }
     const owner = hash(req.authenticatedUserId);
+    if (creditBridge) {
+      try { await creditBridge.register(req.authenticatedUserId); }
+      catch { reply(res, 503, 'CREDITS_STORAGE_UNAVAILABLE', '积分服务暂时不可用，请稍后重试。'); return true; }
+    }
     const headers = { authorization: 'Bearer ' + token, 'x-material-owner': owner };
     for (const key of ['content-type', 'content-length', 'upload-offset', 'upload-checksum', 'range', 'if-range']) {
       if (req.headers[key] !== undefined) headers[key] = req.headers[key];
@@ -135,6 +143,7 @@ export function createMixHandler({ dataDir, env = process.env, serviceUrl, token
       await exited; clearTimeout(timer);
     }
     await starting?.catch(() => {});
+    await creditBridge?.shutdown();
   };
   return handle;
 }

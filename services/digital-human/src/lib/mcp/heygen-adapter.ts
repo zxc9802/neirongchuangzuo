@@ -12,6 +12,7 @@ export interface HeyGenSubmissionOptions {
   submissionTitle: string;
   onLog?: (msg: string) => void;
   onProviderAccepted?: () => void;
+  onProviderSubmitting?: () => void | Promise<void>;
   onJobCreated?: (info: { lipsyncId: string }) => void;
   onResultReady?: (info: { lipsyncId: string; downloadUrl: string }) => void;
 }
@@ -143,6 +144,7 @@ export class HeyGenMcpAdapter {
         keepTheSameFormat: true,
       };
 
+      await options.onProviderSubmitting?.();
       const createRaw = await mcpManager.callTool(createToolName, createPayload);
       const parsed = parseMcpToolResponse(createRaw);
       options.onProviderAccepted?.();
@@ -204,7 +206,7 @@ export class HeyGenMcpAdapter {
           parsed?.error ||
           parsed?.data?.error ||
           "高精度对口型处理失败";
-        throw new Error(`[MCP Client] ${errorMsg}`);
+        throw Object.assign(new Error(`[MCP Client] ${errorMsg}`), { code: "LIPSYNC_GENERATION_FAILED" });
       } else {
         if (pollCount % 3 === 0) {
           onLog(`[MCP Client] MCP 正在对口型渲染中 (轮询第 ${pollCount} 次)...`);

@@ -6,9 +6,56 @@ import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { createRequestLedger } from '../services/ai/request-ledger.mjs';
+import { withDailyCallPolicy } from '../services/ai/call-policy.mjs';
 
 const input = (id, overrides = {}) => ({ id, kind: 'image', fingerprint: `hash-${id}`, model: 'mock-model', ...overrides });
 const at = Date.parse('2026-09-30T08:00:00Z');
+
+test('explicit unlimited daily and minute budgets still persist every billable dispatch', async t => {
+  const f = await fixture(t, {limits:{imageDaily:null,chatDaily:null,perMinute:null}});
+  const ledger=f.create();await ledger.ready;
+  for(let i=0;i<12;i++) {await ledger.reserve(input(`unlimited-${i}`,{kind:i%2?'chat':'image'}));await ledger.markDispatched(`unlimited-${i}`);}
+  const status=await ledger.summary();assert.deepEqual(status.limits,{imageDaily:null,chatDaily:null,perMinute:null});
+  assert.deepEqual(status.used,{image:6,chat:6});assert.deepEqual(status.remaining,{image:null,chat:null});
+  assert.equal(status.recent.length,12);
+});
+
+test('trusted account exemption bypasses both daily caps, persists and still obeys dispatch rate limits', async t => {
+  const f = await fixture(t, { limits: { imageDaily: 1, chatDaily: 0, perMinute: 3 } });
+  const ledger = f.create(); await ledger.ready;
+  await ledger.reserve(input('ordinary')); await ledger.markDispatched('ordinary');
+  await assert.rejects(ledger.reserve(input('blocked')), { code: 'DAILY_QUOTA_EXCEEDED' });
+  await assert.rejects(ledger.reserve(input('forged', { dailyExempt: true })), { code: 'DAILY_QUOTA_EXCEEDED' });
+  await withDailyCallPolicy(true, async () => {
+    const reservations = await ledger.reserveBatch([input('exempt1'), input('exempt2'), input('exempt3')]);
+    assert.ok(reservations.records.every(item => item.dailyExempt));
+    await ledger.markDispatched('exempt1');
+    await ledger.markDispatched('exempt2');
+    await assert.rejects(ledger.markDispatched('exempt3'), { code: 'RATE_LIMITED' });
+    const usage = await ledger.summary();
+    assert.deepEqual(usage.remaining, { image: null, chat: null });
+    assert.equal(usage.limits.perMinute, 3);
+  });
+  assert.equal((await ledger.summary()).remaining.image, 0);
+  await ledger.close();
+  const reopened = f.create({ now: () => at + 60001 }); await reopened.ready;
+  assert.equal((await reopened.get('exempt1')).dailyExempt, true);
+  await withDailyCallPolicy(true, () => reopened.reserve(input('exempt-after-restart')));
+  await reopened.markDispatched('exempt-after-restart');
+  await withDailyCallPolicy(true, () => reopened.reserve(input('chat', { kind: 'chat' })));
+  await assert.rejects(reopened.reserve(input('ordinary-chat', { kind: 'chat' })), { code: 'DAILY_QUOTA_EXCEEDED' });
+});
+
+test('concurrent exempt and ordinary requests retain separate account policies', async t => {
+  const f = await fixture(t, { limits: { imageDaily: 0, chatDaily: 0, perMinute: 50 } });
+  const ledger = f.create(); await ledger.ready;
+  const outcomes = await Promise.allSettled(Array.from({ length: 10 }, (_, index) => withDailyCallPolicy(index % 2 === 0, async () => {
+    await new Promise(resolve => setImmediate(resolve));
+    return ledger.reserve(input('concurrent-' + index));
+  })));
+  outcomes.forEach((outcome, index) => assert.equal(outcome.status, index % 2 === 0 ? 'fulfilled' : 'rejected'));
+  assert.equal((await ledger.summary()).used.image, 0);
+});
 
 async function fixture(t, options = {}) {
   const parent = resolve(tmpdir());
@@ -42,6 +89,34 @@ test('concurrent reservations atomically respect daily limits; duplicate ids reu
   await assert.rejects(ledger.reserve(input('image-0', { fingerprint: 'changed' })), { status: 409, code: 'REQUEST_ID_CONFLICT' });
   await ledger.reserve(input('chat', { kind: 'chat' }));
   assert.deepEqual((await ledger.summary()).used, { image: 2, chat: 1 });
+});
+
+test('removing the image daily cap preserves exhausted history while chat and minute limits remain enforced', async t => {
+  let clock = at;
+  const { create, file } = await fixture(t, { now: () => clock, limits: { imageDaily: 20, chatDaily: 1, perMinute: 100 } });
+  const previous = create();
+  for (let index = 1; index <= 20; index++) {
+    const id = `previous-${index}`;
+    await previous.reserve(input(id)); await previous.markDispatched(id); await previous.finish(id, { status: 'completed' });
+  }
+  await assert.rejects(previous.reserve(input('blocked-by-old-cap')), { code: 'DAILY_QUOTA_EXCEEDED' });
+  await previous.close(); clock += 60_001;
+  const ledger = create({ limits: { imageDaily: null, chatDaily: 1, perMinute: 2 } });
+  assert.equal((await ledger.summary()).used.image, 20);
+  assert.equal((await ledger.summary()).remaining.image, null);
+  await ledger.reserveBatch([input('image-21'), input('image-22'), input('image-23')]);
+  await ledger.markDispatched('image-21'); await ledger.finish('image-21', { status: 'completed' });
+  await ledger.markDispatched('image-22'); await ledger.finish('image-22', { status: 'failed' });
+  await assert.rejects(ledger.markDispatched('image-23'), { code: 'RATE_LIMITED' });
+  clock += 60_001;
+  await ledger.markDispatched('image-23'); await ledger.finish('image-23', { status: 'completed' });
+  await ledger.reserve(input('chat-1', { kind: 'chat' })); await ledger.markDispatched('chat-1'); await ledger.finish('chat-1', { status: 'completed' });
+  await assert.rejects(ledger.reserve(input('chat-2', { kind: 'chat' })), { code: 'DAILY_QUOTA_EXCEEDED' });
+  assert.equal((await ledger.reserve(input('image-21'))).created, false);
+  const summary = JSON.parse(JSON.stringify(await ledger.summary()));
+  assert.equal(summary.limits.imageDaily, null); assert.deepEqual(summary.used, { image: 23, chat: 1 });
+  assert.deepEqual(summary.remaining, { image: null, chat: 0 });
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).records.length, 24);
 });
 
 test('batch reservations atomically reserve every image or none, and duplicate batches never consume again', async t => {

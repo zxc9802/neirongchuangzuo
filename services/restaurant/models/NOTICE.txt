@@ -1,0 +1,14 @@
+Restaurant foreground extraction uses the U²-Net model from:
+https://github.com/xuebinqin/U-2-Net
+
+Model authors: Xuebin Qin, Zichen Zhang, Chenyang Huang, Masood Dehghan,
+Osmar R. Zaiane, Martin Jagersand.
+U2-Net: Going Deeper with Nested U-Structure for Salient Object Detection,
+Pattern Recognition, 2020.
+
+The upstream Apache 2.0 license is retained in LICENSE.u2net.txt.
+The ONNX model is obtained from the rembg distribution:
+https://github.com/danielgatis/rembg/releases/download/v0.0.0/u2net.onnx
+The model weights are not modified by this project.
+
+This project's worker adds local foreground refinement and validation.

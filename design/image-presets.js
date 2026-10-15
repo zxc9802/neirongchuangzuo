@@ -1,3 +1,9 @@
+export function imageTaskTitle(task = {}) {
+  const title = /(?:^|\n)[ \t\u3000]*主标题[：:][ \t\u3000]*([^\r\n]+)/u.exec(String(task?.prompt || ''))?.[1]?.trim();
+  if (title) return Array.from(title).slice(0, 32).join('');
+  return task?.generationMode === 'series' ? '统一风格套图' : task?.generationMode === 'variations' ? '同主题多风格' : '图片作品';
+}
+
 export const PRESET_FIELD_LIMITS = Object.freeze({
   businessName: 40,
   title: 32,

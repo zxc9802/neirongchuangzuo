@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Client } from "pg";
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes, scryptSync } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { NextRequest } from "next/server.js";
 
@@ -21,6 +21,7 @@ await database.connect();
 process.env.AUTH_PUBLIC_URL = "https://studio.test";
 process.env.NODE_ENV = "production";
 const auth = await import("../src/lib/server/standalone-auth.ts");
+const { bindAccountPhone } = await import("../src/lib/server/account-phones.mjs");
 const invites = await import("../src/lib/server/registration-invites.mjs");
 await auth.consumeAuthAttempt("test-fixture-schema", 1);
 const { POST, GET } = await import("../src/app/api/auth/[action]/route.ts");
@@ -57,7 +58,9 @@ const signup = (email, extra = {}) => post("register", { email, nickname: "创�
 test("registration issues a secure session without exposing a token, hash, or admin role", async () => {
   const response = await signup("First@Example.com", { role: "admin", billingAudience: "internal" });
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { success: true });
+  const responseBody = await response.json();
+  assert.equal(responseBody.success, true);
+  assert.doesNotMatch(JSON.stringify(responseBody), /password|token|hash/);
   const cookie = response.headers.get("set-cookie");
   for (const attribute of ["HttpOnly", "Secure", "SameSite=lax", "Expires="]) assert.ok(cookie.includes(attribute));
   const token = tokenOf(response);
@@ -100,6 +103,91 @@ test("account validation accepts Chinese names and rejects empty, spaced, contro
   for (const account of ["", "   ", "user name", "user\u0000name", "a".repeat(255), 9802]) {
     assert.equal((await post("register", { account, password: "correct horse 123" })).status, 400);
   }
+});
+
+test("bound phone and Chinese username log in to the same account without changing credentials or records", async () => {
+  const registered = await post("register", { account: "中文用户", password: "original pass 123" });
+  assert.equal(registered.status, 200);
+  const original = await auth.readStandaloneSession(tokenOf(registered));
+  const before = (await database.query('SELECT password,created_at FROM digital_human_auth.users WHERE id=$1', [original.user.id])).rows[0];
+  await database.query('CREATE TABLE account_test_history(user_id TEXT PRIMARY KEY,credits INTEGER,task_id TEXT)');
+  await database.query('INSERT INTO account_test_history VALUES($1,10429,$2)', [original.user.id, 'previous_task']);
+  const binding = await bindAccountPhone(database, { account: "中文用户", phone: "19900000000", expectedUserId: original.user.id });
+  assert.equal(binding.userId, original.user.id);
+  const first = (await database.query('SELECT bound_at FROM digital_human_auth.account_phones WHERE user_id=$1', [original.user.id])).rows[0];
+  await bindAccountPhone(database, { account: "中文用户", phone: "19900000000" });
+  assert.deepEqual((await database.query('SELECT bound_at FROM digital_human_auth.account_phones WHERE user_id=$1', [original.user.id])).rows[0], first);
+  for (const account of ["中文用户", "19900000000"]) {
+    const response = await post("login", { account, password: "original pass 123" });
+    assert.equal(response.status, 200);
+    const session = await auth.readStandaloneSession(tokenOf(response));
+    assert.equal(session.user.id, original.user.id);
+    assert.equal(session.user.account, "中文用户");
+    assert.equal((await post("login", { account, password: "wrong pass 123" })).status, 401);
+  }
+  assert.ok(await auth.readStandaloneSession(tokenOf(registered)), 'binding preserves existing sessions');
+  assert.deepEqual((await database.query('SELECT password,created_at FROM digital_human_auth.users WHERE id=$1', [original.user.id])).rows[0], before);
+  assert.deepEqual((await database.query('SELECT credits,task_id FROM account_test_history WHERE user_id=$1', [original.user.id])).rows[0], { credits: 10429, task_id: 'previous_task' });
+});
+
+test("binding and registration reject phone collisions and roll back without consuming an invite", async () => {
+  const other = await signup('other_phone_owner');
+  assert.equal(other.status, 200);
+  const otherId = (await auth.readStandaloneSession(tokenOf(other))).user.id;
+  await assert.rejects(bindAccountPhone(database, { account: 'other_phone_owner', phone: '19900000000' }), /已被其他账号/);
+  await assert.rejects(bindAccountPhone(database, { account: '中文用户', phone: '12345' }), /11位/);
+  await assert.rejects(bindAccountPhone(database, { account: '中文用户', phone: '19900000001', expectedUserId: otherId }), /指定账号/);
+  await signup('19900000002');
+  await assert.rejects(bindAccountPhone(database, { account: 'other_phone_owner', phone: '19900000002' }), /已被其他账号/);
+  const inviteCode = await issueTestInvite();
+  assert.equal((await post('register', { account: '19900000000', password: 'other pass 123', inviteCode })).status, 409);
+  assert.equal((await post('register', { account: 'invite_still_usable', password: 'other pass 123', inviteCode })).status, 200);
+  assert.equal((await database.query('SELECT phone FROM digital_human_auth.account_phones WHERE user_id=$1', [otherId])).rowCount, 0);
+});
+
+test("phone reassignment removes the old login alias and concurrent registration cannot take the new phone", async () => {
+  const registered = await signup('phone_rebind');
+  assert.equal(registered.status, 200);
+  await bindAccountPhone(database, { account: 'phone_rebind', phone: '19900000003' });
+  await bindAccountPhone(database, { account: 'phone_rebind', phone: '19900000004' });
+  assert.equal((await post('login', { account: '19900000003', password: 'correct horse 123' })).status, 401);
+  assert.equal((await post('login', { account: '19900000004', password: 'correct horse 123' })).status, 200);
+  const competing = new Client({ connectionString: process.env.AUTH_DATABASE_URL });
+  await competing.connect();
+  try {
+    const results = await Promise.allSettled([
+      bindAccountPhone(competing, { account: 'phone_rebind', phone: '19900000005' }),
+      post('register', { account: '19900000005', password: 'correct horse 123' }),
+    ]);
+    const bindingWon = results[0].status === 'fulfilled';
+    assert.equal(results[1].status, 'fulfilled');
+    assert.equal(results[1].value.status, bindingWon ? 409 : 200);
+    const owners = await database.query(`SELECT u.id FROM digital_human_auth.users u WHERE email=$1
+      OR EXISTS(SELECT 1 FROM digital_human_auth.account_phones p WHERE p.user_id=u.id AND p.phone=$1)`, ['19900000005']);
+    assert.equal(owners.rowCount, 1);
+  } finally { await competing.end(); }
+});
+
+test("ambiguous legacy phone identities fail closed instead of authenticating an arbitrary account", async () => {
+  const response = await signup('legacy_phone_user');
+  const owner = await auth.readStandaloneSession(tokenOf(response));
+  await bindAccountPhone(database, { account: 'legacy_phone_user', phone: '19900000006' });
+  await database.query(`INSERT INTO digital_human_auth.users(id,email,nickname,password,created_at)
+    SELECT $1,$2,'legacy collision',password,created_at FROM digital_human_auth.users WHERE id=$3`, ['legacy_collision', '19900000006', owner.user.id]);
+  assert.equal((await post('login', { account: '19900000006', password: 'correct horse 123' })).status, 401);
+  assert.equal((await post('login', { account: 'legacy_phone_user', password: 'correct horse 123' })).status, 200);
+});
+
+test("an administrator-reset legacy short password can be replaced from the account password form", async () => {
+  const registered=await signup('reset_short_password');
+  const owner=await auth.readStandaloneSession(tokenOf(registered));
+  const current='987654321',salt=randomBytes(16).toString('hex');
+  const encoded=salt+':'+scryptSync(current,salt,64,{N:32768,r:8,p:1,maxmem:64*1024*1024}).toString('hex');
+  await database.query('UPDATE digital_human_auth.users SET password=$1 WHERE id=$2',[encoded,owner.user.id]);
+  const response=await post('password',{currentPassword:current,password:'replacement pass 123'},{cookie:tokenOf(registered)});
+  assert.equal(response.status,200);
+  assert.equal((await post('login',{account:'reset_short_password',password:current})).status,401);
+  assert.equal((await post('login',{account:'reset_short_password',password:'replacement pass 123'})).status,200);
 });
 
 test("password and input validation reject malformed requests", async () => {

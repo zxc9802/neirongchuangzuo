@@ -112,9 +112,10 @@ test('a known complete invalid repair falls back to the valid draft', async t =>
     new Response(JSON.stringify({ choices: [{ message: { content: '{broken' }, finish_reason: 'stop' }] })),
     () => response({}, 500),
   ]) await t.test('known completed error', async () => {
-    const app = harness([degenerate(), repaired]);
+    const malformed = repaired instanceof Response;
+    const app = harness(malformed ? [degenerate(), repaired.clone(), repaired.clone()] : [degenerate(), repaired]);
     const result = await app.model.recommend(materials, profile);
-    assert.deepEqual(result[0].supportingImageIds, ['photo-1']); assert.equal(app.requests.length, 2);
+    assert.deepEqual(result[0].supportingImageIds, ['photo-1']); assert.equal(app.requests.length, malformed ? 3 : 2);
   });
 });
 

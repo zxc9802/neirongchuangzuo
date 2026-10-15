@@ -1,15 +1,19 @@
+import { createVideoPreview } from "./video-preview";
 import { logServerError } from "../server/safe-log";
 import path from "path";
 import fs from "fs";
 import crypto from "crypto";
 import { withTaskExecution } from "./task-execution";
+import { startTaskHeartbeat, withTaskBillingGuard } from "../server/task-worker";
 import { TaskStore, TaskItem, TaskStep } from "../store/task-store";
 import { getAppConfig } from "../config";
 import { generateIndexTTS } from "./indextts";
+import { prepareFaceLipsync, finalizeFaceLipsync } from "./face-lipsync";
+import { deliverNarrationFallback } from "./narration-fallback";
+import { prepareSceneContinuation } from "./scene-tail";
 import {
   probeMedia,
   prepareSourceVideo,
-  finalizeVideo,
   sha256File,
   encodeMp3,
   type MediaProbeInfo,
@@ -27,6 +31,8 @@ import {
 import {
   calculateRequiredPoints,
   assertTaskCreditCoverage,
+  extendTaskCreditCoverage,
+  assertWorkspaceReservationActive,
   calculateCostCny,
   settleMainAppCredits,
   releaseMainAppCredits,
@@ -86,6 +92,15 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       });
     }
   };
+  const markProviderSubmitting = async () => withTaskBillingGuard(taskId, async () => {
+    const current = TaskStore.get(taskId);
+    if (!current?.userId || !current.billing?.requestId ||
+      !["reserved", "provider_committed"].includes(current.billing.status) || current.status !== "processing") {
+      throw new Error("任务已停止，不能继续提交生成");
+    }
+    await assertWorkspaceReservationActive(current.userId, current.billing.requestId);
+    markProviderCommitted();
+  });
   const recordChunk = (chunk: NonNullable<TaskItem["results"]["lipsyncChunks"]>[number]) => {
     const chunks = [...(TaskStore.get(taskId)?.results.lipsyncChunks || [])];
     const index = chunks.findIndex(item => item.index === chunk.index);
@@ -96,8 +111,10 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
   };
 
   let currentStep: TaskStep = "tts";
+  let stopHeartbeat: (() => void) | undefined;
 
   try {
+    if (task.billing?.source === "workspace") stopHeartbeat = startTaskHeartbeat(taskId);
     fs.mkdirSync(providerRoot, { recursive: true });
     for (const entry of fs.readdirSync(providerRoot, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^[a-f0-9]{48}$/.test(entry.name)) continue;
@@ -124,7 +141,11 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
     if (task.billing?.isExternalUser) {
       log(
-        `💳 外部用户计费：费率 ${POINTS_PER_SECOND}积分/秒 (0.20元/秒)，已预留 ${task.billing.estimatedPoints} 积分 (预估 ${task.billing.estimatedDuration}s)`,
+        task.billing.source === "workspace"
+          ? task.billing.exempt === true ? "🎟️ 无限积分，本次任务免扣积分"
+            : task.billing.mode === "api_cost" ? `💳 已预留 ${task.billing.reservedPoints} 积分`
+              : `💳 共用积分：30秒333积分，按实际时长向上取整；已预留 ${task.billing.reservedPoints} 积分`
+          : `💳 外部用户计费：费率 ${POINTS_PER_SECOND}积分/秒 (0.20元/秒)，已预留 ${task.billing.estimatedPoints} 积分 (预估 ${task.billing.estimatedDuration}s)`,
         "info"
       );
     } else {
@@ -167,7 +188,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         )}s | 帧率 ${originalProbe.fps}fps | 含音频轨: ${originalProbe.hasAudio ? "是" : "否"}`
       );
     }
-    assertTaskCreditCoverage(task.billing, task.billing?.estimatedDuration || 0);
+    if (task.billing?.source !== "workspace") assertTaskCreditCoverage(task.billing, task.billing?.estimatedDuration || 0);
 
     // 2. Step: Speech Synthesis
     log("🗣️ 第一步: 正在合成定制原声配音 (根据字数可能需要 1~3 分钟)...");
@@ -199,8 +220,21 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       emotionIntensity: task.inputs.emotionIntensity,
       toneProfile: task.inputs.toneProfile,
       outDir: jobDir,
-      onLog: (m) => logProvider(`[TTS] ${m}`),
+      onLog: (m) => {
+        ensureTaskActive();
+        logProvider(`[TTS] ${m}`);
+      },
       cacheScope: `${task.userId || "local"}:${task.inputs.speakerVoiceId || "default"}`,
+      fallback: {
+        apiKey: config.doubaoTtsApiKey,
+        speakerId: config.doubaoTtsVoiceMap?.[task.inputs.speakerVoiceId || "default"] || "",
+      },
+      checkActive: ensureTaskActive,
+      onFallback: () => log(
+        "主配音服务暂不可用，已切换豆包声音复刻 2.0，重新生成完整配音",
+        "warn",
+        "主配音服务暂不可用，已自动切换备用配音，重新生成完整音轨"
+      ),
     });
     ensureTaskActive();
 
@@ -220,9 +254,14 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       const mp3Hash = await sha256File(mp3Path);
       ensureTaskActive();
 
-      const currentTaskData = TaskStore.get(taskId) || task;
+      let currentTaskData = TaskStore.get(taskId) || task;
       const actualDuration = audioProbe.durationSeconds;
-      assertTaskCreditCoverage(currentTaskData.billing, actualDuration);
+      const reservedPoints = await extendTaskCreditCoverage({ userId: currentTaskData.userId,
+        billing: currentTaskData.billing, durationSeconds: actualDuration });
+      if (currentTaskData.billing?.source === "workspace") {
+        TaskStore.update(taskId, { billing: { ...currentTaskData.billing, reservedPoints } });
+        currentTaskData = TaskStore.get(taskId) || currentTaskData;
+      }
       let chargedPoints: number | undefined;
       let costCny: number | undefined;
       let pointsBalanceAfter: number | undefined;
@@ -230,13 +269,18 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         if (!currentTaskData.billing.requestId || !currentTaskData.userId) {
           throw new Error("外部用户任务缺少主站积分结算标识");
         }
-        chargedPoints = calculateRequiredPoints(actualDuration);
-        costCny = calculateCostCny(actualDuration);
+        chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
+        costCny = calculateCostCny(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
+        // Save the actual MP3 before settlement so recovery never needs another paid TTS call.
+        TaskStore.update(taskId, { results: { exactAudioUrl: mp3Path, audioFormat: "mp3", audioDuration: actualDuration,
+          sha256Audio: mp3Hash, billingDuration: actualDuration } });
         TaskStore.update(taskId, { billing: { ...currentTaskData.billing, status: "settle_pending" } });
         const settlement = await settleMainAppCredits({
           userId: currentTaskData.userId, requestId: currentTaskData.billing.requestId,
-          actualDuration, chargedPoints, sessionToken,
+          actualDuration, chargedPoints, sessionToken, source: currentTaskData.billing.source,
         });
+        chargedPoints = settlement.chargedPoints;
+        costCny = settlement.costCny;
         pointsBalanceAfter = settlement.pointsBalance;
       }
 
@@ -275,12 +319,20 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     });
     log("🎞️ 第二步: 正在进行 FFmpeg 画面归一化与音画对齐...");
 
+    try {
+      localVideoPath = await prepareSceneContinuation({ inputPath: localVideoPath,
+        targetSeconds: ttsResult.selectedDuration, outputPath: path.join(jobDir, "motion-source.mp4"), onLog: log });
+    } catch (error) {
+      logServerError("pipeline.scene_continuation", error, "warn");
+      log("画面接续暂未完成，保留已有素材继续制作", "warn");
+    }
+    ensureTaskActive();
     const preparedVideoPath = path.join(jobDir, "source-video.mp4");
     const prepResult = await prepareSourceVideo(
       localVideoPath,
       ttsResult.selectedDuration,
       preparedVideoPath,
-      task.inputs.videoFit
+      "smart"
     );
     ensureTaskActive();
 
@@ -295,10 +347,15 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     // Check the confirmed hold before any lip-sync engine can spend credits.
     // One second covers frame/container rounding in the final mux.
     ensureTaskActive();
-    assertTaskCreditCoverage(
-      TaskStore.get(taskId)?.billing || task.billing,
-      Math.ceil(Math.max(ttsResult.selectedDuration, prepResult.duration)) + 1,
-    );
+    const coverageTask = TaskStore.get(taskId) || task;
+    const coverageDuration = Math.max(ttsResult.selectedDuration, prepResult.duration);
+    const reservedPoints = await extendTaskCreditCoverage({
+      userId: coverageTask.userId, billing: coverageTask.billing,
+      durationSeconds: coverageTask.billing?.source === "workspace" ? coverageDuration : Math.ceil(coverageDuration) + 1,
+    });
+    if (coverageTask.billing?.source === "workspace") {
+      TaskStore.update(taskId, { billing: { ...coverageTask.billing, reservedPoints } });
+    }
 
     // 4. Step: Lip-sync submission (HeyGen / PixVerse / VEED)
     const lipsyncProvider = resolveLipsyncProvider(
@@ -312,6 +369,25 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       progress: 50,
     });
 
+    let providerVideoPath = preparedVideoPath;
+    let providerAudioPath = ttsResult.finalWavPath;
+    let faceWorkflow = false;
+    if (lipsyncProvider === "veed") {
+      log("正在准备口型画面...", "info");
+      try {
+        const face = await prepareFaceLipsync({ inputVideoPath: localVideoPath,
+          audioPath: ttsResult.finalWavPath, durationSeconds: ttsResult.selectedDuration, jobDir, taskId });
+        providerVideoPath = face.videoPath;
+        providerAudioPath = face.audioPath;
+        faceWorkflow = true;
+      } catch (error) {
+        logServerError("pipeline.face_preparation_fallback", error, "warn");
+        log("局部口型画面准备未完成，自动使用完整画面继续生成", "warn");
+      }
+      ensureTaskActive();
+      TaskStore.update(taskId, { results: { faceWorkflowVersion: faceWorkflow ? 1 : undefined } });
+    }
+
     // Submission title based on hashes for idempotency
     const submissionTitle = `lipsync_${sha256Video.slice(0, 8)}_${sha256Audio.slice(
       0,
@@ -319,21 +395,28 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     )}`;
 
     // Create short-lived, unguessable provider inputs. They are removed in finally.
-    fs.copyFileSync(preparedVideoPath, path.join(providerInputDir, "source-video.mp4"));
-    fs.copyFileSync(ttsResult.finalWavPath, path.join(providerInputDir, "voice-track.wav"));
+    fs.copyFileSync(providerVideoPath, path.join(providerInputDir, "source-video.mp4"));
+    fs.copyFileSync(providerAudioPath, path.join(providerInputDir, "voice-track.wav"));
     let publicVideoUrl = `${baseUrl}/jobs/input/${providerToken}/source-video.mp4`;
     let publicAudioUrl = `${baseUrl}/jobs/input/${providerToken}/voice-track.wav`;
 
     // If cloud object storage is configured, upload prepared video & audio to COS for 100% reachable public access
     if (CosService.isConfigured()) {
+      if (!faceWorkflow) {
+        const saved = await Promise.allSettled([
+          CosService.uploadFile(preparedVideoPath, `jobs/${taskId}/source-video.mp4`),
+          CosService.uploadFile(ttsResult.finalWavPath, `jobs/${taskId}/voice-track.wav`),
+        ]);
+        if (saved.some(item => item.status === "rejected")) log("恢复素材暂未保存到云端，继续使用本地素材生成", "warn");
+      }
       try {
         ensureTaskActive();
         log("☁️ 正在将预处理音画直链同步至云端高速分发...", "info");
         const providerVideoKey = `provider-input/${providerToken}/source-video.mp4`;
         const providerAudioKey = `provider-input/${providerToken}/voice-track.wav`;
-        await CosService.uploadFile(preparedVideoPath, providerVideoKey);
+        await CosService.uploadFile(providerVideoPath, providerVideoKey);
         providerCosKeys.push(providerVideoKey);
-        await CosService.uploadFile(ttsResult.finalWavPath, providerAudioKey);
+        await CosService.uploadFile(providerAudioPath, providerAudioKey);
         providerCosKeys.push(providerAudioKey);
         publicVideoUrl = await CosService.getDownloadUrl(providerVideoKey, undefined, 6 * 60 * 60);
         publicAudioUrl = await CosService.getDownloadUrl(providerAudioKey, undefined, 6 * 60 * 60);
@@ -367,13 +450,14 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
       heygenResult = await OpenLuxLipsyncAdapter.execute(
         {
-          videoPath: preparedVideoPath,
-          audioPath: ttsResult.finalWavPath,
+          videoPath: providerVideoPath,
+          audioPath: providerAudioPath,
           videoUrl: publicVideoUrl,
           audioUrl: publicAudioUrl,
           existingChunks: TaskStore.get(taskId)?.results.lipsyncChunks,
           onLog: logProvider,
           onProviderAccepted: markProviderCommitted,
+          onProviderSubmitting: task.billing?.source === "workspace" ? markProviderSubmitting : undefined,
           onJobCreated: ({ lipsyncId, creditsUsed }) => {
             markProviderCommitted();
             TaskStore.update(taskId, {
@@ -414,14 +498,15 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
 
       heygenResult = await FalVeedLipsyncAdapter.execute(
         {
-          videoPath: preparedVideoPath,
-          audioPath: ttsResult.finalWavPath,
+          videoPath: providerVideoPath,
+          audioPath: providerAudioPath,
           videoUrl: publicVideoUrl,
           audioUrl: publicAudioUrl,
-          objectKeyPrefix: `jobs/${taskId}`,
+          objectKeyPrefix: faceWorkflow ? `jobs/${taskId}/face-provider` : `jobs/${taskId}`,
           onLog: logProvider,
           onChunkProgress: recordChunk,
           onProviderAccepted: markProviderCommitted,
+          onProviderSubmitting: task.billing?.source === "workspace" ? markProviderSubmitting : undefined,
           onJobCreated: ({ lipsyncId }) => {
             markProviderCommitted();
             TaskStore.update(taskId, {
@@ -460,6 +545,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           submissionTitle,
           onLog: logProvider,
           onProviderAccepted: markProviderCommitted,
+          onProviderSubmitting: task.billing?.source === "workspace" ? markProviderSubmitting : undefined,
           onJobCreated: ({ lipsyncId }) => {
             markProviderCommitted();
             TaskStore.update(taskId, {
@@ -490,16 +576,14 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       step: "finalize",
       progress: 85,
     });
-    log("🎧 第五步: 正在将生成的对口型视频与原声 WAV 音轨无损混流封装...");
+    log("🎧 第五步: 正在校准口型并合成最终成片...", "info", "正在校准口型并合成最终成片");
 
     const heygenDownloadedPath = path.join(jobDir, "rendered-source.mp4");
     const finalVideoPath = path.join(jobDir, "final.mp4");
 
-    const finalProbe = await finalizeVideo(
-      heygenDownloadedPath,
-      ttsResult.finalWavPath,
-      finalVideoPath
-    );
+    const finalProbe = await finalizeFaceLipsync({ jobDir, renderedPath: heygenDownloadedPath,
+      audioPath: ttsResult.finalWavPath, outputPath: finalVideoPath,
+      faceWorkflow, onLog: log });
     ensureTaskActive();
 
     // 6. Generate an implementation-neutral production report
@@ -527,7 +611,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           sha256: sha256Audio,
         },
       },
-      processing: { status: "completed" },
+      processing: { status: "completed", lipsync_calibration: "best_effort" },
     };
 
     const evidencePath = path.join(jobDir, "production-report.json");
@@ -553,10 +637,13 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         throw new Error("外部用户任务缺少主站积分结算标识");
       }
       const actualDuration = finalProbe.durationSeconds;
-      chargedPoints = calculateRequiredPoints(actualDuration);
-      costCny = calculateCostCny(actualDuration);
+      chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
+      costCny = calculateCostCny(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
       log(
-        `💳 正在结算主站积分消耗: 实际时长 ${actualDuration.toFixed(1)}s × ${POINTS_PER_SECOND}积分/秒 = ${chargedPoints} 积分 (¥${costCny})...`,
+        currentTaskData.billing.source === "workspace"
+          ? currentTaskData.billing.exempt === true ? "💳 正在确认任务结算"
+            : `💳 正在结算共用积分：实际时长 ${actualDuration.toFixed(1)}秒，扣除 ${chargedPoints} 积分`
+          : `💳 正在结算主站积分消耗: 实际时长 ${actualDuration.toFixed(1)}s × ${POINTS_PER_SECOND}积分/秒 = ${chargedPoints} 积分 (¥${costCny})...`,
         "info"
       );
       TaskStore.update(taskId, {
@@ -568,10 +655,15 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         actualDuration,
         chargedPoints,
         sessionToken,
+        source: currentTaskData.billing.source,
       });
+      chargedPoints = settleResult.chargedPoints;
+      costCny = settleResult.costCny;
       pointsBalanceAfter = settleResult.pointsBalance;
       log(
-        `✅ 主站积分结算成功：扣除 ${chargedPoints} 积分 (¥${costCny})，当前账户剩余: ${
+        currentTaskData.billing.source === "workspace" && currentTaskData.billing.exempt === true
+          ? "✅ 任务结算成功，本次免扣积分"
+          : `${currentTaskData.billing.source === "workspace" ? "✅ 积分结算成功" : "✅ 主站积分结算成功"}：扣除 ${chargedPoints} 积分${currentTaskData.billing.source === "workspace" ? "" : ` (¥${costCny})`}，当前账户剩余: ${
           pointsBalanceAfter !== undefined ? `${pointsBalanceAfter} 积分` : "正常"
         }`,
         "success"
@@ -598,6 +690,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       }
     }
 
+    const previewVideoUrl = await createVideoPreview(finalVideoPath);
+
     // Done!
     currentStep = "done";
     ensureTaskActive();
@@ -622,6 +716,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
           task.inputs.videoUrl ||
           task.inputs.videoPath,
         finalVideoUrl,
+        previewVideoUrl,
         exactAudioUrl,
         evidenceJsonUrl,
         heygenLipsyncId: heygenResult.lipsyncId,
@@ -643,6 +738,16 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
   } catch (err: any) {
     const errorMsg = err.message || "未知流水线异常";
     logServerError("pipeline.failed", err);
+    // Quality/provider/media failures are not delivery gates. Never turn an
+    // authorization or settlement failure into a free alternative output.
+    if (!audioOnly && ["media_prep", "mcp_preflight", "mcp_lipsync_submit", "mcp_lipsync_polling", "finalize"].includes(currentStep) &&
+      !/^(BILLING_|INSUFFICIENT_|NETWORK_ERROR)/.test(err.code || "")) {
+      try {
+        if (await deliverNarrationFallback(taskId, sessionToken)) return;
+      } catch (fallbackError) {
+        logServerError("pipeline.narration_fallback_failed", fallbackError);
+      }
+    }
     log(`❌ 流程发生错误: ${errorMsg}`, "error", "处理失败，请稍后重试");
 
     // Release reserved billing credits on failure
@@ -650,13 +755,16 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     if (
       currentTaskData.billing?.isExternalUser &&
       currentTaskData.billing.requestId &&
-      currentTaskData.billing.status === "reserved"
+      (currentTaskData.billing.status === "reserved" ||
+        (currentTaskData.billing.status === "provider_committed" &&
+          currentTaskData.billing.source === "workspace" && err.code === "LIPSYNC_GENERATION_FAILED"))
     ) {
       try {
         await releaseMainAppCredits({
           userId: currentTaskData.userId || "",
           requestId: currentTaskData.billing.requestId,
           sessionToken,
+          source: currentTaskData.billing.source,
         });
         TaskStore.update(taskId, {
           billing: {
@@ -678,6 +786,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       errorCode: typeof err.code === "string" ? err.code : undefined,
     });
   } finally {
+    stopHeartbeat?.();
     try {
       fs.rmSync(providerInputDir, { recursive: true, force: true });
     } catch {}

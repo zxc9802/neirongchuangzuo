@@ -16,6 +16,12 @@
 !services/runtime-settings.mjs
 !services/restaurant/
 !services/restaurant/**
+!services/credits/
+!services/credits/**
+!services/mix/
+!services/mix/**
+!services/video/
+!services/video/**
 !services/digital-human/
 !services/digital-human/package.json
 !services/digital-human/package-lock.json
@@ -38,3 +44,6 @@
 **/.runtime/**
 **/public/uploads/**
 **/public/jobs/**
+**/__pycache__/**
+**/*.pyc
+**/*.download

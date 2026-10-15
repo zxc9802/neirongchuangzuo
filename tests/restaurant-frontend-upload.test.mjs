@@ -5,7 +5,7 @@ import { restaurantAvailablePhotos, restaurantOutputCount, restaurantCanGenerate
 const profile = { name: '竹里面馆', city: '武汉', address: '建设一路 18 号', category: '面馆' };
 const originals = count => Array.from({ length: count }, (_, index) => ({ name: `实拍-${index}.png`, size: 7 * 1024 * 1024, type: 'image/png', lastModified: index }));
 
-async function restaurantPage(t, { count = 30, interruptBatch = false } = {}) {
+async function restaurantPage(t, { count = 30, interruptBatch = false, merchantProfile = profile } = {}) {
   const keys = ['document', 'fetch', 'FileReader', 'sessionStorage', 'location', 'createImageBitmap', 'matchMedia'];
   const originalGlobals = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
   const originalCreate = URL.createObjectURL, originalRevoke = URL.revokeObjectURL;
@@ -25,7 +25,7 @@ async function restaurantPage(t, { count = 30, interruptBatch = false } = {}) {
     const body = options.body ? JSON.parse(options.body) : undefined;
     calls.push({ url, method: options.method || 'GET', body });
     if (url.endsWith('/status')) return Response.json({ enabled: true });
-    if (url.endsWith('/profile')) return Response.json({ profile });
+    if (url.endsWith('/profile')) return Response.json({ profile: options.method === 'PUT' ? body.profile : merchantProfile });
     if (url.endsWith('/usage')) return Response.json({ usage: { limit: 20, remaining: 20 } });
     if (url.includes('/tasks?')) return Response.json({ tasks: [...tasks.values()], nextCursor: null });
     if (url.endsWith('/tasks') && options.method === 'POST') {
@@ -59,7 +59,7 @@ async function restaurantPage(t, { count = 30, interruptBatch = false } = {}) {
   const files = originals(count);
   const select = () => { listeners.get('restaurant-file-input:change')({ target: { files, value: '' } }); listeners.get('restaurant-rights:change')({ target: { checked: true } }); };
   t.after(() => { module.disposeRestaurant(); URL.createObjectURL = originalCreate; URL.revokeObjectURL = originalRevoke; for (const [key, value] of Object.entries(originalGlobals)) if (value === undefined) delete globalThis[key]; else globalThis[key] = value; });
-  module.renderRestaurant(ctx); module.bindRestaurant(ctx); await settle(() => markup.includes('今日剩余'));
+  module.renderRestaurant(ctx); module.bindRestaurant(ctx); module.handleRestaurantAction('rest-content-type', {dataset:{id:'store-intro'}},ctx); await settle(() => /data-action="rest-analyse"\s*>/.test(markup));
   return { module, ctx, calls, tasks, saved, files, listeners, select, settle, markup: () => markup };
 }
 
@@ -76,6 +76,23 @@ test('restaurant counts only usable supporting photos and rejects inflated or un
   assert.equal(restaurantCanGenerate(task, shortDirection), false);
   assert.equal(restaurantCanGenerate(task, shortDirection, { outputCount: 3, acceptSparse: true }), true);
   assert.equal(restaurantCanGenerate(task, shortDirection, { outputCount: 6, acceptSparse: true }), false);
+});
+
+test('typed one-click uses six default pages and reuses an unchanged saved profile', async t => {
+  const app = await restaurantPage(t, { count: 9 });
+  assert.match(app.markup(), /门店介绍/); assert.match(app.markup(), /value="6" selected/);
+  app.select(); app.module.handleRestaurantAction('rest-analyse', {}, app.ctx);
+  await app.settle(() => app.markup().includes('选择一个内容方向'));
+  const created = app.calls.find(call => call.url.endsWith('/tasks') && call.method === 'POST');
+  assert.equal(created.body.contentType, 'store-intro'); assert.equal(created.body.autoGenerate, true); assert.equal(created.body.outputCount, 6);
+  assert.equal(app.calls.filter(call => call.url.endsWith('/profile') && call.method === 'PUT').length, 0);
+});
+test('store introduction requires city and category and keeps additional facts optional', async t => {
+  const app = await restaurantPage(t, { merchantProfile: { name: '真实酒馆' } });
+  assert.match(app.markup(), /rest-content-name/); assert.match(app.markup(), /rest-content-city/); assert.match(app.markup(), /补充信息（选填）/);
+  app.select(); app.module.handleRestaurantAction('rest-analyse', {}, app.ctx);
+  await app.settle(() => app.markup().includes('请填写城市 / 商圈、主营品类'));
+  assert.equal(app.calls.filter(call => call.url.endsWith('/tasks') && call.method === 'POST').length, 0);
 });
 
 test('thirty restaurant originals compress into ten batches and the selected package count reaches generation', async t => {
@@ -95,12 +112,13 @@ test('thirty restaurant originals compress into ten batches and the selected pac
   assert.deepEqual(batches.map(call => call.body.startIndex), Array.from({ length: 10 }, (_, index) => index * 3));
   assert.ok(batches.every(call => call.body.images.length === 3));
   assert.equal(app.calls.filter(call => call.url.endsWith('/analyse') && call.method === 'POST').length, 1);
-  assert.match(app.markup(), /value="9" selected/);
+  assert.match(app.markup(), /value="30" selected/);
   assert.match(app.markup(), /value="15"/);
-  app.listeners.get('restaurant-output-count:change')({ target: { value: '15' } });
+  assert.equal(init[0].body.autoGenerate, true); assert.equal(init[0].body.outputCount, 6);
+  app.listeners.get('restaurant-output-count:change')({ target: { value: '6' } });
   app.module.handleRestaurantAction('rest-generate', {}, app.ctx);
   await app.settle(() => app.calls.some(call => call.url.endsWith('/generate') && call.method === 'POST'));
-  assert.equal(app.calls.find(call => call.url.endsWith('/generate') && call.method === 'POST').body.outputCount, 15);
+  assert.equal(app.calls.find(call => call.url.endsWith('/generate') && call.method === 'POST').body.outputCount, 6);
   assert.equal(app.files[29].name, '实拍-29.png');
 });
 
@@ -130,6 +148,7 @@ test('starting a fresh restaurant upload explicitly cancels the paused draft bef
   await app.settle(() => !app.saved.has('restaurant-upload-draft'));
   assert.equal(app.calls.filter(call => call.url.endsWith('/cancel-upload') && call.method === 'POST').length, 1);
   assert.equal(app.tasks.get(id).code, 'UPLOAD_CANCELLED');
+  app.module.handleRestaurantAction('rest-content-type', { dataset: { id: 'store-intro' } }, app.ctx);
   assert.match(app.markup(), /0 \/ 30/);
   assert.equal(app.calls.filter(call => call.url.endsWith('/analyse')).length, 0);
 });

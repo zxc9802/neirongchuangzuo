@@ -170,6 +170,7 @@
 .home-discover-heading h2 { margin: 0; color: #303842; font-size: 18px; font-weight: 600; letter-spacing: -.2px; }
 .home-discover-heading > span { color: #87929f; font-size: 11px; }
 .home-material-context { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin: -6px 0 21px; }
+.home-material-context:empty { display: none; }
 .home-material-context > p { margin: 0; color: #5f6e80; font-size: 12px; line-height: 1.8; }
 .home-material-context p > span { color: #8c96a3; font-size: 10px; margin-left: 14px; }
 .home-view-all { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; color: #1677ff; font-size: 11px; min-height: 36px; }

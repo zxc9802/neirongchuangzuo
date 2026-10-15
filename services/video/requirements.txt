@@ -1,0 +1,6 @@
+# OpenCV headless, NumPy, Pillow and ONNX Runtime come from the mix environment.
+pyclipper>=1.3,<2
+six>=1.15,<2
+Shapely>=2.0.5,<3
+PyYAML>=6,<7
+tqdm>=4.66,<5

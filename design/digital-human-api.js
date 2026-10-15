@@ -333,6 +333,7 @@ export const digitalHumanApi = {
     if (!task?.id || task.status !== 'completed') return '';
     let file;
     if (kind === 'video' && task.results?.finalVideoUrl) file = 'final.mp4';
+    if (kind === 'preview' && task.results?.finalVideoUrl) file = 'preview.mp4';
     if (kind === 'audio' && task.results?.exactAudioUrl) file = task.results.audioFormat === 'mp3' ? 'voice-track.mp3' : 'voice-track.wav';
     if (kind === 'report') file = 'production-report.json';
     return file ? `${API}/tasks/${identifier(task.id)}/download/${file}` : '';

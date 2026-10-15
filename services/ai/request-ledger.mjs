@@ -2,10 +2,11 @@ import { lstat, mkdir, open, readFile, realpath, rename, unlink } from 'node:fs/
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
+import { isDailyCallExempt } from './call-policy.mjs';
 
 const TERMINAL = new Set(['completed', 'failed', 'uncertain', 'cancelled']);
 const STATUSES = new Set(['reserved', 'dispatched', ...TERMINAL]);
-const DEFAULT_LIMITS = { imageDaily: 20, chatDaily: 100, perMinute: 10 };
+const DEFAULT_LIMITS = { imageDaily: null, chatDaily: 100, perMinute: 10 };
 const TIME_ZONE = 'Asia/Shanghai';
 const dayAt = time => new Date(time + 8 * 3600000).toISOString().slice(0, 10);
 const copy = value => value == null ? value : structuredClone(value);
@@ -52,7 +53,7 @@ function safeUsage(usage) {
 
 function safeRecord(record) {
   const safe = {};
-  for (const key of ['id', 'kind', 'model', 'status', 'day', 'createdAt', 'dispatchedAt', 'finishedAt', 'code', 'providerRequestId']) {
+  for (const key of ['id', 'kind', 'model', 'status', 'day', 'createdAt', 'dispatchedAt', 'finishedAt', 'code', 'providerRequestId', 'outputIssue']) {
     if (record[key] !== undefined) safe[key] = record[key];
   }
   const usage = safeUsage(record.usage);
@@ -66,6 +67,8 @@ function validRecord(record) {
     && typeof record.fingerprint === 'string' && record.fingerprint.length > 0 && record.fingerprint.length <= 256
     && typeof record.model === 'string' && record.model.length <= 200
     && Number.isSafeInteger(record.createdAt) && record.createdAt >= 0
+    && (record.dailyExempt === undefined || typeof record.dailyExempt === 'boolean')
+    && (record.outputIssue === undefined || ['truncated', 'empty', 'invalid_json', 'invalid_schema'].includes(record.outputIssue))
     && (record.dispatchedAt === undefined || Number.isFinite(record.dispatchedAt))
     && (record.finishedAt === undefined || Number.isFinite(record.finishedAt))
     && record.day === dayAt(record.dispatchedAt ?? record.createdAt)
@@ -82,8 +85,8 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
   const ledgerPath = join(controlDir, 'requests.json');
   const token = randomUUID();
   const effectiveLimits = Object.fromEntries(Object.entries(DEFAULT_LIMITS).map(([key, fallback]) => {
-    const value = limits[key] ?? fallback;
-    if (!Number.isSafeInteger(value) || value < 0) throw error('INVALID_AI_LIMIT', '调用上限必须为非负整数。', 400);
+    const value = limits[key] === null ? null : limits[key] ?? fallback;
+    if (value !== null && (!Number.isSafeInteger(value) || value < 0)) throw error('INVALID_AI_LIMIT', '调用上限必须为非负整数或不限。', 400);
     return [key, value];
   }));
   let records = new Map();
@@ -202,7 +205,8 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
         await checkedFile(ledgerPath, 64 * 1024 * 1024);
         const saved = JSON.parse(await readFile(ledgerPath, 'utf8'));
         if (saved.version !== 1 || !Array.isArray(saved.records) || !saved.records.every(validRecord)) throw storageError();
-        records = new Map(saved.records.map(record => [record.id, { ...safeRecord(record), fingerprint: record.fingerprint }]));
+        records = new Map(saved.records.map(record => [record.id, { ...safeRecord(record), fingerprint: record.fingerprint,
+          ...(record.dailyExempt === true ? { dailyExempt: true } : {}) }]));
         if (records.size !== saved.records.length) throw storageError();
       } catch (cause) { if (cause.code !== 'ENOENT') throw storageError(); }
       const recovered = new Map(records);
@@ -256,16 +260,17 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
     }
     if (existing.every(Boolean)) return { created: false, records: existing.map(copy) };
     if (existing.some(Boolean)) throw error('REQUEST_ID_CONFLICT', '套图已有调用记录，请查询原任务。', 409);
-    const timestamp = now(), day = dayAt(timestamp);
+    const timestamp = now(), day = dayAt(timestamp), dailyExempt = isDailyCallExempt();
     const active = [...records.values()].filter(counted);
     for (const kind of ['image', 'chat']) {
       const requested = checked.filter(item => item.kind === kind).length;
-      if (requested && active.filter(record => record.kind === kind && record.day === day).length + requested > effectiveLimits[`${kind}Daily`]) throw quotaError(kind);
+      const dailyLimit = effectiveLimits[`${kind}Daily`];
+      if (!dailyExempt && requested && dailyLimit !== null && active.filter(record => !record.dailyExempt && record.kind === kind && record.day === day).length + requested > dailyLimit) throw quotaError(kind);
     }
     // A set reserves its daily allowance atomically. Its individual calls are
     // paced at dispatch; reserving 15 positions must not require a 15/min limit.
-    if (checked.length === 1 && active.filter(record => recentAttempt(record, timestamp) && (Number.isFinite(record.dispatchedAt) || !record.batchReservation)).length >= effectiveLimits.perMinute) throw rateError();
-    const reserved = checked.map(input => ({ ...input, status: 'reserved', day, createdAt: timestamp, ...(checked.length > 1 ? { batchReservation: true } : {}) }));
+    if (effectiveLimits.perMinute !== null && checked.length === 1 && active.filter(record => recentAttempt(record, timestamp) && (Number.isFinite(record.dispatchedAt) || !record.batchReservation)).length >= effectiveLimits.perMinute) throw rateError();
+    const reserved = checked.map(input => ({ ...input, ...(dailyExempt ? { dailyExempt: true } : {}), status: 'reserved', day, createdAt: timestamp, ...(checked.length > 1 ? { batchReservation: true } : {}) }));
     const next = new Map(records);
     for (const record of reserved) next.set(record.id, record);
     await persist(next);
@@ -295,13 +300,24 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
         const timestamp = now();
         const day = dayAt(timestamp);
         const others = [...records.values()].filter(candidate => candidate.id !== id && counted(candidate));
-        if (others.filter(candidate => candidate.kind === record.kind && candidate.day === day).length >= effectiveLimits[`${record.kind}Daily`]) {
+        const dailyLimit = effectiveLimits[`${record.kind}Daily`];
+        const dailyExempt = record.dailyExempt === true || isDailyCallExempt();
+        if (!dailyExempt && dailyLimit !== null && others.filter(candidate => !candidate.dailyExempt && candidate.kind === record.kind && candidate.day === day).length >= dailyLimit) {
           throw quotaError(record.kind);
         }
-        if (others.filter(candidate => Number.isFinite(candidate.dispatchedAt) && recentAttempt(candidate, timestamp)).length >= effectiveLimits.perMinute) throw rateError();
-        const updated = { ...record, status: 'dispatched', dispatchedAt: timestamp, day };
+        if (effectiveLimits.perMinute !== null && others.filter(candidate => Number.isFinite(candidate.dispatchedAt) && recentAttempt(candidate, timestamp)).length >= effectiveLimits.perMinute) throw rateError();
+        const updated = { ...record, ...(dailyExempt ? { dailyExempt: true } : {}), status: 'dispatched', dispatchedAt: timestamp, day };
         await persist(new Map(records).set(id, updated));
         return copy(updated);
+      });
+    },
+    recordProviderRequest(id, providerRequestId) {
+      return run(async () => {
+        const record = records.get(id);
+        if (!record || record.status !== 'dispatched' || !/^[A-Za-z0-9_.:-]{1,160}$/.test(providerRequestId || '')) throw error('INVALID_REQUEST_STATUS', '上游任务编号无法保存。');
+        if (record.providerRequestId && record.providerRequestId !== providerRequestId) throw error('REQUEST_ID_CONFLICT', '上游任务编号不一致。', 409);
+        await persist(new Map(records).set(id, { ...record, providerRequestId }));
+        return copy(records.get(id));
       });
     },
     finish(id, details = {}) {
@@ -315,6 +331,7 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
         }
         const updated = { ...record, status: details.status, finishedAt: now() };
         if (/^[A-Z0-9_]{1,80}$/.test(details.code || '')) updated.code = details.code;
+        if (['truncated', 'empty', 'invalid_json', 'invalid_schema'].includes(details.outputIssue)) updated.outputIssue = details.outputIssue;
         const usage = safeUsage(details.usage);
         if (usage) updated.usage = usage;
         if (/^[A-Za-z0-9_.:-]{1,160}$/.test(details.providerRequestId || '')) updated.providerRequestId = details.providerRequestId;
@@ -327,10 +344,12 @@ export function createRequestLedger({ storageDir, now = Date.now, limits = {}, l
       return run(async () => {
         const day = dayAt(now());
         const today = [...records.values()].filter(record => record.day === day);
+        const dailyExempt = isDailyCallExempt();
+        const limits = dailyExempt ? { ...effectiveLimits, imageDaily: null, chatDaily: null } : effectiveLimits;
         const used = { image: 0, chat: 0 };
-        for (const record of today) if (counted(record)) used[record.kind]++;
-        return { day, timeZone: TIME_ZONE, limits: copy(effectiveLimits), used,
-          remaining: { image: Math.max(0, effectiveLimits.imageDaily - used.image), chat: Math.max(0, effectiveLimits.chatDaily - used.chat) },
+        for (const record of today) if (counted(record) && (dailyExempt || !record.dailyExempt)) used[record.kind]++;
+        return { day, timeZone: TIME_ZONE, limits: copy(limits), used,
+          remaining: { image: limits.imageDaily === null ? null : Math.max(0, limits.imageDaily - used.image), chat: limits.chatDaily === null ? null : Math.max(0, limits.chatDaily - used.chat) },
           recent: [...records.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 50).map(safeRecord) };
       });
     },

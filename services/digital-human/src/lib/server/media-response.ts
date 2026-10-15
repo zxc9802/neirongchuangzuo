@@ -210,6 +210,8 @@ export async function servePrivateMedia(
   options: {
     contentType?: string;
     downloadName?: string;
+    direct?: boolean;
+    expiresAt?: number;
     allowConfiguredReference?: boolean;
   } = {}
 ): Promise<Response> {
@@ -253,6 +255,21 @@ export async function servePrivateMedia(
       headers.set("Content-Length", String(end - start + 1));
     }
     return new Response(req.method === "HEAD" ? null : Readable.toWeb(fs.createReadStream(localPath, rangeOptions)) as ReadableStream, {status, headers});
+  }
+
+  // The caller has already checked ownership and delivery/retention status.
+  // Stream stored outputs from COS directly instead of relaying every byte twice.
+  const managedKey = options.direct ? CosService.getManagedObjectKey(source) : null;
+  if (managedKey) {
+    const expires = Math.min(3600, Math.floor(((options.expiresAt ?? Date.now() + 3_600_000) - Date.now()) / 1000));
+    if (expires < 1) return new Response("Media not found", { status: 404 });
+    const url = await CosService.getDownloadUrl(managedKey, options.downloadName, expires, {
+      inline: !options.downloadName, contentType: options.contentType,
+      method: req.method === "HEAD" ? "HEAD" : "GET",
+    });
+    return new Response(null, { status: 307, headers: {
+      Location: url, "Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+    } });
   }
 
   const upstream = await fetchAllowedRemote(source, {

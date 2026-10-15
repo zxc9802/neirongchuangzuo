@@ -60,6 +60,8 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
       "@/lib/access-control": access,
       "@/lib/server/upload-policy": {isOwnedUploadSource: () => true},
       "@/lib/server/media-response": {isTrustedStoredMediaSource: () => true},
+      "@/lib/server/task-worker": {currentTaskWorker: () => ({pid: process.pid, host: os.hostname(), instance: "fixture", startedAt: Date.now()})},
+      "@/lib/server/workspace-task-recovery": {reconcileWorkspaceTask: async task => task},
     };
     const code = ts.transpileModule(fs.readFileSync(new URL("../src/app/api/tasks/route.ts", import.meta.url), "utf8"), {
       compilerOptions: {module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022},

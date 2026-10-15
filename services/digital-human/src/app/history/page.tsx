@@ -128,13 +128,14 @@ export default function HistoryPage() {
                           制作中断
                         </span>
                       )}
-                      {task.billing?.isExternalUser && (
+                      {task.billing?.isExternalUser && !(task.billing.source === "workspace" && task.billing.exempt === true) && (
                         <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 border border-amber-500/25 px-2.5 py-0.5 text-[11px] font-mono font-semibold text-amber-300">
                           <Coins className="h-3 w-3 text-amber-400" />
                           <span>
                             {isDone && typeof (task.results?.chargedPoints ?? task.billing.chargedPoints) === "number"
-                              ? `已扣 ${(task.results?.chargedPoints ?? task.billing.chargedPoints ?? 0).toLocaleString()} 积分 (¥${(task.results?.costCny ?? task.billing.costCny ?? 0).toFixed(2)})`
-                              : `预留 ${(task.billing.estimatedPoints ?? 0).toLocaleString()} 积分`}
+                              ? `已扣 ${(task.results?.chargedPoints ?? task.billing.chargedPoints ?? 0).toLocaleString()} 积分${task.billing.source === "workspace" ? "" : ` (¥${(task.results?.costCny ?? task.billing.costCny ?? 0).toFixed(2)})`}`
+                              : task.billing.status === "released" ? "预留积分已退回"
+                                : `预留 ${(task.billing.reservedPoints ?? task.billing.estimatedPoints ?? 0).toLocaleString()} 积分`}
                           </span>
                         </span>
                       )}

@@ -3,6 +3,25 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createPreviewServer } from '../preview.mjs';
+import { isDailyCallExempt } from '../services/ai/call-policy.mjs';
+
+test('AI and restaurant policy uses the verified account, never client headers', async t => {
+  const backend = createServer((req, res) => {
+    const account = req.headers.cookie === 'session=exempt' ? 'zxc9911' : 'ordinary';
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ success: true, data: { authMode: 'standalone', user: { id: 'id-' + account, account } } }));
+  });
+  const handler = async (req, res) => { await new Promise(resolve => setImmediate(resolve)); res.end(JSON.stringify({ exempt: isDailyCallExempt(), userId: req.authenticatedUserId })); return true; };
+  handler.ready = Promise.resolve(); handler.shutdown = async () => {};
+  const preview = createPreviewServer({ backendUrl: await listen(backend), authRequired: true, credits: { ready: Promise.resolve() }, createAI: () => handler, createRestaurant: () => handler });
+  const base = await listen(preview);
+  t.after(async () => { await preview.shutdown(); backend.closeAllConnections(); await new Promise(resolve => backend.close(resolve)); });
+  const results = await Promise.all(['/api/ai/status', '/api/restaurant/status'].flatMap(path => [true, false].map(async exempt => {
+    const response = await fetch(base + path, { headers: { cookie: exempt ? 'session=exempt' : 'session=ordinary', 'x-account': 'zxc9911', 'x-user-id': 'id-zxc9911', 'x-daily-exempt': 'true' } });
+    return { exempt, data: await response.json() };
+  })));
+  for (const result of results) assert.equal(result.data.exempt, result.exempt);
+});
 
 async function listen(server) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -19,7 +38,7 @@ async function workspace(t) {
   });
   const handler = async (req, res) => { res.end(JSON.stringify({ userId: req.authenticatedUserId })); return true; };
   handler.ready = Promise.resolve(); handler.shutdown = async () => {};
-  const preview = createPreviewServer({ backendUrl: await listen(backend), authRequired: true, createAI: () => handler });
+  const preview = createPreviewServer({ backendUrl: await listen(backend), authRequired: true, credits: { ready: Promise.resolve() }, createAI: () => handler });
   const base = await listen(preview);
   t.after(async () => { await preview.shutdown(); backend.closeAllConnections(); await new Promise(resolve => backend.close(resolve)); });
   return { base, offline: () => { offline = true; } };

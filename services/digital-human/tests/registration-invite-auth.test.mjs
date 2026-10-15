@@ -63,7 +63,10 @@ if (!process.env.TEST_DATABASE_URL) {
 
   test('successful registration redeems the hashed code once; login never needs an invitation', async () => {
     const code = await issue(), response = await signup('one-use-account', ` ${code.toLowerCase()} `);
-    assert.equal(response.status, 200); assert.deepEqual(await response.json(), { success: true });
+    assert.equal(response.status, 200);
+    const responseBody = await response.json();
+    assert.equal(responseBody.success, true);
+    assert.doesNotMatch(JSON.stringify(responseBody), /password|token|hash|inviteCode/);
     const token = response.cookies.get(auth.AUTH_COOKIE)?.value, session = await auth.readStandaloneSession(token);
     const saved = await lookup(code); assert.match(saved.code_hash, /^[0-9a-f]{64}$/); assert.notEqual(saved.code_hash, code); assert.ok(saved.redeemed_at); assert.equal(saved.redeemed_by, session.user.id);
     assert.deepEqual(Object.keys(saved).sort(), ['code_hash', 'created_at', 'expires_at', 'redeemed_at', 'redeemed_by']);
