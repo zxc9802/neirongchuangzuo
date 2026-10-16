@@ -55,6 +55,29 @@ class CreditsClient:
     def release(self, owner, task_id):
         return self.call('release', owner, task_id)
 
+    def cost_call(self, action, owner, scope, **fields):
+        try:
+            response = requests.post(self.url + '/' + action,
+                headers={'Authorization': 'Bearer ' + self.token},
+                json={'owner': owner, 'scope': scope, **fields}, timeout=(3, 300), allow_redirects=False)
+            data = response.json()
+        except (requests.RequestException, ValueError):
+            raise CreditError('模型调用或费用尚未确认，请恢复原任务核对。', uncertain=True) from None
+        if not response.ok:
+            raise CreditError(data.get('error', '模型费用核对暂不可用'), response.status_code,
+                              data.get('code', 'CREDITS_UNAVAILABLE'), response.status_code >= 500)
+        return data['result']
+
+    def provider(self, owner, scope, url, payload, call_key=None):
+        return self.cost_call('provider', owner, scope, url=url, payload=payload,
+                              **({'callKey': call_key} if call_key else {}))
+
+    def close_scope(self, owner, scope):
+        return self.cost_call('close-scope', owner, scope)
+
+    def reject_result(self, owner, scope, url, payload):
+        return self.cost_call('reject-response', owner, scope, url=url, payload=payload)
+
 
 def configured_credits():
     url = os.environ.get('MIX_CREDITS_URL')

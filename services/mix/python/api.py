@@ -24,6 +24,12 @@ _local = threading.local()
 _unsupported_config = set()
 
 
+class ProviderRejected(RuntimeError):
+    def __init__(self, status):
+        self.status = status
+        super().__init__(f'HTTP {status}: 模型拒绝请求，供应商已确认未收费')
+
+
 def clean_error(value):
     text = str(value)
     for name in ('OPENLUX_API_KEY', 'RERANK_API_KEY', 'TTS_API_KEY', 'SUNO_API_KEY', 'MINIMAX_API_KEY',
@@ -74,6 +80,17 @@ class Models:
         self.session = thread_session()
 
     def post(self, url, key_name, payload):
+        from costs import paid_post
+        from credits import CreditError
+        try:
+            with MODEL_SLOTS:
+                metered = paid_post(url, payload)
+        except CreditError as error:
+            if error.code == 'MIX_PROVIDER_REJECTED':
+                raise ProviderRejected(error.status) from None
+            raise
+        if metered is not None:
+            return metered
         key = os.environ.get(key_name)
         if not key:
             raise ValueError(f'请先设置进程环境变量 {key_name}，不要写入技能文件')
@@ -106,8 +123,22 @@ class Models:
             inline = parts[0]['inlineData']
             parts = [{'inline_data': {'mime_type': inline['mimeType'], 'data': inline['data']}}]
         payload = {'content': {'parts': parts}}
-        data = self.post(embed_route(self.embed_url), 'OPENLUX_API_KEY', payload)
-        return unit_vector(data.get('embedding', {}).get('values', []))
+        for attempt in range(4):
+            try:
+                # Some OpenLux auto-routes reject this native method. Retry only
+                # a confirmed, unbilled rejection; never retry an uncertain POST.
+                data = self.post(embed_route(self.embed_url), 'OPENLUX_API_KEY', payload)
+                break
+            except RuntimeError as error:
+                rejected = isinstance(error, ProviderRejected) and error.status in (400, 500)
+                if attempt == 3 or not (rejected or str(error).startswith('HTTP 400')):
+                    raise
+        try:
+            return unit_vector(data.get('embedding', {}).get('values', []))
+        except ValueError:
+            from costs import reject_result
+            reject_result(embed_route(self.embed_url), payload)
+            raise
 
     def json(self, prompt, videos=(), config=None):
         parts = [{'text': prompt}]
@@ -115,18 +146,20 @@ class Models:
             parts.extend([{'text': f'候选片段 ID={label}'}, video_part(path)])
         base = {'responseMimeType': 'application/json', 'maxOutputTokens': 8192}
         extra = {k: v for k, v in (config or {}).items() if k not in _unsupported_config}
+        payload = {'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': base | extra}
         try:
-            data = self.post(self.llm_url, 'OPENLUX_API_KEY', {
-                'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': base | extra})
+            data = self.post(self.llm_url, 'OPENLUX_API_KEY', payload)
         except RuntimeError as exc:
             if not extra or not str(exc).startswith('HTTP 400'):
                 raise
             # A gateway that rejects the speed options keeps working with the plain request.
-            data = self.post(self.llm_url, 'OPENLUX_API_KEY', {
-                'contents': [{'role': 'user', 'parts': parts}], 'generationConfig': base})
+            payload = {**payload, 'generationConfig': base}
+            data = self.post(self.llm_url, 'OPENLUX_API_KEY', payload)
             _unsupported_config.update(extra)
         candidates = data.get('candidates', [])
         if not candidates or candidates[0].get('finishReason') not in ('STOP', None):
+            from costs import reject_result
+            reject_result(self.llm_url, payload)
             raise ValueError('模型输出被截断或拦截，不能作为有效结果')
         text = ''.join(p.get('text', '') for p in candidates[0].get('content', {}).get('parts', [])
                        if not p.get('thought'))
@@ -134,6 +167,8 @@ class Models:
         try:
             return json.loads(text)
         except ValueError:
+            from costs import reject_result
+            reject_result(self.llm_url, payload)
             raise ValueError('模型没有返回可解析的 JSON') from None
 
     def rerank(self, query, candidates):

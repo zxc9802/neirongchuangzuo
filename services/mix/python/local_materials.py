@@ -16,6 +16,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import HTTPException
+from costs import billing_scope
 
 PAIR_TTL = 600
 UPLOAD_TTL = 24 * 3600
@@ -530,6 +531,12 @@ class MaterialBroker:
         defer = defer and not clip['description'] and self.describe_backlog() < DESCRIBE_BACKLOG
 
         def analyze(part):
+            with self.connect() as db:
+                owner = self._device(db, device_id)['owner']
+            with billing_scope(owner, f'browser:{device_id}:{clip_id}:{part}'):
+                return analyze_part(part)
+
+        def analyze_part(part):
             started = time.perf_counter()
             if clip[part]:
                 value = unpack_vector(clip[part]) if part == 'vector' else clip[part]
@@ -623,7 +630,10 @@ class MaterialBroker:
                     self._drop_description(db, row, reset=bool(clip and not clip['description']))
                 return True
             started = time.perf_counter()
-            value = self._describe(Path(row['path']))
+            with self.connect() as db:
+                owner = self._device(db, row['device_id'])['owner']
+            with billing_scope(owner, f"browser:{row['device_id']}:{row['clip_id']}:description"):
+                value = self._describe(Path(row['path']))
             record_timing('description', time.perf_counter() - started)
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')

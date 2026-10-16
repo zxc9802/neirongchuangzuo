@@ -28,6 +28,7 @@ from cloud_materials import CloudMaterials
 from cloud_material_routes import attach_cloud_materials
 from local_materials import MaterialBroker, MaterialsPending, valid_id
 from credits import CreditError, configured_credits, estimate_seconds
+from costs import billing_scope
 from media import duration as media_duration
 
 OUTPUT_TTL = 72 * 3600
@@ -183,10 +184,9 @@ class Jobs:
             if not data or data.get('status') == 'released':
                 seconds = estimate_seconds(spec['text'])
                 wallet = self.credits.snapshot(spec['owner'])
-                if wallet.get('pricing', {}).get('mode') == 'api_cost':
-                    raise CreditError('混剪功能暂未开放。', 503, 'COST_PROVIDER_NOT_CONFIGURED')
-                reserve_seconds = seconds * 1.25 + 2
-                if wallet.get('unlimited') is not True:
+                cost_mode = wallet.get('pricing', {}).get('mode') == 'api_cost'
+                reserve_seconds = 0 if cost_mode else seconds * 1.25 + 2
+                if not cost_mode and wallet.get('unlimited') is not True:
                     price = wallet['pricing']
                     available = wallet['available']
                     if math.ceil(seconds * price['videoPoints'] / price['videoSeconds']) > available:
@@ -195,11 +195,13 @@ class Jobs:
                     reserve_seconds = min(reserve_seconds, maximum)
                 # Floating-point boundaries must not reserve one point more than the wallet.
                 reserve_seconds = math.floor(reserve_seconds * 1000) / 1000
-                reserve_seconds = max(seconds, reserve_seconds)
+                reserve_seconds = 0 if cost_mode else max(seconds, reserve_seconds)
                 attempt = (data or {}).get('attempt', 0) + 1
                 data = {'source': 'workspace', 'attempt': attempt, 'creditId': f'mix:{job_id}:{attempt}',
                         'estimatedSeconds': seconds, 'initialUnits': reserve_seconds, 'reservedPoints': 0,
                         'chargedPoints': 0, 'status': 'reserve_pending'}
+                if cost_mode:
+                    data['billingMode'] = 'api_cost'
                 self._save_billing(job_id, data)
             record = self.credits.read(spec['owner'], data['creditId'])
             if record is None:
@@ -217,6 +219,11 @@ class Jobs:
             return
         with self.credit_lock:
             data = self._billing(job_id)
+            summary = {}
+            if data and data.get('billingMode') == 'api_cost':
+                summary = self.credits.close_scope(owner, 'job:' + job_id)
+                data.update(summary)
+                self._save_billing(job_id, data)
             if not data or data.get('status') in ('released', 'settled'):
                 return
             record = self.credits.read(owner, data['creditId'])
@@ -225,6 +232,7 @@ class Jobs:
             data.update(status=record['status'] if record else 'released',
                         chargedPoints=(record or {}).get('chargedPoints', 0),
                         exempt=(record or {}).get('exempt') is True)
+            data.update(summary)
             self._save_billing(job_id, data)
 
     def _settle(self, job_id, spec, result):
@@ -235,6 +243,8 @@ class Jobs:
             raise ValueError('实际成片时长无效，不能交付')
         with self.credit_lock:
             data = self._billing(job_id)
+            summary = (self.credits.close_scope(spec['owner'], 'job:' + job_id)
+                       if data.get('billingMode') == 'api_cost' else {})
             data.update(status='settle_pending', actualSeconds=seconds)
             self._save_billing(job_id, data)
             record = self.credits.settle(spec['owner'], data['creditId'], seconds)
@@ -242,6 +252,7 @@ class Jobs:
                 raise CreditError('成片已保存，积分结算暂未确认，请稍后继续。', uncertain=True)
             data.update(status='settled', chargedPoints=record['chargedPoints'], reservedPoints=record['reservedPoints'],
                         exempt=record.get('exempt') is True)
+            data.update(summary)
             self._save_billing(job_id, data)
 
     def _extend(self, job_id, spec, seconds):
@@ -249,6 +260,8 @@ class Jobs:
             return
         with self.credit_lock:
             data = self._billing(job_id)
+            if data.get('billingMode') == 'api_cost':
+                return
             record = self.credits.extend(spec['owner'], data['creditId'], seconds)
             data.update(reservedPoints=record['reservedPoints'], status=record['status'], exempt=record.get('exempt') is True)
             self._save_billing(job_id, data)
@@ -365,8 +378,11 @@ class Jobs:
             if spec.get('source') != 'cloud':
                 self.materials.device(spec['device_id'], spec['owner'])
             saved = folder / row['result'] if row['result'] else None
-            result = (saved if saved and saved.is_file() and (folder / 'quality-report.json').is_file()
-                      else Path(runner(spec, folder, lambda message: self.log(job_id, message)))).resolve()
+            billing = self._billing(job_id) if self.credits else None
+            with billing_scope(spec['owner'], 'job:' + job_id,
+                               legacy=bool(billing and billing.get('billingMode') != 'api_cost')):
+                result = (saved if saved and saved.is_file() and (folder / 'quality-report.json').is_file()
+                          else Path(runner(spec, folder, lambda message: self.log(job_id, message)))).resolve()
             if result.parent != folder or not result.is_file():
                 raise ValueError('任务输出路径无效')
             report = json.loads((folder / 'quality-report.json').read_text(encoding='utf-8'))

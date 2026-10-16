@@ -11,6 +11,26 @@ import voice
 
 
 class VoiceTests(unittest.TestCase):
+    def test_metered_uncertain_submission_reuses_original_signed_reference_and_attempt(self):
+        success = Mock(status_code=200)
+        success.json.return_value = {'state': 'SUCCESS', 'audio_url': 'https://example.com/audio.wav'}
+        with tempfile.TemporaryDirectory() as tmp, patch('voice.headers', return_value={}), \
+             patch('voice.metering_enabled', return_value=True), \
+             patch('voice.paid_post', return_value={'task_id': 'original-task'}) as paid, \
+             patch('voice.requests.post') as post, \
+             patch('voice.requests.get', side_effect=[success, Mock(status_code=200, content=b'audio')]), \
+             patch('voice.media.duration', return_value=1):
+            record = self.save_task(tmp, '配音', None, None, speaker='library:stable-voice')
+            saved = json.loads(record.read_text(encoding='utf-8'))
+            original = {'text': '配音', 'speaker_audio_url': 'https://example.com/ref.wav?signature=old', 'emotion_alpha': .8}
+            saved.update(submission='uncertain', request=original)
+            record.write_text(json.dumps(saved), encoding='utf-8')
+            voice.synthesize('配音', 'https://example.com/ref.wav?signature=new', None, 'hash', .8, tmp,
+                             log=lambda _: None, speaker_cache_key='library:stable-voice')
+            self.assertEqual(paid.call_args.args[1], original)
+            self.assertTrue(paid.call_args.kwargs['call_key'].endswith(':0'))
+            post.assert_not_called()
+
     def setUp(self):
         config = patch.dict('voice.os.environ', {'INDEXTTS_DOWNLOAD_HOSTS': 'example.com,302.ai,302ai.cn'})
         config.start()
