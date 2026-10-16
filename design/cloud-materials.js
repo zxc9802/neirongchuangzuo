@@ -24,7 +24,7 @@ function validItem(item) {
 }
 
 export default class CloudMaterials {
-  constructor({ api, fetch: send = globalThis.fetch, onStatus = () => {}, pollInterval = 2500 } = {}) {
+  constructor({ api, fetch: send = globalThis.fetch.bind(globalThis), onStatus = () => {}, pollInterval = 2500 } = {}) {
     this.mode = 'cloud';
     this.api = api;
     this.fetch = send;
