@@ -107,6 +107,27 @@ test('mix studio keeps its columns and labels the submitted text as promotional 
   } finally { f.restore(); }
 });
 
+test('historical failed jobs show their error in task details without reporting a closed material library', async () => {
+  for (const cloud of [false, true]) {
+    const job = { id, state: 'failed', error: '混剪功能暂未开放。' };
+    const f = await fixture({ files: 0,
+      health: { configured: true, indexing_configured: true, voice_configured: true, default_voice_configured: true,
+        ...(cloud ? { material_library: { configured: true } } : {}) },
+      fetchJob: url => Response.json(url === '/api/mix/jobs' ? { jobs: [job] } : job) });
+    try {
+      await f.mod.initializeMixMaterials(f.ctx);
+      assert.equal(f.mod.getMixState().job.error, job.error);
+      assert.match(f.mod.renderMixProgress(), /混剪功能暂未开放/);
+      assert.doesNotMatch(f.mod.renderMixMaterials(), /混剪功能暂未开放/);
+      assert.equal(f.mod.mixFolderLocked(), false);
+      assert.doesNotMatch(f.mod.mixReadiness(f.ctx), /混剪功能暂未开放/);
+      if (cloud) assert.match(f.nodes['#studio-generation-hint'].textContent, /先上传视频素材/);
+      f.mod.getMixState().status.error = '素材上传失败，请重试';
+      assert.match(f.mod.renderMixMaterials(), /素材上传失败，请重试/);
+    } finally { f.restore(); }
+  }
+});
+
 test('mix generation follows server unlimited credits instead of blocking a zero balance', async () => {
   let unlimited = false;
   const f = await fixture({ fetchCredits: () => Response.json({ available: 0, held: 0, total: 0, unlimited,

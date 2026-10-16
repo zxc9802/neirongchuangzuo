@@ -318,6 +318,7 @@ async function deleteAudio(kind, id) {
 
 export function renderMixMaterials() {
   const status = state.status;
+  const error = status.error || state.error;
   if (state.client?.mode === 'cloud') {
     const disabled = mixFolderLocked() ? 'disabled' : '';
     const uploading = state.client.scanning;
@@ -329,7 +330,7 @@ export function renderMixMaterials() {
     const entries = state.client.items.map(item => `<div class="mix-folder-actions"><span>${escape(item.name)} · ${labels[item.state]}</span>${item.state === 'failed' ? `<button data-action="mix-material-retry" data-id="${item.id}" ${disabled}>重试</button>` : ''}<button data-action="mix-material-delete" data-id="${item.id}" ${disabled}>删除</button>${item.error ? `<small class="mix-status-error">${escape(item.error)}</small>` : ''}</div>`).join('');
     const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : state.job?.state === 'credit_pending' ? '' : folderReadiness();
     const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>${state.job?.state === 'credit_pending' ? '重试确认积分' : '继续制作'}</button>` : '';
-    return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite"><span>${text}</span>${analysisFee}${progress}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}<div class="mix-folder-actions"><button data-action="mix-scan" ${disabled}>刷新素材库${status.error ? ' / 重试' : ''}</button>${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}</div>${entries ? `<details><summary>管理云端素材（${state.fileCount}）</summary>${entries}</details>` : ''}</div>`;
+    return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite"><span>${text}</span>${analysisFee}${progress}${error ? `<small class="mix-status-error">${escape(error)}</small>` : ''}<div class="mix-folder-actions"><button data-action="mix-scan" ${disabled}>刷新素材库${status.error ? ' / 重试' : ''}</button>${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}</div>${entries ? `<details><summary>管理云端素材（${state.fileCount}）</summary>${entries}</details>` : ''}</div>`;
   }
   const uploading = !status.needsPermission && (state.client?.scanning || status.uploadTotal || status.connected && status.processing);
   const text = status.needsPermission ? '请重新连接素材文件夹，并在浏览器提示中选择“每次访问时都允许”，以后打开网站会自动连接' : uploading ? '素材正在上传' : status.connected ? status.error ? '部分素材上传失败，请重试' : status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
@@ -341,7 +342,7 @@ export function renderMixMaterials() {
   const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : state.job?.state === 'credit_pending' ? '' : folderReadiness();
   const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>${state.job?.state === 'credit_pending' ? '重试确认积分' : '继续制作'}</button>` : '';
   const actions = `${scan || retry ? `<button data-action="mix-scan" ${disabled}>${status.error ? '重试未完成素材' : '扫描新增 / 修改'}</button>` : ''}${scan ? `<button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
-  return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite">${text ? `<span>${text}</span>` : ''}${progress}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}${actions ? `<div class="mix-folder-actions">${actions}</div>` : ''}</div>`;
+  return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite">${text ? `<span>${text}</span>` : ''}${progress}${error ? `<small class="mix-status-error">${escape(error)}</small>` : ''}${actions ? `<div class="mix-folder-actions">${actions}</div>` : ''}</div>`;
 }
 
 export function mixJobLabel(job = state.job) {
