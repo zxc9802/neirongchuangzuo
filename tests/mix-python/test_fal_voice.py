@@ -8,20 +8,34 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'services/mix/python'))
 import fal_voice
-from app import normalize, provider_pending, readiness
+from app import generate, normalize, provider_pending, readiness
 from api import clean_error
 from credits import CreditError
 
 
 class FalVoiceTests(unittest.TestCase):
-    def test_default_voice_is_available_with_only_fal_key_and_secret_is_redacted(self):
+    def test_indextts_requires_a_reference_and_pins_the_model_without_loading_qwen_voice(self):
         with patch.dict(os.environ, {'MIX_FAL_KEY': 'private-fal-key', 'OPENLUX_API_KEY': 'private-openlux', 'RERANK_API_KEY': 'private-rerank'}, clear=True), \
                 patch('app.shutil.which', return_value='/tool'):
-            self.assertTrue(readiness()['default_voice_configured'])
+            self.assertTrue(readiness()['voice_configured'])
+            self.assertFalse(readiness()['default_voice_configured'])
             spec = normalize({'text': '欢迎。', 'source': 'cloud'}, 'a' * 64)
-            self.assertEqual(spec['voice_config'], {'provider': 'fal', 'voice': 'Vivian'})
+            self.assertEqual(spec['voice_config'], {'provider': 'fal', 'model': fal_voice.TTS_MODEL,
+                'speaker_url': None, 'emotion_url': None, 'emotion_file': None})
             self.assertEqual(clean_error('failed private-fal-key'), 'failed [REDACTED]')
             self.assertNotIn('private-fal-key', json.dumps(spec))
+            with patch.dict(os.environ, {'INDEXTTS_SPEAKER_AUDIO_URL': 'https://example.com/reference.wav'}):
+                self.assertTrue(readiness()['default_voice_configured'])
+                self.assertEqual(normalize({'text': '欢迎。', 'source': 'cloud'}, 'a' * 64)['voice_config']['speaker_url'],
+                                 'https://example.com/reference.wav')
+
+    def test_old_qwen_task_stops_before_paid_matching_or_narration(self):
+        with tempfile.TemporaryDirectory() as tmp, patch('app.readiness', return_value={'configured': True}), \
+                patch('matcher.create_plan') as matching, patch('fal_voice.paid_post') as paid:
+            with self.assertRaisesRegex(ValueError, '旧 Qwen'):
+                generate({'voice_config': {'provider': 'fal', 'voice': 'Vivian'}}, Path(tmp), lambda _: None)
+        matching.assert_not_called()
+        paid.assert_not_called()
 
     def test_metered_queue_and_download_resume_without_new_paid_submission(self):
         pending = {'request_id': '12345678-1234-4567-abcd-123456789abc', 'status': 'IN_PROGRESS'}
@@ -70,6 +84,35 @@ class FalVoiceTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     fal_voice.download(url, Path('unused.wav'))
         get.assert_not_called()
+
+    def test_default_reference_and_emotion_are_sent_to_indextts_with_full_text(self):
+        with tempfile.TemporaryDirectory() as tmp, patch('fal_voice.queued', return_value=Path(tmp) / 'voice.wav') as queued, \
+                patch('fal_voice.media.duration', return_value=1.01), patch('fal_voice.media.run'):
+            plan = {'fps': 25, 'scenes': [{'text': '完整中文文案。'}]}
+            fal_voice.synthesize_plan(plan, tmp, speaker_url='https://example.com/speaker.wav',
+                                      emotion_url='https://example.com/emotion.wav', emotion_alpha=.8, log=lambda _: None)
+            model, payload = queued.call_args.args[:2]
+            self.assertEqual(model, 'fal-ai/index-tts-2/text-to-speech')
+            self.assertEqual(payload, {'prompt': '完整中文文案。', 'audio_url': 'https://example.com/speaker.wav',
+                'emotional_audio_url': 'https://example.com/emotion.wav', 'strength': .8, 'should_use_prompt_for_emotion': False})
+            self.assertEqual(plan['scenes'][0]['end'], 1.04)
+            self.assertEqual(plan['voice_settings']['model'], model)
+
+    def test_missing_reference_stops_before_any_paid_request(self):
+        with tempfile.TemporaryDirectory() as tmp, patch('fal_voice.queued') as queued:
+            with self.assertRaisesRegex(ValueError, '参考音频'):
+                fal_voice.synthesize_plan({'fps': 25, 'scenes': [{'text': '文案。'}]}, tmp)
+        queued.assert_not_called()
+
+    def test_indextts_string_audio_result_can_be_downloaded(self):
+        done = {'request_id': '12345678-1234-4567-abcd-123456789abc', 'status': 'COMPLETED',
+                'result': {'audio': 'https://v3b.fal.media/audio.wav'}, 'result_status': 200}
+        with tempfile.TemporaryDirectory() as tmp, patch('fal_voice.metering_enabled', return_value=True), \
+                patch('fal_voice.paid_post', return_value=done), \
+                patch('fal_voice.download', side_effect=lambda url, path: path.write_bytes(b'audio')) as download, \
+                patch('fal_voice.media.duration', return_value=2):
+            fal_voice.queued(fal_voice.TTS_MODEL, {'prompt': '中文。'}, Path(tmp), 'scene', '.wav', lambda _: None)
+            self.assertEqual(download.call_args.args[0], 'https://v3b.fal.media/audio.wav')
 
 
 if __name__ == '__main__':

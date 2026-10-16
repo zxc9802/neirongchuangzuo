@@ -11,7 +11,9 @@ const unavailable = () => new CreditsError('混剪供应商报价暂不可用，
 const scopePattern = /^(job:[a-f0-9]{32}|index:[a-f0-9]{32}:[1-9][0-9]*|browser:[a-f0-9]{32}:[a-f0-9]{64}:(vector|description))$/;
 const requestId = value => typeof value === 'string' && /^[A-Za-z0-9_:@.-]{1,200}$/.test(value) ? value : undefined;
 const callId = (owner, scope, url, payload, key = '') => hash(owner + '\n' + scope + '\n' + key + '\n' + url + '\n' + JSON.stringify(payload));
-const falModels = ['fal-ai/qwen-3-tts/text-to-speech/1.7b', 'fal-ai/qwen-3-tts/clone-voice/1.7b'];
+const falTtsModel = 'fal-ai/index-tts-2/text-to-speech';
+// Historical Qwen receipts may only be queried/settled, never newly dispatched.
+const retiredFalModels = ['fal-ai/qwen-3-tts/text-to-speech/1.7b', 'fal-ai/qwen-3-tts/clone-voice/1.7b'];
 
 // Only the private Python worker can call this adapter. Prices and actual charges
 // are obtained here; browser bodies never supply a fee, URL credential or owner ID.
@@ -51,9 +53,10 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
     try { return await result; } finally { if (locks.get(id) === result) locks.delete(id); }
   }
   function target(url, payload) {
-    if (falModels.some(model => url === 'https://queue.fal.run/' + model)) {
+    if ([falTtsModel, ...retiredFalModels].some(model => url === 'https://queue.fal.run/' + model)) {
       if (!env.MIX_FAL_KEY) throw unavailable();
-      return { provider: 'fal', model: url.slice('https://queue.fal.run/'.length), key: env.MIX_FAL_KEY, asynchronous: true };
+      const model = url.slice('https://queue.fal.run/'.length);
+      return { provider: 'fal', model, retired: model !== falTtsModel, key: env.MIX_FAL_KEY, asynchronous: true };
     }
     const embedding = (env.EMBEDDING_URL || 'https://api.openlux.ai/v1beta/models/gemini-embedding-2-preview:generateContent').replace(/:generateContent$/, ':embedContent');
     const llm = env.LLM_URL || 'https://api.openlux.ai/v1beta/models/gemini-3.7-flash:generateContent';
@@ -76,12 +79,11 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
       const response = await fetchImpl(url, { headers: { Authorization: 'Key ' + spec.key }, redirect: 'error', signal: AbortSignal.timeout(30000) });
       if (!response.ok) throw unavailable();
       const rate = (await response.json()).prices?.find(item => item.endpoint_id === spec.model);
-      const clone = spec.model.includes('/clone-voice/');
       if (!rate || rate.currency !== 'USD' || !Number.isFinite(rate.unit_price) || rate.unit_price < 0
-        || rate.unit !== (clone ? 'minutes' : '1000 characters')) throw unavailable();
-      // Clone inputs are trimmed to 15 seconds. This is a hold only: the result
-      // header supplies the actual quantity, including the provider's minimum.
-      const units = clone ? 1 : Math.max(1, Math.ceil([...String(payload.text || '')].length / 1000));
+        || rate.unit !== 'seconds') throw unavailable();
+      // Safety hold for speech duration, never a settled estimate. IndexTTS's
+      // result header supplies the actual generated audio seconds.
+      const units = Math.max(10, [...String(payload.prompt || '')].length);
       return { quoteCny: rate.unit_price * units * catalog.fx, unitPrice: rate.unit_price, fx: catalog.fx };
     }
     if (spec.provider === '302') {
@@ -146,7 +148,7 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
     if (record.result !== undefined && (record.settled || Number.isFinite(record.billableUnits))) return;
     // Queue receipts omit the endpoint subpath. Construct reads locally; never
     // send credentials to URLs supplied by an upstream response or a browser.
-    const base = 'https://queue.fal.run/fal-ai/qwen-3-tts/requests/' + record.taskId;
+    const base = 'https://queue.fal.run/' + spec.model.split('/').slice(0, 2).join('/') + '/requests/' + record.taskId;
     const options = { headers: { Authorization: 'Key ' + spec.key }, redirect: 'error', signal: AbortSignal.timeout(30000) };
     const status = await fetchImpl(base + '/status', options);
     if (!status.ok) throw pending();
@@ -200,12 +202,14 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
         const previous = record && !record.dispatched ? await credits.reservation(userId, record.creditId) : null;
         if (discarded || previous?.status === 'settled' || record?.settled && record.httpStatus >= 400 && record.costMicros === 0) { attempt++; record = null; }
         if (!record) {
+          if (spec.retired) throw new CreditsError('Qwen 配音已停用，请新建 IndexTTS 混剪任务。', 409, 'MIX_TTS_RETIRED');
           const rate = await quote(spec, payload);
           if (discarded) await save(join(directory, hash(discarded.creditId) + '.json'), discarded);
           record = { creditId: 'mix-call:' + id + ':' + attempt, attempt, provider: spec.provider, model: spec.model, url, started: Date.now(), ...rate };
           await save(path, record);
         }
         if (!record.dispatched) {
+          if (spec.retired) throw new CreditsError('Qwen 配音已停用，请新建 IndexTTS 混剪任务。', 409, 'MIX_TTS_RETIRED');
           await credits.reserveCost({ userId, taskId: record.creditId });
           await credits.prepareCostCall({ userId, taskId: record.creditId, receiptId: 'provider', quoteCny: record.quoteCny,
             provider: record.provider, metadata: { model: record.model, currency: 'USD', fx: record.fx } });

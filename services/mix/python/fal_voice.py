@@ -1,4 +1,4 @@
-"""fal Qwen3 narration with durable queue receipts and reusable voice embeddings."""
+"""fal IndexTTS2 narration with durable queue receipts and reference-voice cloning."""
 import base64
 import hashlib
 import json
@@ -16,10 +16,9 @@ from costs import paid_post, metering_enabled
 from credits import CreditError
 from matcher import write_json
 import media
+from voice import validate_emotion, checked_url
 
-TTS_MODEL = 'fal-ai/qwen-3-tts/text-to-speech/1.7b'
-CLONE_MODEL = 'fal-ai/qwen-3-tts/clone-voice/1.7b'
-VOICES = ('Vivian', 'Serena', 'Uncle_Fu', 'Dylan', 'Eric', 'Ryan', 'Aiden', 'Ono_Anna', 'Sohee')
+TTS_MODEL = 'fal-ai/index-tts-2/text-to-speech'
 
 
 def headers():
@@ -50,7 +49,7 @@ def queued(model, payload, folder, identity, suffix, log):
     if job.get('state') == 'SUCCESS' and artifact.is_file():
         if suffix == '.wav':
             media.duration(artifact)
-        log('复用已完成配音，不重复生成' if suffix == '.wav' else '复用已保存音色')
+        log('复用已完成配音，不重复生成')
         return artifact
     if job.get('state') == 'FAILED':
         job = {'attempts': job.get('attempts', 0) + 1}
@@ -81,7 +80,7 @@ def queued(model, payload, folder, identity, suffix, log):
                             raise ValueError('fal 未返回有效任务 ID，未重复提交')
                         job.update(task_id=ident, submission='submitted', state='PENDING')
                         write_json(record, job)
-                    base = 'https://queue.fal.run/fal-ai/qwen-3-tts/requests/' + job['task_id']
+                    base = 'https://queue.fal.run/fal-ai/index-tts-2/requests/' + job['task_id']
                     response = requests.get(base + '/status', headers=headers(), timeout=(15, 60), allow_redirects=False)
                     response.raise_for_status()
                     data = response.json()
@@ -105,8 +104,8 @@ def queued(model, payload, folder, identity, suffix, log):
             except requests.RequestException as exc:
                 raise RuntimeError('fal 配音连接中断，已保存原任务：' + clean_error(exc)) from None
         if job.get('result') is not None:
-            key = 'speaker_embedding' if suffix == '.safetensors' else 'audio'
-            download(job['result'].get(key, {}).get('url'), artifact)
+            audio = job['result'].get('audio')
+            download(audio if isinstance(audio, str) else (audio or {}).get('url'), artifact)
             if suffix == '.wav':
                 media.duration(artifact)
             job.update(state='SUCCESS', artifact=artifact.name)
@@ -117,35 +116,45 @@ def queued(model, payload, folder, identity, suffix, log):
     raise TimeoutError('fal 配音等待超过 15 分钟，继续任务会查询原请求')
 
 
-def synthesize_plan(plan, output, voice='Vivian', speaker_file=None, log=print):
-    if voice not in VOICES:
-        raise ValueError('服务器 MIX_FAL_VOICE 音色无效')
+def reference_file(path, cache, kind):
+    source = Path(path)
+    source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+    reference = cache / (kind + '-' + source_hash[:16] + '.wav')
+    if not reference.is_file():
+        media.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', str(source),
+                   '-t', '15', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', str(reference)])
+    return 'data:audio/wav;base64,' + base64.b64encode(reference.read_bytes()).decode()
+
+
+def synthesize_plan(plan, output, speaker_url=None, speaker_file=None, emotion_alpha=.8,
+                    emotion_url=None, emotion_file=None, model=TTS_MODEL, log=print):
+    if model != TTS_MODEL:
+        raise ValueError('混剪配音仅使用 IndexTTS2')
+    alpha = validate_emotion(emotion_alpha)
     output = Path(output).resolve()
     cache = output / 'voice-cache'
     cache.mkdir(parents=True, exist_ok=True)
-    embedding = None
     if speaker_file:
-        source = Path(speaker_file)
-        source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
-        reference = cache / ('reference-' + source_hash[:16] + '.wav')
-        if not reference.is_file():
-            media.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-i', str(source),
-                       '-t', '15', '-ac', '1', '-ar', '24000', '-c:a', 'pcm_s16le', str(reference)])
-        # Small 15s references and embeddings can be sent inline. No second
-        # provider upload, public permanent URL, or expiring signature is needed.
-        audio_url = 'data:audio/wav;base64,' + base64.b64encode(reference.read_bytes()).decode()
-        embedding = queued(CLONE_MODEL, {'audio_url': audio_url}, cache, source_hash, '.safetensors', log)
-    speaker = ('data:application/octet-stream;base64,' + base64.b64encode(embedding.read_bytes()).decode()) if embedding else None
+        speaker = reference_file(speaker_file, cache, 'speaker')
+    elif speaker_url:
+        speaker = checked_url(speaker_url)
+    else:
+        raise ValueError('请选择上传音色或设置 INDEXTTS_SPEAKER_AUDIO_URL 默认参考音频')
+    emotion = (checked_url(emotion_url) if emotion_url else
+               reference_file(emotion_file, cache, 'emotion') if emotion_file else None)
     fps, cursor, names = plan['fps'], 0, []
     for i, scene in enumerate(plan['scenes']):
         text = scene['text']
         if not text.strip() or len(text) > 2048:
             raise ValueError('单段配音文本须为 1–2048 字符')
-        payload = {'text': text, 'voice': voice, 'language': 'Chinese', 'max_new_tokens': 4096}
-        if speaker:
-            payload['speaker_voice_embedding_file_url'] = speaker
+        payload = {'prompt': text, 'audio_url': speaker, 'strength': alpha, 'should_use_prompt_for_emotion': False}
+        if emotion:
+            payload['emotional_audio_url'] = emotion
+        else:
+            payload['emotional_strengths'] = {key: int(key == 'calm') for key in
+                ('happy', 'angry', 'sad', 'afraid', 'disgusted', 'melancholic', 'surprised', 'calm')}
         identity = json.dumps(payload, sort_keys=True)
-        log(f'生成 fal 配音 {i+1}/{len(plan["scenes"])}')
+        log(f'生成 IndexTTS2 配音 {i+1}/{len(plan["scenes"])}')
         audio = queued(TTS_MODEL, payload, cache, identity, '.wav', log)
         seconds = media.duration(audio)
         frames = math.ceil(seconds * fps)
@@ -160,7 +169,7 @@ def synthesize_plan(plan, output, voice='Vivian', speaker_file=None, log=print):
     media.run(['ffmpeg', '-hide_banner', '-loglevel', 'error', '-nostdin', '-y', '-f', 'concat', '-safe', '1',
                '-i', 'voice-concat.txt', '-c:a', 'pcm_s16le', 'narration.wav'], cwd=output)
     plan.update(timing='tts-segment', narration=str(output / 'narration.wav'), voice_settings={
-        'provider': 'fal', 'model': TTS_MODEL, 'voice': voice, 'cloned': bool(embedding),
+        'provider': 'fal', 'model': TTS_MODEL, 'cloned': True, 'emotion_alpha': alpha,
         'alignment': 'scene boundaries, not word timestamps'})
     write_json(output / 'plan.json', plan)
     media.write_srt(plan['scenes'], output / 'captions.srt')

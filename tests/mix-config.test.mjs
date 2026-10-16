@@ -39,7 +39,7 @@ test('remix fal credentials load independently and production uses only deployme
   await writeFile(join(root, '.env.local'), 'MIX_FAL_KEY=private-remix\nMIX_FAL_VOICE=Serena\nFAL_IMAGE_KEY=not-a-remix-key');
   const local = loadWorkspaceSettings({ root, env: {} });
   assert.equal(local.MIX_FAL_KEY, 'private-remix');
-  assert.equal(local.MIX_FAL_VOICE, 'Serena');
+  assert.equal(local.MIX_FAL_VOICE, undefined);
   assert.equal(local.FAL_IMAGE_KEY, undefined);
   const production = { NODE_ENV: 'production', MIX_FAL_KEY: 'deployment-key' };
   assert.deepEqual(loadWorkspaceSettings({ root, env: production }), production);
