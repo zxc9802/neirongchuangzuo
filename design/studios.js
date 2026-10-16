@@ -30,14 +30,15 @@ function mixMaterials(media, ctx) {
   const { icon, button, esc } = ctx;
   const activeId = studioState.mix.activeId;
   const mix = getMixState();
-  const locked = mixFolderLocked() && mix.status.connected && !mix.status.needsPermission ? 'disabled title="制作时请保持原素材文件夹连接"' : '';
+  const cloud = mix.client?.mode === 'cloud';
+  const locked = mixFolderLocked() && (cloud || mix.status.connected && !mix.status.needsPermission) ? `disabled title="${cloud ? '制作完成后可管理素材' : '制作时请保持原素材文件夹连接'}"` : '';
   return `<section class="studio-materials" aria-labelledby="mix-material-title">
-    <div class="studio-section-head"><h2 id="mix-material-title">实拍素材 <span>${mix.fileCount}</span></h2>${button('mix-choose-folder', icon('plus'), 'studio-square-button', `aria-label="选择素材文件夹" ${locked || 'title="选择素材文件夹"'}`)}</div>
+    <div class="studio-section-head"><h2 id="mix-material-title">实拍素材 <span>${mix.fileCount}</span></h2>${button(cloud ? 'mix-upload-videos' : 'mix-choose-folder', icon('plus'), 'studio-square-button', `aria-label="${cloud ? '上传视频素材' : '选择素材文件夹'}" ${locked || `title="${cloud ? '上传视频素材' : '选择素材文件夹'}"`}`)}</div>
     <div class="studio-section-tab"><span class="active">视频素材</span><small>${mix.fileCount > 30 ? '预览前 30 个' : '包含子文件夹'}</small></div>
-    ${button('mix-choose-folder', icon('folder') + `<span class="mix-folder-label">${mix.status.needsPermission ? '重新连接素材文件夹' : mix.status.connected ? '更换素材文件夹' : '选择本地素材文件夹'}</span>`, 'studio-add-material', locked)}
+    ${button('mix-choose-folder', icon('folder') + `<span class="mix-folder-label">${cloud ? '上传素材文件夹' : mix.status.needsPermission ? '重新连接素材文件夹' : mix.status.connected ? '更换素材文件夹' : '选择本地素材文件夹'}</span>`, 'studio-add-material', locked)}
     ${renderMixMaterials()}
     ${media.length ? `<div class="studio-media-list">${media.map((asset, index) => `<button class="studio-media-item ${asset.id === activeId ? 'selected' : ''}" data-action="studio-select-clip" data-id="${esc(asset.id)}" aria-pressed="${asset.id === activeId}">
-      <span class="studio-media-thumb"><video src="${esc(asset.url)}" muted preload="metadata" tabindex="-1" aria-hidden="true"></video><b>${String(index + 1).padStart(2, '0')}</b></span><span class="studio-media-title"><strong>${esc(asset.name)}</strong><small data-duration-id="${esc(asset.id)}">${Math.round(asset.duration)} 秒 · 本机原片</small></span>${icon('chevron')}
+      <span class="studio-media-thumb"><video src="${esc(asset.url)}" muted preload="metadata" tabindex="-1" aria-hidden="true"></video><b>${String(index + 1).padStart(2, '0')}</b></span><span class="studio-media-title"><strong>${esc(asset.name)}</strong><small data-duration-id="${esc(asset.id)}">${asset.duration == null ? '待处理' : `${Math.round(asset.duration)} 秒`} · ${cloud ? '云端原片' : '本机原片'}</small></span>${icon('chevron')}
     </button>`).join('')}</div>` : `<div class="studio-material-empty"><p>暂无实拍素材</p></div>`}
   </section>`;
 }
@@ -53,8 +54,8 @@ function mixPreview(media, ctx) {
   const videoUrl = finished ? safeMixArtifactUrl(job.video_url) : '';
   return `<section class="studio-preview mix-preview" aria-labelledby="mix-preview-title">
     <div class="studio-preview-heading"><h2 id="mix-preview-title">${result ? '成片预览' : active ? '素材预览' : '视频预览'}</h2><div class="mix-preview-actions">${button('mix-show-result', '查看成片', 'studio-ratio-button', finished && !result ? '' : 'hidden')}${button('settings', `${esc(c.ratio)} ${icon('chevron')}`, 'studio-ratio-button', 'aria-label="调整视频比例与分辨率"')}</div></div>
-    <div class="mix-screen ${result && videoUrl || !result && active ? 'has-video' : ''}">${result ? videoUrl ? `<video id="studio-video-preview" src="${esc(videoUrl)}" controls playsinline preload="metadata" aria-label="混剪成片"></video>` : `<div class="mix-screen-empty mix-screen-progress"><span class="studio-film-mark">${icon('video')}</span><h3 id="mix-job-progress">${esc(mixJobLabel(job))}</h3><div id="mix-job-details">${renderMixProgress(job)}</div></div>` : active ? `<video id="studio-video-preview" src="${esc(active.url)}" controls playsinline preload="metadata" aria-label="${esc(active.name)}"></video>` : `<div class="mix-screen-empty"><span class="studio-film-mark">${icon('video')}</span><h3>暂无视频</h3>${button('mix-choose-folder', icon('folder') + '选择素材文件夹', 'studio-screen-button')}</div>`}</div>
-    <div class="studio-preview-caption"><span ${result ? `data-mix-job-label="${esc(job.id)}"` : ''}>${result ? esc(mixJobLabel(job)) : active ? `${icon('video')} ${esc(active.name)}` : ''}</span>${result && videoUrl ? `<a class="mix-download" href="${esc(videoUrl)}" download>下载成片 ${icon('arrow')}</a>` : `<small>${!result && active ? '本机原始视频' : `${esc(c.quality)} · ${esc(c.ratio)}`}</small>`}</div>
+    <div class="mix-screen ${result && videoUrl || !result && active ? 'has-video' : ''}">${result ? videoUrl ? `<video id="studio-video-preview" src="${esc(videoUrl)}" controls playsinline preload="metadata" aria-label="混剪成片"></video>` : `<div class="mix-screen-empty mix-screen-progress"><span class="studio-film-mark">${icon('video')}</span><h3 id="mix-job-progress">${esc(mixJobLabel(job))}</h3><div id="mix-job-details">${renderMixProgress(job)}</div></div>` : active ? `<video id="studio-video-preview" src="${esc(active.url)}" controls playsinline preload="metadata" aria-label="${esc(active.name)}"></video>` : `<div class="mix-screen-empty"><span class="studio-film-mark">${icon('video')}</span><h3>暂无视频</h3>${button('mix-choose-folder', icon('folder') + (mix.client?.mode === 'cloud' ? '上传素材文件夹' : '选择素材文件夹'), 'studio-screen-button')}</div>`}</div>
+    <div class="studio-preview-caption"><span ${result ? `data-mix-job-label="${esc(job.id)}"` : ''}>${result ? esc(mixJobLabel(job)) : active ? `${icon('video')} ${esc(active.name)}` : ''}</span>${result && videoUrl ? `<a class="mix-download" href="${esc(videoUrl)}" download>下载成片 ${icon('arrow')}</a>` : `<small>${!result && active ? mix.client?.mode === 'cloud' ? '云端原片' : '本机原始视频' : `${esc(c.quality)} · ${esc(c.ratio)}`}</small>`}</div>
   </section>`;
 }
 
@@ -193,7 +194,7 @@ export function bindStudio(mode, ctx) {
       if (!Number.isFinite(video.duration)) return;
       const label = video.closest('.studio-media-item').querySelector('[data-duration-id]');
       const seconds = Math.round(video.duration);
-      if (label) label.textContent = `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')} · 原始片段`;
+      if (label) label.textContent = `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${(seconds % 60).toString().padStart(2, '0')} · ${mode === 'mix' && getMixState().client?.mode === 'cloud' ? '云端原片' : '原始片段'}`;
     });
   });
 }

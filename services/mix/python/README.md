@@ -1,4 +1,29 @@
-# Internal browser material mixer
+# Internal cloud and browser material mixer
+
+Cloud materials are the default in the UI when all four server-side settings are present:
+
+```dotenv
+MIX_MATERIAL_COS_SECRET_ID=
+MIX_MATERIAL_COS_SECRET_KEY=
+MIX_MATERIAL_COS_BUCKET=hunjianx-1410143389
+MIX_MATERIAL_COS_REGION=ap-singapore
+```
+
+These are separate from restaurant/digital-human `COS_*` and remix `MIX_AUDIO_COS_*` settings. Local development reads the ignored root `.env.local`; production reads deployment environment variables only. Set `MIX_PYTHON_BIN` to the installed Python environment in local development. The existing Python requirements already include the COS SDK and FAISS; Docker installs them automatically.
+
+Customers upload supported videos directly to private COS using one-hour signed PUT tickets bound to the expected content length. Finalization checks object size and copies staging to a private immutable source key before queuing analysis. Source types: MP4, MOV, MKV, AVI, M4V, MTS, M2TS and WebM; maximum 5 GiB per file. The browser uploads at most three files concurrently; interrupted uploads can be selected again, and expired staging objects are cleaned. Configure the application's exact HTTPS origin before enabling browser uploads:
+
+```powershell
+node scripts/configure-mix-materials-cors.mjs --origin https://your-app.example
+```
+
+The script uses the four server settings above, also accepts production `AUTH_PUBLIC_URL`, and preserves existing unrelated CORS rules. HTTP origins are permitted only for localhost development. CORS permits the browser request; expiring signatures and account authorization still control object access.
+
+The authenticated `/api/mix/materials` API lists the account's durable assets. `/uploads` creates a ticket; `/{id}/complete` queues indexing, `/{id}/retry` retries failed indexing, DELETE `/{id}` removes owned material, and GET/HEAD `/{id}/stream` returns an expiring private preview link. Processing states persist as `uploading`, `queued`, `indexing`, `ready`, `failed` or `deleting`. Completed uploads continue analysis after the browser closes. Failed descriptions reuse successful embeddings, and completed clips survive retries. New cloud jobs use `source:"cloud"` and omit `device_id`; browser-mode jobs retain the existing contract. Deleting material is blocked while the owner's cloud jobs are active, including concurrent resume requests.
+
+Originals and analysis proxies live in COS. SQLite metadata and canonical vectors live under `DATA_DIR/cloud-materials/materials.sqlite3`; replaceable per-account FAISS snapshots live in `cloud-materials/indexes/<owner>/vectors.faiss`. Original videos are fetched to a shared checksum-validated cache when needed; idle cached payloads expire after 24 hours, while active jobs and indexing keep their inputs. Preserve the existing persistent data mount and back up its databases. This is a single active application instance design; do not run multiple independent writers against its SQLite/FAISS directories. FAISS is a search index, not an ownership database.
+
+Deploy the renderer in Tencent Cloud Singapore alongside this bucket and use the normal COS endpoint to obtain same-region intranet routing. Tests run from a developer machine confirm COS functionality, not the production server's actual network route. Final job outputs retain the existing authenticated delivery and 72-hour retention policy. Existing browser material catalogs remain supported when cloud storage is not configured; their local originals must be uploaded to populate a new cloud library.
 
 Node starts `python -m uvicorn app:create_app --factory --host 127.0.0.1 --port <port>` from this directory. `DATA_DIR` points to persistent storage; `MIXER_API_TOKEN` is a random ASCII service secret (at least 32 characters). Every route requires its Bearer token. Browser-material and job routes additionally require Node's verified `x-material-owner` account hash. Body-supplied identities, helper devices, and global NAS material paths are rejected.
 

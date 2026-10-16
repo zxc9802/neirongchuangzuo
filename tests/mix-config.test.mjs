@@ -5,6 +5,19 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { loadWorkspaceSettings } from '../services/runtime-settings.mjs';
 
+test('cloud remix COS configuration is separate from image and audio storage', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mix-material-env-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const material = { MIX_MATERIAL_COS_SECRET_ID: 'test-id', MIX_MATERIAL_COS_SECRET_KEY: 'test-key',
+    MIX_MATERIAL_COS_BUCKET: 'material-example-1234567890', MIX_MATERIAL_COS_REGION: 'ap-singapore' };
+  await writeFile(join(root, '.env.local'), Object.entries(material).map(([key, value]) => key + '=' + value).join('\n'));
+  const config = loadWorkspaceSettings({ root, env: { COS_BUCKET: 'existing-image-bucket' } });
+  for (const [key, value] of Object.entries(material)) assert.equal(config[key], value);
+  assert.equal(config.COS_BUCKET, 'existing-image-bucket');
+  assert.equal(config.MIX_AUDIO_COS_BUCKET, undefined);
+  assert.deepEqual(loadWorkspaceSettings({ root, env: { NODE_ENV: 'production' } }), { NODE_ENV: 'production' });
+});
+
 test('mix audio COS configuration is separate and production only reads deployment variables', async t => {
   const root = await mkdtemp(join(tmpdir(), 'mix-audio-env-'));
   t.after(() => rm(root, { recursive: true, force: true }));

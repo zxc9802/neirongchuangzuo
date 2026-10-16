@@ -19,6 +19,11 @@ function reply(res, status, code, message) {
 
 function route(path, method) {
   if (path === '/api/mix/health' && method === 'GET') return '/health';
+  if (path === '/api/mix/materials' && method === 'GET') return '/v1/mix/materials';
+  if (path === '/api/mix/materials/uploads' && method === 'POST') return '/v1/mix/materials/uploads';
+  if (/^\/api\/mix\/materials\/[a-f0-9]{32}$/.test(path) && method === 'DELETE') return path.replace('/api/mix', '/v1/mix');
+  if (/^\/api\/mix\/materials\/[a-f0-9]{32}\/(complete|retry)$/.test(path) && method === 'POST') return path.replace('/api/mix', '/v1/mix');
+  if (/^\/api\/mix\/materials\/[a-f0-9]{32}\/stream$/.test(path) && ['GET', 'HEAD'].includes(method)) return path.replace('/api/mix', '/v1/mix');
   if (path === '/api/mix/audio' && ['GET', 'POST'].includes(method)) return '/v1/mix/audio';
   if (/^\/api\/mix\/audio\/[a-f0-9]{32}$/.test(path) && method === 'DELETE') return path.replace('/api/mix', '/v1/mix');
   if (/^\/api\/mix\/audio\/[a-f0-9]{32}\/stream$/.test(path) && ['GET', 'HEAD'].includes(method)) return path.replace('/api/mix', '/v1/mix');

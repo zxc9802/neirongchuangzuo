@@ -28,6 +28,7 @@ def clean_error(value):
     text = str(value)
     for name in ('OPENLUX_API_KEY', 'RERANK_API_KEY', 'TTS_API_KEY', 'SUNO_API_KEY', 'MINIMAX_API_KEY',
                  'COS_SECRET_ID', 'COS_SECRET_KEY', 'MIX_AUDIO_COS_SECRET_ID', 'MIX_AUDIO_COS_SECRET_KEY',
+                 'MIX_MATERIAL_COS_SECRET_ID', 'MIX_MATERIAL_COS_SECRET_KEY',
                  'INDEXTTS_302_API_KEY', 'MIXER_API_TOKEN'):
         if os.environ.get(name):
             text = text.replace(os.environ[name], '[REDACTED]')

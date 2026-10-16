@@ -274,8 +274,12 @@ def matching_catalog(folder, models, chunk_seconds=8):
     folder = Path(folder).resolve()
     remote = folder / 'remote.json'
     if remote.is_file():
+        config = json.loads(remote.read_text(encoding='utf-8'))
+        if config.get('type') == 'cloud':
+            from cloud_catalog import CloudCatalog
+            return CloudCatalog(config, embedding=models.embed_url)
         from remote_catalog import RemoteCatalog
-        return RemoteCatalog(json.loads(remote.read_text(encoding='utf-8')))
+        return RemoteCatalog(config)
     active = folder / 'active.json'
     if active.is_file():
         folder = Path(json.loads(active.read_text(encoding='utf-8'))['catalog']).resolve()
