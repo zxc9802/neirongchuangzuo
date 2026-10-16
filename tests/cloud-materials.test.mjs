@@ -12,6 +12,17 @@ const eventually = async predicate => {
 };
 const module = async () => import('../design/cloud-materials.js').catch(() => ({}));
 
+function uploadRequests() {
+  const requests = [];
+  return { requests, XHR: class {
+    constructor() { this.upload = {}; this.headers = {}; requests.push(this); }
+    open(method, url) { Object.assign(this, { method, url }); }
+    setRequestHeader(key, value) { this.headers[key] = value; }
+    send(body) { this.body = body; }
+    abort() { this.aborted = true; this.onabort(); }
+  } };
+}
+
 test('cloud library restores server metadata and indexed clip readiness without local files', async () => {
   const { default: CloudMaterials = class {} } = await module();
   const calls = [], statuses = [];
@@ -44,7 +55,9 @@ test('folder videos upload through signed COS PUT and finalize before server ind
     await client.selectFiles([file('素材/readme.txt'), source]);
     assert.equal(calls.length, 2);
     assert.equal(calls[0].path, '/api/mix/materials/uploads');
-    assert.deepEqual(JSON.parse(calls[0].body), { name: '素材/子目录/a.mp4', bytes: 5 });
+    const request = JSON.parse(calls[0].body);
+    assert.deepEqual({ name: request.name, bytes: request.bytes }, { name: '素材/子目录/a.mp4', bytes: 5 });
+    assert.match(request.fingerprint, /^[a-f0-9]{64}$/);
     assert.equal(uploads.length, 1);
     assert.equal(uploads[0].method, 'PUT');
     assert.equal(uploads[0].credentials, 'omit');
@@ -82,6 +95,202 @@ test('default browser fetch retains its Window receiver when uploading directly 
     assert.equal(client.status.uploadBytes, 5);
     assert.equal(client.items[0].state, 'queued');
   } finally { client.stop(); globalThis.fetch = originalFetch; }
+});
+
+test('native upload progress combines active files before completion without counting bytes twice', async () => {
+  const { default: CloudMaterials } = await module();
+  const original = globalThis.XMLHttpRequest;
+  const { XHR, requests } = uploadRequests();
+  globalThis.XMLHttpRequest = XHR;
+  let created = 0, finalized = 0;
+  const client = new CloudMaterials({ api: async path => {
+    if (path.endsWith('/uploads')) return { id: id(++created), upload_url: cos, headers: { 'Content-Type': 'video/mp4' } };
+    finalized++;
+    return { item: item(Number.parseInt(path.split('/').at(-2), 16), { state: 'queued', indexed_clips: 0 }) };
+  } });
+  try {
+    const sources = [file('first.mov', 100), file('second.mp4', 200)];
+    const work = client.selectFiles(sources);
+    await eventually(() => requests.length === 2 && requests.every(xhr => xhr.body));
+    const [first, second] = requests;
+    assert.equal(first.method, 'PUT');
+    assert.equal(first.url, cos);
+    assert.equal(first.withCredentials, false);
+    assert.equal(first.body, sources[0]);
+    assert.deepEqual(first.headers, { 'Content-Type': 'video/mp4' });
+    first.upload.onprogress({ lengthComputable: true, loaded: 40 });
+    assert.equal(client.status.uploadBytes, 40);
+    assert.ok(client.status.uploadSpeed > 0);
+    second.upload.onprogress({ lengthComputable: true, loaded: 80 });
+    first.upload.onprogress({ lengthComputable: true, loaded: 20 });
+    assert.equal(client.uploadBytes, 120);
+    assert.equal(finalized, 0);
+    assert.equal(client.scanning, true);
+    for (const xhr of requests) { xhr.status = 200; xhr.onload(); }
+    await work;
+    assert.equal(client.status.uploadBytes, 300);
+    assert.equal(client.status.uploadSpeed, 0);
+    assert.equal(finalized, 2);
+    assert.equal(client.scanning, false);
+  } finally { client.stop(); globalThis.XMLHttpRequest = original; }
+});
+
+test('native upload errors and cancellation never finalize unconfirmed files', async () => {
+  const { default: CloudMaterials } = await module();
+  const original = globalThis.XMLHttpRequest;
+  try {
+    for (const outcome of ['http', 'network', 'timeout', 'abort']) {
+      const { XHR, requests } = uploadRequests();
+      globalThis.XMLHttpRequest = XHR;
+      let finalized = 0;
+      const client = new CloudMaterials({ api: async path => {
+        if (path.endsWith('/complete')) finalized++;
+        return { id: id(1), upload_url: cos, headers: {} };
+      } });
+      try {
+        const work = client.selectFiles([file('a.mp4')]);
+        await eventually(() => requests[0]?.body);
+        const xhr = requests[0];
+        if (outcome === 'http') { xhr.status = 403; xhr.onload(); }
+        else if (outcome === 'abort') client.stop();
+        else xhr[outcome === 'network' ? 'onerror' : 'ontimeout']();
+        await work;
+        assert.equal(finalized, 0);
+        if (outcome === 'abort') assert.equal(xhr.aborted, true);
+        else assert.match(client.status.error, /上传/);
+      } finally { client.stop(); }
+    }
+  } finally { globalThis.XMLHttpRequest = original; }
+});
+
+test('reselecting a folder after reload reuses completed files and resumes the incomplete batch', async () => {
+  const { default: CloudMaterials } = await module();
+  const originalStorage = globalThis.localStorage;
+  const stored = new Map(), records = new Map(), uploaded = [];
+  globalThis.localStorage = { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) };
+  const api = async (path, options = {}) => {
+    if (path.endsWith('/uploads')) {
+      const data = JSON.parse(options.body);
+      if (!records.has(data.fingerprint)) records.set(data.fingerprint, item(records.size + 1, { name: data.name, state: 'uploading', indexed_clips: 0 }));
+      const row = records.get(data.fingerprint);
+      return row.state === 'uploading' ? { id: row.id, upload_url: cos, headers: {} } : { id: row.id, item: row };
+    }
+    if (path.endsWith('/complete')) {
+      const row = [...records.values()].find(row => path.includes(row.id));
+      row.state = 'queued';
+      return { item: row };
+    }
+    return { configured: true, items: [...records.values()], indexed_clips: 0 };
+  };
+  const sources = [file('folder/first.mp4'), file('folder/second.mov')];
+  let waiting = false;
+  const first = new CloudMaterials({ api, fetch: async (url, options) => {
+    if (options.body.name === 'first.mp4') return { ok: true };
+    waiting = true;
+    return new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(Object.assign(new Error('stopped'), { name: 'AbortError' })), { once: true }));
+  } });
+  let next;
+  try {
+    const work = first.selectFiles(sources);
+    await eventually(() => waiting && first.batch.remainingFiles === 1);
+    first.stop();
+    await work;
+    next = new CloudMaterials({ api, fetch: async (url, options) => { uploaded.push(options.body.name); return { ok: true }; } });
+    await next.restore();
+    assert.equal(next.status.uploadPending, true);
+    assert.equal(next.status.remainingFiles, 1);
+    await next.selectFiles(sources);
+    assert.equal(records.size, 2);
+    assert.deepEqual(uploaded, ['second.mov']);
+    assert.equal(next.status.uploadBytes, 10);
+    assert.equal(next.transferredBytes, 5);
+    assert.equal(next.status.uploadPending, false);
+    assert.equal(JSON.parse([...stored.values()][0]).remainingFiles, 0);
+  } finally { first.stop(); next?.stop(); globalThis.localStorage = originalStorage; }
+});
+
+test('continuous upload progress cannot postpone cloud analysis polling indefinitely', async () => {
+  const { default: CloudMaterials } = await module();
+  let reads = 0;
+  const client = new CloudMaterials({ pollInterval: 20, api: async () => {
+    reads++;
+    return { configured: true, items: [item(1, { state: 'indexing' })], indexed_clips: 0 };
+  } });
+  let interval;
+  try {
+    await client.restore();
+    interval = setInterval(() => client._report(), 5);
+    await new Promise(resolve => setTimeout(resolve, 75));
+    assert.ok(reads >= 2, 'server status must refresh while upload progress keeps arriving');
+  } finally { clearInterval(interval); client.stop(); }
+});
+
+test('legacy uploads are reused only after confirming unchanged local originals', async () => {
+  const { default: CloudMaterials } = await module();
+  const original = globalThis.confirm;
+  try {
+    for (const confirmed of [true, false]) {
+      let prompts = 0, uploads = 0;
+      const old = item(1, { name: 'folder/old.mov', fingerprint: null });
+      globalThis.confirm = text => { prompts++; assert.match(text, /从未修改或替换/); return confirmed; };
+      const client = new CloudMaterials({ api: async (path, options = {}) => {
+        if (path.endsWith('/uploads')) {
+          const body = JSON.parse(options.body);
+          assert.equal(body.reuse_legacy, confirmed ? true : undefined);
+          return confirmed ? { id: old.id, item: { ...old, fingerprint: body.fingerprint } } : { id: id(2), upload_url: cos, headers: {} };
+        }
+        if (path.endsWith('/complete')) return { item: item(2) };
+        return { configured: true, items: [old], indexed_clips: 1 };
+      }, fetch: async () => { uploads++; return { ok: true }; } });
+      try {
+        await client.restore();
+        await client.selectFiles([file(old.name)]);
+        assert.equal(prompts, 1);
+        assert.equal(uploads, confirmed ? 0 : 1);
+        assert.equal(client.items.length, confirmed ? 1 : 2);
+        assert.equal(client.status.uploadPending, false);
+      } finally { client.stop(); }
+    }
+  } finally { globalThis.confirm = original; }
+});
+
+test('old interrupted upload records show paused state even without a browser batch marker', async () => {
+  const { default: CloudMaterials } = await module();
+  const client = new CloudMaterials({ api: async () => ({ configured: true,
+    items: [item(1, { state: 'uploading', fingerprint: null, indexed_clips: 0 }), item(2)], indexed_clips: 1 }) });
+  try {
+    await client.restore();
+    assert.equal(client.status.uploadPending, true);
+    assert.equal(client.status.remainingFiles, 1);
+    assert.equal(client.status.indexed, 1);
+    assert.equal(client.media.length, 1);
+  } finally { client.stop(); }
+});
+
+test('a completed current batch stays usable across reload despite unrelated old upload records', async () => {
+  const { default: CloudMaterials } = await module();
+  const original = globalThis.localStorage;
+  const stored = new Map();
+  globalThis.localStorage = { getItem: key => stored.get(key), setItem: (key, value) => stored.set(key, value), removeItem: key => stored.delete(key) };
+  const old = item(1, { state: 'uploading', fingerprint: null, indexed_clips: 0 });
+  const ready = item(2);
+  const api = async path => path.endsWith('/uploads') ? { id: ready.id, item: ready }
+    : { configured: true, items: [old, ready], indexed_clips: 1 };
+  const first = new CloudMaterials({ api });
+  let restored;
+  try {
+    await first.restore();
+    assert.equal(first.status.uploadPending, true);
+    await first.selectFiles([file(ready.name)]);
+    assert.equal(first.status.uploadPending, false);
+    first.stop();
+    restored = new CloudMaterials({ api });
+    await restored.restore();
+    assert.equal(restored.status.uploadPending, false);
+    assert.equal(restored.status.remainingFiles, 0);
+    assert.equal(restored.items.length, 2);
+    assert.equal(restored.items[0].state, 'uploading');
+  } finally { first.stop(); restored?.stop(); globalThis.localStorage = original; }
 });
 
 test('unsafe signed upload destinations are rejected before sending source bytes', async () => {

@@ -29,9 +29,13 @@ def attach_cloud_materials(app, library, owner, body, in_use):
     @app.post('/v1/mix/materials/uploads', status_code=201)
     async def upload(request: Request, owner_id=Depends(owner)):
         data = await body(request, 4096)
-        if set(data) != {'name', 'bytes'}:
+        if set(data) not in ({'name', 'bytes'}, {'name', 'bytes', 'fingerprint'},
+                             {'name', 'bytes', 'fingerprint', 'reuse_legacy'}):
             raise HTTPException(400, '请提交视频名称和文件大小')
-        return await call(library.create_upload, owner_id, data['name'], data['bytes'])
+        if 'fingerprint' in data and data['fingerprint'] is None:
+            raise HTTPException(400, '视频文件标识无效，请重新选择素材文件夹')
+        return await call(library.create_upload, owner_id, data['name'], data['bytes'],
+                          data.get('fingerprint'), data.get('reuse_legacy', False))
 
     @app.post('/v1/mix/materials/{ident}/complete')
     async def complete(ident: str, owner_id=Depends(owner)):

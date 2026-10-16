@@ -164,6 +164,8 @@ class Jobs:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY, request_key TEXT UNIQUE, owner TEXT NOT NULL, spec TEXT,
                 state TEXT, created REAL, updated REAL, logs TEXT, result TEXT, error TEXT)''')
+            if 'started' not in {row['name'] for row in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN started REAL')
             db.execute('CREATE TABLE IF NOT EXISTS job_billing (job_id TEXT PRIMARY KEY, data TEXT NOT NULL)')
             db.execute("UPDATE jobs SET state='interrupted',error=?,updated=? WHERE state='running'",
                        ('服务重启中断任务；保留输出和服务商任务记录，核对后再恢复。', time.time()))
@@ -328,7 +330,7 @@ class Jobs:
             row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
         if not row or owner is not None and row['owner'] != owner:
             raise HTTPException(404, '任务不存在')
-        return {key: row[key] for key in ('id', 'state', 'created', 'updated', 'result', 'error')} | {
+        return {key: row[key] for key in ('id', 'state', 'created', 'started', 'updated', 'result', 'error')} | {
             'logs': json.loads(row['logs'])} | ({'billing': self._billing(job_id)} if self.credits else {})
 
     def list(self, owner):
@@ -351,7 +353,7 @@ class Jobs:
             row = db.execute('SELECT state,spec FROM jobs WHERE id=? AND owner=?', (job_id, owner)).fetchone()
             if row['state'] not in ('failed', 'interrupted', 'waiting_materials', 'credit_pending'):
                 raise HTTPException(409, '仅失败、中断或等待素材的任务可以继续')
-            db.execute("UPDATE jobs SET state=?,error=NULL,updated=? WHERE id=?", ('credit_pending' if self.credits else 'queued', time.time(), job_id))
+            db.execute("UPDATE jobs SET state=?,error=NULL,started=NULL,updated=? WHERE id=?", ('credit_pending' if self.credits else 'queued', time.time(), job_id))
         if self.credits:
             try:
                 self._reservation(job_id, json.loads(row['spec']))
@@ -377,7 +379,8 @@ class Jobs:
             row = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY created LIMIT 1").fetchone()
             if not row:
                 return False
-            db.execute("UPDATE jobs SET state='running',error=NULL,updated=? WHERE id=?", (time.time(), row['id']))
+            started = time.time()
+            db.execute("UPDATE jobs SET state='running',error=NULL,started=?,updated=? WHERE id=?", (started, started, row['id']))
         job_id = row['id']
         folder = self.root / 'outputs' / job_id
         folder.mkdir(parents=True, exist_ok=True)
