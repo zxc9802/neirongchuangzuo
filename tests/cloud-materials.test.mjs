@@ -58,6 +58,32 @@ test('folder videos upload through signed COS PUT and finalize before server ind
   } finally { client.stop?.(); }
 });
 
+test('default browser fetch retains its Window receiver when uploading directly to COS', async () => {
+  const { default: CloudMaterials = class {} } = await module();
+  const originalFetch = globalThis.fetch;
+  let uploaded = 0, finalized = 0;
+  globalThis.fetch = async function (url, options) {
+    if (this !== globalThis) throw new TypeError("Failed to execute 'fetch' on 'Window': Illegal invocation");
+    assert.equal(url, cos);
+    assert.equal(options.method, 'PUT');
+    uploaded++;
+    return { ok: true };
+  };
+  const client = new CloudMaterials({ api: async path => {
+    if (path.endsWith('/uploads')) return { id: id(1), upload_url: cos, headers: {} };
+    if (path.endsWith('/complete')) { finalized++; return { item: item(1, { state: 'queued', indexed_clips: 0 }) }; }
+    throw new Error('unexpected API request');
+  } });
+  try {
+    await client.selectFiles([file('browser-upload.mov')]);
+    assert.equal(client.status.error, '');
+    assert.equal(uploaded, 1);
+    assert.equal(finalized, 1);
+    assert.equal(client.status.uploadBytes, 5);
+    assert.equal(client.items[0].state, 'queued');
+  } finally { client.stop(); globalThis.fetch = originalFetch; }
+});
+
 test('unsafe signed upload destinations are rejected before sending source bytes', async () => {
   const { default: CloudMaterials = class {} } = await module();
   for (const upload_url of ['https://evil.example/video', '//evil.example/video', cos.replace('https:', 'http:'), cos.replace('.myqcloud.com', '.myqcloud.com.evil.example'), cos.replace('/staging', ':8443/staging'), cos.replace('https://', 'https://user:password@')]) {
