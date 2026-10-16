@@ -1,4 +1,5 @@
 import BrowserMaterials from './browser-materials.js';
+import CloudMaterials from './cloud-materials.js';
 import { accountStorageKey } from './account-storage.js';
 
 import { videoPoints, estimatedSpeechSeconds, videoCreditEstimateText, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask } from './workspace-credits.js';
@@ -121,6 +122,13 @@ async function request(path, options = {}, raw = false) {
 }
 
 function catalog() {
+  if (state.client?.mode === 'cloud') {
+    const media = state.client.media.slice(0, 30);
+    const changed = JSON.stringify(state.media) !== JSON.stringify(media);
+    state.fileCount = state.client.items.length;
+    state.media = media;
+    return changed;
+  }
   const entries = Object.values(state.client?.record?.manifest || {});
   state.fileCount = entries.length;
   const visible = entries.filter(entry => state.client.files.has(entry.relativePath)).slice(0, 30);
@@ -144,6 +152,8 @@ function refreshPreview(catalogChanged = false) {
 
 function folderReadiness() {
   if (!state.health?.configured) return '生成服务尚未配置完成';
+  if (state.client?.mode === 'cloud') return state.status.indexed > 0 ? ''
+    : state.client.scanning ? '素材正在上传，请稍候' : state.status.processing ? '素材正在处理，请稍候' : '先上传视频素材';
   if (state.status.needsPermission) return '请重新连接素材文件夹';
   if (!state.status.connected) return '先选择素材文件夹';
   if (state.client?.scanning) return '素材正在上传，请稍候';
@@ -160,7 +170,7 @@ export function mixReadiness(ctx = state.ctx) {
   const folderHint = folderReadiness();
   if (folderHint) return folderHint;
   if (!ctx?.configs?.mix?.prompt?.trim()) return '填写宣传文案后即可开始';
-  if (state.busy || state.job && !terminal(state.job)) return '正在制作，请保持网页连接';
+  if (state.busy || state.job && !terminal(state.job)) return state.client?.mode === 'cloud' ? '正在云端制作视频' : '正在制作，请保持网页连接';
   if (state.pending && !state.pending.id) return '请确认上次提交的任务状态';
   if (state.audio.busy) return '正在保存音频，请稍候';
   const c = ctx?.configs?.mix;
@@ -308,6 +318,18 @@ async function deleteAudio(kind, id) {
 
 export function renderMixMaterials() {
   const status = state.status;
+  if (state.client?.mode === 'cloud') {
+    const disabled = mixFolderLocked() ? 'disabled' : '';
+    const uploading = state.client.scanning;
+    const labels = { uploading: '等待原片上传完成', queued: '等待处理', indexing: '正在处理', ready: '可用于混剪', failed: '处理失败', deleting: '正在删除' };
+    const progress = uploading ? `<progress max="${status.uploadTotal || 1}" value="${status.uploadBytes || 0}" aria-label="原片上传进度"></progress>`
+      : status.processing ? `<progress max="${status.totalFiles || 1}" value="${status.readyFiles || 0}" aria-label="素材处理进度"></progress>` : '';
+    const text = uploading ? '正在上传云端原片' : status.processing ? '云端素材正在处理' : status.totalFiles ? `云端素材库 · ${status.indexed || 0} 个片段可供匹配` : '上传视频后即可在云端保存和处理';
+    const entries = state.client.items.map(item => `<div class="mix-folder-actions"><span>${escape(item.name)} · ${labels[item.state]}</span>${item.state === 'failed' ? `<button data-action="mix-material-retry" data-id="${item.id}" ${disabled}>重试</button>` : ''}<button data-action="mix-material-delete" data-id="${item.id}" ${disabled}>删除</button>${item.error ? `<small class="mix-status-error">${escape(item.error)}</small>` : ''}</div>`).join('');
+    const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : state.job?.state === 'credit_pending' ? '' : folderReadiness();
+    const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>${state.job?.state === 'credit_pending' ? '重试确认积分' : '继续制作'}</button>` : '';
+    return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite"><span>${text}</span>${progress}${status.error || state.error || state.job?.error ? `<small class="mix-status-error">${escape(status.error || state.error || state.job.error)}</small>` : ''}<div class="mix-folder-actions"><button data-action="mix-scan" ${disabled}>刷新素材库${status.error ? ' / 重试' : ''}</button>${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}</div>${entries ? `<details><summary>管理云端素材（${state.fileCount}）</summary>${entries}</details>` : ''}</div>`;
+  }
   const uploading = !status.needsPermission && (state.client?.scanning || status.uploadTotal || status.connected && status.processing);
   const text = status.needsPermission ? '请重新连接素材文件夹，并在浏览器提示中选择“每次访问时都允许”，以后打开网站会自动连接' : uploading ? '素材正在上传' : status.connected ? status.error ? '部分素材上传失败，请重试' : status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
   const progress = status.uploadTotal ? `<progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="素材上传进度"></progress>` : state.client?.scanning ? '<progress aria-label="素材上传进度"></progress>' : status.totalFiles && !status.needsPermission ? `<progress max="${status.totalFiles}" value="${status.readyFiles}" aria-label="素材上传进度"></progress>` : '';
@@ -322,6 +344,7 @@ export function renderMixMaterials() {
 }
 
 export function mixJobLabel(job = state.job) {
+  if (job?.state === 'waiting_materials' && state.client?.mode === 'cloud') return '正在准备云端素材';
   const labels = { credit_pending: '积分确认中', queued: '任务已提交', matching: '正在匹配素材', waiting_materials: '正在等待本机素材', running: '正在制作视频', rendering: '正在合成视频', done: '成片已完成', completed: '成片已完成', failed: '制作失败', error: '制作失败', cancelled: '任务已取消', interrupted: '制作已中断', expired: '任务已过期' };
   return labels[job?.state] || '正在制作视频';
 }
@@ -340,7 +363,7 @@ export function renderMixProgress(job = state.job, now = Date.now()) {
   const elapsed = Number.isFinite(created) && created > 0
     ? durationLabel((active || !updated ? now / 1000 : updated) - created) : '';
   const detail = job.error || (job.state === 'queued' ? '正在排队，等待开始制作；请勿重复提交。'
-    : job.state === 'waiting_materials' ? '等待本机传输命中的素材，请保持网页与素材文件夹连接。'
+    : job.state === 'waiting_materials' ? state.client?.mode === 'cloud' ? '正在准备云端原片。' : '等待本机传输命中的素材，请保持网页与素材文件夹连接。'
     : logs.at(-1) || (active ? '制作已开始，等待下一条进展。' : mixJobLabel(job)));
   return `<div class="mix-progress-current" role="status" aria-live="polite"><small>${active ? '当前步骤' : '任务结果'}</small><p>${escape(detail)}</p></div>
     <div class="mix-progress-time">${elapsed ? `<span>已用时 ${elapsed}</span>` : ''}${age !== null ? `<span>最近进展：${age < 1 ? '刚刚' : durationLabel(age) + '前'}</span>` : ''}</div>
@@ -356,7 +379,7 @@ function updateStatus() {
   const footer = root.querySelector('#mix-material-status');
   if (footer) footer.innerHTML = renderMixMaterials().replace(/^<div[^>]*>|<\/div>$/g, '');
   const folderLabel = root.querySelector('.studio-add-material .mix-folder-label');
-  if (folderLabel) folderLabel.textContent = state.status.needsPermission ? '重新连接素材文件夹' : state.status.connected ? '更换素材文件夹' : '选择本地素材文件夹';
+  if (folderLabel) folderLabel.textContent = state.client?.mode === 'cloud' ? '上传素材文件夹' : state.status.needsPermission ? '重新连接素材文件夹' : state.status.connected ? '更换素材文件夹' : '选择本地素材文件夹';
   const hint = mixReadiness();
   const generate = root.querySelector('[data-action="studio-generate"]');
   if (generate) { generate.disabled = !!hint; generate.title = hint; }
@@ -384,10 +407,10 @@ function updateStatus() {
   }
   const resultButton = root.querySelector('[data-action="mix-show-result"]');
   if (resultButton) resultButton.hidden = !complete(state.job) || state.view === 'result';
-  root.querySelectorAll('[data-action="mix-choose-folder"], [data-action="mix-disconnect"], [data-action="mix-scan"]').forEach(button => {
-    const locked = mixFolderLocked() && (button.dataset.action !== 'mix-choose-folder' || state.status.connected && !state.status.needsPermission);
+  root.querySelectorAll('[data-action="mix-choose-folder"], [data-action="mix-upload-videos"], [data-action="mix-material-delete"], [data-action="mix-material-retry"], [data-action="mix-disconnect"], [data-action="mix-scan"]').forEach(button => {
+    const locked = mixFolderLocked() && (state.client?.mode === 'cloud' || button.dataset.action !== 'mix-choose-folder' || state.status.connected && !state.status.needsPermission);
     button.disabled = locked;
-    button.title = locked ? '制作时请保持原素材文件夹连接' : '';
+    button.title = locked ? state.client?.mode === 'cloud' ? '制作完成后可管理素材' : '制作时请保持原素材文件夹连接' : '';
   });
   root.querySelectorAll('[data-mix-audio-field], [data-mix-audio-upload], [data-action="mix-audio-delete"], [data-action="mix-audio-refresh"]').forEach(input => {
     input.disabled = mixFolderLocked() || state.audio.busy || state.audio.loading || input.dataset.mixAudioUpload && state.audio.configured !== true
@@ -511,19 +534,27 @@ export function initializeMixMaterials(ctx) {
   state.ownerKey = storageKey();
   const revision = state.revision;
   state.pending = remembered();
-  state.client = new BrowserMaterials({ api: request, fetch: (path, options) => request(path, options, true),
-    onStatus: status => {
-      try { guard(revision); } catch { return; }
-      state.status = { ...status };
-      const changed = catalog();
-      updateStatus();
-      if (changed) refreshPreview(true);
-    } });
   state.loading = (async () => {
     const results = await Promise.allSettled([
-      (async () => { const health = await request('/api/mix/health'); guard(revision); state.health = health; updateAudio(); updateStatus(); })(),
+      (async () => {
+        const health = await request('/api/mix/health');
+        guard(revision);
+        state.health = health;
+        state.error = '';
+        const MaterialClient = health.material_library?.configured ? CloudMaterials : BrowserMaterials;
+        state.client = new MaterialClient({ api: request,
+          ...(MaterialClient === BrowserMaterials ? { fetch: (path, options) => request(path, options, true) } : {}),
+          onStatus: status => {
+            try { guard(revision); } catch { return; }
+            state.status = { ...status };
+            const changed = catalog();
+            updateStatus();
+            if (changed) refreshPreview(true);
+          } });
+        updateAudio(); updateStatus(); refreshPreview(true);
+        await state.client.restore();
+      })(),
       loadAudio(),
-      state.client.restore(),
       (async () => {
         const result = await request('/api/mix/jobs');
         guard(revision);
@@ -539,6 +570,7 @@ export function initializeMixMaterials(ctx) {
     try { guard(revision); } catch { return; }
     const failed = results.find(result => result.status === 'rejected' && result.reason?.name !== 'AbortError');
     if (failed) state.error = message(failed.reason);
+    if (!state.client) state.started = false;
     updateStatus();
   })();
   return state.loading;
@@ -564,7 +596,7 @@ export function handleMixMaterialAction(action, el, ctx) {
     else {
       const c = ctx.configs.mix;
       if (c.prompt.length > 2000) { ctx.toast('宣传文案最多 2000 字，请精简后继续。'); return true; }
-      state.pending = { key: crypto.randomUUID(), body: { text: c.prompt.trim(), device_id: state.client.deviceId,
+      state.pending = { key: crypto.randomUUID(), body: { text: c.prompt.trim(), ...(state.client.mode === 'cloud' ? { source: 'cloud' } : { device_id: state.client.deviceId }),
         ratio: c.ratio, quality: c.quality, subtitles: c.subtitles, voice_mode: c.voice_mode || 'synthesized',
         voice_id: c.voice_mode === 'original' ? null : c.voice_id || null, music_id: c.music_id || null,
         music: !!c.music_id, count: 1, duration: null } };
@@ -574,15 +606,30 @@ export function handleMixMaterialAction(action, el, ctx) {
     return true;
   }
   if (!action.startsWith('mix-')) return false;
+  if (['mix-choose-folder', 'mix-upload-videos', 'mix-scan', 'mix-material-delete', 'mix-material-retry'].includes(action) && !state.client) {
+    ctx.toast('正在加载素材库，请稍候'); return true;
+  }
   switch (action) {
     case 'mix-audio-refresh': if (!mixFolderLocked()) loadAudio(); break;
     case 'mix-audio-delete': deleteAudio(el.dataset.kind, el.dataset.id); break;
+    case 'mix-material-delete':
+    case 'mix-material-retry': {
+      if (state.client.mode !== 'cloud' || mixFolderLocked()) break;
+      const revision = state.revision;
+      const work = action === 'mix-material-delete' ? state.client.delete(el.dataset.id) : state.client.retry(el.dataset.id);
+      work.catch(error => {
+        if (revision === state.revision && error.name !== 'AbortError') { state.error = message(error); updateStatus(); }
+      });
+      break;
+    }
+    case 'mix-upload-videos':
     case 'mix-choose-folder':
     case 'mix-scan': {
+      const cloud = state.client.mode === 'cloud';
       const reconnecting = !state.status.connected || state.status.needsPermission;
-      if (mixFolderLocked() && !reconnecting) { ctx.toast('制作时请保持原素材文件夹连接'); break; }
+      if (mixFolderLocked() && (cloud || !reconnecting)) { ctx.toast(cloud ? '制作完成后可管理素材' : '制作时请保持原素材文件夹连接'); break; }
       const revision = state.revision;
-      const choosing = action === 'mix-scan' && !state.status.needsPermission ? state.client.scan() : state.client.choose({ reconnectOnly: mixFolderLocked() });
+      const choosing = action === 'mix-scan' && !state.status.needsPermission ? state.client.scan() : state.client.choose({ reconnectOnly: mixFolderLocked(), directory: action !== 'mix-upload-videos' });
       Promise.resolve(choosing).then(() => {
         guard(revision);
         updateStatus();
@@ -592,6 +639,7 @@ export function handleMixMaterialAction(action, el, ctx) {
       break;
     }
     case 'mix-disconnect': {
+      if (state.client?.mode === 'cloud') break;
       if (mixFolderLocked()) { ctx.toast('制作时请保持原素材文件夹连接'); break; }
       const revision = state.revision;
       state.client.disconnect().catch(error => {

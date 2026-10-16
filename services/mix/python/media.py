@@ -172,7 +172,7 @@ def render(plan, output, width=1920, height=1080, log=print):
                       if shot.get('selected') and shot['selected'].get('remote')]
     if remote_sources:
         from remote_catalog import hydrate
-        log('准备本机高清片段；素材传输完成后，服务器继续导出')
+        log('正在准备高清素材；素材就绪后，服务器继续导出')
         hydrate(remote_sources, 'source')
     started = perf_counter()
     for i, j, shot in pieces:

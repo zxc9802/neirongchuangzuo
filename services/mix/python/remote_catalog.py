@@ -60,10 +60,21 @@ class RemoteCatalog:
 
 def hydrate(candidates, kind):
     """Enqueue the whole group first; a pending upload must not repeat model checks."""
-    required, seen, brokers = [], set(), {}
+    required, seen, brokers, cloud_cache = [], set(), {}, {}
     for candidate in candidates:
         remote = candidate.get('remote')
         if not remote:
+            continue
+        if remote.get('type') == 'cloud':
+            key = (remote['root'], remote['owner'], kind,
+                   remote['asset_id'] if kind == 'source' else remote['clip_id'])
+            if key not in cloud_cache:
+                from cloud_catalog import hydrate_cloud
+                hydrate_cloud(candidate, kind)
+                cloud_cache[key] = ({'path': candidate['path'], 'stamp': candidate['stamp']}
+                                    if kind == 'source' else {'proxy': candidate['proxy']})
+            else:
+                candidate.update(cloud_cache[key])
             continue
         target = Path(candidate['proxy'] if kind == 'proxy' else candidate['path'])
         if target.is_file():

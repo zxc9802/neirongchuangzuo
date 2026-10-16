@@ -10,7 +10,7 @@ const settle = async predicate => {
   assert.ok(predicate(), 'browser UI did not finish expected work');
 };
 
-async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchCredits, xhr, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [], voice_configured: true, default_voice_configured: true } } = {}) {
+async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchMaterials, fetchCredits, xhr, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [], voice_configured: true, default_voice_configured: true } } = {}) {
   const original = Object.fromEntries(['workspaceUser', 'document', 'window', 'location', 'indexedDB', 'localStorage', 'fetch', 'XMLHttpRequest'].map(key => [key, globalThis[key]]));
   const storage = new Map();
   const databases = new Map();
@@ -67,6 +67,7 @@ async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchCred
     calls.push({ url, ...options });
     if (url === '/api/workspace/credits' && fetchCredits) return fetchCredits();
     if (url === '/api/mix/health') return fetchHealth ? fetchHealth() : Response.json(health);
+    if (url.startsWith('/api/mix/materials')) return fetchMaterials ? fetchMaterials(url, options) : Response.json({ configured: true, items: [], indexed_clips: 0 });
     if (url.startsWith('/api/mix/audio')) return fetchAudio ? fetchAudio(url, options, calls) : Response.json({ configured: true, missing: [], items: [] });
     if (url === '/api/browser-materials/connect') return Response.json({ device_id: 'c'.repeat(32) });
     if (url.endsWith('/clips')) return Response.json({ clips: JSON.parse(options.body).clips.map(clip => ({ id: clip.id, state: 'indexed' })) });
@@ -865,5 +866,145 @@ test('indexing can restore before TTS is configured and BFCache pageshow reconne
     assert.equal(f.mod.getMixState().status.connected, false);
     f.events.get('pageshow')({ persisted: true });
     await settle(() => f.mod.getMixState().status.connected);
+  } finally { f.restore(); }
+});
+
+const cloudHealth = { configured: true, voice_configured: true, default_voice_configured: true, material_library: { configured: true, missing: [] } };
+const cloudItem = (n, overrides = {}) => {
+  const id = n.toString(16).padStart(32, '0');
+  return { id, name: `素材/视频-${n}.mp4`, bytes: 10, duration: 8, state: 'ready', error: null, indexed_clips: 1, url: `/api/mix/materials/${id}/stream`, ...overrides };
+};
+
+test('configured cloud library restores all counts and previews without a local folder connection', async () => {
+  const f = await fixture({ useShared: true, health: cloudHealth, fetchMaterials: () => Response.json({ configured: true, items: Array.from({ length: 35 }, (_, n) => cloudItem(n + 1)), indexed_clips: 70 }) });
+  try {
+    f.databases.clear();
+    await f.mod.initializeMixMaterials(f.ctx);
+    const state = f.mod.getMixState();
+    assert.equal(state.client.mode, 'cloud');
+    assert.equal(state.fileCount, 35);
+    assert.equal(state.media.length, 30);
+    assert.equal(state.status.indexed, 70);
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    assert.equal(f.calls.some(call => call.url.startsWith('/api/browser-materials')), false);
+    const html = renderStudio('mix', f.ctx);
+    assert.match(html, /上传素材文件夹/);
+    assert.match(html, /上传视频素材/);
+    assert.match(html, /云端原片/);
+    assert.match(html, /data-action="mix-material-delete"/);
+    assert.doesNotMatch(html, /本机原片|本机原始视频|选择本地素材文件夹|更换素材文件夹|mix-disconnect|保持网页/);
+  } finally { f.restore(); }
+});
+
+test('cloud submission uses the persistent server library and keeps delete locked during active jobs', async () => {
+  const f = await fixture({ health: cloudHealth, fetchMaterials: () => Response.json({ configured: true, items: [cloudItem(1)], indexed_clips: 1 }),
+    fetchJob: (url, options) => Response.json(options.method === 'POST' ? { id, state: 'running' } : { jobs: [] }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    f.mod.handleMixMaterialAction('studio-generate', { dataset: {} }, f.ctx);
+    await settle(() => f.mod.getMixState().job?.state === 'running');
+    const post = f.calls.find(call => call.url === '/api/mix/jobs' && call.method === 'POST');
+    const body = JSON.parse(post.body);
+    assert.equal(body.source, 'cloud');
+    assert.equal('device_id' in body, false);
+    assert.doesNotMatch(f.mod.mixReadiness(f.ctx), /保持网页/);
+    f.mod.handleMixMaterialAction('mix-material-delete', { dataset: { id: cloudItem(1).id } }, f.ctx);
+    assert.equal(f.calls.some(call => call.method === 'DELETE'), false);
+    const html = f.mod.renderMixMaterials();
+    assert.match(html, /云端/);
+    assert.doesNotMatch(html, /保持网页|mix-disconnect/);
+  } finally { f.restore(); }
+});
+
+test('cloud indexing status offers refresh and retry and deletes assets through the library', async () => {
+  const f = await fixture({ health: cloudHealth, fetchMaterials: (url, options) => Response.json(options.method === 'DELETE' ? { ok: true }
+    : { configured: true, items: [cloudItem(1, { state: 'indexing', indexed_clips: 0 }), cloudItem(2, { state: 'failed', error: '请重试' })], indexed_clips: 1 }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    const html = f.mod.renderMixMaterials();
+    assert.match(html, /正在处理/);
+    assert.match(html, /刷新素材库/);
+    assert.match(html, /data-action="mix-material-retry"/);
+    f.mod.handleMixMaterialAction('mix-material-delete', { dataset: { id: cloudItem(2).id } }, f.ctx);
+    await settle(() => f.mod.getMixState().fileCount === 1);
+    assert.ok(f.calls.some(call => call.url === `/api/mix/materials/${cloudItem(2).id}` && call.method === 'DELETE'));
+  } finally { f.restore(); }
+});
+
+test('account changes discard a late cloud library restore and abort its request', async () => {
+  let release, signal;
+  const f = await fixture({ health: cloudHealth, fetchMaterials: (url, options) => { signal = options.signal; return new Promise(resolve => { release = resolve; }); } });
+  try {
+    const restoring = f.mod.initializeMixMaterials(f.ctx);
+    await settle(() => !!release);
+    globalThis.workspaceUser = { id: 'account-b' };
+    release(Response.json({ configured: true, items: [cloudItem(1)], indexed_clips: 1 }));
+    await restoring;
+    assert.equal(signal.aborted, true);
+    assert.equal(f.mod.getMixState().media.length, 0);
+    assert.equal(f.mod.getMixState().client, null);
+    assert.equal(f.mod.getMixState().status.connected, false);
+  } finally { f.restore(); }
+});
+
+test('cloud preparation and loaded video metadata keep cloud material labels', async () => {
+  const f = await fixture({ useShared: true, health: cloudHealth, fetchMaterials: () => Response.json({ configured: true, items: [cloudItem(1)], indexed_clips: 1 }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const label = { textContent: '' };
+    let loaded;
+    const video = { duration: 8, addEventListener: (name, fn) => { loaded = fn; }, closest: () => ({ querySelector: () => label }) };
+    f.root.querySelectorAll = selector => selector === '.studio-media-item video' ? [video] : [];
+    bindStudio('mix', f.ctx);
+    loaded();
+    assert.match(label.textContent, /云端原片/);
+    assert.match(f.mod.mixJobLabel({ state: 'waiting_materials' }), /云端/);
+    assert.doesNotMatch(f.mod.renderMixProgress({ state: 'waiting_materials' }), /本机|保持网页/);
+  } finally { f.restore(); }
+});
+
+test('a transient health failure can retry initialization and restore the cloud library', async () => {
+  for (const failure of ['http', 'network']) {
+    let attempts = 0;
+    const f = await fixture({ fetchHealth: () => {
+      if (++attempts > 1) return Response.json(cloudHealth);
+      if (failure === 'network') throw new Error('health network unavailable');
+      return Response.json({ error: 'health temporarily unavailable' }, { status: 503 });
+    }, fetchMaterials: () => Response.json({ configured: true, items: [cloudItem(1)], indexed_clips: 1 }) });
+    try {
+      await f.mod.initializeMixMaterials(f.ctx);
+      assert.equal(f.mod.getMixState().client, null);
+      assert.match(f.mod.getMixState().error, /unavailable/);
+      assert.match(f.nodes['#mix-material-status'].innerHTML, /unavailable/);
+      await f.mod.initializeMixMaterials(f.ctx);
+      assert.equal(attempts, 2);
+      assert.equal(f.mod.getMixState().client?.mode, 'cloud');
+      assert.equal(f.mod.getMixState().status.indexed, 1);
+      assert.equal(f.mod.getMixState().error, '');
+      assert.equal(f.mod.getMixState().controllers.size, 0);
+      assert.equal(f.mod.mixReadiness(f.ctx), '');
+    } finally { f.restore(); }
+  }
+});
+
+test('upload action retries failed health initialization and rejects a late other-account response', async () => {
+  let attempts = 0, release;
+  const f = await fixture({ fetchHealth: () => ++attempts === 1
+    ? Response.json({ error: 'health temporarily unavailable' }, { status: 503 })
+    : new Promise(resolve => { release = resolve; }) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    f.mod.handleMixMaterialAction('mix-choose-folder', { dataset: {} }, f.ctx);
+    await settle(() => !!release);
+    assert.equal(attempts, 2);
+    const restoring = f.mod.getMixState().loading;
+    globalThis.workspaceUser = { id: 'account-b' };
+    release(Response.json(cloudHealth));
+    await restoring;
+    assert.equal(f.mod.getMixState().client, null);
+    assert.equal(f.mod.getMixState().health, null);
+    assert.equal(f.mod.getMixState().started, false);
+    assert.equal(f.calls.some(call => call.url === '/api/mix/materials'), false);
   } finally { f.restore(); }
 });

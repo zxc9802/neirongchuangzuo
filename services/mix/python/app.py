@@ -24,6 +24,8 @@ from starlette.concurrency import run_in_threadpool
 from api import clean_error
 from audio_library import AudioLibrary, attach_audio_library
 from browser_materials import attach_browser_materials
+from cloud_materials import CloudMaterials
+from cloud_material_routes import attach_cloud_materials
 from local_materials import MaterialBroker, MaterialsPending, valid_id
 from credits import CreditError, configured_credits, estimate_seconds
 from media import duration as media_duration
@@ -70,7 +72,7 @@ def provider_pending(folder):
     return False
 
 
-def generate(spec, folder, log, audio_library=None):
+def generate(spec, folder, log, audio_library=None, cloud_library=None):
     """Resume the saved provider/matching checkpoints before doing new work."""
     config = readiness()
     if not config['configured']:
@@ -95,11 +97,16 @@ def generate(spec, folder, log, audio_library=None):
                 raise ValueError('声线文件校验与任务记录不一致，不能复用已付费任务')
         if spec.get('music_id'):
             library.get(spec['owner'], spec['music_id'], 'music')
-    broker = MaterialBroker(folder.parent.parent)
-    broker.device(spec['device_id'], spec['owner'])
     catalog = folder / 'remote-catalog'
-    write_json(catalog / 'remote.json', {'root': str(broker.root),
-               'device_id': spec['device_id'], 'job_id': folder.name})
+    if spec.get('source') == 'cloud':
+        cloud = cloud_library or CloudMaterials(folder.parent.parent)
+        write_json(catalog / 'remote.json', {'type': 'cloud', 'root': str(cloud.root),
+                   'owner': spec['owner'], 'job_id': folder.name})
+    else:
+        broker = MaterialBroker(folder.parent.parent)
+        broker.device(spec['device_id'], spec['owner'])
+        write_json(catalog / 'remote.json', {'root': str(broker.root),
+                   'device_id': spec['device_id'], 'job_id': folder.name})
     saved = folder / 'plan.json'
     log('正在恢复已保存的素材匹配…' if saved.exists() else '正在拆解文案并匹配分镜…')
     plan = json.loads(saved.read_text(encoding='utf-8')) if saved.exists() else create_plan(
@@ -355,7 +362,8 @@ class Jobs:
             if self.credits:
                 spec['_credit_gate'] = lambda seconds: self._extend(job_id, spec, seconds)
             self.log(job_id, '任务已开始，正在准备制作…')
-            self.materials.device(spec['device_id'], spec['owner'])
+            if spec.get('source') != 'cloud':
+                self.materials.device(spec['device_id'], spec['owner'])
             saved = folder / row['result'] if row['result'] else None
             result = (saved if saved and saved.is_file() and (folder / 'quality-report.json').is_file()
                       else Path(runner(spec, folder, lambda message: self.log(job_id, message)))).resolve()
@@ -418,13 +426,16 @@ class Jobs:
 
 def normalize(body, owner):
     fields = {'text', 'device_id', 'ratio', 'quality', 'subtitles', 'music', 'count', 'duration',
-              'voice_mode', 'voice_id', 'music_id'}
+              'voice_mode', 'voice_id', 'music_id', 'source'}
     if set(body) - fields:
         raise HTTPException(400, '任务包含不支持的参数')
     text = body.get('text')
     if not isinstance(text, str) or not text.strip() or len(text) > 6000:
         raise HTTPException(400, '文案须为 1–6000 字符')
-    device_id = valid_id(body.get('device_id'), 32)
+    source = body.get('source', 'browser')
+    if source not in ('browser', 'cloud'):
+        raise HTTPException(400, '素材来源无效')
+    device_id = None if source == 'cloud' else valid_id(body.get('device_id'), 32)
     ratio, quality = body.get('ratio', '9:16'), body.get('quality', '1080p')
     if ratio not in ('9:16', '16:9', '1:1') or quality not in ('720p', '1080p'):
         raise HTTPException(400, '画幅或清晰度无效')
@@ -447,7 +458,7 @@ def normalize(body, owner):
         raise HTTPException(400, '每次制作一条；时长由完整文案与所选声音模式决定')
     short, long = (720, 1280) if quality == '720p' else (1080, 1920)
     width, height = {'9:16': (short, long), '16:9': (long, short), '1:1': (short, short)}[ratio]
-    return {'text': text, 'device_id': device_id, 'owner': owner, 'ratio': ratio, 'quality': quality,
+    return ({'source': 'cloud'} if source == 'cloud' else {}) | {'text': text, 'device_id': device_id, 'owner': owner, 'ratio': ratio, 'quality': quality,
             'width': width, 'height': height, 'subtitles': subtitles, 'music': enabled_music,
             'voice_mode': voice_mode, 'voice_id': voice_id, 'music_id': music_id,
             'count': 1, 'duration': None,
@@ -457,13 +468,14 @@ def normalize(body, owner):
                              'emotion_file': os.environ.get('INDEXTTS_EMOTION_AUDIO_PATH') or None})}
 
 
-def create_app(root=None, token=None, start_worker=True, runner=generate, audio_library=None, credits=None):
+def create_app(root=None, token=None, start_worker=True, runner=generate, audio_library=None, credits=None, cloud_library=None):
     token = token or os.environ.get('MIXER_API_TOKEN', '')
     if len(token) < 32 or not token.isascii():
         raise ValueError('MIXER_API_TOKEN 必须是至少 32 字符的随机 ASCII 密钥')
     jobs = Jobs(root or os.environ.get('DATA_DIR', 'data/mix'), credits=credits)
     library = audio_library if audio_library is not None else AudioLibrary(jobs.root)
-    job_runner = ((lambda spec, folder, log: generate(spec, folder, log, audio_library=library))
+    cloud = cloud_library if cloud_library is not None else CloudMaterials(jobs.root)
+    job_runner = ((lambda spec, folder, log: generate(spec, folder, log, audio_library=library, cloud_library=cloud))
                   if runner is generate else runner)
     stop = threading.Event()
 
@@ -472,6 +484,7 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
             try:
                 app.state.browser_materials.cleanup()
                 jobs.cleanup()
+                cloud.cleanup(cloud_in_use)
             except Exception as exc:
                 print('素材清理暂不可用：' + clean_error(exc), flush=True)
             stop.wait(60)
@@ -495,12 +508,29 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
                 print('素材画面描述暂不可用：' + clean_error(exc), flush=True)
                 stop.wait(5)
 
+    def index_cloud():
+        while not stop.is_set():
+            try:
+                if not cloud.index_next():
+                    stop.wait(2)
+            except Exception as error:
+                print('云端素材处理暂不可用：' + clean_error(error), flush=True)
+                stop.wait(5)
+
+    def cloud_in_use(owner_id):
+        with jobs.connect() as db:
+            rows = db.execute("SELECT spec FROM jobs WHERE owner=? AND state IN "
+                              "('queued','running','credit_pending','waiting_materials')", (owner_id,)).fetchall()
+        return any(json.loads(row['spec']).get('source') == 'cloud' for row in rows)
+
     @asynccontextmanager
     async def lifespan(app):
         if start_worker:
+            cloud.recover()
             jobs.materials.recover_descriptions()
             app.state.browser_materials.defer_descriptions = True
             threading.Thread(target=maintain, name='browser-mixer-cleanup', daemon=True).start()
+            threading.Thread(target=index_cloud, name='cloud-material-index', daemon=True).start()
             for index in range(max(1, int(os.environ.get('MIX_JOB_WORKERS') or 2))):
                 threading.Thread(target=work, name=f'browser-mixer-{index}', daemon=True).start()
             for index in range(max(1, int(os.environ.get('MIX_DESCRIBE_WORKERS') or 6))):
@@ -512,6 +542,7 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
     app.state.jobs = jobs
     app.state.materials = jobs.materials
     app.state.audio_library = library
+    app.state.cloud_materials = cloud
     app.state.runner = job_runner
 
     def authorize(request: Request):
@@ -546,6 +577,7 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
 
     attach_browser_materials(app, jobs.materials, authorize, material_body)
     attach_audio_library(app, library, owner, jobs.audio_in_use)
+    attach_cloud_materials(app, cloud, owner, material_body, cloud_in_use)
 
     def payload(job):
         result = {key: value for key, value in job.items() if key != 'result'}
@@ -555,11 +587,11 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
 
     @app.get('/health', dependencies=[Depends(authorize)])
     def health():
-        return {**readiness(), 'audio_library': library.status()}
+        return {**readiness(), 'audio_library': library.status(), 'material_library': cloud.status()}
 
     def submit_owned(key, spec):
         # Deletion shares this lock, so an ID cannot disappear before its job is registered.
-        with library.lock:
+        with cloud.lock, library.lock:
             try:
                 if spec['voice_id']:
                     item = library.get(spec['owner'], spec['voice_id'], 'voice')
@@ -568,6 +600,9 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
                     library.get(spec['owner'], spec['music_id'], 'music')
             except KeyError:
                 raise HTTPException(404, '音频不存在') from None
+            if spec.get('source') == 'cloud' and not any(
+                    item['state'] == 'ready' and item['indexed_clips'] for item in cloud.list(spec['owner'])):
+                raise HTTPException(409, '云端素材尚未分析完成，请先上传并等待分析')
             return jobs.submit(key, spec)
 
     @app.post('/v1/mix/jobs', status_code=202)
@@ -576,7 +611,8 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', key):
             raise HTTPException(400, '需要有效 Idempotency-Key')
         spec = normalize(await material_body(request, 32768), owner_id)
-        await run_in_threadpool(app.state.browser_materials.check_device, spec['device_id'], owner_id)
+        if spec.get('source') != 'cloud':
+            await run_in_threadpool(app.state.browser_materials.check_device, spec['device_id'], owner_id)
         job_id = await run_in_threadpool(submit_owned, key, spec)
         return payload(jobs.get(job_id, owner_id))
 
@@ -590,7 +626,36 @@ def create_app(root=None, token=None, start_worker=True, runner=generate, audio_
 
     @app.post('/v1/mix/jobs/{job_id}/resume', status_code=202)
     def resume(job_id: str, owner_id=Depends(owner)):
-        return payload(jobs.resume(job_id, owner_id))
+        with cloud.lock:
+            jobs.get(job_id, owner_id)
+            with jobs.connect() as db:
+                spec = json.loads(db.execute('SELECT spec FROM jobs WHERE id=? AND owner=?', (job_id, owner_id)).fetchone()['spec'])
+            if spec.get('source') == 'cloud':
+                available = {item['id'] for item in cloud.list(owner_id)
+                             if item['state'] == 'ready' and item['indexed_clips']}
+                if not available:
+                    raise HTTPException(409, '云端素材不可用，请先上传并等待分析')
+                plan = jobs.root / 'outputs' / job_id / 'plan.json'
+                if plan.is_file():
+                    saved = json.loads(plan.read_text(encoding='utf-8'))
+                    for scene in saved.get('scenes', []):
+                        selected = [shot.get('selected') for shot in scene.get('shots', [])]
+                        selected.append(scene.get('match', {}).get('selected'))
+                        if not scene.get('shots') or 'coverage_progress' in scene:
+                            from finish import verified_options
+                            selected.extend(verified_options(scene))
+                        for group in scene.get('match_progress', {}).get('groups', {}).values():
+                            if 'verdict' not in group:
+                                selected.extend(group.get('top', []))
+                            else:
+                                accepted = {item['id'] for item in group['verdict'].get('accepted', [])}
+                                selected.extend(item for item in group.get('top', []) if item['id'] in accepted)
+                        selected.extend(scene.get('coverage_progress', {}).get('ranked', []))
+                        for candidate in selected:
+                            remote = (candidate or {}).get('remote', {})
+                            if remote.get('type') == 'cloud' and remote.get('asset_id') not in available:
+                                raise HTTPException(409, '该任务使用的云端素材已删除，请新建任务')
+            return payload(jobs.resume(job_id, owner_id))
 
     def artifact(job_id, owner_id, name):
         job = jobs.get(job_id, owner_id)

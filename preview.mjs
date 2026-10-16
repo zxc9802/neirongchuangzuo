@@ -20,7 +20,7 @@ const files = new Map([
   ['/auth.css', ['design/auth.css', 'text/css; charset=utf-8']],
   ...['auth', 'workspace-account', 'workspace-credits', 'account-storage'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/app.js', ['design/app.js', 'text/javascript; charset=utf-8']],
-  ...['browser-materials', 'mix-materials', 'wasm-media'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ...['browser-materials', 'cloud-materials', 'mix-materials', 'wasm-media'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ...['index', 'classes', 'worker', 'const', 'errors', 'utils', 'types'].map(name => [`/vendor/ffmpeg/${name}.js`,
     [`node_modules/@ffmpeg/ffmpeg/dist/esm/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/vendor/ffmpeg/ffmpeg-core.js', ['node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js', 'text/javascript; charset=utf-8']],

@@ -45,6 +45,25 @@ test('mix and browser catalog routes require verified accounts before launching 
   assert.equal(received.length, 0);
 });
 
+test('cloud material routes use verified owners and preserve upload finalization and preview methods', async t => {
+  const { base, received } = await fixture(t);
+  const id = 'e'.repeat(32);
+  const headers = { cookie: 'session=a', Origin: 'https://studio.example', 'Content-Type': 'application/json',
+    'x-material-owner': hash('forged') };
+  for (const [path, method] of [
+    ['/api/mix/materials', 'GET'], ['/api/mix/materials/uploads', 'POST'],
+    [`/api/mix/materials/${id}/complete`, 'POST'], [`/api/mix/materials/${id}/retry`, 'POST'],
+    [`/api/mix/materials/${id}/stream`, 'GET'], [`/api/mix/materials/${id}/stream`, 'HEAD'],
+    [`/api/mix/materials/${id}`, 'DELETE'],
+  ]) {
+    assert.equal((await fetch(base + path, { method, headers, ...(method === 'POST' ? { body: '{}' } : {}) })).status, 200, path);
+    assert.equal(received.at(-1).path, path.replace('/api/mix', '/v1/mix'));
+    assert.equal(received.at(-1).headers['x-material-owner'], hash('alice'));
+  }
+  assert.equal((await fetch(base + '/api/mix/materials')).status, 401);
+  assert.equal((await fetch(base + `/api/mix/materials/${id}/complete`, { method: 'GET', headers })).status, 404);
+});
+
 test('browser video repair serves pinned same-origin worker assets without exposing node_modules', async t => {
   const { base } = await fixture(t);
   for (const file of ['index.js', 'classes.js', 'worker.js', 'const.js', 'errors.js', 'utils.js', 'types.js', 'ffmpeg-core.js']) {
