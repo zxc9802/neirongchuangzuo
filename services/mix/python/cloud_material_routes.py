@@ -2,6 +2,7 @@
 from fastapi import Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from starlette.concurrency import run_in_threadpool
+from credits import CreditError
 
 
 def attach_cloud_materials(app, library, owner, body, in_use):
@@ -10,6 +11,8 @@ def attach_cloud_materials(app, library, owner, body, in_use):
             return await run_in_threadpool(function, *args)
         except KeyError:
             raise HTTPException(404, '素材不存在') from None
+        except CreditError as error:
+            raise HTTPException(error.status, str(error)) from None
         except ValueError as error:
             raise HTTPException(400, str(error)) from None
         except HTTPException:

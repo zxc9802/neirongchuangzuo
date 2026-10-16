@@ -15,7 +15,9 @@ from pathlib import Path
 
 import numpy as np
 
-from api import Models, clean_error, unit_vector
+from api import Models, ProviderRejected, clean_error, unit_vector
+from costs import billing_scope
+from credits import CreditError
 from local_materials import valid_id
 import media
 
@@ -234,6 +236,10 @@ class CloudMaterials:
             db.execute('INSERT OR IGNORE INTO clips(asset_id,start,end,key) VALUES(?,?,?,?)',
                        (item['id'], start, end, f"mix-materials/{item['owner']}/{item['id']}/clips/{round(start*1000)}.mp4"))
             clip = dict(db.execute('SELECT * FROM clips WHERE asset_id=? AND start=?', (item['id'], start)).fetchone())
+        with billing_scope(item['owner'], f"index:{item['id']}:{clip['id']}"):
+            self._analyze_clip(item, source, clip, start, end, models)
+
+    def _analyze_clip(self, item, source, clip, start, end, models):
         if clip['vector'] is not None and clip['description'] and clip['sha256']:
             return
         proxy = source.parent / (str(clip['id']) + '-proxy.mp4')
@@ -301,9 +307,12 @@ class CloudMaterials:
             CloudCatalog({'root': str(self.root), 'owner': item['owner'], 'job_id': '0'*32},
                          library=self, embedding=models.embed_url).searcher()
         except Exception as error:
+            message = (clean_error(error) if isinstance(error, CreditError)
+                       else '素材模型渠道暂不可用，已确认未收费，请稍后重试' if isinstance(error, ProviderRejected)
+                       else '素材分析失败，请重试或检查视频格式')
             with self.connect() as db:
                 db.execute("UPDATE assets SET state='failed',error=?,updated=? WHERE id=?",
-                           ('素材分析失败，请重试或检查视频格式', time.time(), item['id']))
+                           (message, time.time(), item['id']))
             print('云端素材分析失败：' + clean_error(error), flush=True)
         return True
 
@@ -329,6 +338,11 @@ class CloudMaterials:
             item = self.get(owner, ident)
             if item['state'] == 'indexing':
                 raise ValueError('正在分析的素材不能删除，请稍后重试')
+            with self.connect() as db:
+                clip_ids = [row['id'] for row in db.execute('SELECT id FROM clips WHERE asset_id=?', (ident,))]
+            for clip_id in clip_ids:
+                with billing_scope(owner, f'index:{ident}:{clip_id}'):
+                    pass  # Resolve pending analysis fees before removing their retry entry.
             with self.connect() as db:
                 db.execute("UPDATE assets SET state='deleting' WHERE id=?", (ident,))
                 keys = [row['key'] for row in db.execute('SELECT key FROM clips WHERE asset_id=?', (ident,))]

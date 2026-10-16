@@ -97,7 +97,7 @@ class AudioContractTests(unittest.TestCase):
         self.assertTrue(health['configured'])
         self.assertEqual(health['missing'], [])
         self.assertFalse(health['voice_configured'])
-        self.assertEqual(health['voice_missing'], ['INDEXTTS_302_API_KEY'])
+        self.assertEqual(health['voice_missing'], ['MIX_FAL_KEY'])
         self.assertFalse(health['default_voice_configured'])
         self.assertEqual(health['audio_library'], {'configured': True, 'missing': []})
 
@@ -296,8 +296,12 @@ class AudioContractTests(unittest.TestCase):
                                        music_id=selected_music, music=True)
         calls, reviews = [], []
 
-        def synthesize(text, speaker, emotion_url, emotion_hash, alpha, cache, log, **kwargs):
-            calls.append((speaker, kwargs['speaker_cache_key']))
+        def synthesize(model, payload, cache, identity, suffix, log):
+            calls.append(model)
+            if suffix == '.safetensors':
+                path = cache / 'paid.safetensors'
+                path.write_bytes(b'cloned-embedding')
+                return path
             path = cache / 'paid.wav'
             path.parent.mkdir(parents=True, exist_ok=True)
             tone(path, 880, 1)
@@ -311,9 +315,9 @@ class AudioContractTests(unittest.TestCase):
             return self.checked_report(video, plan, output)
 
         with patch.dict(os.environ, {'OPENLUX_API_KEY': 'test', 'RERANK_API_KEY': 'test',
-                                    'INDEXTTS_302_API_KEY': 'test', 'PATH': os.environ['PATH'],
+                                    'MIX_FAL_KEY': 'test', 'PATH': os.environ['PATH'],
                                     'SystemRoot': os.environ.get('SystemRoot', '')}, clear=True), \
-                patch('voice.synthesize', side_effect=synthesize), patch('finish.Models'), \
+                patch('fal_voice.queued', side_effect=synthesize), patch('finish.Models'), \
                 patch('app.shutil.which', return_value='/tool'), \
                 patch('quality.review', side_effect=review):
             self.app.state.jobs.run_one(self.app.state.runner)
@@ -322,10 +326,11 @@ class AudioContractTests(unittest.TestCase):
             self.app.state.jobs.run_one(self.app.state.runner)
         job = self.app.state.jobs.get(ident)
         self.assertEqual(job['state'], 'done', job['error'])
-        self.assertEqual(len(calls), 1, 'completed paid narration must survive review failure')
-        self.assertIn(self.library.get(self.owner, selected_voice)['sha256'], calls[0][1])
+        self.assertEqual(len(calls), 2, 'completed clone and narration must survive review failure')
+        self.assertIn('/clone-voice/', calls[0])
+        self.assertIn('/text-to-speech/', calls[1])
         self.assertEqual(reviews, ['video-music.mp4', 'video-music.mp4'])
-        self.assertEqual(len(self.cos.signatures), 1)
+        self.assertEqual(len(self.cos.signatures), 0, 'fal references use owned downloads, not public signatures')
         samples = audio_samples(folder / job['result'])
         self.assertGreater(amplitude(samples, 880, .3), .04)
         self.assertGreater(amplitude(samples, 220, .3), .001)

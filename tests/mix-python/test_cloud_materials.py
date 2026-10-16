@@ -189,7 +189,7 @@ class CloudMaterialsTests(unittest.TestCase):
         item = self.index()
         catalog = CloudCatalog({'type': 'cloud', 'root': str(self.root), 'owner': OWNER,
                                 'job_id': 'd' * 32}, library=self.library, embedding=self.models.embed_url)
-        candidate = catalog.searcher()([1, 0, 0], 1)[0]
+        candidate = next(row for row in catalog.searcher()([1, 0, 0], 100) if row['source_start'] == 0)
         hydrate_cloud(candidate, 'proxy', library=self.library)
         self.assertTrue(Path(candidate['proxy']).is_file())
         source = self.library.cache_source(OWNER, item['id'])

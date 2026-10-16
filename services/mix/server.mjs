@@ -47,12 +47,12 @@ async function freePort() {
 }
 
 // Only the Node gateway knows this process's token; the Python listener is private.
-export function createMixHandler({ dataDir, env = process.env, serviceUrl, token = randomBytes(32).toString('hex'), publicOrigin, requireOrigin = false, credits } = {}) {
+export function createMixHandler({ dataDir, env = process.env, serviceUrl, token = randomBytes(32).toString('hex'), publicOrigin, requireOrigin = false, credits, fetchImpl = fetch } = {}) {
   let endpoint = serviceUrl ? new URL(serviceUrl) : null;
   if (endpoint && (endpoint.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(endpoint.hostname))) throw new Error('Mix service must use loopback HTTP.');
   let child, exited, starting, closing = false;
   const transfers = new Set();
-  const creditBridge = credits ? createMixCreditsBridge({ credits, dataDir, token }) : null;
+  const creditBridge = credits ? createMixCreditsBridge({ credits, dataDir, token, env, fetchImpl }) : null;
 
   async function start() {
     if (closing) throw new Error('Stopping');
@@ -67,7 +67,8 @@ export function createMixHandler({ dataDir, env = process.env, serviceUrl, token
         ['-m', 'uvicorn', 'app:create_app', '--factory', '--host', '127.0.0.1', '--port', String(port), '--log-level', 'warning', '--no-access-log'],
         { cwd: PYTHON_ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'],
           env: { ...env, DATA_DIR: dataDir, MIXER_API_TOKEN: token, PYTHONUNBUFFERED: '1',
-            MIX_CREDITS_ENABLED: creditBridge ? '1' : '0', MIX_CREDITS_URL: creditsUrl || '' } });
+            MIX_CREDITS_ENABLED: creditBridge ? '1' : '0', MIX_CREDITS_URL: creditsUrl || '',
+            MIX_API_COST_ENABLED: credits?.costMode ? '1' : '0' } });
       let ended = false;
       exited = new Promise(resolve => {
         child.once('exit', () => { ended = true; endpoint = null; resolve(); });

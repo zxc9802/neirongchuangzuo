@@ -93,7 +93,9 @@ function validateRecord(record, userId, taskId) {
       if (!Number.isSafeInteger(shortfall) || shortfall < 0 || record.units !== 0
         || record.reservedUnits !== totals.budgetMicros
         || (record.exempt === true ? record.reservedPoints !== 0 || shortfall !== 0 :
-          record.reservedPoints + shortfall !== costPointsFromMicros(totals.budgetMicros))
+          (record.status === 'settled'
+            ? record.reservedPoints > costPointsFromMicros(totals.budgetMicros)
+            : record.reservedPoints + shortfall !== costPointsFromMicros(totals.budgetMicros)))
         || record.status === 'settled' && (totals.pendingCount || shortfall || record.settledUnits !== totals.actualMicros
           || !Number.isSafeInteger(record.costTotalBeforeMicros) || !Number.isSafeInteger(record.costTotalAfterMicros)
           || record.costTotalAfterMicros !== record.costTotalBeforeMicros + (record.exempt === true ? 0 : totals.actualMicros)

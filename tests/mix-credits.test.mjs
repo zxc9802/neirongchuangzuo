@@ -14,9 +14,9 @@ import { getMixState, mixJobLabel, mixReadiness, renderMixMaterials, mixFolderLo
 const sha = value => createHash('sha256').update(value).digest('hex');
 const token = 'private-test-token-'.repeat(3);
 const taskId = 'mix:' + 'a'.repeat(32) + ':1';
-async function fixture(t) {
+async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'qiya-mix-credits-'));
-  const credits = createCreditsLedger({ databaseUrl: '', storageDir: join(root, 'wallets') });
+  const credits = createCreditsLedger({ databaseUrl: '', storageDir: join(root, 'wallets'), ...options });
   await credits.ready;
   let bridge = createMixCreditsBridge({ credits, dataDir: join(root, 'mix'), token });
   let url = await bridge.start();
@@ -27,6 +27,19 @@ async function fixture(t) {
   };
   return { credits, root, call, register: user => bridge.register(user), restart: async () => { await bridge.shutdown(); bridge = createMixCreditsBridge({ credits, dataDir: join(root, 'mix'), token }); url = await bridge.start(); } };
 }
+
+test('api-cost mode accepts new mix tasks including unlimited accounts and preserves existing duration reservations', async t => {
+  const ctx = await fixture(t, { costMode: true });
+  const owner = await ctx.register('alice');
+  await ctx.credits.setUnlimited('alice', true);
+  const result = await ctx.call('reserve', { owner, taskId, units: 0 });
+  assert.equal(result.status, 200);
+  assert.equal(result.data.reservation.kind, 'api-cost');
+  assert.equal(result.data.reservation.reservedPoints, 0);
+  assert.equal((await ctx.call('settle', { owner, taskId, units: 30 })).status, 200);
+  const legacy = await ctx.call('reserve', { owner, taskId: taskId.replace(':1', ':2'), units: 30 });
+  assert.equal(legacy.data.reservation.kind, 'mix');
+});
 
 test('mix callbacks require the private bearer and a gateway-registered owner instead of a browser identity', async t => {
   const ctx = await fixture(t);

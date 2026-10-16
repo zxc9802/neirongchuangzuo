@@ -32,3 +32,15 @@ test('mix audio COS configuration is separate and production only reads deployme
   const production = { NODE_ENV: 'production', MIX_AUDIO_COS_BUCKET: 'production-audio-bucket' };
   assert.deepEqual(loadWorkspaceSettings({ root, env: production }), production);
 });
+
+test('remix fal credentials load independently and production uses only deployment settings', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'mix-fal-env-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, '.env.local'), 'MIX_FAL_KEY=private-remix\nMIX_FAL_VOICE=Serena\nFAL_IMAGE_KEY=not-a-remix-key');
+  const local = loadWorkspaceSettings({ root, env: {} });
+  assert.equal(local.MIX_FAL_KEY, 'private-remix');
+  assert.equal(local.MIX_FAL_VOICE, 'Serena');
+  assert.equal(local.FAL_IMAGE_KEY, undefined);
+  const production = { NODE_ENV: 'production', MIX_FAL_KEY: 'deployment-key' };
+  assert.deepEqual(loadWorkspaceSettings({ root, env: production }), production);
+});

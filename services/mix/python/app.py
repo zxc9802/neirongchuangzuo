@@ -28,17 +28,19 @@ from cloud_materials import CloudMaterials
 from cloud_material_routes import attach_cloud_materials
 from local_materials import MaterialBroker, MaterialsPending, valid_id
 from credits import CreditError, configured_credits, estimate_seconds
+from costs import billing_scope
 from media import duration as media_duration
 
 OUTPUT_TTL = 72 * 3600
 RECORD_TTL = 30 * 86400
 
 
-def readiness():
+def readiness(voice_provider='fal'):
     missing = [name for name in ('OPENLUX_API_KEY', 'RERANK_API_KEY') if not os.environ.get(name)]
     indexing = bool(os.environ.get('OPENLUX_API_KEY'))
-    voice_missing = ([] if os.environ.get('INDEXTTS_302_API_KEY') or os.environ.get('TTS_API_KEY')
-                     else ['INDEXTTS_302_API_KEY'])
+    legacy = voice_provider != 'fal'
+    voice_key = (os.environ.get('INDEXTTS_302_API_KEY') or os.environ.get('TTS_API_KEY')) if legacy else os.environ.get('MIX_FAL_KEY')
+    voice_missing = [] if voice_key else ['INDEXTTS_302_API_KEY' if legacy else 'MIX_FAL_KEY']
     for binary in ('ffmpeg', 'ffprobe'):
         if not shutil.which(binary):
             missing.append(binary)
@@ -46,7 +48,7 @@ def readiness():
     return {'app': 'browser-material-mixer', 'browser_materials': True,
             'configured': not missing, 'indexing_configured': indexing, 'missing': missing,
             'voice_configured': not voice_missing, 'voice_missing': voice_missing,
-            'default_voice_configured': bool(os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL'))}
+            'default_voice_configured': bool(os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL')) if legacy else not voice_missing}
 
 
 def file_digest(path):
@@ -67,21 +69,26 @@ def provider_pending(folder):
         if record.get('submission') == 'uncertain':
             return True
         if record.get('task_id') and record.get('state') not in ('FAILURE', 'FAILED', 'ERROR', 'REVOKED'):
-            if record.get('state') != 'SUCCESS' or not path.with_suffix('.wav').is_file():
+            artifact = path.parent / record['artifact'] if record.get('provider') == 'fal' and record.get('artifact') else path.with_suffix('.wav')
+            if record.get('state') != 'SUCCESS' or not artifact.is_file():
                 return True
     return False
 
 
 def generate(spec, folder, log, audio_library=None, cloud_library=None):
     """Resume the saved provider/matching checkpoints before doing new work."""
-    config = readiness()
+    fal_voice = spec.get('voice_config', {}).get('provider') == 'fal'
+    config = readiness('fal' if fal_voice else '302')
     if not config['configured']:
         raise ValueError('服务器混剪配置缺失：' + ', '.join(config['missing']))
     from matcher import create_plan, estimate_timeline, resume_plan, write_json
-    from voice import synthesize_plan
     from finish import deliver
     folder = Path(folder).resolve()
     voice_mode = spec.get('voice_mode', 'synthesized')
+    if fal_voice:
+        from fal_voice import synthesize_plan
+    else:
+        from voice import synthesize_plan
     if voice_mode == 'synthesized' and not (folder / 'narration.wav').is_file():
         if not config.get('voice_configured', True):
             raise ValueError('服务器配音配置缺失：' + ', '.join(config['voice_missing']))
@@ -126,9 +133,13 @@ def generate(spec, folder, log, audio_library=None, cloud_library=None):
     else:
         log('正在准备音色并合成配音…')
         voice_config = dict(spec['voice_config'])
+        voice_config.pop('provider', None)
         if spec.get('voice_id'):
-            voice_config.update(speaker_url=library.signed_url(spec['owner'], spec['voice_id']),
-                                speaker_cache_key='library:' + spec['voice_id'] + ':' + spec['voice_sha256'])
+            if fal_voice:
+                voice_config['speaker_file'] = library.download(spec['owner'], spec['voice_id'], folder)
+            else:
+                voice_config.update(speaker_url=library.signed_url(spec['owner'], spec['voice_id']),
+                                    speaker_cache_key='library:' + spec['voice_id'] + ':' + spec['voice_sha256'])
         synthesize_plan(plan, folder, log=log, **voice_config)
     if spec.get('music_id'):
         log('正在读取背景音乐…')
@@ -183,10 +194,9 @@ class Jobs:
             if not data or data.get('status') == 'released':
                 seconds = estimate_seconds(spec['text'])
                 wallet = self.credits.snapshot(spec['owner'])
-                if wallet.get('pricing', {}).get('mode') == 'api_cost':
-                    raise CreditError('混剪功能暂未开放。', 503, 'COST_PROVIDER_NOT_CONFIGURED')
-                reserve_seconds = seconds * 1.25 + 2
-                if wallet.get('unlimited') is not True:
+                cost_mode = wallet.get('pricing', {}).get('mode') == 'api_cost'
+                reserve_seconds = 0 if cost_mode else seconds * 1.25 + 2
+                if not cost_mode and wallet.get('unlimited') is not True:
                     price = wallet['pricing']
                     available = wallet['available']
                     if math.ceil(seconds * price['videoPoints'] / price['videoSeconds']) > available:
@@ -195,11 +205,13 @@ class Jobs:
                     reserve_seconds = min(reserve_seconds, maximum)
                 # Floating-point boundaries must not reserve one point more than the wallet.
                 reserve_seconds = math.floor(reserve_seconds * 1000) / 1000
-                reserve_seconds = max(seconds, reserve_seconds)
+                reserve_seconds = 0 if cost_mode else max(seconds, reserve_seconds)
                 attempt = (data or {}).get('attempt', 0) + 1
                 data = {'source': 'workspace', 'attempt': attempt, 'creditId': f'mix:{job_id}:{attempt}',
                         'estimatedSeconds': seconds, 'initialUnits': reserve_seconds, 'reservedPoints': 0,
                         'chargedPoints': 0, 'status': 'reserve_pending'}
+                if cost_mode:
+                    data['billingMode'] = 'api_cost'
                 self._save_billing(job_id, data)
             record = self.credits.read(spec['owner'], data['creditId'])
             if record is None:
@@ -217,6 +229,11 @@ class Jobs:
             return
         with self.credit_lock:
             data = self._billing(job_id)
+            summary = {}
+            if data and data.get('billingMode') == 'api_cost':
+                summary = self.credits.close_scope(owner, 'job:' + job_id)
+                data.update(summary)
+                self._save_billing(job_id, data)
             if not data or data.get('status') in ('released', 'settled'):
                 return
             record = self.credits.read(owner, data['creditId'])
@@ -225,6 +242,7 @@ class Jobs:
             data.update(status=record['status'] if record else 'released',
                         chargedPoints=(record or {}).get('chargedPoints', 0),
                         exempt=(record or {}).get('exempt') is True)
+            data.update(summary)
             self._save_billing(job_id, data)
 
     def _settle(self, job_id, spec, result):
@@ -235,6 +253,8 @@ class Jobs:
             raise ValueError('实际成片时长无效，不能交付')
         with self.credit_lock:
             data = self._billing(job_id)
+            summary = (self.credits.close_scope(spec['owner'], 'job:' + job_id)
+                       if data.get('billingMode') == 'api_cost' else {})
             data.update(status='settle_pending', actualSeconds=seconds)
             self._save_billing(job_id, data)
             record = self.credits.settle(spec['owner'], data['creditId'], seconds)
@@ -242,6 +262,7 @@ class Jobs:
                 raise CreditError('成片已保存，积分结算暂未确认，请稍后继续。', uncertain=True)
             data.update(status='settled', chargedPoints=record['chargedPoints'], reservedPoints=record['reservedPoints'],
                         exempt=record.get('exempt') is True)
+            data.update(summary)
             self._save_billing(job_id, data)
 
     def _extend(self, job_id, spec, seconds):
@@ -249,6 +270,8 @@ class Jobs:
             return
         with self.credit_lock:
             data = self._billing(job_id)
+            if data.get('billingMode') == 'api_cost':
+                return
             record = self.credits.extend(spec['owner'], data['creditId'], seconds)
             data.update(reservedPoints=record['reservedPoints'], status=record['status'], exempt=record.get('exempt') is True)
             self._save_billing(job_id, data)
@@ -365,8 +388,11 @@ class Jobs:
             if spec.get('source') != 'cloud':
                 self.materials.device(spec['device_id'], spec['owner'])
             saved = folder / row['result'] if row['result'] else None
-            result = (saved if saved and saved.is_file() and (folder / 'quality-report.json').is_file()
-                      else Path(runner(spec, folder, lambda message: self.log(job_id, message)))).resolve()
+            billing = self._billing(job_id) if self.credits else None
+            with billing_scope(spec['owner'], 'job:' + job_id,
+                               legacy=bool(billing and billing.get('billingMode') != 'api_cost')):
+                result = (saved if saved and saved.is_file() and (folder / 'quality-report.json').is_file()
+                          else Path(runner(spec, folder, lambda message: self.log(job_id, message)))).resolve()
             if result.parent != folder or not result.is_file():
                 raise ValueError('任务输出路径无效')
             report = json.loads((folder / 'quality-report.json').read_text(encoding='utf-8'))
@@ -463,9 +489,7 @@ def normalize(body, owner):
             'voice_mode': voice_mode, 'voice_id': voice_id, 'music_id': music_id,
             'count': 1, 'duration': None,
             'voice_config': ({} if voice_mode == 'original' else {
-                             'speaker_url': None if voice_id else os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL', ''),
-                             'emotion_url': os.environ.get('INDEXTTS_EMOTION_AUDIO_URL') or None,
-                             'emotion_file': os.environ.get('INDEXTTS_EMOTION_AUDIO_PATH') or None})}
+                             'provider': 'fal', 'voice': os.environ.get('MIX_FAL_VOICE') or 'Vivian'})}
 
 
 def create_app(root=None, token=None, start_worker=True, runner=generate, audio_library=None, credits=None, cloud_library=None):

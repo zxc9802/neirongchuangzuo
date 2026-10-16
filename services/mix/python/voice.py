@@ -13,6 +13,7 @@ import requests
 from api import clean_error
 from matcher import write_json
 import media
+from costs import paid_post, metering_enabled
 
 TTS_BASE_URL = os.environ.get('INDEXTTS_BASE_URL') or os.environ.get('TTS_BASE_URL') or 'https://api.302.ai'
 TTS_BASE_URL = TTS_BASE_URL.rstrip('/')
@@ -110,7 +111,7 @@ def synthesize(text, speaker, emotion_url, emotion_hash, alpha, folder, log=prin
         attempts = job.get('attempts', []) + [{key: job.get(key) for key in ('task_id', 'state', 'result')}]
         job = {'spec': spec, 'attempts': attempts}
     if not job.get('task_id'):
-        if job.get('submission') == 'uncertain':
+        if job.get('submission') == 'uncertain' and not metering_enabled():
             raise RuntimeError(f'配音提交结果不确定，未获得任务 ID；请核对服务商记录后恢复：{record}')
         payload = {'text': text, 'speaker_audio_url': checked_url(speaker),
                    'emotion_alpha': validate_emotion(alpha)}
@@ -118,19 +119,23 @@ def synthesize(text, speaker, emotion_url, emotion_hash, alpha, folder, log=prin
             payload['emotion_audio_url'] = checked_url(emotion_url)
         else:
             payload['emotion_vector'] = [0, 0, 0, 0, 0, 0, 0, 1.0]
+        if job.get('submission') == 'uncertain' and metering_enabled():
+            # A refreshed COS signature must not turn recovery into a new paid task.
+            payload = job['request']
         authorization = headers()
         # Persist before POST: a lost reply is different from a confirmed failed task.
         job.update({'spec': spec, 'request': payload, 'submission': 'uncertain'})
         write_json(record, job)
         try:
-            response = requests.post(TASK_URL, headers=authorization, json=payload,
-                                     timeout=(15,90), allow_redirects=False)
+            metered = paid_post(TASK_URL, payload, call_key=f'tts:{digest}:{len(job.get("attempts", []))}')
+            response = None if metered is not None else requests.post(TASK_URL, headers=authorization, json=payload,
+                                                                     timeout=(15,90), allow_redirects=False)
         except requests.RequestException as exc:
             raise RuntimeError('配音提交结果不确定，请核对服务商任务后恢复：'+clean_error(exc)) from None
-        if 400 <= response.status_code < 500:
+        if response is not None and 400 <= response.status_code < 500:
             job['submission'] = 'rejected'
             write_json(record, job)
-        data = response_json(response)
+        data = metered if metered is not None else response_json(response)
         if not data.get('task_id'):
             raise ValueError('TTS 提交未返回 task_id，请核对服务商任务，避免重复提交')
         job.update({'task_id': data['task_id'], 'state': 'PENDING', 'submission': 'submitted'})

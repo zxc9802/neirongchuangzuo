@@ -97,7 +97,7 @@ class IntegrationTests(unittest.TestCase):
 
             with patch('app.readiness', return_value={'configured': True}), \
                     patch('api.Models', CountModels), patch('matcher.Models', CountModels), \
-                    patch('finish.Models', CountModels), patch('voice.synthesize_plan', side_effect=voice), \
+                    patch('finish.Models', CountModels), patch('fal_voice.synthesize_plan', side_effect=voice), \
                     patch('quality.review', side_effect=review):
                 for clip in clips:
                     response = client.post(prefix + '/analyze', json={'clip_id': clip['id'], 'frames': frames()}, headers=headers)

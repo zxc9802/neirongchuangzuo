@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { createHash, timingSafeEqual, randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile, rename, lstat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { createMixProviderCosts } from './provider-costs.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const ownerId = /^[a-f0-9]{64}$/;
@@ -9,9 +10,10 @@ const taskId = /^mix:[a-f0-9]{32}:[1-9][0-9]{0,5}$/;
 const publicRecord = record => record && Object.fromEntries(Object.entries(record).filter(([key]) => !['userId', 'wallet'].includes(key)));
 
 /** This listener is private to the Python worker. Identities never come from browser request bodies. */
-export function createMixCreditsBridge({ credits, dataDir, token }) {
+export function createMixCreditsBridge({ credits, dataDir, token, env = process.env, fetchImpl = fetch }) {
   const path = join(dataDir, 'credit-owners.json');
   let owners = {}, sequence = Promise.resolve(), server, starting;
+  const providers = createMixProviderCosts({ credits, dataDir, env, fetchImpl });
   const ready = (async () => {
     await mkdir(dataDir, { recursive: true });
     try {
@@ -40,22 +42,35 @@ export function createMixCreditsBridge({ credits, dataDir, token }) {
       const auth = Buffer.from(String(req.headers.authorization || '')), expected = Buffer.from('Bearer ' + token);
       if (auth.length !== expected.length || !timingSafeEqual(auth, expected) || req.method !== 'POST' || req.headers.origin) { send(401, { error: '内部积分凭据无效', code: 'UNAUTHENTICATED' }); return; }
       let size = 0, chunks = [];
-      for await (const chunk of req) { size += chunk.length; if (size > 8192) throw Object.assign(new Error('请求过大'), { status: 413 }); chunks.push(chunk); }
+      const limit = ['/provider', '/reject-response'].includes(req.url) ? 256 * 1024 * 1024 : 8192;
+      for await (const chunk of req) { size += chunk.length; if (size > limit) throw Object.assign(new Error('请求过大'), { status: 413 }); chunks.push(chunk); }
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       await ready; await sequence;
       if (!ownerId.test(body.owner || '') || !owners[body.owner]) { send(403, { error: '账号积分映射不可用', code: 'CREDITS_OWNER_UNKNOWN' }); return; }
       const userId = owners[body.owner];
       if (req.url === '/snapshot') { send(200, { wallet: await credits.snapshot(userId) }); return; }
+      if (['/provider', '/close-scope', '/reject-response'].includes(req.url)) {
+        if (!credits.costMode) throw Object.assign(new Error('当前任务使用原积分规则。'), { status: 409, code: 'COST_MODE_REQUIRED' });
+        const result = req.url === '/provider'
+          ? await providers.request(userId, body.owner, body.scope, body.url, body.payload, body.callKey)
+          : req.url === '/reject-response' ? await providers.reject(userId, body.owner, body.scope, body.url, body.payload)
+          : await providers.close(userId, body.owner, body.scope);
+        send(200, { result }); return;
+      }
       if (!taskId.test(body.taskId || '')) { send(400, { error: '混剪积分任务标识无效' }); return; }
       const argument = { userId, taskId: body.taskId, units: body.units };
       let record;
       switch (req.url) {
         case '/read': record = await credits.reservation(userId, body.taskId); break;
         case '/reserve':
-          if(credits.costMode) throw Object.assign(new Error('混剪功能暂未开放。'),{status:503,code:'COST_PROVIDER_NOT_CONFIGURED'});
-          record = await credits.reserve({ ...argument, kind: 'mix' }); break;
-        case '/extend': record = await credits.extendReservation(argument); break;
-        case '/settle': record = await credits.settle(argument); break;
+          record = credits.costMode && body.units === 0 ? await credits.reserveCost(argument) : await credits.reserve({ ...argument, kind: 'mix' }); break;
+        case '/extend':
+          record = await credits.reservation(userId, body.taskId);
+          if (record?.kind !== 'api-cost') record = await credits.extendReservation(argument);
+          break;
+        case '/settle':
+          record = await credits.reservation(userId, body.taskId);
+          record = record?.kind === 'api-cost' ? await credits.settleCost(argument) : await credits.settle(argument); break;
         case '/release': record = await credits.release(argument); break;
         default: send(404, { error: '接口不存在' }); return;
       }
