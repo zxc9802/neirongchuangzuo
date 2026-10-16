@@ -50,6 +50,30 @@ class BrowserMaterialBackendTests(unittest.TestCase):
             headers={**self.headers, 'X-Material-Owner': owner or self.owner},
             json={'folder_key': key, 'name': '我的素材'}).json()
 
+    def test_durable_progress_separates_vectors_descriptions_failures_and_account_access(self):
+        url = self.base + '/progress'
+        initial = self.client.get(url, headers=self.headers).json()
+        self.assertEqual((initial['total'], initial['vectorized'], initial['ready']), (1, 0, 0))
+        with self.broker.connect() as db:
+            db.execute("UPDATE clips SET state='indexed',vector=? WHERE device_id=?", ('[1,0]', self.device))
+            db.execute('INSERT INTO description_queue VALUES(?,?,?,1,?,?)',
+                       (self.device, self.clip['id'], 'pending.mp4', time.time(), time.time() + 60))
+        # A new broker instance must report the same in-progress durable work.
+        progress = local_materials.MaterialBroker(self.root).progress(self.device)
+        self.assertEqual((progress['vectorized'], progress['described'], progress['ready']), (1, 0, 0))
+        self.assertEqual((progress['description_pending'], progress['describing'], progress['description_retries']), (1, 1, 1))
+        with self.broker.connect() as db:
+            db.execute("UPDATE clips SET description='游泳池' WHERE device_id=?", (self.device,))
+            db.execute('DELETE FROM description_queue')
+        self.assertEqual(self.client.get(url, headers=self.headers).json()['ready'], 1)
+        self.assertEqual(self.client.get(url).status_code, 401)
+        self.assertEqual(self.client.get(url, headers={**self.headers, 'X-Material-Owner': 'e' * 64}).status_code, 404)
+        with self.broker.connect() as db:
+            db.execute("UPDATE clips SET state='error' WHERE device_id=?", (self.device,))
+        self.assertEqual(self.client.get(url, headers=self.headers).json()['failed'], 1)
+        self.broker.remove_asset(self.device, self.clip['asset_id'])
+        self.assertEqual(self.client.get(url, headers=self.headers).json()['total'], 0)
+
     @staticmethod
     def frames(color='blue', count=2, size=(64, 64)):
         image = io.BytesIO()
@@ -316,7 +340,9 @@ class BrowserMaterialBackendTests(unittest.TestCase):
         # The browser prefers sparse transfer for analysis, including small MOV/MP4 files.
         sparse = self.client.post(self.base + '/requests/' + request['id'] + '/sparse', headers=self.headers,
                                   json={'size': len(content), 'ranges': self.index_ranges(content)})
-        self.assertEqual(sparse.status_code, 422, 'a cached full source must route back to resumable full transfer')
+        self.assertEqual(sparse.status_code, 200)
+        self.assertTrue(sparse.json()['cached'], 'an existing complete source needs no new bytes')
+        self.assertEqual(sparse.json()['ranges'], [])
         segment = self.client.post(self.base + '/requests/' + request['id'] + '/segment', headers=self.headers,
                                    json={'size': 100, 'origin': 0})
         self.assertEqual(segment.status_code, 422, 'a segment fallback must also preserve cached render source bytes')

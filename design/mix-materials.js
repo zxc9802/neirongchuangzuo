@@ -47,6 +47,8 @@ export function stopMixMaterials() {
   state.client?.stop();
   state.client = null;
   clearTimeout(state.timer);
+  clearTimeout(state.statusTimer);
+  state.statusTimer = null;
   state.timer = null;
   for (const controller of state.controllers) controller.abort();
   state.controllers.clear();
@@ -136,7 +138,11 @@ function catalog() {
   }
   const entries = Object.values(state.client?.record?.manifest || {});
   state.fileCount = entries.length;
-  const visible = entries.filter(entry => state.client.files.has(entry.relativePath)).slice(0, 30);
+  const available = entries.filter(entry => state.client.files.has(entry.relativePath));
+  const byId = new Map(available.map(entry => [entry.assetId, entry]));
+  const visible = state.media.map(item => byId.get(item.id)).filter(Boolean);
+  const retained = new Set(visible.map(entry => entry.assetId));
+  for (const entry of available) { if (visible.length >= 30) break; if (!retained.has(entry.assetId)) visible.push(entry); }
   const keep = new Set(visible.map(entry => entry.assetId));
   for (const [id, item] of state.urls) if (!keep.has(id)) { URL.revokeObjectURL(item.url); state.urls.delete(id); }
   const media = visible.map(entry => {
@@ -162,11 +168,26 @@ function folderReadiness() {
     : state.status.processing ? '素材正在分析，请稍候' : state.status.indexed > 0 ? '' : '先上传视频素材';
   if (state.status.needsPermission) return '请重新连接素材文件夹';
   if (!state.status.connected) return '先选择素材文件夹';
-  if (state.client?.scanning) return '素材正在上传，请稍候';
-  if (!state.status.indexed) return '素材正在上传，请稍候';
+  if (state.client?.scanning) return '正在扫描本地素材，请稍候';
   const readable = Object.values(state.client?.record?.manifest || {}).some(entry =>
     state.client.files.has(entry.relativePath) && entry.clips?.some(clip => clip.state === 'indexed'));
+  if (state.status.indexed && !readable) return '请重新扫描可读取的素材';
+  if (state.client?.trackProgress && (!state.status.cloud || state.status.progressError)) return '正在确认云端分析进度，请稍候';
+  if (state.status.processing || state.status.cloud?.ready < state.status.cloud?.total) return '素材正在分析，完成后可开始混剪';
+  if (state.status.error) return '部分素材分析失败，请重试';
+  if (!state.status.indexed) return '请先完成素材分析';
   return readable ? '' : '请重新扫描可读取的素材';
+}
+
+function cloudJob(job = state.job) {
+  return job?.source === 'cloud' || !job?.source && state.client?.mode === 'cloud';
+}
+
+function resumeReadiness(job = state.job) {
+  if (job?.state === 'credit_pending') return '';
+  if (cloudJob(job)) return state.client?.mode === 'cloud' ? folderReadiness() : state.health?.configured ? '' : '生成服务尚未配置完成';
+  if (job?.device_id && state.client?.deviceId !== job.device_id) return '请连接此任务原来的素材文件夹';
+  return folderReadiness();
 }
 
 export function mixFolderLocked() { return state.busy || state.audio.busy || !!(state.job && !terminal(state.job)) || !!(state.pending && !state.pending.id); }
@@ -352,21 +373,34 @@ export function renderMixMaterials() {
     const pagination = pages > 1 ? `<div class="mix-folder-actions"><button data-action="mix-materials-previous" ${state.materialPage === 0 ? 'disabled' : ''}>上一页</button><span>${state.materialPage + 1}/${pages} 页</span><button data-action="mix-materials-next" ${state.materialPage === pages - 1 ? 'disabled' : ''}>下一页</button></div>` : '';
     return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite"><span>${text}</span>${analysisFee}${progress}${transfer}${error ? `<small class="mix-status-error">${escape(error)}</small>` : ''}<div class="mix-folder-actions"><button data-action="mix-scan">刷新素材库${status.error ? ' / 重试分析' : ''}</button>${state.pending && !state.pending.id && !state.busy ? `<button data-action="mix-retry-submit" ${retryHint ? `disabled title="${escape(retryHint)}"` : ''}>重试提交制作任务</button>` : ''}</div>${entries ? `<details id="mix-cloud-material-list" ${state.materialsExpanded ? 'open' : ''}><summary>管理云端素材（${state.fileCount}）</summary>${entries}${pagination}</details>` : ''}</div>`;
   }
-  const uploading = !status.needsPermission && (state.client?.scanning || status.uploadTotal || status.connected && status.processing);
-  const text = status.needsPermission ? '请重新连接素材文件夹，并在浏览器提示中选择“每次访问时都允许”，以后打开网站会自动连接' : uploading ? '素材正在上传' : status.connected ? status.error ? '部分素材上传失败，请重试' : status.total ? '素材上传完成' : '未找到可用的视频素材' : '';
-  const progress = status.uploadTotal ? `<progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="素材上传进度"></progress>` : state.client?.scanning ? '<progress aria-label="素材上传进度"></progress>' : status.totalFiles && !status.needsPermission ? `<progress max="${status.totalFiles}" value="${status.readyFiles}" aria-label="素材上传进度"></progress>` : '';
+  const cloud = status.cloud, stages = status.stages || {};
+  const processing = status.processing || !status.error && cloud?.ready < cloud?.total;
+  const text = status.needsPermission ? '请重新连接素材文件夹（原文件夹），已保存的云端分析可继续使用'
+    : status.uploadTotal ? '正在按需传输视频片段，请保持网页连接'
+    : status.connected ? state.client?.scanning ? '正在扫描本地素材'
+      : state.client?.trackProgress && (!cloud || status.progressError) ? '正在确认云端分析进度'
+      : processing ? '素材正在分析，完成后可手动开始混剪'
+      : status.error ? '部分素材分析失败，请重试' : status.total ? '素材分析完成' : '未找到可用的视频素材'
+    : '原片保留本地，云端保存分析结果；制作时按需传输片段。';
+  const meter = (label, value, total) => `<small>${label}：${value} / ${total}</small><progress max="${total || 1}" value="${value}" aria-label="${label}进度"></progress>`;
+  const local = status.connected && !status.needsPermission ? `${state.client?.scanning ? meter('本地扫描（视频）', status.scanned || 0, status.scanTotal || 0) : ''}
+    ${meter('画面准备（片段）', status.prepared || 0, status.total || 0)}
+    <small>本地抽帧 ${stages.frames?.active || 0}/${stages.frames?.limit || 5} 路 · 兼容解码 ${stages.wasm?.active || 0}/${stages.wasm?.limit || 2} 路</small>` : '';
+  const cloudProgress = cloud ? `${meter('云端向量', cloud.vectorized, cloud.total)}${meter('云端画面描述', cloud.described, cloud.total)}
+    <small>分析完成 ${cloud.ready}/${cloud.total} 个片段 · 正在分析 ${cloud.analyzing} · 正在补充描述 ${cloud.describing}${cloud.failed ? ` · 失败 ${cloud.failed}` : ''}${cloud.description_retries ? ` · 描述待重试 ${cloud.description_retries}` : ''}</small>`
+    : status.connected ? state.client?.trackProgress ? '<small>正在读取云端分析进度…</small>' : meter('已索引片段', status.indexed || 0, status.total || 0) : '';
+  const transfer = status.uploadTotal ? `<small>片段传输：${((status.uploadBytes || 0) / 1024 ** 2).toFixed(1)} / ${(status.uploadTotal / 1024 ** 2).toFixed(1)} MiB</small><progress max="${status.uploadTotal}" value="${status.uploadBytes || 0}" aria-label="片段传输进度"></progress>` : '';
+  const progress = `${local}${cloudProgress}${status.connected ? `<small>云端分析请求 ${stages.analysis?.active || 0}/${stages.analysis?.limit || 8} 路 · 原片不做整库上传</small>` : ''}${transfer}${status.progressError ? `<small class="mix-status-error">${escape(status.progressError)}</small>` : ''}`;
   const locked = mixFolderLocked();
   const disabled = locked ? 'disabled title="制作时请保持原素材文件夹连接"' : '';
-  const scan = status.connected && !status.needsPermission && !uploading;
+  const scan = status.connected && !status.needsPermission && !processing && !status.uploadTotal;
   const retry = status.connected && !status.needsPermission && status.error && !state.client?.scanning;
-  const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : state.job?.state === 'credit_pending' ? '' : folderReadiness();
-  const resume = resumable(state.job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>${state.job?.state === 'credit_pending' ? '重试确认积分' : '继续制作'}</button>` : '';
-  const actions = `${scan || retry ? `<button data-action="mix-scan" ${disabled}>${status.error ? '重试未完成素材' : '扫描新增 / 修改'}</button>` : ''}${scan ? `<button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${resume}${state.pending && !state.pending.id && !state.busy ? '<button data-action="mix-retry-submit">重试这次提交</button>' : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
+  const actions = `${scan || retry ? `<button data-action="mix-scan" ${disabled}>${status.error ? '重试未完成素材' : '扫描新增 / 修改'}</button>` : ''}${scan ? `<button data-action="mix-disconnect" ${disabled}>断开</button>` : ''}${state.pending && !state.pending.id && !state.busy ? `<button data-action="mix-retry-submit" ${folderReadiness() ? 'disabled' : ''}>重试提交制作任务</button>` : ''}${state.error && state.job ? '<button data-action="mix-refresh-job">刷新任务</button>' : ''}`;
   return `<div class="mix-material-status" id="mix-material-status" role="status" aria-live="polite">${text ? `<span>${text}</span>` : ''}${progress}${error ? `<small class="mix-status-error">${escape(error)}</small>` : ''}${actions ? `<div class="mix-folder-actions">${actions}</div>` : ''}</div>`;
 }
 
 export function mixJobLabel(job = state.job) {
-  if (job?.state === 'waiting_materials' && state.client?.mode === 'cloud') return '正在准备云端素材';
+  if (job?.state === 'waiting_materials' && cloudJob(job)) return '正在准备云端素材';
   const labels = { credit_pending: '积分确认中', queued: '任务已提交', matching: '正在匹配素材', waiting_materials: '正在等待本机素材', running: '正在制作视频', rendering: '正在合成视频', done: '成片已完成', completed: '成片已完成', failed: '制作失败', error: '制作失败', cancelled: '任务已取消', interrupted: '制作已中断', expired: '任务已过期' };
   return labels[job?.state] || '正在制作视频';
 }
@@ -384,10 +418,10 @@ export function renderMixProgress(job = state.job, now = Date.now()) {
   const age = Number.isFinite(updated) && updated > 0 ? Math.max(0, now / 1000 - updated) : null;
   const elapsed = Number.isFinite(started) && started > 0
     ? durationLabel((active || !updated ? now / 1000 : updated) - started) : '';
-  const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : job.state === 'credit_pending' ? '' : folderReadiness();
-  const resume = state.client?.mode === 'cloud' && resumable(job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>${job.state === 'credit_pending' ? '重试确认积分' : '继续此制作任务'}</button>` : '';
+  const resumeHint = state.audio.busy ? '正在保存音频，请稍候' : state.busy ? '正在继续制作' : resumeReadiness(job);
+  const resume = resumable(job) ? `<button data-action="mix-resume-job" ${resumeHint ? `disabled title="${escape(resumeHint)}"` : ''}>${job.state === 'credit_pending' ? '重试确认积分' : '继续此制作任务'}</button>` : '';
   const detail = job.error || (job.state === 'queued' ? '正在排队，等待开始制作；请勿重复提交。'
-    : job.state === 'waiting_materials' ? state.client?.mode === 'cloud' ? '正在准备云端原片。' : '等待本机传输命中的素材，请保持网页与素材文件夹连接。'
+    : job.state === 'waiting_materials' ? cloudJob(job) ? '正在准备云端原片。' : '等待本机传输命中的素材，请保持网页与素材文件夹连接。'
     : logs.at(-1) || (active ? '制作已开始，等待下一条进展。' : mixJobLabel(job)));
   return `<div class="mix-progress-current" role="status" aria-live="polite"><small>${active ? '当前步骤' : '任务结果'}</small><p>${escape(detail)}</p></div>
     <div class="mix-progress-time">${elapsed ? `<span>本次运行 ${elapsed}</span>` : ''}${age !== null ? `<span>最近进展：${age < 1 ? '刚刚' : durationLabel(age) + '前'}</span>` : ''}</div>${resume}
@@ -517,7 +551,7 @@ async function submit(pending) {
 
 async function resumeJob() {
   if (state.busy || state.audio.busy || !resumable(state.job)) return;
-  const hint = state.job?.state === 'credit_pending' ? '' : folderReadiness();
+  const hint = resumeReadiness();
   if (hint) { state.ctx?.toast?.(hint); return; }
   const revision = state.revision;
   const id = state.job.id;
@@ -552,7 +586,7 @@ export function initializeMixMaterials(ctx) {
     lifecycleBound = true;
     window.addEventListener('pagehide', stopMixMaterials);
     window.addEventListener('beforeunload', event => {
-      if (state.client?.mode === 'cloud' && state.client.scanning) { event.preventDefault(); event.returnValue = ''; }
+      if (state.client?.scanning || state.status.processing || state.status.uploadTotal || state.job && !terminal(state.job) && !cloudJob()) { event.preventDefault(); event.returnValue = ''; }
     });
     window.addEventListener('pageshow', event => { if (event.persisted && state.ctx) initializeMixMaterials(state.ctx); });
     window.addEventListener('workspace-account-change', stopMixMaterials);
@@ -572,16 +606,24 @@ export function initializeMixMaterials(ctx) {
         guard(revision);
         state.health = health;
         state.error = '';
-        const MaterialClient = health.material_library?.configured ? CloudMaterials : BrowserMaterials;
+        const MaterialClient = health.material_mode !== 'local' && health.material_library?.configured ? CloudMaterials : BrowserMaterials;
         state.client = new MaterialClient({ api: request,
-          ...(MaterialClient === BrowserMaterials ? { fetch: (path, options) => request(path, options, true) } : {}),
+          ...(MaterialClient === BrowserMaterials ? { fetch: (path, options) => request(path, options, true), trackProgress: !!health.material_progress } : {}),
           onStatus: status => {
             try { guard(revision); } catch { return; }
             const billed = status.indexed > state.status.indexed || state.status.processing && !status.processing;
             state.status = { ...status };
-            const changed = catalog();
-            updateStatus();
-            if (changed) refreshPreview(true);
+            const paint = () => {
+              state.statusTimer = null;
+              try { guard(revision); } catch { return; }
+              const changed = catalog();
+              updateStatus();
+              if (changed) refreshPreview(true);
+            };
+            // Coalesce parallel decode/model completions instead of rebuilding the UI per frame.
+            if (typeof globalThis.window?.requestAnimationFrame === 'function') {
+              if (!state.statusTimer) state.statusTimer = setTimeout(paint, 200);
+            } else paint();
             if (billed && workspaceCreditsState().snapshot?.pricing?.mode === 'api_cost') void refreshWorkspaceCredits({ afterCurrent: true });
           } });
         updateAudio(); updateStatus(); refreshPreview(true);

@@ -7,6 +7,18 @@ import { createPreviewServer } from '../preview.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const idleAI = () => Object.assign(async () => false, { ready: Promise.resolve(), shutdown: async () => {} });
+
+test('browser progress is a read-only authenticated route with server-derived ownership', async t => {
+  const { base, received } = await fixture(t);
+  const path = `/api/browser-materials/devices/${'d'.repeat(32)}/progress`;
+  assert.equal((await fetch(base + path)).status, 401);
+  assert.equal(received.length, 0);
+  assert.equal((await fetch(base + path, { headers: { cookie: 'session=a', 'x-material-owner': hash('bob') } })).status, 200);
+  assert.equal(received[0].path, path.replace('/api/', '/v1/'));
+  assert.equal(received[0].headers['x-material-owner'], hash('alice'));
+  assert.equal((await fetch(base + path, { method: 'POST', headers: { cookie: 'session=a', Origin: 'https://studio.example' } })).status, 404);
+  assert.equal(received.length, 1);
+});
 async function listen(server) {
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   return `http://127.0.0.1:${server.address().port}`;

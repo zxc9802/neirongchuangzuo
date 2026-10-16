@@ -10,7 +10,7 @@ const settle = async predicate => {
   assert.ok(predicate(), 'browser UI did not finish expected work');
 };
 
-async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchMaterials, fetchCredits, xhr, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [], voice_configured: true, default_voice_configured: true } } = {}) {
+async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchMaterials, fetchCredits, fetchProgress, xhr, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [], voice_configured: true, default_voice_configured: true } } = {}) {
   const original = Object.fromEntries(['workspaceUser', 'document', 'window', 'location', 'indexedDB', 'localStorage', 'fetch', 'XMLHttpRequest'].map(key => [key, globalThis[key]]));
   const storage = new Map();
   const databases = new Map();
@@ -73,6 +73,8 @@ async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchMate
     if (url.endsWith('/clips')) return Response.json({ clips: JSON.parse(options.body).clips.map(clip => ({ id: clip.id, state: 'indexed' })) });
     if (url.endsWith('/requests')) return Response.json({ requests: [] });
     if (url.endsWith('/heartbeat')) return Response.json({});
+    if (url.includes('/assets/') && options.method === 'DELETE') return Response.json({ ok: true });
+    if (url.endsWith('/progress')) return fetchProgress ? fetchProgress() : Response.json({ total: files, vectorized: files, described: files, ready: files, analyzing: 0, describing: 0, failed: 0 });
     if (url.startsWith('/api/mix/jobs')) return fetchJob ? fetchJob(url, options, calls) : Response.json(url === '/api/mix/jobs' ? { jobs: [] } : { id, state: 'completed', video_url: `/api/mix/jobs/${id}/video` });
     throw new Error('unexpected browser request ' + url);
   };
@@ -159,7 +161,7 @@ test('folder selection stays in the main upload area without an idle footer uplo
   } finally { f.restore(); }
 });
 
-test('material preparation shows upload copy and actual progress through scanning, indexing and transfer', async () => {
+test('material preparation distinguishes scanning, frame preparation, analysis and clip transfer', async () => {
   const f = await fixture({ files: 2 });
   try {
     await f.mod.initializeMixMaterials(f.ctx);
@@ -167,22 +169,23 @@ test('material preparation shows upload copy and actual progress through scannin
     const clips = Object.values(state.client.record.manifest).flatMap(entry => entry.clips);
     clips[1].state = 'pending';
     state.client.scanning = true;
-    state.client._report({ text: '正在向量化素材' });
-    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材正在上传/);
-    assert.match(f.nodes['#mix-material-status'].innerHTML, /<progress aria-label="素材上传进度"><\/progress>/);
+    state.client._report({ text: '正在向量化素材', scanned: 1, scanTotal: 2 });
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /正在扫描本地素材/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /max="2" value="1" aria-label="本地扫描（视频）进度"/);
     state.client.scanning = false;
     state.client._report();
     assert.match(f.nodes['#mix-material-status'].innerHTML, /max="2" value="1"/);
-    assert.doesNotMatch(f.nodes['#mix-material-status'].innerHTML, /向量化|索引|并行|AI 分析|data-action=/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /本地抽帧 0\/5 路/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /云端分析请求 0\/8 路/);
     assert.equal(f.nodes['#studio-generation-hint'].textContent.includes('索引'), false);
     state.client._report({ uploadTotal: 100, uploadBytes: 25 });
     assert.match(f.nodes['#mix-material-status'].innerHTML, /max="100" value="25"/);
     clips[1].state = 'indexed';
     state.client._report();
-    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材正在上传/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /按需传输视频片段/);
     assert.match(f.nodes['#mix-material-status'].innerHTML, /max="100" value="25"/);
     state.client._report({ uploadTotal: 0, uploadBytes: 0 });
-    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材上传完成/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材分析完成/);
     assert.match(f.nodes['#mix-material-status'].innerHTML, /max="2" value="2"/);
   } finally { f.restore(); }
 });
@@ -199,15 +202,15 @@ test('queued and running video repairs remain in the upload progress until their
     client._queueRepair('bad.mov', file);
     client._report({ scanned: 2, error: 'bad.mov：等待处理' });
     let html = f.nodes['#mix-material-status'].innerHTML;
-    assert.match(html, /素材正在上传/);
-    assert.match(html, /max="2" value="1"/);
+    assert.match(html, /素材正在分析/);
+    assert.match(html, /画面准备/);
     assert.doesNotMatch(html, /素材上传完成/);
     assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
     assert.doesNotMatch(html, /data-action="mix-disconnect"/);
     client.repairs.get('bad.mov').attempted = true;
     client.workers.set('repair:bad.mov', Promise.resolve());
     client._report();
-    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材正在上传/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材正在分析/);
     client.workers.clear();
     client.repairs.get('bad.mov').failed = true;
     client.attempts.set('repair:bad.mov', 4);
@@ -251,7 +254,7 @@ test('manual retry is available during automatic retry backoff and reuses comple
     client._report({ error: 'video-1.mp4：接口暂时不可用' });
     assert.equal(client.status.processing, true);
     const html = f.nodes['#mix-material-status'].innerHTML;
-    assert.match(html, /素材正在上传/);
+    assert.match(html, /素材正在分析/);
     assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
     assert.doesNotMatch(html, /data-action="mix-disconnect"/);
     const analyzed = [], originalFetch = globalThis.fetch;
@@ -545,7 +548,7 @@ test('audio uploads prevent resuming an interrupted job until upload completion'
     f.mod.handleMixMaterialAction('mix-resume-job', { dataset: {} }, f.ctx);
     await new Promise(resolve => setTimeout(resolve, 10));
     assert.equal(f.calls.some(call => call.url.endsWith('/resume')), false);
-    assert.match(f.mod.renderMixMaterials(f.ctx), /disabled title="正在保存音频/);
+    assert.match(f.mod.renderMixProgress(), /disabled title="正在保存音频/);
     uploads[0].abort();
     await uploading;
   } finally { f.restore(); }
@@ -588,7 +591,7 @@ test('recursive restoration indexes every file while displaying a small catalog 
     assert.equal(state.status.connected, true);
     assert.equal(Object.keys(f.databases.get('workbench-browser-materials:account-a').manifest).length, 36);
     assert.match(f.mod.renderMixMaterials(f.ctx), /mix-material-status/);
-    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材上传完成/);
+    assert.match(f.nodes['#mix-material-status'].innerHTML, /素材分析完成/);
     assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, false);
   } finally { f.restore(); }
 });
@@ -697,7 +700,8 @@ test('resume continues the saved job once without a new creation request or idem
     : Response.json(url === '/api/mix/jobs' ? { jobs: [] } : { id, state: 'interrupted', error: '连接中断' }) });
   try {
     await f.mod.initializeMixMaterials(f.ctx);
-    assert.match(f.mod.renderMixMaterials(f.ctx), /data-action="mix-resume-job"/);
+    assert.doesNotMatch(f.mod.renderMixMaterials(f.ctx), /data-action="mix-resume-job"/);
+    assert.match(f.mod.renderMixProgress(), /data-action="mix-resume-job"/);
     f.mod.handleMixMaterialAction('mix-resume-job', { dataset: {} }, f.ctx);
     f.mod.handleMixMaterialAction('mix-resume-job', { dataset: {} }, f.ctx);
     await settle(() => f.calls.some(call => call.url.endsWith('/resume')));
@@ -813,7 +817,7 @@ test('metadata rescan blocks generation until its guarded completion updates the
     state.client.readDuration = () => pending;
     f.mod.handleMixMaterialAction('mix-scan', { dataset: {} }, f.ctx);
     await settle(() => state.client.scanning);
-    assert.match(f.mod.mixReadiness(f.ctx), /素材正在上传/);
+    assert.match(f.mod.mixReadiness(f.ctx), /正在扫描本地素材/);
     assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
     release(2);
     await settle(() => !state.client.scanning);
@@ -892,6 +896,43 @@ test('indexing can restore before TTS is configured and BFCache pageshow reconne
 });
 
 const cloudHealth = { configured: true, voice_configured: true, default_voice_configured: true, material_library: { configured: true, missing: [] } };
+
+test('local-first health keeps COS originals untouched and waits for durable descriptions before manual generation', async () => {
+  let progress = { total: 2, vectorized: 2, described: 1, ready: 1, analyzing: 0, describing: 1, failed: 0 };
+  const f = await fixture({ files: 2, health: { ...cloudHealth, material_mode: 'local', material_progress: true },
+    fetchProgress: () => Response.json(progress) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    await settle(() => f.mod.getMixState().status.cloud?.total === 2);
+    const { client } = f.mod.getMixState();
+    assert.ok(client instanceof BrowserMaterials);
+    assert.equal(f.calls.some(call => call.url.startsWith('/api/mix/materials')), false);
+    assert.match(f.mod.renderMixMaterials(), /云端向量：2 \/ 2/);
+    assert.match(f.mod.renderMixMaterials(), /云端画面描述：1 \/ 2/);
+    assert.match(f.mod.mixReadiness(f.ctx), /素材正在分析/);
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
+    progress = { ...progress, described: 2, ready: 2, describing: 0 };
+    await client._pollProgress(client.generation);
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, false);
+    assert.equal(f.calls.some(call => call.url === '/api/mix/jobs' && call.method === 'POST'), false);
+    client._report({ progressError: '云端进度暂时无法更新，正在重连' });
+    assert.match(f.mod.mixReadiness(f.ctx), /正在确认云端分析进度/);
+  } finally { f.restore(); }
+});
+
+test('old cloud jobs keep their source and can be resumed after defaulting to local materials', async () => {
+  const job = { id, state: 'failed', source: 'cloud', device_id: null };
+  const f = await fixture({ files: 0, health: { ...cloudHealth, material_mode: 'local', material_progress: true },
+    fetchJob: url => Response.json(url === '/api/mix/jobs' ? { jobs: [job] } : job) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.match(f.mod.renderMixProgress(), /data-action="mix-resume-job" >继续此制作任务/);
+    assert.equal(f.mod.mixJobLabel({ ...job, state: 'waiting_materials' }), '正在准备云端素材');
+    f.mod.getMixState().job = { ...job, source: 'browser', device_id: 'e'.repeat(32) };
+    assert.match(f.mod.renderMixProgress(), /disabled title="请连接此任务原来的素材文件夹/);
+  } finally { f.restore(); }
+});
 const cloudItem = (n, overrides = {}) => {
   const id = n.toString(16).padStart(32, '0');
   return { id, name: `素材/视频-${n}.mp4`, bytes: 10, duration: 8, state: 'ready', error: null, indexed_clips: 1, url: `/api/mix/materials/${id}/stream`, ...overrides };
@@ -1194,7 +1235,7 @@ test('a 256-item cloud library paginates management in groups of 50 and preserve
   } finally { f.restore(); }
 });
 
-test('cloud catalogs never preload original thumbnails while local media keeps metadata previews', async () => {
+test('local and cloud catalogs avoid concurrent video previews during analysis', async () => {
   for (const cloud of [true, false]) {
     const f = await fixture({ useShared: true, files: 2,
       ...(cloud ? { health: cloudHealth, fetchMaterials: () => Response.json({ configured: true,
@@ -1204,15 +1245,9 @@ test('cloud catalogs never preload original thumbnails while local media keeps m
       const html = renderStudio('mix', f.ctx);
       const list = html.slice(html.indexOf('<div class="studio-media-list">'), html.indexOf('<section class="studio-preview'));
       const preview = html.match(/<video id="studio-video-preview"[^>]*>/)[0];
-      if (cloud) {
-        assert.doesNotMatch(list, /<video|\bsrc=/);
-        assert.equal((html.match(/<video/g) || []).length, 1);
-        assert.match(preview, /preload="none"/);
-      } else {
-        assert.equal((list.match(/<video/g) || []).length, 2);
-        assert.match(list, /preload="metadata"/);
-        assert.match(preview, /preload="metadata"/);
-      }
+      assert.doesNotMatch(list, /<video|\bsrc=/);
+      assert.equal((html.match(/<video/g) || []).length, 1);
+      assert.match(preview, /preload="none"/);
     } finally { f.restore(); }
   }
 });

@@ -512,8 +512,8 @@ class BrowserMaterials:
                                       (device_id, request['asset_id'])).fetchone()
                 if (request['kind'] != 'source' and previous and previous['state'] != 'expired' and
                         previous['mode'] == 'full' and previous['expires'] > time.time() and Path(previous['path']).is_file()):
-                    # The browser's sparse-first proxy path must reuse a full source already
-                    # retained for rendering. Its 422 fallback resumes that existing file.
+                    if previous['state'] == 'ready' and Path(previous['path']).stat().st_size == previous['size']:
+                        return {'id': previous['id'], 'ranges': [], 'cached': True}
                     raise HTTPException(422, '已有完整原片缓存，请恢复整文件传输')
                 if (previous and previous['state'] != 'expired' and previous['mode'] == 'sparse' and
                         previous['expires'] > time.time() and Path(previous['path']).is_file()):
@@ -886,6 +886,10 @@ def attach_browser_materials(app, broker, authorize, material_body):
         body = await material_body(request)
         await call(adapter.maybe_cleanup)
         return await call(broker.register_clips, device_id, body.get('clips'), restore_revoked=True)
+
+    @app.get(prefix + '/progress')
+    async def progress(device_id=Depends(device)):
+        return await call(broker.progress, device_id)
 
     @app.delete(prefix + '/assets/{asset_id}')
     def remove_asset(asset_id: str, device_id=Depends(device)):

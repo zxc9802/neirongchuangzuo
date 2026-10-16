@@ -6,6 +6,51 @@ import BrowserMaterials from '../design/browser-materials.js';
 const helpers = BrowserMaterials?.helpers || {};
 const digest = value => createHash('sha256').update(value).digest('hex');
 
+test('cloud progress polls independently of analysis and ignores a late response after stopping', async () => {
+  const backend = server();
+  let release;
+  const blocked = new Promise(resolve => { release = resolve; });
+  const reports = [];
+  const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    sampleFrames: async () => ['frame'], trackProgress: true, onStatus: status => reports.push(status),
+    api: async (path, options) => {
+      if (path.endsWith('/progress')) return blocked;
+      return backend.api(path, options);
+    } });
+  try {
+    await controller.selectFiles([videoFile('素材/a.mp4')]);
+    await eventually(() => controller.status.indexed === 1);
+    assert.equal(controller.status.scanTotal, 1);
+    assert.equal(controller.status.prepared, 1);
+    assert.ok(reports.some(status => status.stages.frames.active === 1));
+    assert.ok(reports.some(status => status.stages.analysis.active === 1));
+    const count = reports.length;
+    controller.stop();
+    release({ total: 999, ready: 999 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(reports.length, count);
+    assert.equal(controller.status.cloud, null);
+  } finally { controller.stop(); release({}); }
+});
+
+test('restoring a folder without read permission still displays saved cloud analysis progress', async () => {
+  const store = memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32),
+    handle: { queryPermission: async () => 'prompt' }, manifest: {}, uploads: {} });
+  const calls = [];
+  const controller = new BrowserMaterials({ store, trackProgress: true, api: async path => {
+    calls.push(path);
+    return { total: 7, vectorized: 7, described: 4, ready: 4 };
+  } });
+  try {
+    await controller.restore();
+    await eventually(() => controller.status.cloud?.ready === 4);
+    assert.equal(controller.status.needsPermission, true);
+    assert.equal(controller.connected, false);
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].endsWith('/progress'));
+  } finally { controller.stop(); }
+});
+
 test('IndexedDB folder stores capture separate account namespaces', async () => {
   const original = { indexedDB: globalThis.indexedDB, workspaceUser: globalThis.workspaceUser };
   const names = [];
@@ -537,6 +582,7 @@ test('a stalled mix source upload leaves all eight analysis slots running and ne
   let releaseUpload, cycle, uploading = false, completed = false, frames = 0, analyses = 0, peak = 0, creates = 0, polls = 0;
   const upload = new Promise(resolve => { releaseUpload = resolve; });
   const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    wasmMedia: { extractSegment: async () => ({ file: source, origin: 0 }) },
     sampleFrames: async () => { frames++; return ['frame']; }, api: async (path, options = {}) => {
       if (path.endsWith('/clips')) {
         const result = await backend.api(path, options);
@@ -546,7 +592,7 @@ test('a stalled mix source upload leaves all eight analysis slots running and ne
       }
       if (path.endsWith('/requests')) { polls++; return { requests: completed ? [] : [{ id: '2'.repeat(32), kind: 'source',
         asset_id: controller.record.manifest['source.mp4'].assetId }] }; }
-      if (path.endsWith('/file')) { creates++; return { id: '3'.repeat(32), offset: 0 }; }
+      if (path.endsWith('/segment')) { creates++; return { id: '3'.repeat(32), offset: 0 }; }
       if (options.method === 'PATCH') {
         uploading = true; await upload;
         return { offset: Number(options.headers['Upload-Offset']) + options.body.byteLength };
@@ -718,7 +764,7 @@ test('multi-gigabyte sources are indexed after reading only a small fingerprint'
   } finally { controller.stop(); }
 });
 
-test('MOV clips bypass native browser timeouts and reselecting the folder reuses indexed clips', async () => {
+test('MOV clips try local decoding with compatible fallback and reselecting the folder reuses indexed clips', async () => {
   const backend = server();
   const attempts = [];
   const originalNow = Date.now;
@@ -740,7 +786,7 @@ test('MOV clips bypass native browser timeouts and reselecting the folder reuses
     Date.now = () => now;
     await controller.selectFiles(files);
     for (let i = 0; i < 5; i++) { await controller._cycle(controller.generation); await Promise.all(controller.workers.values()); }
-    assert.deepEqual(attempts, ['good.mp4', 'good.mp4']);
+    assert.deepEqual(attempts.sort(), ['bad.mov', 'bad.mov', 'good.mp4', 'good.mp4']);
     assert.equal(controller.status.indexed, 4);
     assert.equal(controller.status.error, '');
     broken = false;
@@ -836,7 +882,7 @@ test('server registration must confirm a pending clip before analysis is allowed
   } finally { controller.stop(); }
 });
 
-test('source requests persist their upload ID and resume in a new controller via same-origin HEAD', async () => {
+test('segment requests resume the server offset in a new controller after a lost acknowledgement', async () => {
   const file = videoFile('a.mp4', 1, Buffer.alloc(4 * 1024 * 1024 + 7, 3));
   const store = memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32),
     handle: directory('素材', [file]), manifest: {}, uploads: {} });
@@ -847,7 +893,7 @@ test('source requests persist their upload ID and resume in a new controller via
   let fulfilled = false;
   const offsets = [];
   const backend = server();
-  const options = { store, readDuration: async () => 2, api: async (path, config) => {
+  const options = { store, wasmMedia: { extractSegment: async () => ({ file, origin: 0 }) }, readDuration: async () => 2, api: async (path, config) => {
     if (path.endsWith('/clips')) {
       const result = await backend.api(path, config);
       result.clips.forEach(clip => { clip.state = 'indexed'; });
@@ -855,9 +901,8 @@ test('source requests persist their upload ID and resume in a new controller via
     }
     if (path.endsWith('/requests')) return { requests: fulfilled ? [] : [{ id: '2'.repeat(32),
       asset_id: store.value.manifest['a.mp4'].assetId, start: 0, end: 2, kind: 'source' }] };
-    if (path.endsWith('/file')) { creates++; return { id: '3'.repeat(32), offset: 0 }; }
+    if (path.endsWith('/segment')) { creates++; return { id: '3'.repeat(32), offset }; }
     if (config?.method === 'PATCH') {
-      assert.equal(store.value.uploads['2'.repeat(32)].id, '3'.repeat(32));
       assert.equal(config.headers['Content-Type'], 'application/octet-stream');
       assert.equal(config.headers['Upload-Checksum'], digest(Buffer.from(config.body)));
       assert.equal(config.body.byteLength <= helpers.CHUNK_SIZE, true);
@@ -881,12 +926,12 @@ test('source requests persist their upload ID and resume in a new controller via
     await controller.restore();
     await eventually(() => controller.status.error.includes('offline'));
     controller.stop();
-    assert.equal(store.value.uploads['2'.repeat(32)].id, '3'.repeat(32));
+    assert.equal(offset, helpers.CHUNK_SIZE);
     allowHead = true;
     controller = new BrowserMaterials(options);
     await controller.restore();
     await eventually(() => fulfilled && !store.value.uploads['2'.repeat(32)]);
-    assert.equal(creates, 1);
+    assert.equal(creates, 2);
     assert.deepEqual(offsets, [0, helpers.CHUNK_SIZE]);
   } finally { controller?.stop(); }
 });
@@ -898,9 +943,10 @@ test('background indexing completion preserves an ongoing source upload progress
   const analysis = new Promise(resolve => { releaseAnalysis = resolve; });
   const uploading = new Promise(resolve => { releaseUpload = resolve; });
   const controller = new BrowserMaterials({ store: memoryStore(), readDuration: async () => 2,
+    wasmMedia: { extractSegment: async () => ({ file, origin: 0 }) },
     sampleFrames: async () => ['frame'], api: async (path, options = {}) => {
       if (path.endsWith('/analyze')) { await analysis; return { complete: true }; }
-      if (path.endsWith('/file')) return { id: '3'.repeat(32), offset: 0 };
+      if (path.endsWith('/segment')) return { id: '3'.repeat(32), offset: 0 };
       if (options.method === 'PATCH') {
         const offset = Number(options.headers['Upload-Offset']);
         if (offset) { lastChunk = true; await uploading; }
@@ -1497,7 +1543,7 @@ test('failed analysis waits until every compatibility probe and server first ana
       }
       await Promise.all(controller.workers.values());
       assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 1, 'server clips must finish their first attempt before retries');
-      assert.equal(controller.record.manifest[name].decoder, 'server');
+      assert.equal(controller.record.manifest[name].decoder, 'wasm');
     }
     await cycle(); await Promise.all(controller.workers.values());
     assert.equal(events.filter(event => event === 'analyze:' + failedId).length, 2);
@@ -1535,7 +1581,7 @@ test('failed compatibility probing moves behind other files, retries three times
     await cycle(); await cycle();
     assert.equal(controller.status.indexed, 2);
     assert.equal(probes.filter(name => name === 'good.mov').length, 1, 'manual retry must reuse completed files');
-    assert.equal(store.value.manifest['good.mov'].decoder, 'server');
+    assert.equal(store.value.manifest['good.mov'].decoder, 'wasm');
     assert.equal(controller.status.error, '');
   } finally { controller.stop(); Date.now = originalNow; }
 });
@@ -1642,7 +1688,7 @@ test('temporary analysis failures recover after two attempts without rescanning 
   } finally { controller.stop(); Date.now = originalNow; }
 });
 
-test('duration repair probes metadata once then uses server analysis without copying originals', async () => {
+test('duration repair probes metadata once then extracts local frames without copying originals', async () => {
   const backend = server(), events = [];
   const store = memoryStore();
   const big = largeFile('素材/big.mp4', 3 * 1024 ** 3, new Uint8Array(0), 7);
@@ -1658,9 +1704,9 @@ test('duration repair probes metadata once then uses server analysis without cop
     await controller.selectFiles([big, bad, good]);
     await eventually(() => controller.status.indexed === 3);
     assert.ok(events.indexOf('indexed') < events.indexOf('probe:bad.mov'));
-    assert.deepEqual(events.filter(event => event.endsWith('bad.mov')), ['probe:bad.mov']);
+    assert.deepEqual(events.filter(event => event.endsWith('bad.mov')), ['probe:bad.mov', 'wasm:bad.mov']);
     assert.equal(controller.files.get('bad.mov'), bad, 'the original file is read in place');
-    assert.equal(controller.record.manifest['bad.mov'].decoder, 'server');
+    assert.equal(controller.record.manifest['bad.mov'].decoder, 'wasm');
     assert.equal(controller.record.manifest['big.mp4'].decoder, undefined);
     assert.equal(controller.record.manifest['big.mp4'].assetId, await helpers.assetId('big.mp4', big.size, 7));
     assert.equal(controller.status.error, '');
@@ -1753,8 +1799,8 @@ function sourceHarness(file, handlers, options = {}, request = { id: '2'.repeat(
   return { controller, patches, posts, done: () => fulfilled };
 }
 
-test('large MP4 sources upload only the index and the planned packet ranges', async () => {
-  const size = 3 * 1024 ** 3;
+test('small and large MP4 sources upload only the index and the planned packet ranges', async () => {
+  for (const size of [8 * 1024 ** 2, 3 * 1024 ** 3]) {
   const file = largeFile('素材/long.mp4', size, mp4Header(size));
   const bodies = {}, id = '4'.repeat(32);
   const { controller, patches, posts, done } = sourceHarness(file, {
@@ -1769,6 +1815,7 @@ test('large MP4 sources upload only the index and the planned packet ranges', as
     assert.deepEqual(patches, [[id, 0, 140], [id, 1000, helpers.CHUNK_SIZE], [id, 1000 + helpers.CHUNK_SIZE, 9]]);
     assert.equal(controller.status.error, '');
   } finally { controller.stop(); }
+  }
 });
 
 test('a sparse plan the server cannot cut falls back to a wasm stream-copied segment', async () => {
@@ -1793,17 +1840,16 @@ test('a sparse plan the server cannot cut falls back to a wasm stream-copied seg
   } finally { controller.stop(); }
 });
 
-test('native preview reuses a retained full source when sparse preparation asks for full resume', async () => {
+test('small sources fall back to segments when sparse parsing fails without uploading full files', async () => {
   const size = 50000, file = largeFile('素材/a.mov', size, mp4Header(size));
   const { controller, posts, patches, done } = sourceHarness(file, {
     sparse: () => { throw Object.assign(new Error('已有完整原片缓存'), { status: 422 }); },
-    file: () => ({ id: '5'.repeat(32), offset: size }), complete: () => ({ complete: true }) }, {},
-    { id: '2'.repeat(32), kind: 'proxy', start: 0, end: 2 });
+    segment: () => ({ id: '5'.repeat(32), offset: 0 }), complete: () => ({ complete: true }) }, { wasmMedia: { extractSegment: async () => ({ file: new Blob(['segment']), origin: 0 }) } });
   try {
     await controller.selectFiles([file]);
     await eventually(done);
-    assert.deepEqual(posts, ['sparse', 'file', 'complete']);
-    assert.deepEqual(patches, [], 'the retained original bytes must not be uploaded again');
+    assert.deepEqual(posts, ['sparse', 'segment', 'complete']);
+    assert.deepEqual(patches, [['5'.repeat(32), 0, 7]], 'only the requested segment is uploaded');
   } finally { controller.stop(); }
 });
 
@@ -1823,19 +1869,19 @@ test('large non-MP4 sources send only a segment around the requested clip', asyn
 test('a preview request switches an indexed video to native transfer when browser sampling fails', async () => {
   const file = videoFile('素材/a.mp4');
   const { controller, done, posts } = sourceHarness(file, {
-    file: () => ({ id: '5'.repeat(32), offset: 0 }), complete: () => ({ complete: true }) }, {
+    segment: () => ({ id: '5'.repeat(32), offset: 0 }), complete: () => ({ complete: true }) }, {
     sampleFrames: async () => { throw Object.assign(new Error('seek failed'), { code: 'MEDIA_DECODE' }); },
-    wasmMedia: { sampleFrames: async () => ['wasm-frame', 'wasm-frame'] } },
+    wasmMedia: { extractSegment: async () => ({ file: new Blob(['segment']), origin: 0 }) } },
   { id: '2'.repeat(32), kind: 'proxy', start: 0, end: 2 });
   try {
     await controller.selectFiles([file]);
     await eventually(done);
-    assert.deepEqual(posts, ['file', 'complete']);
+    assert.deepEqual(posts, ['segment', 'complete']);
     assert.equal(controller.record.manifest['a.mp4'].decoder, 'server');
   } finally { controller.stop(); }
 });
 
-test('MOV and saved server or wasm entries submit cached native proxies without browser frames', async () => {
+test('MOV and wasm entries extract local frames while saved server fallback remains usable', async () => {
   for (const decoder of [undefined, 'server', 'wasm']) {
     const file = videoFile(decoder ? '素材/a.mp4' : '素材/a.MOV'), backend = server();
     const entry = await helpers.inspectFile(file.name, file, null, async () => 2);
@@ -1849,9 +1895,10 @@ test('MOV and saved server or wasm entries submit cached native proxies without 
     try {
       await controller.selectFiles([file]);
       await eventually(() => controller.status.indexed === 1);
-      assert.equal(sampled, 0);
+      assert.equal(sampled, decoder === 'server' ? 0 : 1);
       const body = backend.calls.find(call => call.path.endsWith('/analyze')).body;
-      assert.deepEqual(body, { clip_id: entry.clips[0].id, source_request_id: '8'.repeat(32) });
+      assert.deepEqual(body, decoder === 'server' ? { clip_id: entry.clips[0].id, source_request_id: '8'.repeat(32) }
+        : { clip_id: entry.clips[0].id, frames: ['frame'] });
       assert.equal(controller.files.get(file.name), file);
       assert.equal(controller.record.manifest[file.name].assetId, entry.assetId);
     } finally { controller.stop(); }
@@ -1918,7 +1965,7 @@ test('native analysis and render share one transfer stage and release it before 
       if (path.endsWith('/analyze')) { modelStarted = true; await new Promise(resolve => { releaseModel = resolve; }); }
       return backend.api(path, options);
     } });
-  controller._sendFile = async () => {
+  controller._sendLarge = async () => {
     transferActive++; peak = Math.max(peak, transferActive);
     if (!releaseTransfer) await new Promise(resolve => { releaseTransfer = resolve; });
     transferActive--; completed++;

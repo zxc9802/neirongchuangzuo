@@ -29,6 +29,7 @@ function engines({ probe = metadata(), probeCode = 0, frames = Infinity, execCod
       },
       exec: async (args, timeout) => {
         calls.push(['exec', args, timeout]);
+        if (args[0] === '-version') return 0;
         if (pendingExec) return new Promise(() => {});
         const output = args.at(-1);
         if (output.includes('%02d')) {
@@ -74,6 +75,8 @@ test('probe mounts the original read-only, loads the local core and cleans up', 
   const file = source();
   assert.deepEqual(await media.probe(file), { duration: 95.5, start: 1.25, width: 1920, height: 1080, codec: 'hevc', audio: 1 });
   const [ffmpeg] = created;
+  assert.deepEqual(ffmpeg.calls.find(call => call[0] === 'exec')[1], ['-version']);
+  assert.ok(ffmpeg.calls.findIndex(call => call[0] === 'exec') < ffmpeg.calls.findIndex(call => call[0] === 'mount'));
   assert.deepEqual(ffmpeg.calls.find(call => call[0] === 'load')[1], {
     coreURL: 'https://workbench.example/vendor/ffmpeg/ffmpeg-core.js',
     wasmURL: 'https://workbench.example/vendor/ffmpeg/ffmpeg-core.wasm' });
@@ -93,7 +96,7 @@ test('frames are one JPEG per second at most 640 pixels and the last frame repea
   assert.ok(frames.every(frame => frame.startsWith('data:image/jpeg;base64,')));
   assert.notEqual(frames[0], frames[1]);
   assert.equal(frames[3], frames[1]);
-  const args = created[0].calls.find(call => call[0] === 'exec')[1];
+  const args = created[0].calls.find(call => call[0] === 'exec' && call[1][0] !== '-version')[1];
   assert.equal(arg(args, '-ss'), '16');
   assert.equal(arg(args, '-t'), '3.5');
   assert.ok(args.indexOf('-ss') < args.indexOf('-i'), 'input seeking keeps long files fast');
@@ -109,7 +112,7 @@ test('segments are stream copies around the request that keep the original timel
   assert.equal(result.origin, 0.5);
   assert.equal(result.file.type, 'video/x-matroska');
   assert.equal(result.file.size, 4);
-  const args = created[0].calls.find(call => call[0] === 'exec')[1];
+  const args = created[0].calls.find(call => call[0] === 'exec' && call[1][0] !== '-version')[1];
   assert.equal(arg(args, '-ss'), '39.000');
   assert.equal(arg(args, '-t'), '4.000');
   assert.equal(arg(args, '-c'), 'copy');
@@ -140,7 +143,7 @@ test('at most two ffmpeg instances run at once and loaded instances are reused',
   const media = createWasmMedia({ createFFmpeg: async () => {
     const ffmpeg = await create();
     const exec = ffmpeg.exec;
-    ffmpeg.exec = async (...args) => { await new Promise(resolve => gates.push(resolve)); return exec(...args); };
+    ffmpeg.exec = async (...args) => { if (args[0][0] !== '-version') await new Promise(resolve => gates.push(resolve)); return exec(...args); };
     return ffmpeg;
   } });
   const runs = [1, 2, 3].map(() => media.sampleFrames(source(), 0, 1));
@@ -164,7 +167,7 @@ test('stopping terminates the running instance and the next job loads a fresh on
   assert.equal(loads, 0, 'an already stopped job never loads ffmpeg');
   const controller = new AbortController();
   const running = media.sampleFrames(source(), 0, 2, controller.signal);
-  await eventually(() => pending.created[0]?.calls.some(call => call[0] === 'exec'));
+  await eventually(() => pending.created[0]?.calls.some(call => call[0] === 'exec' && call[1][0] !== '-version'));
   controller.abort();
   await assert.rejects(running, { name: 'AbortError' });
   assert.ok(pending.created[0].calls.some(call => call[0] === 'terminate'));

@@ -46,6 +46,7 @@ def readiness(voice_provider='fal'):
             missing.append(binary)
             indexing = False
     return {'app': 'browser-material-mixer', 'browser_materials': True,
+            'material_mode': 'local', 'material_progress': True,
             'configured': not missing, 'indexing_configured': indexing, 'missing': missing,
             'voice_configured': not voice_missing, 'voice_missing': voice_missing,
             'default_voice_configured': bool(os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL'))}
@@ -330,7 +331,9 @@ class Jobs:
             row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
         if not row or owner is not None and row['owner'] != owner:
             raise HTTPException(404, '任务不存在')
+        spec = json.loads(row['spec'])
         return {key: row[key] for key in ('id', 'state', 'created', 'started', 'updated', 'result', 'error')} | {
+            'source': spec.get('source', 'browser'), 'device_id': spec.get('device_id'),
             'logs': json.loads(row['logs'])} | ({'billing': self._billing(job_id)} if self.credits else {})
 
     def list(self, owner):
