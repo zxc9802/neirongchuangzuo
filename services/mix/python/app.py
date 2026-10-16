@@ -48,7 +48,7 @@ def readiness(voice_provider='fal'):
     return {'app': 'browser-material-mixer', 'browser_materials': True,
             'configured': not missing, 'indexing_configured': indexing, 'missing': missing,
             'voice_configured': not voice_missing, 'voice_missing': voice_missing,
-            'default_voice_configured': bool(os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL')) if legacy else not voice_missing}
+            'default_voice_configured': bool(os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL'))}
 
 
 def file_digest(path):
@@ -86,6 +86,8 @@ def generate(spec, folder, log, audio_library=None, cloud_library=None):
     folder = Path(folder).resolve()
     voice_mode = spec.get('voice_mode', 'synthesized')
     if fal_voice:
+        if spec['voice_config'].get('model') != 'fal-ai/index-tts-2/text-to-speech':
+            raise ValueError('旧 Qwen 配音任务已停用，请重新创建 IndexTTS 混剪任务')
         from fal_voice import synthesize_plan
     else:
         from voice import synthesize_plan
@@ -489,7 +491,10 @@ def normalize(body, owner):
             'voice_mode': voice_mode, 'voice_id': voice_id, 'music_id': music_id,
             'count': 1, 'duration': None,
             'voice_config': ({} if voice_mode == 'original' else {
-                             'provider': 'fal', 'voice': os.environ.get('MIX_FAL_VOICE') or 'Vivian'})}
+                             'provider': 'fal', 'model': 'fal-ai/index-tts-2/text-to-speech',
+                             'speaker_url': None if voice_id else os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL') or None,
+                             'emotion_url': os.environ.get('INDEXTTS_EMOTION_AUDIO_URL') or None,
+                             'emotion_file': os.environ.get('INDEXTTS_EMOTION_AUDIO_PATH') or None})}
 
 
 def create_app(root=None, token=None, start_worker=True, runner=generate, audio_library=None, credits=None, cloud_library=None):

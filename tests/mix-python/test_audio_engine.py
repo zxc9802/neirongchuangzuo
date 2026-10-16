@@ -298,10 +298,9 @@ class AudioContractTests(unittest.TestCase):
 
         def synthesize(model, payload, cache, identity, suffix, log):
             calls.append(model)
-            if suffix == '.safetensors':
-                path = cache / 'paid.safetensors'
-                path.write_bytes(b'cloned-embedding')
-                return path
+            self.assertEqual(model, 'fal-ai/index-tts-2/text-to-speech')
+            self.assertTrue(payload['audio_url'].startswith('data:audio/wav;base64,'))
+            self.assertEqual(payload['prompt'], '散步。')
             path = cache / 'paid.wav'
             path.parent.mkdir(parents=True, exist_ok=True)
             tone(path, 880, 1)
@@ -326,9 +325,7 @@ class AudioContractTests(unittest.TestCase):
             self.app.state.jobs.run_one(self.app.state.runner)
         job = self.app.state.jobs.get(ident)
         self.assertEqual(job['state'], 'done', job['error'])
-        self.assertEqual(len(calls), 2, 'completed clone and narration must survive review failure')
-        self.assertIn('/clone-voice/', calls[0])
-        self.assertIn('/text-to-speech/', calls[1])
+        self.assertEqual(len(calls), 1, 'completed IndexTTS narration must survive review failure')
         self.assertEqual(reviews, ['video-music.mp4', 'video-music.mp4'])
         self.assertEqual(len(self.cos.signatures), 0, 'fal references use owned downloads, not public signatures')
         samples = audio_samples(folder / job['result'])
