@@ -48,7 +48,7 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(health['indexing_configured'])
         self.assertFalse(health['configured'])
         self.assertEqual(health['missing'], ['RERANK_API_KEY'])
-        self.assertEqual(health['voice_missing'], ['INDEXTTS_302_API_KEY'])
+        self.assertEqual(health['voice_missing'], ['MIX_FAL_KEY'])
         self.assertFalse(health['voice_configured'])
         self.assertFalse(health['default_voice_configured'])
 

@@ -35,11 +35,12 @@ OUTPUT_TTL = 72 * 3600
 RECORD_TTL = 30 * 86400
 
 
-def readiness():
+def readiness(voice_provider='fal'):
     missing = [name for name in ('OPENLUX_API_KEY', 'RERANK_API_KEY') if not os.environ.get(name)]
     indexing = bool(os.environ.get('OPENLUX_API_KEY'))
-    voice_missing = ([] if os.environ.get('INDEXTTS_302_API_KEY') or os.environ.get('TTS_API_KEY')
-                     else ['INDEXTTS_302_API_KEY'])
+    legacy = voice_provider != 'fal'
+    voice_key = (os.environ.get('INDEXTTS_302_API_KEY') or os.environ.get('TTS_API_KEY')) if legacy else os.environ.get('MIX_FAL_KEY')
+    voice_missing = [] if voice_key else ['INDEXTTS_302_API_KEY' if legacy else 'MIX_FAL_KEY']
     for binary in ('ffmpeg', 'ffprobe'):
         if not shutil.which(binary):
             missing.append(binary)
@@ -47,7 +48,7 @@ def readiness():
     return {'app': 'browser-material-mixer', 'browser_materials': True,
             'configured': not missing, 'indexing_configured': indexing, 'missing': missing,
             'voice_configured': not voice_missing, 'voice_missing': voice_missing,
-            'default_voice_configured': bool(os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL'))}
+            'default_voice_configured': bool(os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL')) if legacy else not voice_missing}
 
 
 def file_digest(path):
@@ -68,21 +69,26 @@ def provider_pending(folder):
         if record.get('submission') == 'uncertain':
             return True
         if record.get('task_id') and record.get('state') not in ('FAILURE', 'FAILED', 'ERROR', 'REVOKED'):
-            if record.get('state') != 'SUCCESS' or not path.with_suffix('.wav').is_file():
+            artifact = path.parent / record['artifact'] if record.get('provider') == 'fal' and record.get('artifact') else path.with_suffix('.wav')
+            if record.get('state') != 'SUCCESS' or not artifact.is_file():
                 return True
     return False
 
 
 def generate(spec, folder, log, audio_library=None, cloud_library=None):
     """Resume the saved provider/matching checkpoints before doing new work."""
-    config = readiness()
+    fal_voice = spec.get('voice_config', {}).get('provider') == 'fal'
+    config = readiness('fal' if fal_voice else '302')
     if not config['configured']:
         raise ValueError('服务器混剪配置缺失：' + ', '.join(config['missing']))
     from matcher import create_plan, estimate_timeline, resume_plan, write_json
-    from voice import synthesize_plan
     from finish import deliver
     folder = Path(folder).resolve()
     voice_mode = spec.get('voice_mode', 'synthesized')
+    if fal_voice:
+        from fal_voice import synthesize_plan
+    else:
+        from voice import synthesize_plan
     if voice_mode == 'synthesized' and not (folder / 'narration.wav').is_file():
         if not config.get('voice_configured', True):
             raise ValueError('服务器配音配置缺失：' + ', '.join(config['voice_missing']))
@@ -127,9 +133,13 @@ def generate(spec, folder, log, audio_library=None, cloud_library=None):
     else:
         log('正在准备音色并合成配音…')
         voice_config = dict(spec['voice_config'])
+        voice_config.pop('provider', None)
         if spec.get('voice_id'):
-            voice_config.update(speaker_url=library.signed_url(spec['owner'], spec['voice_id']),
-                                speaker_cache_key='library:' + spec['voice_id'] + ':' + spec['voice_sha256'])
+            if fal_voice:
+                voice_config['speaker_file'] = library.download(spec['owner'], spec['voice_id'], folder)
+            else:
+                voice_config.update(speaker_url=library.signed_url(spec['owner'], spec['voice_id']),
+                                    speaker_cache_key='library:' + spec['voice_id'] + ':' + spec['voice_sha256'])
         synthesize_plan(plan, folder, log=log, **voice_config)
     if spec.get('music_id'):
         log('正在读取背景音乐…')
@@ -479,9 +489,7 @@ def normalize(body, owner):
             'voice_mode': voice_mode, 'voice_id': voice_id, 'music_id': music_id,
             'count': 1, 'duration': None,
             'voice_config': ({} if voice_mode == 'original' else {
-                             'speaker_url': None if voice_id else os.environ.get('INDEXTTS_SPEAKER_AUDIO_URL', ''),
-                             'emotion_url': os.environ.get('INDEXTTS_EMOTION_AUDIO_URL') or None,
-                             'emotion_file': os.environ.get('INDEXTTS_EMOTION_AUDIO_PATH') or None})}
+                             'provider': 'fal', 'voice': os.environ.get('MIX_FAL_VOICE') or 'Vivian'})}
 
 
 def create_app(root=None, token=None, start_worker=True, runner=generate, audio_library=None, credits=None, cloud_library=None):

@@ -11,6 +11,7 @@ const unavailable = () => new CreditsError('混剪供应商报价暂不可用，
 const scopePattern = /^(job:[a-f0-9]{32}|index:[a-f0-9]{32}:[1-9][0-9]*|browser:[a-f0-9]{32}:[a-f0-9]{64}:(vector|description))$/;
 const requestId = value => typeof value === 'string' && /^[A-Za-z0-9_:@.-]{1,200}$/.test(value) ? value : undefined;
 const callId = (owner, scope, url, payload, key = '') => hash(owner + '\n' + scope + '\n' + key + '\n' + url + '\n' + JSON.stringify(payload));
+const falModels = ['fal-ai/qwen-3-tts/text-to-speech/1.7b', 'fal-ai/qwen-3-tts/clone-voice/1.7b'];
 
 // Only the private Python worker can call this adapter. Prices and actual charges
 // are obtained here; browser bodies never supply a fee, URL credential or owner ID.
@@ -50,6 +51,10 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
     try { return await result; } finally { if (locks.get(id) === result) locks.delete(id); }
   }
   function target(url, payload) {
+    if (falModels.some(model => url === 'https://queue.fal.run/' + model)) {
+      if (!env.MIX_FAL_KEY) throw unavailable();
+      return { provider: 'fal', model: url.slice('https://queue.fal.run/'.length), key: env.MIX_FAL_KEY, asynchronous: true };
+    }
     const embedding = (env.EMBEDDING_URL || 'https://api.openlux.ai/v1beta/models/gemini-embedding-2-preview:generateContent').replace(/:generateContent$/, ':embedContent');
     const llm = env.LLM_URL || 'https://api.openlux.ai/v1beta/models/gemini-3.7-flash:generateContent';
     const rerank = env.RERANK_URL || 'https://api.302.ai/v1/reranks';
@@ -66,6 +71,19 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
   }
   async function quote(spec, payload) {
     const catalog = await prices();
+    if (spec.provider === 'fal') {
+      const url = new URL('https://api.fal.ai/v1/models/pricing'); url.searchParams.set('endpoint_id', spec.model);
+      const response = await fetchImpl(url, { headers: { Authorization: 'Key ' + spec.key }, redirect: 'error', signal: AbortSignal.timeout(30000) });
+      if (!response.ok) throw unavailable();
+      const rate = (await response.json()).prices?.find(item => item.endpoint_id === spec.model);
+      const clone = spec.model.includes('/clone-voice/');
+      if (!rate || rate.currency !== 'USD' || !Number.isFinite(rate.unit_price) || rate.unit_price < 0
+        || rate.unit !== (clone ? 'minutes' : '1000 characters')) throw unavailable();
+      // Clone inputs are trimmed to 15 seconds. This is a hold only: the result
+      // header supplies the actual quantity, including the provider's minimum.
+      const units = clone ? 1 : Math.max(1, Math.ceil([...String(payload.text || '')].length / 1000));
+      return { quoteCny: rate.unit_price * units * catalog.fx, unitPrice: rate.unit_price, fx: catalog.fx };
+    }
     if (spec.provider === '302') {
       // Safety holds, never settled prices. 302's actual API record is the receipt.
       return { quoteCny: (spec.asynchronous ? 0.1 : 0.01) * catalog.fx, fx: catalog.fx, quotaUnit: catalog.quotaUnit };
@@ -82,6 +100,10 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
   }
   async function actual(record, spec) {
     if (record.httpStatus >= 400 && [400, 401, 402, 403, 404, 422].includes(record.httpStatus)) return 0;
+    if (record.provider === 'fal') {
+      if (!Number.isFinite(record.billableUnits) || record.billableUnits < 0) throw pending();
+      return record.billableUnits * record.unitPrice * record.fx;
+    }
     if (record.provider === 'openlux' && Number.isSafeInteger(record.response?.quota) && record.response.quota >= 0)
       return record.response.quota / record.quotaUnit * record.fx;
     if (!record.requestId && !record.taskId) throw pending();
@@ -118,6 +140,28 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
       if (items.length < 100) break;
     }
     throw pending();
+  }
+  async function falResult(path, record, spec) {
+    if (!record.taskId || record.httpStatus >= 400) throw pending();
+    if (record.result !== undefined && (record.settled || Number.isFinite(record.billableUnits))) return;
+    // Queue receipts omit the endpoint subpath. Construct reads locally; never
+    // send credentials to URLs supplied by an upstream response or a browser.
+    const base = 'https://queue.fal.run/fal-ai/qwen-3-tts/requests/' + record.taskId;
+    const options = { headers: { Authorization: 'Key ' + spec.key }, redirect: 'error', signal: AbortSignal.timeout(30000) };
+    const status = await fetchImpl(base + '/status', options);
+    if (!status.ok) throw pending();
+    const data = await status.json();
+    if (!['IN_QUEUE', 'IN_PROGRESS', 'COMPLETED'].includes(data.status) || data.request_id !== record.taskId) throw pending();
+    record.queueStatus = data.status;
+    await save(path, record);
+    if (data.status !== 'COMPLETED') return;
+    const result = await fetchImpl(base, options);
+    if (result.headers.get('x-fal-request-id') !== record.taskId) throw pending();
+    const rawUnits = result.headers.get('x-fal-billable-units');
+    if (rawUnits !== null && rawUnits.trim() && Number.isFinite(Number(rawUnits)) && Number(rawUnits) >= 0) record.billableUnits = Number(rawUnits);
+    record.resultStatus = result.status;
+    record.result = await result.json();
+    await save(path, record);
   }
   async function reconcile(userId, path, record, spec) {
     const scope = { userId, taskId: record.creditId };
@@ -168,15 +212,22 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
           record.dispatched = true;
           await save(path, record); // Crash/timeout after this point must never POST again.
           try {
-            const response = await fetchImpl(url, { method: 'POST', headers: { Authorization: 'Bearer ' + spec.key, 'Content-Type': 'application/json' },
+            const response = await fetchImpl(url, { method: 'POST', headers: { Authorization: (spec.provider === 'fal' ? 'Key ' : 'Bearer ') + spec.key, 'Content-Type': 'application/json' },
               body: JSON.stringify(payload), redirect: 'error', signal: AbortSignal.timeout(210000) });
             record.httpStatus = response.status;
             record.requestId = requestId(response.headers.get('x-api-request-id') || response.headers.get('x-request-id') || response.headers.get('request-id'));
             await save(path, record);
             record.response = await response.json();
           } catch { throw pending(); }
-          record.taskId = requestId(record.response?.task_id);
+          record.taskId = requestId(record.response?.task_id || record.response?.request_id);
           await save(path, record);
+        }
+        if (record.response === undefined) throw pending();
+        if (spec.provider === 'fal' && record.httpStatus < 400) {
+          await falResult(path, record, spec);
+          if (record.queueStatus === 'COMPLETED') await reconcile(userId, path, record, spec);
+          return { request_id: record.taskId, status: record.queueStatus, ...(record.result !== undefined
+            ? { result: record.result, result_status: record.resultStatus } : {}) };
         }
         if (!spec.asynchronous || record.httpStatus >= 400) await reconcile(userId, path, record, spec);
         if (record.httpStatus >= 400) throw new CreditsError('混剪模型请求失败 HTTP ' + record.httpStatus, record.httpStatus,
@@ -215,7 +266,12 @@ export function createMixProviderCosts({ credits, dataDir, env = process.env, fe
             }
             return;
           }
-          const saved = await reconcile(userId, path, record, target(record.url, { model: record.model }));
+          const spec = target(record.url, { model: record.model });
+          if (record.provider === 'fal' && record.httpStatus < 400) {
+            await falResult(path, record, spec);
+            if (record.queueStatus !== 'COMPLETED') throw pending();
+          }
+          const saved = await reconcile(userId, path, record, spec);
           chargedPoints += saved.chargedPoints; costMicros += saved.settledUnits;
         });
       }
