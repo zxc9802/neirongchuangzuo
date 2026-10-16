@@ -73,6 +73,11 @@ class RemoteCatalogTests(unittest.TestCase):
             self.assertEqual(clips[0]['remote']['clip_id'], 'a' * 64)
             self.assertEqual(clips[0]['id'], 7, 'Indexing more files must not renumber saved scene candidates')
             self.assertFalse(Path(clips[0]['path']).exists())
+            snapshot = Path(temp) / 'local-materials' / 'indexes' / ('e' * 32) / 'vectors.faiss'
+            import faiss
+            self.assertEqual(faiss.deserialize_index(np.frombuffer(snapshot.read_bytes(), dtype=np.uint8)).ntotal, 2)
+            snapshot.write_bytes(b'interrupted snapshot')
+            self.assertEqual(catalog.searcher()(np.array([1., 0.]), 1)[0]['id'], 7)
 
     def test_all_proxy_requests_are_enqueued_before_waiting_and_only_candidates_are_fetched(self):
         try:

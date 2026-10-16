@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { createMixCreditsBridge } from '../services/mix/credits-bridge.mjs';
 import { createMixHandler } from '../services/mix/server.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
-import { getMixState, mixJobLabel, mixReadiness, renderMixMaterials, mixFolderLocked, stopMixMaterials } from '../design/mix-materials.js';
+import { getMixState, mixJobLabel, mixReadiness, renderMixProgress, mixFolderLocked, stopMixMaterials } from '../design/mix-materials.js';
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const token = 'private-test-token-'.repeat(3);
@@ -105,7 +105,7 @@ test('pending credit confirmation is labelled and can resume its original task w
   t.after(stopMixMaterials);
   assert.equal(mixJobLabel(state.job), '积分确认中');
   assert.match(mixReadiness(), /积分确认中.*重试确认/);
-  const html = renderMixMaterials();
+  const html = renderMixProgress();
   assert.match(html, /data-action="mix-resume-job"[^>]*>重试确认积分/);
   assert.doesNotMatch(html, /data-action="mix-retry-submit"/);
   assert.equal(mixFolderLocked(), true);

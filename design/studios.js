@@ -38,7 +38,7 @@ function mixMaterials(media, ctx) {
     ${button('mix-choose-folder', icon('folder') + `<span class="mix-folder-label">${cloud ? '上传素材文件夹' : mix.status.needsPermission ? '重新连接素材文件夹' : mix.status.connected ? '更换素材文件夹' : '选择本地素材文件夹'}</span>`, 'studio-add-material', locked)}
     ${renderMixMaterials()}
     ${media.length ? `<div class="studio-media-list">${media.map((asset, index) => `<button class="studio-media-item ${asset.id === activeId ? 'selected' : ''}" data-action="studio-select-clip" data-id="${esc(asset.id)}" aria-pressed="${asset.id === activeId}">
-      <span class="studio-media-thumb"${cloud ? ' style="display:grid;place-items:center;color:#9eacc0"' : ''}>${cloud ? icon('video') : `<video src="${esc(asset.url)}" muted preload="metadata" tabindex="-1" aria-hidden="true"></video>`}<b>${String(index + 1).padStart(2, '0')}</b></span><span class="studio-media-title"><strong>${esc(asset.name)}</strong><small data-duration-id="${esc(asset.id)}">${asset.duration == null ? '待处理' : `${Math.round(asset.duration)} 秒`} · ${cloud ? '云端原片' : '本机原片'}</small></span>${icon('chevron')}
+      <span class="studio-media-thumb" style="display:grid;place-items:center;color:#9eacc0">${icon('video')}<b>${String(index + 1).padStart(2, '0')}</b></span><span class="studio-media-title"><strong>${esc(asset.name)}</strong><small data-duration-id="${esc(asset.id)}">${asset.duration == null ? '待处理' : `${Math.round(asset.duration)} 秒`} · ${cloud ? '云端原片' : '本机原片'}</small></span>${icon('chevron')}
     </button>`).join('')}</div>` : `<div class="studio-material-empty"><p>暂无实拍素材</p></div>`}
   </section>`;
 }
@@ -48,7 +48,7 @@ function mixPreview(media, ctx) {
   const c = configs.mix;
   const active = media.find(asset => asset.id === studioState.mix.activeId);
   const mix = getMixState();
-  const preload = mix.client?.mode === 'cloud' ? 'none' : 'metadata';
+  const preload = 'none';
   const job = mix.job;
   const result = mix.view === 'result' && job;
   const finished = ['done', 'completed'].includes(job?.state);

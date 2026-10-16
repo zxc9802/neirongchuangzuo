@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import numpy as np
+import faiss
 
 
 def broker_for(root):
@@ -46,14 +47,27 @@ class RemoteCatalog:
         if not records:
             raise ValueError('本机素材尚未整理完成，请在网页连接素材文件夹')
         matrix = np.stack(vectors)
+        index = faiss.IndexFlatIP(matrix.shape[1])
+        index.add(matrix)
+        # SQLite remains authoritative. Each search uses its own immutable snapshot;
+        # persisted snapshots are replaceable, never concurrently mutated in place.
+        folder = self.root / 'local-materials' / 'indexes' / self.config['device_id']
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = folder / (uuid.uuid4().hex + '.tmp')
+        try:
+            temporary.write_bytes(faiss.serialize_index(index).tobytes())
+            temporary.replace(folder / 'vectors.faiss')
+        finally:
+            temporary.unlink(missing_ok=True)
 
         def search(query, count):
             vector = np.asarray(query, dtype=np.float32)
             if vector.shape != matrix.shape[1:] or not np.all(np.isfinite(vector)) or np.linalg.norm(vector) <= 0:
                 raise ValueError('素材索引与当前检索模型不一致，请重新整理素材')
-            scores = matrix @ (vector / np.linalg.norm(vector))
-            indices = np.argsort(-scores, kind='stable')[:max(0, count)]
-            return [{**records[index], 'distance': float(scores[index])} for index in indices]
+            # Include ties before cutting top-k, retaining the stable clip ordering.
+            scores, indices = index.search((vector / np.linalg.norm(vector))[None, :], len(records))
+            ranked = sorted(zip(scores[0], indices[0]), key=lambda item: (-item[0], item[1]))[:max(0, count)]
+            return [{**records[int(position)], 'distance': float(score)} for score, position in ranked]
 
         return search
 

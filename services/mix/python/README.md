@@ -1,6 +1,8 @@
 # Internal cloud and browser material mixer
 
-Cloud materials are the default in the UI when all four server-side settings are present:
+The UI defaults to local originals (`/health.material_mode=local`) even with a configured COS library. Browser frame extraction runs at most five tasks, cloud analysis eight, and WASM compatibility decoding two. The authenticated device `/progress` route reports durable vector/description/completion counts every three seconds; new generation waits for preparation and an explicit user action. SQLite remains authoritative and per-device FAISS snapshots under `local-materials/indexes` are rebuilt from it. Keep `DATA_DIR` on persistent storage.
+
+COS settings remain available for existing cloud assets and historical cloud jobs; changing the default does not delete them:
 
 ```dotenv
 MIX_MATERIAL_COS_SECRET_ID=
@@ -27,7 +29,7 @@ The authenticated `/api/mix/materials` API lists the account's durable assets. `
 
 Originals and analysis proxies live in COS. SQLite metadata and canonical vectors live under `DATA_DIR/cloud-materials/materials.sqlite3`; replaceable per-account FAISS snapshots live in `cloud-materials/indexes/<owner>/vectors.faiss`. Original videos are fetched to a shared checksum-validated cache when needed; idle cached payloads expire after 24 hours, while active jobs and indexing keep their inputs. Preserve the existing persistent data mount and back up its databases. This is a single active application instance design; do not run multiple independent writers against its SQLite/FAISS directories. FAISS is a search index, not an ownership database.
 
-Deploy the renderer in Tencent Cloud Singapore alongside this bucket and use the normal COS endpoint to obtain same-region intranet routing. Tests run from a developer machine confirm COS functionality, not the production server's actual network route. Final job outputs retain the existing authenticated delivery and 72-hour retention policy. Existing browser material catalogs remain supported when cloud storage is not configured; their local originals must be uploaded to populate a new cloud library.
+For existing cloud jobs, deploy the renderer in Tencent Cloud Singapore alongside this bucket and use the normal COS endpoint to obtain same-region intranet routing. Tests run from a developer machine confirm COS functionality, not the production server's actual network route. Final job outputs retain the existing authenticated delivery and 72-hour retention policy. New jobs use the browser's local catalog; configuring COS no longer changes that default.
 
 Node starts `python -m uvicorn app:create_app --factory --host 127.0.0.1 --port <port>` from this directory. `DATA_DIR` points to persistent storage; `MIXER_API_TOKEN` is a random ASCII service secret (at least 32 characters). Every route requires its Bearer token. Browser-material and job routes additionally require Node's verified `x-material-owner` account hash. Body-supplied identities, helper devices, and global NAS material paths are rejected.
 

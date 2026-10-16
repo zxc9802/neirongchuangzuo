@@ -80,6 +80,9 @@ export function createWasmMedia({ createFFmpeg = loadFFmpeg, instances = 2, idle
           const base = globalThis.location.href;
           await Promise.race([slot.ffmpeg.load({ coreURL: new URL(CORE_URL, base).href,
             wasmURL: new URL(WASM_URL, base).href }), aborted]);
+          // The bundled 0.12.10 core can trap on a cold media command. Initialize
+          // its command runtime before mounting files; subsequent commands reuse it.
+          await Promise.race([slot.ffmpeg.exec(['-version'], 5000), aborted]);
           return slot;
         } catch (error) {
           retire(slot);

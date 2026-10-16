@@ -203,6 +203,23 @@ class MaterialBroker:
             ids = [row['id'] for row in db.execute('SELECT id FROM devices WHERE owner=? AND revoked=0 ORDER BY created', (owner,))]
         return {'devices': [self.device(device_id, owner) for device_id in ids]}
 
+    def progress(self, device_id):
+        """Durable counts, including descriptions still running after vector indexing."""
+        with self.connect() as db:
+            self._device(db, device_id)
+            counts = dict(db.execute('''SELECT count(*) AS total, count(DISTINCT asset_id) AS files,
+                coalesce(sum(vector IS NOT NULL),0) AS vectorized,
+                coalesce(sum(description IS NOT NULL),0) AS described,
+                coalesce(sum(state='indexed' AND vector IS NOT NULL AND description IS NOT NULL),0) AS ready,
+                coalesce(sum(state='indexing'),0) AS analyzing,
+                coalesce(sum(state='error'),0) AS failed
+                FROM clips WHERE device_id=? AND revoked=0''', (device_id,)).fetchone())
+            queue = db.execute('''SELECT count(*),coalesce(sum(q.lease>?),0),coalesce(sum(q.attempts>0),0)
+                FROM description_queue q JOIN clips c ON c.device_id=q.device_id AND c.id=q.clip_id
+                WHERE q.device_id=? AND c.revoked=0''', (time.time(), device_id)).fetchone()
+        return {**counts, 'description_pending': queue[0], 'describing': queue[1],
+                'description_retries': queue[2]}
+
     def heartbeat(self, device_id, status='ready', error=''):
         bounded_text(status, 64, '助手状态')
         if not isinstance(error, str) or len(error) > 1000:

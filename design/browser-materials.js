@@ -4,7 +4,7 @@ const root = globalThis;
 
   const PREFIX = '/api/browser-materials';
   const CHUNK_SIZE = 4 * 1024 * 1024;
-  // Larger sources are never uploaded whole: MP4/MOV send their index plus the needed packets,
+  // Sources are never uploaded whole: MP4/MOV send their index plus the needed packets,
   // other containers send a stream-copied segment around each request.
   const MAX_SOURCE_SIZE = 512 * 1024 * 1024;
   const MAX_INDEX_BOXES = 4096;
@@ -24,6 +24,7 @@ const root = globalThis;
   const wasmModule = () => import('./wasm-media.js');
   const wasmMedia = {
     probe: async (...args) => (await wasmModule()).wasmMedia.probe(...args),
+    sampleFrames: async (...args) => (await wasmModule()).wasmMedia.sampleFrames(...args),
     extractSegment: async (...args) => (await wasmModule()).wasmMedia.extractSegment(...args),
   };
 
@@ -353,11 +354,12 @@ const root = globalThis;
 
   export default class BrowserMaterials {
     constructor({ api, onStatus = noop, onConnected = noop, store, readDuration: durationReader,
-      sampleFrames: frameSampler, wasmMedia: wasmReader, locks, fetch: fetcher } = {}) {
+      sampleFrames: frameSampler, wasmMedia: wasmReader, locks, fetch: fetcher, trackProgress = false } = {}) {
       this.api = api;
       this.ownerKey = accountStorageKey('workbench-browser-materials');
       this.onStatus = onStatus;
       this.onConnected = onConnected;
+      this.trackProgress = trackProgress;
       this.store = store || createFolderStore();
       this.readDuration = durationReader || readDuration;
       this.sampleFrames = frameSampler || sampleFrames;
@@ -409,6 +411,8 @@ const root = globalThis;
       this.lastRequests = 0;
       this.lastHeartbeat = 0;
       this.requests = [];
+      this.prepared = new Set();
+      this.status = { ...this.status, cloud: null, progressError: '' };
       return this.generation;
     }
 
@@ -445,10 +449,27 @@ const root = globalThis;
             (this.attempts.get(clip.id) || 0) < MAX_ATTEMPTS)));
       this.status = { ...this.status, ...value, connected: this.connected, folderName: this.folderName,
         indexed: clips.filter(clip => clip.state === 'indexed').length, total: clips.length, processing,
+        scanning: !!this.scanning, prepared: clips.filter(clip => this.prepared?.has(clip.id) || clip.state === 'indexed').length,
+        stages: Object.fromEntries(Object.entries(this.stages || {}).map(([name, pool]) =>
+          [name, { active: pool.active, limit: pool.limit, waiting: pool.waiting.length }])),
         follower: !this.leading,
         totalFiles: value.scanned ?? (this.status.scanned || entries.length),
         readyFiles: entries.filter(entry => readable(entry) && entry.clips.length && entry.clips.every(clip => clip.state === 'indexed')).length };
       this.onStatus(this.status);
+    }
+
+    async _pollProgress(token) {
+      if (!this.trackProgress || !this.record?.deviceId || !this.active || token !== this.generation) return;
+      clearTimeout(this.progressTimer);
+      try {
+        const cloud = await this._api(this._devicePath('/progress'), {}, token);
+        this._report({ cloud, progressError: '' });
+      } catch (error) {
+        if (!this.active || token !== this.generation || isAbort(error)) return;
+        this._report({ progressError: '云端进度暂时无法更新，正在重连' });
+      } finally {
+        if (this.active && token === this.generation) this.progressTimer = setTimeout(() => this._pollProgress(token), 3000);
+      }
     }
 
     _ready() {
@@ -501,6 +522,7 @@ const root = globalThis;
       // Only a connected tab competes for processing, so a tab waiting for permission never blocks another.
       this._lead();
       this._report({ needsPermission: false, text: '已连接素材文件夹：' + this.folderName });
+      void this._pollProgress(token);
       this.onConnected(this.deviceId);
     }
 
@@ -538,6 +560,7 @@ const root = globalThis;
           this.connected = false;
           this.permissionDenied = false;
           this._report({ text: '重新连接素材文件夹', needsPermission: true, error: '' });
+          void this._pollProgress(token);
           this.onConnected('');
           return;
         }
@@ -671,7 +694,7 @@ const root = globalThis;
       this.retryAfter.clear();
       this.processingDeferred = false;
       this.errors.clear();
-      this._report({ text: '正在扫描素材文件夹：' + this.folderName, error: '', scanned: 0, needsPermission: false });
+      this._report({ text: '正在扫描素材文件夹：' + this.folderName, error: '', scanned: 0, scanTotal: 0, needsPermission: false });
       const candidates = [];
       const observations = [];
       const files = new Map();
@@ -716,6 +739,7 @@ const root = globalThis;
           complete = false;
           this._error('素材文件夹', error);
         }
+        this._report({ scanTotal: candidates.length });
         let cursor = 0;
         await Promise.all(Array.from({ length: Math.min(FRAME_WORKERS, candidates.length) }, async () => {
           while (cursor < candidates.length) {
@@ -823,6 +847,7 @@ const root = globalThis;
       this.generation++;
       this.abort?.abort();
       clearTimeout(this.timer);
+      clearTimeout(this.progressTimer);
       this.scanning = false;
       // restore/choose/scan restart synchronously; a stop that leaves this tab disconnected hands processing over.
       queueMicrotask(() => this._unlead());
@@ -910,7 +935,7 @@ const root = globalThis;
           // A following tab only mirrors the server state that the processing tab produces.
           const busy = Object.values(this.record.manifest).filter(entry => this.files.has(entry.relativePath))
             .flatMap(entry => entry.clips.filter(clip => this.registered.has(clip.id) && !this.workers.has(clip.id) &&
-              (this.leading ? clip.state === 'indexing' : clip.state !== 'indexed')));
+              (this.leading ? clip.state === 'indexing' || clip.state === 'indexed' && this.status.cloud?.ready < this.status.cloud?.total : clip.state !== 'indexed')));
           await this._register(busy, token);
           this._guard(token);
           this.lastStateCheck = Date.now();
@@ -1001,21 +1026,23 @@ const root = globalThis;
           signal.addEventListener('abort', cancel, { once: true });
         });
       } else pool.active++;
-      try { this._guard(token); return await action(); }
+      try { this._guard(token); this._report(); return await action(); }
       finally {
         const next = pool.waiting.shift();
         if (next) next();
         else pool.active--;
+        if (this.active && token === this.generation) this._report();
       }
     }
 
     _serverDecoder(entry) {
-      return entry.decoder === 'server' || entry.decoder === 'wasm' || /\.mov$/i.test(entry.relativePath);
+      return entry.decoder === 'server';
     }
 
     // Original Files and their timelines stay unchanged; only the analysis source changes.
     _sample(entry, start, end, token) {
       const file = this.files.get(entry.relativePath), signal = this.abort.signal;
+      if (entry.decoder === 'wasm') return this._runStage('wasm', () => this.wasmMedia.sampleFrames(file, start, end, signal), token);
       return this._runStage('frames', () => this.sampleFrames(file, start, end, signal), token);
     }
 
@@ -1028,7 +1055,11 @@ const root = globalThis;
           catch (error) {
             this._guard(token);
             if (error.code === 'MEDIA_TIMEOUT') throw error;
-            item.decoder = 'server';
+            if (item.decoder !== 'wasm') {
+              item.decoder = 'wasm';
+              try { payload = { clip_id: clip.id, frames: await this._sample(item, clip.start, clip.end, token) }; }
+              catch (fallback) { this._guard(token); item.decoder = 'server'; }
+            } else item.decoder = 'server';
             await this._save(token);
           }
         }
@@ -1041,6 +1072,7 @@ const root = globalThis;
           if (!prepared.complete) payload = { clip_id: clip.id, source_request_id: prepared.request.id };
         }
         this._guard(token);
+        this.prepared.add(clip.id);
         this._report({ text: '并行 AI 分析素材：' + item.relativePath });
         const result = prepared?.complete ? prepared : await this._runStage('analysis',
           () => this._post(this._devicePath('/analyze'), payload, token), token);
@@ -1063,7 +1095,7 @@ const root = globalThis;
     }
 
     // Tail recovery: re-read files whose read failed, or probe undecodable files' metadata in
-    // compatibility mode so their frames are decoded on the server.
+    // compatibility mode before local frame extraction.
     async _repairFile(repair, token) {
       const { relativePath } = repair;
       try {
@@ -1086,7 +1118,7 @@ const root = globalThis;
           this._guard(token);
           if (!(info?.duration > 0)) throw new Error('兼容模式也无法读取视频时长，请检查文件');
           duration = unchanged ? previous.duration : info.duration;
-          decoder = 'server';
+          decoder = 'wasm';
         } else if (!unchanged) duration = await this.readDuration(file, this.abort.signal);
         this._guard(token);
         const fingerprint = unchanged && previous.fingerprint || await fingerprintFile(file, () => this._guard(token), this.abort.signal);
@@ -1149,8 +1181,8 @@ const root = globalThis;
       const file = this.files.get(entry.relativePath);
       if (!file) throw new Error('请求的原视频不可读取，请重新扫描素材文件夹');
       const path = this._devicePath('/requests/' + request.id);
-      if (request.kind !== 'source' || file.size > MAX_SOURCE_SIZE) await this._sendLarge(request, entry, file, path, token);
-      else await this._sendFile(request, entry, file, path, token);
+      try { await this._sendLarge(request, entry, file, path, token); }
+      finally { if (this.active && token === this.generation) this._report({ uploadBytes: 0, uploadTotal: 0 }); }
     }
 
     async _patch(id, offset, bytes, checksum, token) {
@@ -1166,27 +1198,6 @@ const root = globalThis;
       if (!result.complete) throw new Error('原视频传输未完成，请重试');
     }
 
-    async _sendFile(request, entry, file, path, token) {
-      this._report({ uploadBytes: 0, uploadTotal: file.size });
-      const saved = this.record.uploads[request.id];
-      await transferFile({ file, upload: saved?.assetId === entry.assetId ? saved : null,
-        guard: () => this._guard(token), create: size => this._post(path + '/file', { size }, token),
-        onUpload: async upload => {
-          this._guard(token);
-          this.record.uploads[request.id] = { id: upload.id, assetId: entry.assetId, size: file.size };
-          await this._save(token);
-        }, head: id => this._uploadOffset(id, token),
-        patch: async (id, offset, bytes, checksum) => {
-          const next = await this._patch(id, offset, bytes, checksum, token);
-          this._report({ text: '正在临时传输素材：' + entry.relativePath + '（' + Math.round(next / file.size * 100) + '%）',
-            uploadBytes: next, uploadTotal: file.size });
-          return next;
-        }, complete: id => this._complete(id, token) });
-      this._guard(token);
-      delete this.record.uploads[request.id];
-      await this._save(token);
-    }
-
     async _sendLarge(request, entry, file, path, token) {
       const index = await mp4Index(file, () => this._guard(token));
       this._guard(token);
@@ -1198,7 +1209,6 @@ const root = globalThis;
           if (error.status !== 413 && error.status !== 422) throw error;
         }
       }
-      if (file.size <= MAX_SOURCE_SIZE) return this._sendFile(request, entry, file, path, token);
       await this._sendSegment(request, entry, file, path, token);
     }
 
@@ -1207,6 +1217,7 @@ const root = globalThis;
       const progress = { sent: 0, total: 0 };
       const begin = await this._post(path + '/sparse', { size: file.size, ranges: index }, token);
       if (!/^[a-f0-9]{32}$/.test(begin.id || '')) throw new Error('服务器未返回有效的上传编号，请重试');
+      if (begin.cached) return this._complete(begin.id, token);
       progress.total = rangeBytes(validateRanges(begin.ranges, file.size));
       await this._sendRanges(begin.id, file, begin.ranges, entry, progress, token);
       const plan = await this._post(this._devicePath('/files/' + begin.id + '/plan'), {}, token);
