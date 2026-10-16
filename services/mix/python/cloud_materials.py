@@ -18,7 +18,7 @@ import numpy as np
 from api import Models, ProviderRejected, clean_error, unit_vector
 from costs import billing_scope
 from credits import CreditError
-from local_materials import valid_id
+from local_materials import add_columns, valid_id
 import media
 
 COS_ENV = ('MIX_MATERIAL_COS_SECRET_ID', 'MIX_MATERIAL_COS_SECRET_KEY',
@@ -67,6 +67,8 @@ class CloudMaterials:
                     vector BLOB, description TEXT, UNIQUE(asset_id,start));
                 CREATE TABLE IF NOT EXISTS staging_cleanup (key TEXT PRIMARY KEY, expires REAL NOT NULL);
             ''')
+            add_columns(db, 'assets', {'fingerprint': 'TEXT'})
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS assets_fingerprint ON assets(owner,fingerprint)')
 
     @contextmanager
     def connect(self):
@@ -109,7 +111,7 @@ class CloudMaterials:
         with self.connect() as db:
             count = db.execute('SELECT count(*) FROM clips WHERE asset_id=? AND vector IS NOT NULL '
                                'AND description IS NOT NULL', (item['id'],)).fetchone()[0]
-        return {key: item[key] for key in ('id', 'name', 'bytes', 'duration', 'state', 'error')} | {
+        return {key: item[key] for key in ('id', 'name', 'bytes', 'duration', 'state', 'error', 'fingerprint')} | {
             'indexed_clips': count, 'url': '/api/mix/materials/' + item['id'] + '/stream'}
 
     def list(self, owner):
@@ -118,7 +120,7 @@ class CloudMaterials:
             rows = db.execute('SELECT * FROM assets WHERE owner=? ORDER BY created DESC,id', (owner,)).fetchall()
         return [self.public(row) for row in rows]
 
-    def create_upload(self, owner, name, size):
+    def create_upload(self, owner, name, size, fingerprint=None, reuse_legacy=False):
         valid_id(owner)
         if not isinstance(name, str) or not name.strip() or len(name) > 1000 or any(ord(c) < 32 for c in name):
             raise ValueError('视频文件名无效')
@@ -126,43 +128,94 @@ class CloudMaterials:
         ext = Path(name).suffix.lower()
         if ext not in SUFFIXES or type(size) is not int or not 0 < size <= MAX_FILE_BYTES:
             raise ValueError('仅支持视频文件，单个文件须大于零且不超过 5 GiB')
+        if fingerprint is not None:
+            if not isinstance(fingerprint, str) or not re.fullmatch('[0-9a-fA-F]{64}', fingerprint):
+                raise ValueError('视频文件标识无效，请重新选择素材文件夹')
+            fingerprint = fingerprint.lower()
+        if type(reuse_legacy) is not bool or (reuse_legacy and fingerprint is None):
+            raise ValueError('旧版素材复用须确认原文件未修改并提交视频文件标识')
         cos = self.cos()
-        ident, now = uuid.uuid4().hex, time.time()
-        prefix = f'mix-materials/{owner}/{ident}/'
-        upload_key, key = prefix + 'upload' + ext, prefix + 'source' + ext
-        content_type = 'video/webm' if ext == '.webm' else 'video/quicktime' if ext == '.mov' else 'video/mp4'
-        headers = {'Content-Type': content_type, 'x-cos-acl': 'private'}
-        url = cos.get_presigned_url(Bucket=self.bucket, Key=upload_key, Method='PUT',
-                                   Expired=UPLOAD_TTL, Headers={**headers, 'Content-Length': str(size)})
-        with self.connect() as db:
-            db.execute('INSERT INTO assets(id,owner,name,bytes,upload_key,key,state,created,updated) '
-                       "VALUES(?,?,?,?,?,?,'uploading',?,?)",
-                       (ident, owner, name, size, upload_key, key, now, now))
-            db.execute('INSERT INTO staging_cleanup VALUES(?,?)', (upload_key, now + UPLOAD_TTL + 300))
-        return {'id': ident, 'upload_url': url, 'headers': headers}
+        with self.lock:
+            ticket, finished = None, False
+            with self.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                previous = db.execute('SELECT * FROM assets WHERE owner=? AND fingerprint=?',
+                                      (owner, fingerprint)).fetchone() if fingerprint else None
+                if previous is None and reuse_legacy:
+                    candidates = db.execute('SELECT * FROM assets WHERE owner=? AND name=? AND bytes=? '
+                                            "AND fingerprint IS NULL AND state!='deleting' LIMIT 2",
+                                            (owner, name, size)).fetchall()
+                    if len(candidates) == 1:
+                        previous = candidates[0]
+                        db.execute('UPDATE assets SET fingerprint=? WHERE id=? AND fingerprint IS NULL',
+                                   (fingerprint, previous['id']))
+                now = time.time()
+                if previous:
+                    item = dict(previous)
+                    if item['name'] != name or item['bytes'] != size:
+                        raise ValueError('视频文件标识与名称或大小不一致，请重新选择素材文件夹')
+                    if item['state'] == 'deleting':
+                        raise ValueError('素材正在删除，请稍后重新上传')
+                    if item['state'] == 'uploading':
+                        from qcloud_cos.cos_exception import CosServiceError
+                        try:
+                            head = cos.head_object(Bucket=self.bucket, Key=item['upload_key'])
+                        except CosServiceError as error:
+                            if error.get_status_code() != 404:
+                                raise
+                            head = None
+                        if head and int(head['Content-Length']) == size:
+                            self._finish_upload(item, head, db)
+                            item['state'], finished = 'queued', True
+                else:
+                    ident = uuid.uuid4().hex
+                    prefix = f'mix-materials/{owner}/{ident}/'
+                    item = {'id': ident, 'upload_key': prefix + 'upload' + ext,
+                            'key': prefix + 'source' + ext, 'state': 'uploading'}
+                    db.execute('INSERT INTO assets(id,owner,name,bytes,upload_key,key,state,created,updated,fingerprint) '
+                               "VALUES(?,?,?,?,?,?,'uploading',?,?,?)",
+                               (ident, owner, name, size, item['upload_key'], item['key'], now, now, fingerprint))
+                if item['state'] == 'uploading':
+                    content_type = 'video/webm' if ext == '.webm' else 'video/quicktime' if ext == '.mov' else 'video/mp4'
+                    headers = {'Content-Type': content_type, 'x-cos-acl': 'private'}
+                    url = cos.get_presigned_url(Bucket=self.bucket, Key=item['upload_key'], Method='PUT',
+                                               Expired=UPLOAD_TTL, Headers={**headers, 'Content-Length': str(size)})
+                    db.execute('UPDATE assets SET updated=? WHERE id=?', (now, item['id']))
+                    db.execute('INSERT INTO staging_cleanup VALUES(?,?) ON CONFLICT(key) DO UPDATE SET expires=excluded.expires',
+                               (item['upload_key'], now + UPLOAD_TTL + 300))
+                    ticket = {'id': item['id'], 'upload_url': url, 'headers': headers}
+            if finished:
+                self._delete_staging(item)
+            return ticket or {'id': item['id'], 'item': self.public(self.get(owner, item['id']))}
+
+    def _finish_upload(self, item, head, db):
+        if int(head['Content-Length']) != item['bytes']:
+            raise ValueError('视频大小与上传记录不一致，请重新上传')
+        # A still-valid upload URL must never be able to replace an indexed original.
+        result = self.cos().copy_object(Bucket=self.bucket, Key=item['key'],
+            CopySource={'Bucket': self.bucket, 'Region': self.env[COS_ENV[3]], 'Key': item['upload_key']},
+            CopySourceIfMatch=head['ETag'], ACL='private')
+        db.execute("UPDATE assets SET state='queued',etag=?,updated=? WHERE id=?",
+                   (result['ETag'], time.time(), item['id']))
+
+    def _delete_staging(self, item):
+        try:
+            self.cos().delete_object(Bucket=self.bucket, Key=item['upload_key'])
+        except Exception:
+            pass  # The expiring staging cleanup retries this deletion.
 
     def complete(self, owner, ident):
         with self.lock:
-            item = self.get(owner, ident)
-            if item['state'] != 'uploading':
-                return self.public(item)
-            if time.time() - item['created'] > UPLOAD_TTL:
-                raise ValueError('上传凭据已过期，请重新上传素材')
-            cos = self.cos()
-            head = cos.head_object(Bucket=self.bucket, Key=item['upload_key'])
-            if int(head['Content-Length']) != item['bytes']:
-                raise ValueError('视频大小与上传记录不一致，请重新上传')
-            # A still-valid upload URL must never be able to replace an indexed original.
-            result = cos.copy_object(Bucket=self.bucket, Key=item['key'],
-                CopySource={'Bucket': self.bucket, 'Region': self.env[COS_ENV[3]], 'Key': item['upload_key']},
-                CopySourceIfMatch=head['ETag'], ACL='private')
             with self.connect() as db:
-                db.execute("UPDATE assets SET state='queued',etag=?,updated=? WHERE id=?",
-                           (result['ETag'], time.time(), ident))
-            try:
-                cos.delete_object(Bucket=self.bucket, Key=item['upload_key'])
-            except Exception:
-                pass  # The expiring staging cleanup retries this deletion.
+                db.execute('BEGIN IMMEDIATE')
+                item = self.get(owner, ident)
+                if item['state'] != 'uploading':
+                    return self.public(item)
+                if time.time() - item['updated'] > UPLOAD_TTL:
+                    raise ValueError('上传凭据已过期，请重新上传素材')
+                head = self.cos().head_object(Bucket=self.bucket, Key=item['upload_key'])
+                self._finish_upload(item, head, db)
+            self._delete_staging(item)
             return self.public(self.get(owner, ident))
 
     def retry(self, owner, ident):
@@ -358,18 +411,18 @@ class CloudMaterials:
         if not self.status()['configured']:
             return
         cutoff = time.time() - UPLOAD_TTL - 300
-        with self.connect() as db:
-            expired = [dict(row) for row in db.execute("SELECT * FROM assets WHERE created<? AND state IN ('uploading','deleting')", (cutoff,))]
-        for item in expired:
-            with self.lock:
+        with self.lock:
+            with self.connect() as db:
+                expired = [dict(row) for row in db.execute("SELECT * FROM assets WHERE updated<? AND state IN ('uploading','deleting')", (cutoff,))]
+            for item in expired:
                 if not in_use(item['owner']):
                     self.delete(item['owner'], item['id'])
-        with self.connect() as db:
-            staging = [row['key'] for row in db.execute('SELECT key FROM staging_cleanup WHERE expires<?', (time.time(),))]
-        for key in staging:
-            self.cos().delete_object(Bucket=self.bucket, Key=key)
             with self.connect() as db:
-                db.execute('DELETE FROM staging_cleanup WHERE key=?', (key,))
+                db.execute('BEGIN IMMEDIATE')
+                staging = [row['key'] for row in db.execute('SELECT key FROM staging_cleanup WHERE expires<?', (time.time(),))]
+                for key in staging:
+                    self.cos().delete_object(Bucket=self.bucket, Key=key)
+                    db.execute('DELETE FROM staging_cleanup WHERE key=?', (key,))
         cache = self.folder / 'cache'
         for owner in cache.iterdir() if cache.is_dir() else ():
             with self.lock:

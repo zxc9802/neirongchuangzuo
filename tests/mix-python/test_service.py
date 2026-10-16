@@ -1,9 +1,11 @@
 import hashlib
 import json
+import sqlite3
 import sys
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from unittest.mock import patch
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from fastapi.testclient import TestClient
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'services/mix/python'))
 try:
-    from app import create_app
+    from app import Jobs, create_app
 except ModuleNotFoundError:
     create_app = None
 
@@ -93,6 +95,52 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(restarted.state.jobs.get(job_id)['state'], 'interrupted')
         self.assertEqual((folder / 'plan.json').read_text(encoding='utf-8'), '{"script":"散步。"}')
         self.assertFalse(restarted.state.jobs.run_one(lambda *args: self.fail('must not auto replay')))
+
+    def test_legacy_jobs_gain_nullable_run_start_without_automatic_resume(self):
+        legacy = self.root / 'legacy'
+        legacy.mkdir()
+        job_id = '1' * 32
+        with closing(sqlite3.connect(legacy / 'jobs.sqlite3')) as db, db:
+            db.execute('''CREATE TABLE jobs (
+                id TEXT PRIMARY KEY, request_key TEXT UNIQUE, owner TEXT NOT NULL, spec TEXT,
+                state TEXT, created REAL, updated REAL, logs TEXT, result TEXT, error TEXT)''')
+            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)',
+                       (job_id, 'legacy', 'a' * 64, '{}', 'failed', 100, 200, '[]', None, '旧任务失败'))
+        jobs = Jobs(legacy)
+        job = jobs.get(job_id)
+        self.assertIsNone(job['started'])
+        self.assertEqual((job['state'], job['created'], job['updated']), ('failed', 100, 200))
+        self.assertFalse(jobs.run_one(lambda *args: self.fail('must not auto replay')))
+        self.assertIsNone(Jobs(legacy).get(job_id)['started'])
+
+    def test_each_run_has_its_own_start_time_and_reads_do_not_resume(self):
+        submitted = self.submit().json()
+        job_id = submitted['id']
+        self.assertIsNone(submitted['started'])
+        jobs = self.app.state.jobs
+        first_start = time.time() + 10
+
+        def fail_attempt(spec, folder, log):
+            self.assertEqual(jobs.get(job_id)['started'], expected_start)
+            raise ValueError('测试失败')
+
+        for expected_start in (first_start, first_start + 86400):
+            with patch('app.time.time', return_value=expected_start):
+                self.assertTrue(jobs.run_one(fail_attempt))
+            current = self.client.get('/v1/mix/jobs/' + job_id, headers=self.headers).json()
+            self.assertEqual(current['state'], 'failed')
+            self.assertEqual(current['error'], '测试失败')
+            self.assertEqual(current['started'], expected_start)
+            self.assertEqual(current['created'], submitted['created'])
+            listed = self.client.get('/v1/mix/jobs', headers=self.headers).json()['jobs'][0]
+            self.assertEqual(listed['started'], expected_start)
+            self.assertEqual(jobs.get(job_id)['state'], 'failed')
+            self.assertFalse(jobs.run_one(lambda *args: self.fail('GET must not resume')))
+            if expected_start == first_start:
+                resumed = self.client.post('/v1/mix/jobs/' + job_id + '/resume', headers=self.headers)
+                self.assertEqual(resumed.status_code, 202, resumed.text)
+                self.assertEqual(resumed.json()['state'], 'queued')
+                self.assertIsNone(resumed.json()['started'])
 
     def test_worker_publishes_progress_before_the_first_model_request(self):
         job_id = self.submit(body={**self.spec, 'voice_mode': 'original'}).json()['id']

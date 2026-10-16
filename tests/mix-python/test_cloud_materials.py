@@ -12,6 +12,7 @@ from unittest.mock import patch
 import numpy as np
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from qcloud_cos.cos_exception import CosServiceError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'services/mix/python'))
 try:
@@ -38,6 +39,8 @@ class FakeCos:
         return 'https://test-bucket-123.cos.ap-singapore.myqcloud.com/' + params['Key'] + '?sign=test'
 
     def head_object(self, **params):
+        if params['Key'] not in self.objects:
+            raise CosServiceError('HEAD', '<Error><Code>NoSuchKey</Code></Error>', 404)
         value = self.objects[params['Key']]
         return {'Content-Length': str(len(value)), 'ETag': '"' + hashlib.md5(value).hexdigest() + '"'}
 
@@ -151,6 +154,244 @@ class CloudMaterialsTests(unittest.TestCase):
         self.assertEqual(self.library.complete(OWNER, item['id'])['state'], 'queued')
         self.assertNotIn('key', item)
         self.assertNotIn('upload_key', item)
+
+    def test_fingerprint_resumes_the_same_account_file_and_preserves_legacy_uploads(self):
+        fingerprint = 'd' * 64
+        first = self.library.create_upload(OWNER, 'folder/clip.mp4', 5, fingerprint)
+        restarted = CloudMaterials(self.root, client=self.cos, env=ENV)
+        resumed = restarted.create_upload(OWNER, 'folder\\clip.mp4', 5, fingerprint.upper())
+        self.assertEqual(first['id'], resumed['id'])
+        self.assertIn('upload_url', resumed)
+        other = restarted.create_upload(OTHER, 'folder/clip.mp4', 5, fingerprint)
+        self.assertNotEqual(first['id'], other['id'])
+        for _ in range(2):
+            legacy = restarted.create_upload(OWNER, 'folder/clip.mp4', 5)
+            self.assertNotEqual(first['id'], legacy['id'])
+        self.assertEqual(len(restarted.list(OWNER)), 3)
+        self.assertIsNone(restarted.list(OWNER)[0]['fingerprint'])
+        self.assertEqual(restarted.public(restarted.get(OWNER, first['id']))['fingerprint'], fingerprint)
+
+    def test_existing_database_migration_preserves_assets_without_guessing_identity(self):
+        legacy = self.upload()
+        with self.library.connect() as db:
+            db.execute('DROP INDEX assets_fingerprint')
+            db.execute('ALTER TABLE assets DROP COLUMN fingerprint')
+        restarted = CloudMaterials(self.root, client=self.cos, env=ENV)
+        before = restarted.get(OWNER, legacy['id'])
+        self.assertIsNone(before['fingerprint'])
+        ticket = restarted.create_upload(OWNER, legacy['name'], legacy['bytes'], 'd' * 64)
+        self.assertNotEqual(ticket['id'], legacy['id'])
+        self.assertEqual(restarted.get(OWNER, legacy['id']), before)
+        self.assertEqual(self.cos.objects[before['key']], self.video.read_bytes())
+
+    def test_confirmed_legacy_reselection_binds_only_the_unique_owned_asset(self):
+        legacy = self.upload()
+        other = self.upload(OTHER)
+        before = self.library.get(OWNER, legacy['id'])
+        resumed = self.library.create_upload(OWNER, legacy['name'], legacy['bytes'], 'd' * 64, True)
+        self.assertEqual(resumed['id'], legacy['id'])
+        self.assertEqual(resumed['item']['fingerprint'], 'd' * 64)
+        self.assertEqual(resumed['item']['state'], 'queued')
+        self.assertNotIn('upload_url', resumed)
+        self.assertEqual(self.library.get(OWNER, legacy['id']), {**before, 'fingerprint': 'd' * 64})
+        self.assertIsNone(self.library.get(OTHER, other['id'])['fingerprint'])
+        self.assertEqual(len(self.cos.copies), 2)
+
+    def test_legacy_reselection_does_not_guess_between_duplicates_or_rebind_identity(self):
+        first = self.library.create_upload(OWNER, 'clip.mp4', 5)
+        second = self.library.create_upload(OWNER, 'clip.mp4', 5)
+        ambiguous = self.library.create_upload(OWNER, 'clip.mp4', 5, 'd' * 64, True)
+        self.assertNotIn(ambiguous['id'], (first['id'], second['id']))
+        self.assertIsNone(self.library.get(OWNER, first['id'])['fingerprint'])
+        self.assertIsNone(self.library.get(OWNER, second['id'])['fingerprint'])
+        assigned = self.library.create_upload(OWNER, 'assigned.mp4', 5, 'e' * 64)
+        replacement = self.library.create_upload(OWNER, 'assigned.mp4', 5, 'f' * 64, True)
+        self.assertNotEqual(replacement['id'], assigned['id'])
+        self.assertEqual(self.library.get(OWNER, assigned['id'])['fingerprint'], 'e' * 64)
+
+    def test_confirmed_legacy_reselection_continues_uploads_and_excludes_deleting(self):
+        pending = self.library.create_upload(OWNER, 'pending.mp4', 5)
+        resumed = self.library.create_upload(OWNER, 'pending.mp4', 5, 'd' * 64, True)
+        self.assertEqual(resumed['id'], pending['id'])
+        self.assertIn('upload_url', resumed)
+        finished = self.library.create_upload(OWNER, 'finished.mp4', 5)
+        item = self.library.get(OWNER, finished['id'])
+        self.cos.objects[item['upload_key']] = b'short'
+        recovered = self.library.create_upload(OWNER, 'finished.mp4', 5, 'e' * 64, True)
+        self.assertEqual(recovered['id'], finished['id'])
+        self.assertEqual(recovered['item']['state'], 'queued')
+        deleting = self.library.create_upload(OWNER, 'deleting.mp4', 5)
+        with self.library.connect() as db:
+            db.execute("UPDATE assets SET state='deleting' WHERE id=?", (deleting['id'],))
+        replacement = self.library.create_upload(OWNER, 'deleting.mp4', 5, 'f' * 64, True)
+        self.assertNotEqual(replacement['id'], deleting['id'])
+        self.assertIsNone(self.library.get(OWNER, deleting['id'])['fingerprint'])
+
+    def test_concurrent_legacy_claims_do_not_overwrite_the_first_bound_identity(self):
+        legacy = self.library.create_upload(OWNER, 'clip.mp4', 5)
+        clients = [CloudMaterials(self.root, client=self.cos, env=ENV) for _ in range(2)]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda n: clients[n].create_upload(
+                OWNER, 'clip.mp4', 5, ('d' if n == 0 else 'e') * 64, True), range(2)))
+        self.assertEqual(len({result['id'] for result in results}), 2)
+        self.assertIn(legacy['id'], {result['id'] for result in results})
+        for n, result in enumerate(results):
+            self.assertEqual(self.library.get(OWNER, result['id'])['fingerprint'], ('d' if n == 0 else 'e') * 64)
+
+    def test_legacy_reuse_flag_is_strict_and_requires_a_fingerprint(self):
+        for reuse in ['true', 1, None, []]:
+            with self.assertRaises(ValueError):
+                self.library.create_upload(OWNER, 'clip.mp4', 5, 'd' * 64, reuse)
+        with self.assertRaises(ValueError):
+            self.library.create_upload(OWNER, 'clip.mp4', 5, None, True)
+        self.assertEqual(self.library.list(OWNER), [])
+
+    def test_fingerprint_rejects_invalid_identity_and_conflicting_metadata(self):
+        for fingerprint in ['', 'z' * 64, 'a' * 63, 123, True]:
+            with self.assertRaises(ValueError):
+                self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        fingerprint = 'd' * 64
+        self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        for name, size in [('changed.mp4', 5), ('clip.mp4', 6)]:
+            with self.assertRaises(ValueError):
+                self.library.create_upload(OWNER, name, size, fingerprint)
+        self.assertEqual(len(self.library.list(OWNER)), 1)
+
+    def test_resume_recovers_a_finished_put_without_the_complete_request(self):
+        fingerprint = 'e' * 64
+        ticket = self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        item = self.library.get(OWNER, ticket['id'])
+        self.cos.objects[item['upload_key']] = b'short'
+        resumed = self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        self.assertEqual(resumed['id'], ticket['id'])
+        self.assertEqual(resumed['item']['state'], 'queued')
+        self.assertNotIn('upload_url', resumed)
+        self.assertEqual(self.cos.objects[item['key']], b'short')
+        self.cos.objects[item['upload_key']] = b'other'
+        self.library.complete(OWNER, item['id'])
+        again = self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        self.assertEqual(again['item']['state'], 'queued')
+        self.assertEqual(len(self.cos.copies), 1)
+        self.assertEqual(self.cos.objects[item['key']], b'short')
+
+    def test_resume_reuploads_incomplete_staging_but_does_not_hide_storage_failure(self):
+        fingerprint = 'e' * 64
+        ticket = self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        item = self.library.get(OWNER, ticket['id'])
+        self.cos.objects[item['upload_key']] = b'x'
+        self.assertIn('upload_url', self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint))
+        denied = CosServiceError('HEAD', '<Error><Code>AccessDenied</Code></Error>', 403)
+        with patch.object(self.cos, 'head_object', side_effect=denied), self.assertRaises(CosServiceError):
+            self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        self.assertEqual(len(self.library.list(OWNER)), 1)
+        self.assertEqual(self.cos.copies, [])
+
+    def test_reselection_reuses_indexed_or_failed_assets_without_analysis_again(self):
+        content = self.video.read_bytes()
+        fingerprint = 'f' * 64
+        ticket = self.library.create_upload(OWNER, 'clip.mp4', len(content), fingerprint)
+        item = self.library.get(OWNER, ticket['id'])
+        self.cos.objects[item['upload_key']] = content
+        self.library.complete(OWNER, item['id'])
+        self.library.index_next(self.models)
+        for state in ['ready', 'failed']:
+            with self.library.connect() as db:
+                db.execute('UPDATE assets SET state=? WHERE id=?', (state, item['id']))
+            resumed = self.library.create_upload(OWNER, 'clip.mp4', len(content), fingerprint)
+            self.assertEqual(resumed['item']['id'], item['id'])
+            self.assertEqual(resumed['item']['state'], state)
+            self.assertNotIn('upload_url', resumed)
+            self.assertFalse(self.library.index_next(self.models))
+        self.assertEqual(self.models.embeds, 2)
+
+    def test_resigned_upload_lifetime_and_staging_cleanup_use_the_latest_ticket(self):
+        fingerprint = 'd' * 64
+        with patch('cloud_materials.time.time', return_value=1000):
+            ticket = self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        item = self.library.get(OWNER, ticket['id'])
+        with patch('cloud_materials.time.time', return_value=4500):
+            self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        with patch('cloud_materials.time.time', return_value=5000):
+            self.library.cleanup()
+            self.assertEqual(self.library.get(OWNER, ticket['id'])['state'], 'uploading')
+            self.cos.objects[item['upload_key']] = b'short'
+            self.assertEqual(self.library.complete(OWNER, ticket['id'])['state'], 'queued')
+            self.cos.objects[item['upload_key']] = b'replayed staging'
+            self.library.cleanup()
+            self.assertIn(item['upload_key'], self.cos.objects)
+        with patch('cloud_materials.time.time', return_value=8500):
+            self.library.cleanup()
+        self.assertNotIn(item['upload_key'], self.cos.objects)
+        self.assertEqual(self.cos.objects[item['key']], b'short')
+
+    def test_cleanup_waits_for_resigning_before_selecting_expired_uploads(self):
+        fingerprint = 'd' * 64
+        with patch('cloud_materials.time.time', return_value=1000):
+            ticket = self.library.create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+        entered, release = threading.Event(), threading.Event()
+        signing = self.cos.get_presigned_url
+
+        def paused(**kwargs):
+            entered.set()
+            self.assertTrue(release.wait(5))
+            return signing(**kwargs)
+
+        with ThreadPoolExecutor(max_workers=2) as pool, \
+                patch('cloud_materials.time.time', return_value=6000), \
+                patch.object(self.cos, 'get_presigned_url', side_effect=paused):
+            renewing = pool.submit(self.library.create_upload, OWNER, 'clip.mp4', 5, fingerprint)
+            self.assertTrue(entered.wait(5))
+            cleaning = pool.submit(self.library.cleanup)
+            try:
+                self.assertFalse(cleaning.done(), 'cleanup must not select the old expiry during signing')
+            finally:
+                release.set()
+            self.assertEqual(renewing.result()['id'], ticket['id'])
+            cleaning.result()
+        self.assertEqual(self.library.get(OWNER, ticket['id'])['state'], 'uploading')
+
+    def test_parallel_resume_and_complete_reuse_one_asset_and_copy_once(self):
+        fingerprint = 'd' * 64
+        clients = [CloudMaterials(self.root, client=self.cos, env=ENV) for _ in range(4)]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            tickets = list(pool.map(lambda library: library.create_upload(OWNER, 'clip.mp4', 5, fingerprint), clients))
+        self.assertEqual(len({ticket['id'] for ticket in tickets}), 1)
+        item = self.library.get(OWNER, tickets[0]['id'])
+        self.cos.objects[item['upload_key']] = b'short'
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            outcomes = list(pool.map(lambda n: clients[n].create_upload(OWNER, 'clip.mp4', 5, fingerprint)
+                if n % 2 else clients[n].complete(OWNER, item['id']), range(4)))
+        self.assertTrue(all(outcome.get('item', outcome)['state'] == 'queued' for outcome in outcomes))
+        self.assertEqual(len(self.cos.copies), 1)
+        self.assertEqual(len(self.library.list(OWNER)), 1)
+
+    def test_upload_routes_accept_optional_fingerprint_and_return_existing_item(self):
+        from app import create_app
+        app = create_app(root=self.root, token='t' * 64, start_worker=False, cloud_library=self.library)
+        headers = {'Authorization': 'Bearer ' + 't' * 64, 'x-material-owner': OWNER}
+        payload = {'name': 'clip.mp4', 'bytes': 5, 'fingerprint': 'd' * 64}
+        with TestClient(app) as client:
+            initial = client.post('/v1/mix/materials/uploads', headers=headers, json=payload)
+            self.assertEqual(initial.status_code, 201, initial.text)
+            item = self.library.get(OWNER, initial.json()['id'])
+            self.cos.objects[item['upload_key']] = b'short'
+            recovered = client.post('/v1/mix/materials/uploads', headers=headers, json=payload)
+            self.assertEqual(recovered.status_code, 201, recovered.text)
+            self.assertEqual(recovered.json()['item']['state'], 'queued')
+            self.assertNotIn('upload_url', recovered.json())
+            for invalid in [{**payload, 'fingerprint': None}, {**payload, 'name': 'different.mp4'},
+                            {**payload, 'unexpected': True}, {**payload, 'reuse_legacy': 'true'},
+                            {'name': 'clip.mp4', 'bytes': 5, 'reuse_legacy': True}]:
+                self.assertEqual(client.post('/v1/mix/materials/uploads', headers=headers, json=invalid).status_code, 400)
+            legacy = client.post('/v1/mix/materials/uploads', headers=headers, json={'name': 'clip.mp4', 'bytes': 5})
+            self.assertEqual(legacy.status_code, 201, legacy.text)
+            self.assertIn('upload_url', legacy.json())
+            items = client.get('/v1/mix/materials', headers=headers).json()['items']
+            self.assertIsNone(next(item for item in items if item['id'] == legacy.json()['id'])['fingerprint'])
+            claimed = client.post('/v1/mix/materials/uploads', headers=headers,
+                                  json={**payload, 'fingerprint': 'e' * 64, 'reuse_legacy': True})
+            self.assertEqual(claimed.status_code, 201, claimed.text)
+            self.assertEqual(claimed.json()['id'], legacy.json()['id'])
 
     def test_index_is_durable_and_faiss_search_is_account_scoped(self):
         asset = self.index()
