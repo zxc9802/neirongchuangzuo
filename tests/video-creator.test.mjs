@@ -10,7 +10,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createVideoCreatorHandler, normalizeVideoSettings } from '../services/video-creator/server.mjs';
 import { createCreatorProvider, creatorConfig, creativeGenerationBody } from '../services/video-creator/provider.mjs';
-import { createDirectorModel, validateDirectorResult } from '../services/video-creator/model.mjs';
+import { createDirectorModel, validateDirectorResult, directorPacing } from '../services/video-creator/model.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
 import { VIDEO_MODELS, DEFAULT_VIDEO_SETTINGS } from '../design/video-catalog.js';
 import { videoConfig } from '../services/video/provider.mjs';
@@ -72,19 +72,58 @@ test('Seedance request matches reference repository and enforces model-specific 
 test('director validates real asset references and timeline, supports clarification and consumes streaming structured output', async () => {
   const id = randomUUID(), root = await mkdtemp(join(tmpdir(), 'director-model-')), path = join(root, 'photo.jpg');
   try {
-    await sharp({ create: { width: 256, height: 256, channels: 3, background: '#445544' } }).jpeg().toFile(path);
+    await sharp({ create: { width: 320, height: 160, channels: 3, background: '#445544' } }).withMetadata({ orientation: 6 }).jpeg().toFile(path);
     const input = { skill: 'group-buy', settings, message: '做一条宣传', assets: [{ id, path, type: 'image', name: '门店' }], history: [] };
     assert.equal(validateDirectorResult({ kind: 'clarification', questions: ['套餐价格和使用条件是什么？'] }, input).kind, 'clarification');
     const bad = script(input); bad.script.shots[0].referenceIds = ['invented']; assert.throws(() => validateDirectorResult(bad, input), /素材引用/);
     const timing = script(input); timing.script.shots[0].end = 15; assert.throws(() => validateDirectorResult(timing, input), /时长/);
     let sent;
     const result = await createDirectorModel({ config: { apiKey: 'private-key', baseUrl: 'https://text.example/v1', imageTextModel: 'claude-opus-5-5' }, fetchImpl: async (_url, opts) => {
-      sent = JSON.parse(opts.body); return new Response('data: ' + JSON.stringify({ choices: [{ delta: { content: JSON.stringify(script(input)) } }], usage: { prompt_tokens: 100, completion_tokens: 200 } }) + '\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
+      sent = JSON.parse(opts.body); const output = script(input); delete output.script.videoPrompt; output.script.globalDirection = '保留真实装修与暖色灯光。';
+      return new Response('data: ' + JSON.stringify({ choices: [{ delta: { content: JSON.stringify(output) } }], usage: { prompt_tokens: 100, completion_tokens: 200 } }) + '\n\ndata: [DONE]\n\n', { headers: { 'content-type': 'text/event-stream' } });
     } }).generate(input);
     assert.equal(result.kind, 'script'); assert.equal(result.script.shots[0].referenceIds[0], id);
     assert.equal(sent.model, 'claude-opus-5-5'); assert.equal(sent.messages[1].content.filter(x => x.type === 'image_url').length, 1);
+    const prepared = sent.messages[1].content.find(x => x.type === 'image_url').image_url.url.split(',')[1];
+    const photo = await sharp(Buffer.from(prepared, 'base64')).metadata();
+    assert.equal(photo.width, 160); assert.equal(photo.height, 320); assert.equal(photo.orientation, undefined);
     assert.match(sent.messages[0].content, /团购缺少套餐内容/);
+    assert.equal(JSON.parse(sent.messages[1].content[0].text).pacing.duration, settings.duration);
+    assert.ok(result.script.videoPrompt.includes(`镜头1｜0–${settings.duration}秒｜参考图片1`));
   } finally { await rm(root, { force: true, recursive: true }); }
+});
+
+test('director pacing adapts to duration without imposing a fixed shot count', () => {
+  assert.deepEqual(directorPacing({ duration: 30 }).suggestedShots, { min: 8, max: 10 });
+  for (const model of VIDEO_MODELS) for (const duration of model.durations) {
+    const { min, max } = directorPacing({ duration }).suggestedShots;
+    assert.ok(min >= 1 && max >= min && max <= 15);
+  }
+  const input = { settings: { ...settings, duration: 30 }, assets: [{ id: 'room', type: 'image' }] };
+  assert.equal(validateDirectorResult(script(input), input).script.shots.length, 1);
+});
+
+test('applied director prompt retains every planned shot and maps references by image order', () => {
+  const input = { settings: { ...settings, duration: 30, language: 'en' }, assets: [
+    { id: 'voice', type: 'audio' }, { id: 'room', type: 'image' }, { id: 'bar', type: 'image' }, { id: 'stage', type: 'image' },
+  ] };
+  const shots = Array.from({ length: 8 }, (_, i) => ({ start: i * 3.75, end: (i + 1) * 3.75,
+    visual: `展示重点${i + 1}`, referenceIds: [['room', 'bar', 'stage'][i % 3]], camera: `衔接${i + 1}`, voiceover: 'Voice', caption: '' }));
+  const value = { kind: 'script', script: { title: '门店', globalDirection: '暖黄灯光与粉紫舞台色保持一致。', shots,
+    videoPrompt: '旧版只写了0到10秒，不应采用' } };
+  const result = validateDirectorResult(value, input).script;
+  assert.equal(result.shots.length, 8);
+  for (let i = 0; i < 8; i++) {
+    assert.ok(result.videoPrompt.includes(`镜头${i + 1}｜${shots[i].start}–${shots[i].end}秒`));
+    assert.ok(result.videoPrompt.includes(shots[i].visual));
+    assert.ok(result.videoPrompt.includes(`参考图片${i % 3 + 1}`));
+  }
+  assert.match(result.videoPrompt, /旁白语言：英文/);
+  assert.doesNotMatch(result.videoPrompt, /旧版|room|bar|stage|voice/);
+  const muted = validateDirectorResult(value, { ...input, settings: { ...input.settings, generateAudio: false } }).script;
+  assert.match(muted.videoPrompt, /静音视频/); assert.doesNotMatch(muted.videoPrompt, /旁白：Voice/);
+  const incomplete = structuredClone(value); incomplete.script.shots.pop();
+  assert.throws(() => validateDirectorResult(incomplete, input), /总时长/);
 });
 
 test('full workflow: upload, director, apply, single idempotent render, correct MP4 download and cost settlement', async t => {
