@@ -1,38 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createFalVideoProvider, falGenerationBody, wanGenerationBody, FAL_MODEL } from '../services/video/fal.mjs';
-import { videoConfig, WAN_MODEL } from '../services/video/provider.mjs';
+import { createFalVideoProvider, falGenerationBody, FAL_MODEL } from '../services/video/fal.mjs';
 
 const task = { duration: 15, ratio: '9:16', video: { duration: 12.3 }, voice: {},
   speech: { start: 0.16, segments: [{ start: 0.16, end: 9.28, text: '不要九块九。' }] },
   materials: { photo: { id: 'https://app.example/photo?signed=1' }, video: { id: 'https://app.example/video?signed=2' }, voice: { id: 'https://app.example/voice?signed=3' } } };
-
-test('Wan uses replacement inputs and the shared fal key without Seedance configuration', () => {
-  assert.deepEqual(wanGenerationBody(task), { video_url: task.materials.video.id, image_url: task.materials.photo.id,
-    resolution: '720p', num_inference_steps: 20, use_turbo: false });
-  const config = videoConfig({ FAL_KEY: 'common', FAL_API_KEY: 'alias', VIDEO_FAL_KEY: 'legacy', TEMP_ASSET_SIGNING_SECRET: 'sign' }, 'https://workspace.example');
-  assert.equal(config.falKey, 'common'); assert.equal(config.falEnabled, true); assert.equal(config.enabled, false);
-  assert.equal(videoConfig({ FAL_API_KEY: 'alias', VIDEO_FAL_KEY: 'legacy' }).falKey, 'alias');
-});
-
-test('Wan submits once, restores its queue and rejects unrelated queue hosts or models', async () => {
-  const calls = [], queue = { status: 'https://queue.fal.run/fal-ai/wan/requests/wan-1/status', result: 'https://queue.fal.run/fal-ai/wan/requests/wan-1' };
-  const responses = [{ request_id: 'wan-1', status_url: queue.status, response_url: queue.result }, { status: 'IN_PROGRESS' },
-    { status: 'COMPLETED' }, { video: { url: 'https://fal.media/wan.mp4' } }];
-  const fetchImpl = async (url, options) => { calls.push({ url, ...options }); return Response.json(responses.shift()); };
-  const submitted = await createFalVideoProvider({ falKey: 'shared' }, fetchImpl, WAN_MODEL).generate(task);
-  const restored = createFalVideoProvider({ falKey: 'shared' }, fetchImpl, WAN_MODEL);
-  assert.deepEqual(submitted.falQueue, queue);
-  assert.equal((await restored.query('wan-1', submitted)).completed, undefined);
-  assert.equal((await restored.query('wan-1', submitted)).url, 'https://fal.media/wan.mp4');
-  assert.equal(calls[0].url, `https://queue.fal.run/${WAN_MODEL}`);
-  assert.deepEqual(JSON.parse(calls[0].body), wanGenerationBody(task));
-  assert.equal(calls.filter(call => call.method === 'POST').length, 1);
-  for (const status of ['https://foreign.example/collect', 'https://queue.fal.run/minimax/h3-max/requests/other/status']) {
-    await assert.rejects(restored.query('wan-1', { falQueue: { status } }), /队列/);
-  }
-  assert.equal(calls.length, 4);
-});
 
 test('H3 Max sends all three references with the original dialogue and no prompt rewriting', () => {
   const body = falGenerationBody(task);
