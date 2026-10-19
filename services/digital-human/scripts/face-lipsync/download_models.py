@@ -13,6 +13,8 @@ models = [
      "961e8696f888fce4f3f3a6c3d5b3267cf5b343100b238e79b2659bff2c605442"),
     ("selfie_multiclass_256x256.tflite", "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite",
      "c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0"),
+    ("hand_landmarker.task", "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+     "fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1"),
 ]
 for name, url, digest in models:
     target = root / name

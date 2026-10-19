@@ -17,7 +17,7 @@ import wave
 import cv2
 import numpy as np
 from scipy.ndimage import median_filter
-from occlusion import create_segmenter, source_protection
+from occlusion import create_hand_detector, create_segmenter, source_protection
 
 MODELS = Path(os.environ.get("LIPSYNC_MODEL_DIR", "/opt/lipsync/models"))
 FPS = 30
@@ -165,7 +165,8 @@ def prepare(req):
         raise QualityError("Narration is too short to measure reliably", "LIPSYNC_INPUT_DURATION")
     # Check the full inference runtime before the server submits paid work.
     load_syncnet()
-    with create_segmenter(MODELS / "selfie_multiclass_256x256.tflite"):
+    with create_segmenter(MODELS / "selfie_multiclass_256x256.tflite"), \
+         create_hand_detector(MODELS / "hand_landmarker.task"):
         pass
     info, data = track(req["inputVideoPath"], duration=duration, extend=True)
     crop = crop_plan(info, data)
@@ -267,7 +268,8 @@ def composite(req):
                         str(job / "face-composited.mp4")], stdin=sp.PIPE)
     count = 0
     try:
-        with create_segmenter(MODELS / "selfie_multiclass_256x256.tflite") as segmenter:
+        with create_segmenter(MODELS / "selfie_multiclass_256x256.tflite") as segmenter, \
+             create_hand_detector(MODELS / "hand_landmarker.task") as hand_detector:
             for i, frame in enumerate(frames(job / "source-video.mp4", base["width"], base["height"])):
                 patch = next(patches, None)
                 if patch is None or i >= len(manifest["track"]):
@@ -276,7 +278,7 @@ def composite(req):
                 cx = ((row[10] + row[12]) / 2 - c["x"]) * scale_x
                 cy = ((row[11] + row[13]) / 2 - c["y"]) * scale_y
                 rx, ry = row[2] * scale_x * 0.42, row[3] * scale_y * 0.28
-                protection = source_protection(segmenter, frame[y:y + h, x:x + w])
+                protection = source_protection(segmenter, hand_detector, frame, (x, y, w, h))
                 result = blend_mouth(frame, patch, x, y, cx, cy, rx, ry, protection)
                 encoder.stdin.write(result.tobytes())
                 count += 1
