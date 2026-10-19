@@ -1,6 +1,7 @@
 import { createVideoProvider, parseGeneration, VideoError } from '../video/provider.mjs';
 import { createProviderStorage } from '../video/provider-storage.mjs';
 import { VIDEO_MODELS } from '../../design/video-catalog.js';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export function creatorConfig(env = {}, publicOrigin) {
   const value = (suffix, fallback) => env[`VIDEO_CREATOR_${suffix}`] || fallback;
@@ -42,10 +43,57 @@ export function creativeGenerationBody(input) {
 export function createCreatorProvider(config, fetchImpl = fetch) {
   const common = createVideoProvider(config, fetchImpl);
   const storage = config.storageKey ? createProviderStorage({ FAL_KEY: config.storageKey }, fetchImpl) : null;
+  async function materialRequest(path, body, timeoutMs = 30000) {
+    try {
+      const c = config.material, response = await fetchImpl(new URL(path, c.base), { method: 'POST', redirect: 'error',
+        headers: { 'Content-Type': 'application/json', projectCode: c.project, 'X-Access-Key': c.access, 'X-Secret-Key': c.secret },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) });
+      const chunks = []; let size = 0;
+      for await (const chunk of response.body) { size += chunk.length; if (size > 1024 * 1024) throw new Error(); chunks.push(chunk); }
+      const data = JSON.parse(Buffer.concat(chunks).toString());
+      if (!response.ok || data.success === false) {
+        if (/白名单|whitelist|allowlist/i.test(String(data.msg || data.message || ''))) throw new VideoError('当前服务器 IP 未获模型服务授权，请管理员配置供应商 IP 白名单。', 502, 'VIDEO_PROVIDER_IP_DENIED');
+        throw new VideoError('素材服务拒绝请求，请检查素材或接口权限。', 502, 'VIDEO_PROVIDER_REJECTED');
+      }
+      return data;
+    } catch (cause) {
+      if (cause instanceof VideoError) throw cause;
+      throw new VideoError('素材接口连接中断，请稍后查看任务。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+    }
+  }
+  const identity = value => { try { const u = new URL(value); return u.origin + u.pathname; } catch { return null; } };
+  async function findMaterial(url, fileType) {
+    const sourceIdentity = identity(url); if (!sourceIdentity) return null;
+    const data = await materialRequest('/openApi/material/pageList', { pageNo: 1, pageSize: 50 });
+    const found = data.data?.records?.find(r => r.materialId && identity(r.originalUrl) === sourceIdentity && Number(r.fileType || fileType) === fileType);
+    return found ? { id: String(found.materialId), status: Number(found.status || 1) } : null;
+  }
   return { ...common, async uploadSource(asset) {
     if (!storage) return null;
     try { return await storage.upload(asset.path, asset.type === 'image' ? 'image/jpeg' : 'audio/wav'); }
     catch { throw new VideoError('素材传输失败，尚未提交视频生成，请稍后重试。', 502, 'CREATOR_SOURCE_UPLOAD_FAILED'); }
+  }, async createMaterial(url, kind) {
+    const fileType = kind === 'photo' ? 1 : kind === 'voice' ? 2 : 3;
+    const known = await findMaterial(url, fileType).catch(() => null); if (known) return known;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const data = await materialRequest('/openApi/material/create', { name: `qiya-video-${kind}`, originalUrl: url, type: 1, fileType, thirdChannel: 1 }, 120000);
+        if (!data.data?.materialId) throw new VideoError('素材服务未返回素材编号。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+        return { id: String(data.data.materialId), status: Number(data.data.status || 1) };
+      } catch (cause) {
+        if (cause.code !== 'VIDEO_PROVIDER_UNAVAILABLE') throw cause;
+        const recovered = await findMaterial(url, fileType).catch(() => null); if (recovered) return recovered;
+        if (attempt === 2) throw cause;
+        await delay(500 * (attempt + 1));
+      }
+    }
+  }, async queryMaterial(id) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const data = await materialRequest('/openApi/material/pageList', { materialId: id, pageNo: 1, pageSize: 10 });
+        return Number(data.data?.records?.find(r => String(r.materialId) === id)?.status || 1);
+      } catch (cause) { if (cause.code !== 'VIDEO_PROVIDER_UNAVAILABLE' || attempt === 2) throw cause; await delay(500 * (attempt + 1)); }
+    }
   }, async generateCreative(input) {
     const body = creativeGenerationBody(input), c = input.model === 'doubao-seedance-2-5-260628' && config.dedicated25 ? config.dedicated25 : config.video;
     if (!Object.values(c).every(Boolean)) throw new VideoError('所选模型的独立接口配置不完整。', 503, 'CREATOR_MODEL_NOT_CONFIGURED');

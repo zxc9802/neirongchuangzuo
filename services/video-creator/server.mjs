@@ -65,6 +65,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       skill: task.skill, title: task.title, settings: task.settings, duration: task.settings.duration, actualDuration: task.actualDuration,
       createdAt: task.createdAt, startedAt: task.startedAt, completedAt: task.completedAt, expiresAt: task.expiresAt,
       error: task.error || '', code: task.code, warning: task.warning, billing: task.billing, estimatedPoints: points(task.settings.duration),
+      materialProgress: { total: task.assetIds?.length || 0, prepared: Object.keys(task.materials || {}).length, approved: Object.values(task.materials || {}).filter(m => m.status === 2).length },
       canRecover: task.status === 'failed' && paid && Boolean(task.resultSource) && !expired,
       prompt: task.prompt, resultUrl: task.status === 'completed' && paid && !expired ? `${PREFIX}/tasks/${task.id}/result` : null };
   }
@@ -140,15 +141,22 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       }
       if (['preparing', 'reviewing'].includes(task.status)) {
         task.materials ||= {};
-        for (const assetId of task.assetIds) {
-          const asset = c.assets.find(a => a.id === assetId); let material = task.materials[assetId];
-          if (!material) {
-            if (!asset.sourceUrl && provider.uploadSource) { asset.sourceUrl = await provider.uploadSource(asset); await save(c); }
-            material = await provider.createMaterial(asset.sourceUrl || sourceUrl(c, asset), asset.type === 'image' ? 'photo' : 'voice'); task.materials[assetId] = material; await save(c);
+        let next = 0; const failures = [];
+        await Promise.all(Array.from({ length: Math.min(3, task.assetIds.length) }, async () => {
+          while (!closing && !failures.length && next < task.assetIds.length) {
+            const assetId = task.assetIds[next++], asset = c.assets.find(a => a.id === assetId); let material = task.materials[assetId];
+            try {
+              if (!material) {
+                if (!asset.sourceUrl && provider.uploadSource) { asset.sourceUrl = await provider.uploadSource(asset); await save(c); }
+                material = await provider.createMaterial(asset.sourceUrl || sourceUrl(c, asset), asset.type === 'image' ? 'photo' : 'voice'); task.materials[assetId] = material;
+              } else if (material.status !== 2) material.status = await provider.queryMaterial(material.id);
+              await save(c);
+              if (material.status === 3) throw creatorError('部分素材未通过视频服务审核，请换一组清晰的实拍。', 422, 'VIDEO_MATERIAL_REJECTED');
+            } catch (cause) { failures.push(cause); }
           }
-          else if (material.status !== 2) material.status = await provider.queryMaterial(material.id);
-          if (material.status === 3) throw creatorError('部分素材未通过视频服务审核，请换一组清晰的实拍。', 422, 'VIDEO_MATERIAL_REJECTED');
-        }
+        }));
+        if (failures.length) throw failures[0];
+        if (closing) return;
         task.status = 'reviewing'; await save(c);
         if (Object.values(task.materials).some(m => m.status !== 2)) return;
         if (closing) return;

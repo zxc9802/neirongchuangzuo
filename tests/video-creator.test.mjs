@@ -27,7 +27,7 @@ async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-creator-'));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode: true }); await wallet.ready;
   const state = { generates: 0, materialCreates: 0, scripts: 0, review: 2, done: false, failed: false, downloads: 0 };
-  const provider = { async createMaterial(url) { state.materialCreates++; state.source = url; return { id: 'material-' + state.materialCreates, status: state.review }; },
+  const provider = { async createMaterial(url) { state.materialCreates++; state.source = url; if (options.createMaterial) return options.createMaterial(url); return { id: 'material-' + state.materialCreates, status: state.review }; },
     async queryMaterial() { return state.review; }, async generateCreative(input) { state.generates++; state.input = input;
       if (state.uncertain) throw new Error('Connection reset'); return { taskId: 'provider-task' }; },
     async query() { return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; } };
@@ -173,4 +173,31 @@ test('task identifiers cannot share a billing reservation across different conve
   const id = randomUUID(); assert.equal((await f.generate(first, id)).status, 202);
   assert.equal((await f.generate(second, id)).status, 409); await f.until(() => f.state.generates === 1);
   assert.equal((await f.current(second)).tasks.length, 0); assert.equal((await f.wallet.snapshot('alice')).held, 500);
+});
+
+test('lost material-create response reconciles the accepted asset before retrying and ignores expired URL signatures', async () => {
+  const config = { material: { base: 'https://supplier.example', project: 'project', access: 'access', secret: 'secret' } };
+  const url = 'https://workspace.example/source/immutable-photo?signature=new'; let creates = 0, lists = 0;
+  const provider = createCreatorProvider(config, async (target, opts) => {
+    if (new URL(target).pathname.endsWith('/create')) { creates++; throw new Error('Accepted upstream but connection reset'); }
+    lists++;
+    return Response.json({ success: true, data: { records: lists === 1 ? [] : [
+      { materialId: 'foreign', originalUrl: 'https://other.example/source/immutable-photo', status: 2, fileType: 1 },
+      { materialId: 'accepted', originalUrl: 'https://workspace.example/source/immutable-photo?signature=previous', status: 2, fileType: 1 },
+    ] } });
+  });
+  assert.deepEqual(await provider.createMaterial(url, 'photo'), { id: 'accepted', status: 2 }); assert.equal(creates, 1); assert.equal(lists, 2);
+  assert.deepEqual(await provider.createMaterial(url, 'photo'), { id: 'accepted', status: 2 }); assert.equal(creates, 1);
+});
+
+test('material preparation runs at most three requests together and preserves image reference order', async t => {
+  const pending = [];
+  const f = await fixture(t, { createMaterial: url => new Promise(resolve => pending.push({ url, resolve })) });
+  const id = await f.init(), images = [];
+  for (let i = 0; i < 4; i++) images.push(await f.upload(id));
+  await f.generate(id); await f.until(() => pending.length === 3);
+  assert.equal(f.state.materialCreates, 3);
+  const resolve = item => item.resolve({ id: 'material-' + new URL(item.url).pathname.split('/').at(-1), status: 2 });
+  resolve(pending[2]); await f.until(() => pending.length === 4); resolve(pending[3]); resolve(pending[1]); resolve(pending[0]);
+  await f.until(() => f.state.generates === 1); assert.deepEqual(f.state.input.imageIds, images.map(id => 'material-' + id));
 });
