@@ -83,7 +83,7 @@ test('Seedance 2.0 connection matches reference project and never returns creden
   assert.equal(requests[0].body.type, 1); assert.equal(requests[0].body.fileType, 1); assert.equal(requests[1].body.fileType, 3);
   assert.equal(requests[3].body.modelId, 'doubao-seedance-2-0-260128');
   assert.equal(requests[3].body.prompt, PROMPT);
-  assert.deepEqual(requests[3].body.payload, { params: { mode: 'fusion_video', resolution: '720p', scale: '9:16', duration: 4, generateAudio: true }, resources: ['asset://photo-id'], referVideoUrl: ['asset://video-id'] });
+  assert.deepEqual(requests[3].body.payload, { params: { mode: 'fusion_video', resolution: '720p', scale: 'adaptive', duration: -1, generateAudio: true }, resources: ['asset://photo-id'], referVideoUrl: ['asset://video-id'] });
   assert.deepEqual(requests[4].body, { taskId: 'paid-id', abilityType: 'VIDEO' });
   assert.equal(parseGeneration({ data: { status: 3 } }).failed, true);
   assert.equal(parseGeneration({ data: { results: [{ video_url: 'https://cdn.example/clip.mp4' }] } }).url, 'https://cdn.example/clip.mp4');
@@ -111,7 +111,8 @@ for (const [sourceDuration, generatedDuration] of [[15.1, 20], [20, 20], [20.1, 
     assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
     const running = await app.until(id, task => task.status === 'running');
     assert.equal(running.model, PREMIUM_MODEL); assert.equal(running.modelName, '至臻版');
-    assert.equal(app.state.body.modelId, PREMIUM_MODEL); assert.equal(app.state.body.payload.params.duration, generatedDuration);
+    assert.equal(app.state.body.modelId, PREMIUM_MODEL); assert.equal(app.state.body.payload.params.duration, -1);
+    assert.equal(app.state.body.payload.params.scale, 'adaptive'); assert.equal(running.duration, generatedDuration);
     assert.equal(app.state.generations, 1);
     app.state.done = true;
     assert.equal((await app.until(id, task => task.status === 'completed')).model, PREMIUM_MODEL);

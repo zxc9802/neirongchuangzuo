@@ -10,6 +10,21 @@ const task = overrides => ({
   ...overrides,
 });
 
+for (const model of [undefined, 'doubao-seedance-2-0-260128', 'doubao-seedance-2-5-260628']) {
+  test(`${model || 'default model'} edits the source with adaptive ratio and duration`, () => {
+    for (const ratio of ['9:16', '16:9']) {
+      const source = task({ model, ratio });
+      const before = structuredClone(source);
+      const { payload } = generationBody(source);
+      assert.equal(payload.params.mode, 'fusion_video');
+      assert.equal(payload.params.scale, 'adaptive');
+      assert.equal(payload.params.duration, -1);
+      assert.deepEqual(payload.referVideoUrl, ['asset://video-1']);
+      assert.deepEqual(source, before, 'Keep measured duration and ratio for display and billing');
+    }
+  });
+}
+
 test('voice prompt includes measured lead-in, interior pause and output-tail silence', () => {
   const request = generationBody(task({
     voice: { duration: 5.8 },
@@ -54,7 +69,7 @@ test('rounded-up video duration freezes the end frame without removing real pack
   assert.doesNotMatch(prompt, /去除画面叠加的字幕/);
   assert.match(prompt, /保留真实商品包装与场景标识/);
   assert.doesNotMatch(prompt, /原视频人声从第|唯一台词依据/);
-  assert.equal(payload.params.duration, 15);
+  assert.equal(payload.params.duration, -1);
   assert.equal('referAudioUrl' in payload, false);
 });
 
