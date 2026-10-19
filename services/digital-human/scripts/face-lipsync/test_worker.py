@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 import wave
 import worker
+from occlusion import protection_from_scores
 
 import numpy as np
 from worker import QualityError, choose_delay, crop_plan, pad_audio, frame_offset, prepare, composite
@@ -28,6 +29,7 @@ class FaceWorkflowTests(unittest.TestCase):
             detector = unittest.mock.Mock()
             detector.detect.return_value = (None, np.array([[12,12,100,100,40,40,80,40,60,60,40,80,80,80,.99]], dtype=np.float32))
             with patch("worker.load_syncnet", return_value=object()), \
+                 patch("worker.create_segmenter"), \
                  patch("worker.cv2.FaceDetectorYN.create", return_value=detector):
                 result = prepare({"inputVideoPath":str(source), "audioPath":str(audio),
                                   "durationSeconds":3.5, "jobDir":directory})
@@ -222,6 +224,92 @@ class FaceWorkflowTests(unittest.TestCase):
             actual = worker.blend_mouth(frame, patch_image, 60, 40, cx, cy, rx, ry)
             np.testing.assert_array_equal(actual, expected)
             np.testing.assert_array_equal(frame[:40], actual[:40])
+
+    def test_hand_in_front_of_mouth_keeps_source_pixels(self):
+        frame = np.full((120, 160, 3), 90, dtype=np.uint8)
+        # A finger crosses the centre of the replacement, including its edge.
+        frame[35:95, 77:86] = [40, 120, 220]
+        generated = np.full((80, 100, 3), [180, 30, 70], dtype=np.uint8)
+        protected = np.zeros((80, 100), dtype=np.float32)
+        protected[15:75, 47:56] = 1
+        actual = worker.blend_mouth(frame, generated, 30, 20, 50, 40, 35, 25, protected)
+        np.testing.assert_array_equal(actual[35:95, 77:86], frame[35:95, 77:86])
+        np.testing.assert_array_equal(actual[60, 65], generated[40, 35])
+        np.testing.assert_array_equal(actual[:20], frame[:20])
+
+    def test_no_occlusion_keeps_existing_mouth_blend_exactly(self):
+        rng = np.random.default_rng(83)
+        frame = rng.integers(0, 256, (120, 160, 3), dtype=np.uint8)
+        generated = rng.integers(0, 256, (80, 100, 3), dtype=np.uint8)
+        expected = worker.blend_mouth(frame, generated, 30, 20, 50, 40, 35, 25)
+        actual = worker.blend_mouth(frame, generated, 30, 20, 50, 40, 35, 25,
+                                    np.zeros((80, 100), dtype=np.float32))
+        np.testing.assert_array_equal(actual, expected)
+
+    def test_protection_tracks_current_hand_without_leaving_a_mask_after_it_moves(self):
+        scores = np.zeros((6, 64, 64), dtype=np.float32)
+        scores[3] = 1  # Uncovered face, including the lips.
+        for column in [16, 42, None]:
+            current = scores.copy()
+            if column is not None:
+                current[3, 12:52, column:column + 6] = 0.15
+                current[2, 12:52, column:column + 6] = 0.85
+            protection = protection_from_scores(current, 128, 96)
+            self.assertEqual(protection[48, 64], 0, "uncovered mouth must still animate")
+            if column is None:
+                self.assertFalse(protection.any(), "old hand positions must not leave a frozen mouth")
+            else:
+                self.assertEqual(protection[48, column * 2 + 4], 1)
+                other = 42 if column == 16 else 16
+                self.assertEqual(protection[48, other * 2 + 4], 0)
+
+    def test_fully_occluded_mouth_preserves_source_instead_of_painting_through_it(self):
+        frame = np.full((120, 160, 3), [45, 125, 210], dtype=np.uint8)
+        generated = np.full((80, 100, 3), [170, 20, 80], dtype=np.uint8)
+        actual = worker.blend_mouth(frame, generated, 30, 20, 50, 40, 35, 25,
+                                    np.ones((80, 100), dtype=np.float32))
+        np.testing.assert_array_equal(actual, frame)
+
+    def test_occlusion_runtime_failure_stops_face_preparation_before_encoding(self):
+        with patch("worker.load_syncnet"), \
+             patch("worker.create_segmenter", side_effect=RuntimeError("missing occlusion model")), \
+             patch("worker.ffmpeg") as encode:
+            with self.assertRaisesRegex(RuntimeError, "missing occlusion model"):
+                prepare({"jobDir": "/unused", "durationSeconds": 2})
+        encode.assert_not_called()
+
+    def test_encoded_composite_preserves_moving_hand_and_releases_uncovered_mouth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            job = Path(directory)
+            source = np.full((12, 120, 160, 3), 90, dtype=np.uint8)
+            source[:4, 45:95, 83:91] = [20, 220, 30]
+            source[4:8, 45:95, 103:111] = [20, 220, 30]
+            generated = np.full((39, 80, 80, 3), [180, 30, 170], dtype=np.uint8)
+            for name, images in [("source-video.mp4", source), ("rendered.mp4", generated)]:
+                height, width = images.shape[1:3]
+                worker.sp.run(["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
+                               "-s", f"{width}x{height}", "-r", "30", "-i", "-", "-an", "-c:v",
+                               "libx264rgb", "-crf", "0", str(job / name)], input=images.tobytes(), check=True)
+            row = [40,20,80,80,60,40,100,40,80,55,70,70,100,70]
+            (job / "face-manifest.json").write_text(json.dumps({"durationSeconds": 0.4,
+                "source": {"width":160,"height":120}, "crop": {"x":40,"y":20,"size":80},
+                "track": [row] * 12}))
+            seen = []
+            def protect(_segmenter, source_crop):
+                seen.append(source_crop.copy())
+                return (source_crop[:, :, 1] > 180).astype(np.float32)
+            with patch("worker.frame_offset", return_value=0), patch("worker.create_segmenter"), \
+                 patch("worker.source_protection", side_effect=protect):
+                result = composite({"jobDir":directory, "renderedPath":str(job / "rendered.mp4")})
+            output = list(worker.frames(job / "face-composited.mp4", 160, 120))
+            self.assertEqual(result["frames"], 12)
+            self.assertEqual(len(seen), 12)
+            np.testing.assert_array_equal(seen[0], source[0,20:100,40:120])
+            for index, x in [(2, 86), (6, 106)]:
+                self.assertLess(np.abs(output[index][70,x].astype(int) - source[index,70,x]).max(), 12,
+                                "encoded output must retain the source finger, not the generated patch")
+            for index, x in [(6, 86), (10, 86), (10, 106)]:
+                self.assertGreater(output[index][70,x,0], 140, "mouth must resume after the hand moves")
 
     def test_short_narration_fails_before_model_loading_or_paid_work(self):
         with self.assertRaises(QualityError) as caught:

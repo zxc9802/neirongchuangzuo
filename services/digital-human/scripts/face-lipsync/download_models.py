@@ -11,6 +11,8 @@ models = [
      "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"),
     ("syncnet_v2.model", "https://www.robots.ox.ac.uk/~vgg/software/lipsync/data/syncnet_v2.model",
      "961e8696f888fce4f3f3a6c3d5b3267cf5b343100b238e79b2659bff2c605442"),
+    ("selfie_multiclass_256x256.tflite", "https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/1/selfie_multiclass_256x256.tflite",
+     "c6748b1253a99067ef71f7e26ca71096cd449baefa8f101900ea23016507e0e0"),
 ]
 for name, url, digest in models:
     target = root / name

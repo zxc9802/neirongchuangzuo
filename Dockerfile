@@ -14,7 +14,7 @@ FROM public.ecr.aws/docker/library/node:24-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production PORT=8080 NEXT_TELEMETRY_DISABLED=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg ca-certificates curl fonts-noto-cjk python3 python3-venv \
+    ffmpeg ca-certificates curl fonts-noto-cjk python3 python3-venv libgl1 libglib2.0-0 \
     libnss3 libdbus-1-3 libatk1.0-0 libgbm1 libasound2 \
     libxrandr2 libxkbcommon0 libxfixes3 libxcomposite1 libxdamage1 \
     libatk-bridge2.0-0 libpango-1.0-0 libcairo2 libcups2 \

@@ -10,6 +10,13 @@ YuNet face detection, streaming frames and per-section alignment checks.
 YuNet face_detection_yunet_2023mar.onnx:
 https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet
 
+MediaPipe SelfieMulticlass (256 x 256), float32 version 1:
+Copyright Google LLC. Licensed under Apache License 2.0; see LICENSE-mediapipe.txt.
+https://developers.google.com/edge/mediapipe/solutions/vision/image_segmenter
+https://storage.googleapis.com/mediapipe-assets/Model%20Card%20Multiclass%20Segmentation.pdf
+Used for source-frame occlusion masks; outputs are adapted with a narrow protective
+boundary margin before blending. Model weights are downloaded without modification.
+
 MIT License
 
 Copyright (c) 2020 Shiqi Yu <shiqi.yu@gmail.com>
