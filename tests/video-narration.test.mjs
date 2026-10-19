@@ -7,10 +7,14 @@ import { execFileSync } from 'node:child_process';
 import { createNarrationService, muxNarration } from '../services/video/narration.mjs';
 import { createLipsyncService } from '../services/video/lipsync.mjs';
 import { createProviderStorage } from '../services/video/provider-storage.mjs';
+import { loadWorkspaceSettings } from '../services/runtime-settings.mjs';
 
 const pcm = (input, start, duration) => execFileSync('ffmpeg', ['-v', 'error', '-ss', String(start), '-i', input,
   '-t', String(duration), '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1']);
 const rms = bytes => Math.sqrt(Array.from({ length: bytes.length / 4 }, (_, i) => bytes.readFloatLE(i * 4) ** 2).reduce((a, b) => a + b, 0) / (bytes.length / 4));
+const falJob = id => ({ request_id: id,
+  status_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}/status`,
+  response_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}` });
 
 test('IndexTTS uses uploaded timbre and per-segment source emotion, at most three jobs, with timed silence and exact final audio mapping', async t => {
   const folder = await mkdtemp(join(tmpdir(), 'replica-narration-')); t.after(() => rm(folder, { recursive: true, force: true }));
@@ -20,25 +24,29 @@ test('IndexTTS uses uploaded timbre and per-segment source emotion, at most thre
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=1', '-ar', '24000', wav]);
   const requests = [], events = [];
   const uploads = [];
-  const service = createNarrationService({ INDEXTTS_302_API_KEY: 'unit-test-key' }, {
+  const service = createNarrationService({ FAL_KEY: 'unit-test-key', INDEXTTS_302_API_KEY: 'legacy-key' }, {
     upload: async input => { uploads.push(input); return `https://fal.media/${basename(input)}`; },
     fetchImpl: async (url, options) => {
-      if (options.method === 'POST') { const body = JSON.parse(options.body); requests.push(body); return Response.json({ task_id: `speech-${requests.length}` }); }
-      events.push(String(url)); return Response.json({ state: 'SUCCESS', audio_url: 'https://file.302.ai/unit.wav' });
+      assert.equal(options.headers.Authorization, 'Key unit-test-key');
+      if (options.method === 'POST') {
+        assert.equal(String(url), 'https://queue.fal.run/fal-ai/index-tts-2/text-to-speech');
+        const body = JSON.parse(options.body); requests.push(body); return Response.json(falJob(`speech-${requests.length}`));
+      }
+      events.push(String(url)); return Response.json(String(url).endsWith('/status') ? { status: 'COMPLETED' } : { audio: { url: 'https://v3.fal.media/unit.wav' } });
     },
     download: async (_url, output) => writeFile(output, await readFile(wav)), detect: async () => [{ start: 0.1, end: 0.9 }],
   });
   const task = { duration: 6, actualDuration: 6, video: { audio: true }, speech: { segments: Array.from({ length: 5 }, (_, i) => ({ start: i + 0.25, end: i + 0.75, text: `第${i}句` })) } };
   task.narration = await service.prepare(task, folder);
+  assert.equal(task.narration.provider, 'fal');
   const advance = () => service.advance(task, folder, kind => `https://workspace.example/${kind}`, async () => {});
   await advance(); assert.equal(requests.length, 3); assert.equal(events.length, 0);
   await advance(); await advance(); assert.equal(requests.length, 5); assert.equal(task.narration.ready, false);
   await advance(); assert.equal(task.narration.ready, true);
-  await advance(); assert.equal(requests.length, 5); assert.equal(events.length, 5);
+  await advance(); assert.equal(requests.length, 5); assert.equal(events.length, 10);
   for (const [i, body] of requests.entries()) {
-    assert.equal(body.speaker_audio_url, 'https://fal.media/reference.wav');
-    assert.equal(body.emotion_audio_url, `https://fal.media/emotion-${i}.wav`); assert.equal(body.emotion_alpha, 0.8);
-    assert.equal(body.text, `第${i}句`);
+    assert.deepEqual(body, { audio_url: 'https://fal.media/reference.wav',
+      emotional_audio_url: `https://fal.media/emotion-${i}.wav`, strength: 0.8, prompt: `第${i}句`, should_use_prompt_for_emotion: false });
   }
   assert.equal(uploads.filter(input => input.endsWith('reference.wav')).length, 1, 'The shared voice must be uploaded once and reused');
   assert.equal(uploads.length, 6);
@@ -57,8 +65,8 @@ test('IndexTTS uses uploaded timbre and per-segment source emotion, at most thre
 test('an uncertain TTS submission is persisted and never automatically paid for again', async t => {
   const folder = await mkdtemp(join(tmpdir(), 'replica-tts-uncertain-')); t.after(() => rm(folder, { recursive: true, force: true }));
   let posts = 0;
-  const service = createNarrationService({ INDEXTTS_API_KEY: 'test' }, { upload: async () => 'https://fal.media/reference.wav', fetchImpl: async () => { posts++; throw new Error('Lost response'); } });
-  const task = { video: { audio: false }, narration: { ready: false, segments: [{ start: 0, end: 1, text: '你好' }] } };
+  const service = createNarrationService({ FAL_KEY: 'test' }, { upload: async () => 'https://fal.media/reference.wav', fetchImpl: async () => { posts++; throw new Error('Lost response'); } });
+  const task = { video: { audio: false }, narration: { provider: 'fal', ready: false, segments: [{ start: 0, end: 1, text: '你好' }] } };
   const advance = () => service.advance(task, folder, kind => `https://workspace.example/${kind}`, async () => {});
   await assert.rejects(advance(), { code: 'VIDEO_NARRATION_UNCERTAIN' });
   assert.equal(task.narration.segments[0].status, 'submitting');
@@ -78,11 +86,12 @@ test('lip-sync receives the generated video and IndexTTS audio, polls the same q
   await assert.rejects(service.query({ statusUrl: 'https://attacker.example/steal' }), { code: 'VIDEO_LIPSYNC_FAILED' }); assert.equal(calls.length, 3);
 });
 
-test('reloaded pending TTS jobs retain their ID across transient query failures and never resubmit', async () => {
+test('legacy 302 TTS jobs retain their ID and provider across transient query failures and never resubmit', async () => {
   const saved = JSON.stringify({ actualDuration: 4, narration: { ready: false,
     segments: [{ id: 'already-paid-speech', status: 'pending', start: 1, end: 2, text: '你好' }] } });
   const task = JSON.parse(saved); let gets = 0;
-  const service = createNarrationService({ INDEXTTS_API_KEY: 'test' }, { fetchImpl: async (url, options) => {
+  const service = createNarrationService({ INDEXTTS_API_KEY: 'test', FAL_KEY: 'new-key' }, { fetchImpl: async (url, options) => {
+    assert.equal(new URL(url).origin, 'https://api.302.ai'); assert.equal(options.headers.Authorization, 'Bearer test');
     assert.equal(options.method, 'GET'); assert.equal(new URL(url).searchParams.get('task_id'), 'already-paid-speech');
     if (++gets === 1) throw new Error('Temporary gateway outage'); return Response.json({ state: 'PENDING' });
   } });
@@ -139,12 +148,83 @@ test('provider inputs are uploaded with expiry and storage credentials never rea
 });
 
 test('an input transfer failure is retriable and occurs before paid synthesis submission', async () => {
-  const task = { video: { audio: false }, narration: { ready: false, segments: [{ start: 0, end: 1, text: '你好' }] } };
+  const task = { video: { audio: false }, narration: { provider: 'fal', ready: false, segments: [{ start: 0, end: 1, text: '你好' }] } };
   let posts = 0;
-  const service = createNarrationService({ INDEXTTS_API_KEY: 'test' }, {
+  const service = createNarrationService({ FAL_KEY: 'test' }, {
     upload: async () => { const error = new Error('Transfer outage'); error.code = 'VIDEO_NARRATION_PENDING'; throw error; },
     fetchImpl: async () => { posts++; return Response.json({ task_id: 'unexpected' }); },
   });
   await assert.rejects(service.advance(task, '/unused', () => {}, async () => {}), { code: 'VIDEO_NARRATION_PENDING' });
   assert.equal(posts, 0); assert.equal(task.narration.segments[0].status, undefined);
+});
+
+test('new narration requires fal credentials and accepts the same aliases as lip-sync', () => {
+  assert.equal(createNarrationService({ INDEXTTS_API_KEY: 'old' }).enabled, false);
+  for (const name of ['FAL_KEY', 'FAL_API_KEY', 'VIDEO_FAL_KEY']) assert.equal(createNarrationService({ [name]: 'test' }).enabled, true);
+});
+
+test('replica fal credentials load locally, environment overrides them, and production ignores local files', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'replica-fal-env-')); t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, '.env.local'), 'VIDEO_FAL_KEY=local-key\n');
+  const local = loadWorkspaceSettings({ root, env: {} });
+  assert.equal(createNarrationService(local).enabled, true); assert.equal(createLipsyncService(local).enabled, true);
+  assert.equal(loadWorkspaceSettings({ root, env: { VIDEO_FAL_KEY: 'env-key' } }).VIDEO_FAL_KEY, 'env-key');
+  assert.equal(createNarrationService(loadWorkspaceSettings({ root, env: { NODE_ENV: 'production' } })).enabled, false);
+});
+
+test('fal queue receipts survive reload, polling errors and output download errors without another submission', async () => {
+  let posts = 0, polls = 0, downloads = 0;
+  const service = createNarrationService({ FAL_KEY: 'test' }, {
+    upload: async () => 'https://fal.media/reference.wav',
+    fetchImpl: async (url, options) => {
+      if (options.method === 'POST') { posts++; return Response.json(falJob('paid')); }
+      if (String(url).endsWith('/status')) {
+        if (++polls === 1) throw new Error('Gateway outage');
+        return Response.json({ status: polls === 2 ? 'IN_QUEUE' : 'COMPLETED' });
+      }
+      return Response.json({ audio: 'https://storage.googleapis.com/falserverless/result.mp3' });
+    },
+    download: async url => { assert.equal(url, 'https://storage.googleapis.com/falserverless/result.mp3'); if (++downloads === 1) throw new Error('Download outage'); },
+    detect: async () => [{ start: 0.1, end: 0.9 }],
+  });
+  let task = { video: { audio: false }, narration: { provider: 'fal', ready: false, segments: [{ start: 0, end: 1, text: '你好' }] } };
+  const advance = () => service.advance(task, '/unused', () => {}, async () => {});
+  await advance(); task = JSON.parse(JSON.stringify(task));
+  assert.equal(task.narration.segments[0].id, 'paid');
+  await assert.rejects(advance(), { code: 'VIDEO_NARRATION_PENDING' }); await advance();
+  await assert.rejects(advance(), { code: 'VIDEO_NARRATION_PENDING' }); await advance();
+  assert.equal(posts, 1); assert.equal(downloads, 2); assert.equal(task.narration.segments[0].status, 'ready');
+});
+
+test('fal credentials never reach a foreign queue URL and untrusted output hosts are rejected', async () => {
+  for (const invalid of ['queue', 'audio']) {
+    let calls = 0, downloads = 0;
+    const job = falJob('paid');
+    const task = { narration: { provider: 'fal', ready: false, segments: [{ id: 'paid', status: 'pending',
+      falQueue: { status: invalid === 'queue' ? 'https://attacker.example/status' : job.status_url, result: job.response_url } }] } };
+    const service = createNarrationService({ FAL_KEY: 'test' }, {
+      fetchImpl: async url => { calls++; return Response.json(String(url).endsWith('/status') ? { status: 'COMPLETED' } : { audio: { url: 'https://attacker.example/audio.wav' } }); },
+      download: async () => { downloads++; },
+    });
+    await assert.rejects(service.advance(task, '/unused', () => {}, async () => {}), { code: 'VIDEO_NARRATION_FAILED' });
+    assert.equal(calls, invalid === 'queue' ? 0 : 2); assert.equal(downloads, 0);
+  }
+});
+
+test('fal terminal errors fail clearly and a missing receipt never triggers a second paid submission', async () => {
+  for (const mode of ['failed', 'incomplete', 'rejected']) {
+    let posts = 0;
+    const task = { video: { audio: false }, narration: { provider: 'fal', ready: false, segments: [{ start: 0, end: 1, text: '你好' }] } };
+    const service = createNarrationService({ FAL_KEY: 'test' }, {
+      upload: async () => 'https://fal.media/reference.wav',
+      fetchImpl: async (_url, options) => {
+        if (options.method === 'POST') { posts++; return Response.json(mode === 'incomplete' ? { request_id: 'paid' } : falJob('paid'), { status: mode === 'rejected' ? 403 : 200 }); }
+        return Response.json({ status: 'COMPLETED', error: 'Synthesis failed' });
+      },
+    });
+    const advance = () => service.advance(task, '/unused', () => {}, async () => {});
+    if (mode === 'failed') await advance();
+    await assert.rejects(advance(), { code: mode === 'incomplete' ? 'VIDEO_NARRATION_UNCERTAIN' : 'VIDEO_NARRATION_FAILED' });
+    await assert.rejects(advance()); assert.equal(posts, 1);
+  }
 });
