@@ -5,6 +5,7 @@ const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
 const MODELS = [
   { id: DEFAULT_MODEL, name: '标准版', maxDuration: 15, description: '最多生成15秒视频，视频质量良好，积分消耗较少' },
   { id: 'doubao-seedance-2-5-260628', name: '至臻版', maxDuration: 30, description: '最多生成30秒视频，视频质量优秀，积分消耗较多' },
+  { id: 'fal-ai/wan/v2.2-14b/animate/replace', name: '开源复刻', maxDuration: 30, description: 'Wan2.2-Animate · 最多30秒，跟随原视频动作与场景' },
 ];
 const DEFAULT_VOICE_ENGINE = 'indextts2';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');

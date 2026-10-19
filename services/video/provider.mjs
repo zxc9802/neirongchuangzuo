@@ -1,8 +1,10 @@
 export const MODEL = 'doubao-seedance-2-0-260128';
+export const WAN_MODEL = 'fal-ai/wan/v2.2-14b/animate/replace';
 export const DURATIONS = [4, 5, 6, 8, 10, 12, 15];
 export const MODELS = [
   { id: MODEL, name: '标准版', description: '最多生成15秒视频，视频质量良好，积分消耗较少', maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: 'doubao-seedance-2-5-260628', name: '至臻版', description: '最多生成30秒视频，视频质量优秀，积分消耗较多', maxDuration: 30, durations: [...DURATIONS, 20, 25, 30], resolution: '720p' },
+  { id: WAN_MODEL, name: '开源复刻', description: 'Wan2.2-Animate · 最多30秒，跟随原视频动作与场景', maxDuration: 30, durations: [...DURATIONS, 20, 25, 30], resolution: '720p' },
 ];
 export const PROMPT = '严格编辑视频1，在原视频上做人物替换，不创作全新视频。仅将视频1中的唯一人物改为图片1的人物形象，严格保持图片1中的五官、脸型、发型、外观和服饰，不新增图片1中不存在的服饰文字或装饰。保留视频1的动作、镜头、场景、商品与说话内容，逐时刻保持动作和镜头顺序，不增加动作、不重复片段、不延伸表演。表情和情绪跟随视频1原表演，自然不僵硬。保留视频1已有字幕的原文、位置、排版和出现时间，字幕清晰完整，不新增字幕；禁止擦除、涂抹、打码或模糊字幕区域。保留真实商品包装与场景标识。';
 export class VideoError extends Error {
@@ -14,7 +16,7 @@ export function videoConfig(env = {}, publicOrigin) {
     access: env[`${prefix}_ACCESS_KEY`] || env.VIDEO_ACCESS_KEY, secret: env[`${prefix}_SECRET_KEY`] || env.VIDEO_SECRET_KEY });
   const config = { video: credentials('VIDEO'), material: credentials('MATERIAL'),
     publicOrigin: env.VIDEO_PUBLIC_BASE_URL || publicOrigin || env.AUTH_PUBLIC_URL,
-    signingSecret: env.TEMP_ASSET_SIGNING_SECRET, falKey: env.VIDEO_FAL_KEY };
+    signingSecret: env.TEMP_ASSET_SIGNING_SECRET, falKey: env.FAL_KEY || env.FAL_API_KEY || env.VIDEO_FAL_KEY };
   config.enabled = Boolean(config.publicOrigin && config.signingSecret && Object.values(config.video).every(Boolean) && Object.values(config.material).every(Boolean));
   config.falEnabled = Boolean(config.publicOrigin && config.signingSecret && config.falKey);
   if (config.enabled || config.falEnabled) {

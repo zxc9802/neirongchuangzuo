@@ -6,7 +6,7 @@ import { calculateCredits } from '../credits/store.mjs';
 import { costPoints } from '../credits/costs.mjs';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
-import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT } from './provider.mjs';
+import { createVideoProvider, videoConfig, VideoError, MODEL, WAN_MODEL, MODELS, DURATIONS, PROMPT } from './provider.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
@@ -41,14 +41,16 @@ async function readJSON(req) {
 }
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
-  config = videoConfig(env, publicOrigin), provider, falProvider, probe = probeVideo,
+  config = videoConfig(env, publicOrigin), provider, falProvider, wanProvider, probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env),
   narration = createNarrationService(env), lipsync = createLipsyncService(env), providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env)});
   provider ||= createVideoProvider(config,costMeter.fetch);
-  falProvider ||= createFalVideoProvider(config,costMeter.fetch);
-  const models = MODELS.map(model => ({ ...model, enabled: Boolean(config.enabled) }));
+  falProvider ||= createFalVideoProvider({ ...config, falKey: env.VIDEO_FAL_KEY || config.falKey },costMeter.fetch);
+  wanProvider ||= createFalVideoProvider(config,costMeter.fetch,WAN_MODEL);
+  const models = MODELS.map(model => ({ ...model, enabled: Boolean(model.id === WAN_MODEL
+    ? config.falEnabled && speech.enabled && narration?.enabled && lipsync?.enabled : config.enabled) }));
   const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
     { id: 'indextts2', name: 'IndexTTS2', enabled: Boolean(narration?.enabled && lipsync?.enabled) }];
   const enabled = models.some(model => model.enabled);
@@ -58,7 +60,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   function selectedModel(id = MODEL) {
     const model = models.find(model => model.id === id);
-    if (!model) throw error('请选择标准版或至臻版，请刷新页面后重新提交。', 400, 'VIDEO_MODEL_INVALID');
+    if (!model) throw error('生成版本无效，请刷新页面后重新选择。', 400, 'VIDEO_MODEL_INVALID');
     if (!model.enabled) throw error(`${model.name}尚未配置，请联系管理员。`, 503, 'VIDEO_NOT_CONFIGURED');
     return model.id;
   }
@@ -200,8 +202,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   async function processVideoTask(task) {
     if (closing || fatal) return;
-    // Retain the provider only to finish tasks submitted before H3 Max was removed.
-    const taskProvider = task.model === FAL_MODEL ? falProvider : provider;
+    // H3 Max remains available only for previously submitted tasks.
+    const taskProvider = task.model === WAN_MODEL ? wanProvider : task.model === FAL_MODEL ? falProvider : provider;
     if (isExpired(task)) {
       if (task.status !== 'expired') {
         task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; await save(task);
@@ -227,7 +229,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     if (task.status === 'reviewing') {
       for (const kind of ['photo', 'video', ...(task.voice && task.voiceEngine !== 'indextts2' ? ['voice'] : [])]) {
-        if (!task.materials[kind]) { task.materials[kind] = await taskProvider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
+        if (!task.materials[kind]) {
+          const url = task.model === WAN_MODEL ? await providerStorage.upload(file(task, kind), mime(kind)) : sourceUrl(task, kind);
+          task.materials[kind] = await taskProvider.createMaterial(url, kind); await save(task);
+        }
         const material = task.materials[kind];
         if (material.status !== 2) {
           try { material.status = await taskProvider.queryMaterial(material.id); }
@@ -456,6 +461,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const model = selectedModel(body.model);
           const duration = task.video ? videoDuration(task.video, model) : undefined;
           task.model = model;
+          if (model === WAN_MODEL) task.voiceEngine = 'indextts2';
           if (task.video) task.duration = duration;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
@@ -551,6 +557,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             if (!narration?.enabled || !lipsync?.enabled) throw error('参考声音配音或口型服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
           }
           const model = selectedModel(body.model ?? (models.some(model => model.id === task.model) ? task.model : MODEL));
+          if (model === WAN_MODEL && voiceEngine !== 'indextts2') throw error('开源复刻需要参考声音配音，请上传声音参考后重新提交。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
           const duration = videoDuration(task.video, model);
           task.model = model;
           task.duration = duration;

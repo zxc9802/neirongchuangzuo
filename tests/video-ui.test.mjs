@@ -56,7 +56,7 @@ test('edition buttons show the requested descriptions and update the upload dura
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
 
-test('premium choice is sent during task creation and start without changing the voice engine', async t => {
+for (const chosenModel of [PREMIUM_MODEL, 'fal-ai/wan/v2.2-14b/animate/replace']) test(`${chosenModel} choice is sent during task creation and start without changing the voice engine`, async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
@@ -68,15 +68,15 @@ test('premium choice is sent during task creation and start without changing the
     return Response.json({ task });
   } });
   page.recover(); await page.poll();
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: PREMIUM_MODEL } }) } }); await page.settle();
+  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: chosenModel } }) } }); await page.settle();
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(calls[0].body.model, PREMIUM_MODEL); assert.equal(calls.at(-1).body.model, PREMIUM_MODEL);
+  assert.equal(calls[0].body.model, chosenModel); assert.equal(calls.at(-1).body.model, chosenModel);
   assert.equal(calls[0].body.voiceEngine, 'indextts2'); assert.equal(calls.at(-1).body.voiceEngine, 'indextts2');
   const count = calls.length;
   page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: STANDARD_MODEL } }) } }); await page.settle();
   assert.equal(calls.length, count);
-  assert.match(page.html(), /data-replica-model="doubao-seedance-2-5-260628"[^>]*aria-pressed="true"[^>]*disabled/);
+  assert.ok(page.html().includes(`data-replica-model="${chosenModel}" aria-pressed="true" disabled`));
 });
 
 test('saved premium drafts keep their edition and a rejected downgrade retains the original quote', async t => {
