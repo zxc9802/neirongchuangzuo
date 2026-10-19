@@ -51,17 +51,19 @@ async function harness(run) {
     const primary = load('../src/lib/engine/indextts.ts', {fs, path, crypto,
       './ffmpeg': media, './speech-stitch': stitch, './doubao-tts': doubao,
       '../server/safe-log': {logServerError() {}},
-      '../server/outbound-url-policy': {providerUrlPolicy: () => ({})},
+      '../server/outbound-url-policy': {providerUrlPolicy: () => ({allowedHosts: ['fal.media']})},
       './download-file': {downloadFileToDisk: async ({outputPath}) => fs.copyFileSync(fixture, outputPath)},
     });
     globalThis.fetch = async (url, init) => {
       if (init?.method === 'POST') {
         const payload = JSON.parse(init.body); posts.push({url: String(url), payload, init});
         if (String(url).includes('openspeech.bytedance.com')) return fallbackResponse();
-        if (failPrimary && payload.text.includes('失败')) return Response.json({error: '服务器繁忙'}, {status: 500});
-        return Response.json({task_id: String(posts.length)});
+        if (failPrimary && payload.prompt.includes('失败')) return Response.json({error: '服务器繁忙'}, {status: 500});
+        const id = String(posts.length);
+        return Response.json({request_id: id, status_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}/status`,
+          response_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}`});
       }
-      return Response.json({state: 'SUCCESS', audio_url: 'https://audio.example.test/test.wav'});
+      return Response.json(url.endsWith('/status') ? {status: 'COMPLETED'} : {audio: {url: 'https://fal.media/test.wav'}});
     };
     const options = {apiKey: 'primary-test', speakerAudioUrl: 'https://speaker.example.test/a.wav',
       cacheScope: `test:${dir}`, outDir: path.join(dir, 'job'), onLog: message => logs.push(message),
@@ -104,7 +106,7 @@ for (const complete of [true, false]) {
           addLog: (_id, message, level, publicMessage) => task.logs.push({message, level, publicMessage}),
           update: (_id, update) => task = {...task, ...update, results: {...task.results, ...update.results}}}},
         '../config': {getAppConfig: () => ({storageDir: path.join(h.dir, 'jobs'),
-          publicBaseUrl: 'https://media.example.test', indexttsApiKey: h.options.apiKey,
+          publicBaseUrl: 'https://media.example.test', indexttsFalApiKey: h.options.apiKey,
           doubaoTtsApiKey: h.options.fallback.apiKey,
           doubaoTtsVoiceMap: {'selected-voice': h.options.fallback.speakerId}})},
         './indextts': {generateIndexTTS: h.generate}, './ffmpeg': {...media, prepareSourceVideo: noVideo},
@@ -226,10 +228,9 @@ test('empty, truncated and error-after-audio streams cannot publish partial fall
 
 test('cancellation while Doubao streams stops reading and publishes no audio', async () => {
   await harness(async h => {
-    let checks = 0;
     const outDir = path.join(h.dir, 'cancelled');
     await assert.rejects(h.generate('失败。', {...h.options, outDir,
-      checkActive() {if (++checks > 3) throw new Error('任务已删除');}}), /任务已删除/);
+      checkActive() {if (h.posts.some(p => p.url.includes('openspeech.bytedance.com'))) throw new Error('任务已删除');}}), /任务已删除/);
     assert.equal(h.posts.filter(p => p.url.includes('openspeech.bytedance.com')).length, 1);
     assert.equal(fs.existsSync(path.join(outDir, 'tts-doubao', 'voice-track.wav')), false);
   });

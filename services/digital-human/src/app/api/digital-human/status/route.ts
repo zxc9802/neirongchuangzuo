@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
   } catch { /* No usable media base URL. */ }
   const mediaReady = Boolean(publicAddress ||
     (config.cosSecretId && config.cosSecretKey && config.cosBucket && config.cosRegion));
-  const ttsReady = Boolean(config.indexttsApiKey);
+  const ttsReady = Boolean(config.indexttsFalApiKey);
   const engines = [
     { id: "a", label: "口型方案 A", available: Boolean(config.openluxApiKey) },
     { id: "b", label: "口型方案 B", available: Boolean(config.falApiKey) },

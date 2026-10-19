@@ -22,7 +22,7 @@ async function harness(run) {
     const joins = [];
     const deps = {fs, path, crypto, './ffmpeg': media,
       '../server/safe-log': {logServerError() {}},
-      '../server/outbound-url-policy': {providerUrlPolicy: () => ({})},
+      '../server/outbound-url-policy': {providerUrlPolicy: () => ({allowedHosts: ['fal.media']})},
       './download-file': {downloadFileToDisk: async ({outputPath}) => fs.copyFileSync(fixture, outputPath)},
       './speech-stitch': {...stitch, stitchSpeechSegments: async (parts, output) => {
         joins.push(parts.map(part => part.text));
@@ -42,13 +42,15 @@ async function harness(run) {
         requests.push({id, payload, ready, release});
         active++; maximum = Math.max(maximum, active);
         if (autoComplete) release();
-        return Response.json({task_id:id});
+        return Response.json({request_id:id, status_url:`https://queue.fal.run/fal-ai/index-tts-2/requests/${id}/status`,
+          response_url:`https://queue.fal.run/fal-ai/index-tts-2/requests/${id}`});
       }
-      const request = requests[Number(new URL(url).searchParams.get('task_id'))];
+      const request = requests[Number(new URL(url).pathname.split('/')[4])];
+      if (!url.endsWith('/status')) return Response.json({audio:{url:`https://fal.media/${request.id}`}});
       await request.ready;
       active--;
-      if (request.payload.text === failText) return Response.json({state:'FAILURE'});
-      return Response.json({state:'SUCCESS', audio_url:`https://audio.example.test/${request.id}`});
+      if (request.payload.prompt === failText) return Response.json({status:'FAILED'});
+      return Response.json({status:'COMPLETED'});
     };
     const module = {exports:{}};
     new Function('require', 'module', 'exports', 'setTimeout', compiled)(name => {
@@ -78,7 +80,7 @@ test('sentence synthesis overlaps three requests across jobs and preserves order
     await running;
     assert.equal(observed,3,'three requests must be in flight before the first finishes');
     assert.equal(h.maximum(),3,'the limit must apply across concurrent jobs');
-    assert.ok(h.requests.every(({payload}) => payload.emotion_audio_url === h.options.emotionAudioUrl && payload.emotion_alpha === 0.8 && !('emotion_vector' in payload)), 'every segment must use the same emotion recording and strength');
+    assert.ok(h.requests.every(({payload}) => payload.emotional_audio_url === h.options.emotionAudioUrl && payload.strength === 0.8 && !('emotional_strengths' in payload)), 'every segment must use the same emotion recording and strength');
     assert.deepEqual(h.joins.map(parts=>parts.join('')).sort(),[first,second].sort());
     assert.ok(fs.statSync(path.join(h.options.outDir,'voice-track.wav')).size>44);
   });

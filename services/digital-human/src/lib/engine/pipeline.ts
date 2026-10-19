@@ -213,8 +213,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       : "";
 
     const ttsResult = await generateIndexTTS(task.inputs.scriptText, {
-      apiKey: config.indexttsApiKey,
-      baseUrl: config.indexttsBaseUrl,
+      apiKey: config.indexttsFalApiKey,
       speakerAudioUrl: speakerUrl,
       emotionAudioUrl: emotionAudioUrl,
       emotionIntensity: task.inputs.emotionIntensity,

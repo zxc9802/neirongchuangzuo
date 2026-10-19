@@ -3,6 +3,7 @@ import { resolveLipsyncProvider } from "./lipsync-provider";
 import type { LipsyncProvider } from "./lipsync-provider";
 
 export interface AppConfig {
+  indexttsFalApiKey: string;
   indexttsApiKey: string;
   indexttsBaseUrl: string;
   indexttsSpeakerAudioUrl: string;
@@ -40,6 +41,7 @@ export interface AppConfig {
 const defaultMcpScriptPath = path.join(process.cwd(), "scripts", "heygen_mcp_server.mjs");
 
 const DEFAULT_CONFIG: AppConfig = {
+  indexttsFalApiKey: process.env.FAL_KEY || process.env.FAL_API_KEY || process.env.VIDEO_FAL_KEY || "",
   indexttsApiKey:
     process.env.INDEXTTS_302_API_KEY || "",
   indexttsBaseUrl:

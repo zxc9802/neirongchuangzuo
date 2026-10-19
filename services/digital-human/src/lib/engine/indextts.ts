@@ -4,10 +4,20 @@ import { downloadFileToDisk } from "./download-file";
 import { providerUrlPolicy } from "../server/outbound-url-policy";
 import path from "path";
 import crypto from "crypto";
-import { applyToneProfile } from "./ffmpeg";
+import { applyToneProfile, execMediaCommand } from "./ffmpeg";
 import { splitSpeechText, stitchSpeechSegments } from "./speech-stitch";
 
 const TTS_CONCURRENCY = 3;
+const FAL_ENDPOINT = "https://queue.fal.run/fal-ai/index-tts-2/text-to-speech";
+
+function falQueueUrl(value: string): string {
+  const url = new URL(value);
+  if (url.origin !== "https://queue.fal.run" || url.username || url.password ||
+    !/^\/fal-ai\/index-tts-2(?:\/|$)/.test(url.pathname)) {
+    throw new Error("fal IndexTTS-2 返回的任务地址无效");
+  }
+  return url.href;
+}
 let activeRequests = 0;
 const waitingRequests: (() => void)[] = [];
 
@@ -38,7 +48,6 @@ function referenceCacheIdentity(value: string): string {
 
 export interface IndexTTSOptions {
   apiKey: string;
-  baseUrl?: string;
   speakerAudioUrl: string;
   emotionAudioUrl?: string;
   emotionIntensity?: number;
@@ -70,7 +79,7 @@ function getCacheKey(
   toneProfile: string = "low",
   cacheScope: string = "local"
 ): string {
-  const payload = `sentence-stitch-v1|${cacheScope}|${text.trim()}|${referenceCacheIdentity(speakerUrl)}|${referenceCacheIdentity(emotionUrl)}|${intensity}|${toneProfile}`;
+  const payload = `fal-sentence-stitch-v1|${cacheScope}|${text.trim()}|${referenceCacheIdentity(speakerUrl)}|${referenceCacheIdentity(emotionUrl)}|${intensity}|${toneProfile}`;
   return crypto.createHash("sha256").update(payload).digest("hex");
 }
 
@@ -112,7 +121,6 @@ async function generatePrimaryIndexTTS(
 ): Promise<IndexTTSResult> {
   const {
     apiKey,
-    baseUrl = "https://api.302.ai",
     speakerAudioUrl,
     emotionAudioUrl,
     emotionIntensity = 0.8,
@@ -123,7 +131,7 @@ async function generatePrimaryIndexTTS(
   } = options;
 
   if (!apiKey) {
-    throw new Error("INDEXTTS_302_API_KEY is required");
+    throw new Error("fal IndexTTS-2 配音密钥未配置（FAL_KEY / FAL_API_KEY / VIDEO_FAL_KEY）");
   }
   if (!speakerAudioUrl) {
     throw new Error("INDEXTTS_SPEAKER_AUDIO_URL is required");
@@ -216,43 +224,48 @@ async function generatePrimaryIndexTTS(
   } else {
     const release = await acquireRequestSlot();
     try {
-      onLog(`正在向 302.AI 提交 IndexTTS-2 语音合成请求...`);
+      options.checkActive?.();
+      onLog(`正在向 fal.ai 提交 IndexTTS-2 语音合成请求...`);
 
       const payload: Record<string, any> = {
-        text: text.trim(),
-        speaker_audio_url: speakerAudioUrl,
-        emotion_alpha: Math.min(Math.max(emotionIntensity, 0), 0.85),
+        prompt: text.trim(),
+        audio_url: speakerAudioUrl,
+        strength: Math.min(Math.max(emotionIntensity, 0), 0.85),
+        should_use_prompt_for_emotion: false,
       };
 
       if (emotionAudioUrl && emotionAudioUrl.startsWith("http")) {
-        payload.emotion_audio_url = emotionAudioUrl;
+        payload.emotional_audio_url = emotionAudioUrl;
       } else {
-        payload.emotion_vector = [0, 0, 0, 0, 0, 0, 0, 1.0];
+        payload.emotional_strengths = { calm: 1.0 };
       }
 
       onLog(`[TTS] 👤 发音人音色克隆: ${speakerAudioUrl}`);
-      onLog(`[TTS] 🎭 语气与情绪参考音频: ${payload.emotion_audio_url || "基准"} (情绪强度: ${payload.emotion_alpha})`);
+      onLog(`[TTS] 🎭 语气与情绪参考音频: ${payload.emotional_audio_url || "基准"} (情绪强度: ${payload.strength})`);
 
-      const endpoint = `${baseUrl.replace(/\/$/, "")}/302/index_tts2/task`;
-      const createResp = await fetch(endpoint, {
+      const createResp = await fetch(FAL_ENDPOINT, {
         method: "POST",
+        redirect: "error",
         headers: {
-          Authorization: `Bearer ${apiKey}`,
+          Authorization: `Key ${apiKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(60_000),
       });
 
       if (!createResp.ok) {
         const errText = await createResp.text();
-        throw new Error(`IndexTTS-2 任务创建失败 (${createResp.status}): ${errText}`);
+        throw new Error(`fal IndexTTS-2 任务创建失败 (${createResp.status}): ${errText}`);
       }
 
       const createJson = await createResp.json();
-      const taskId = createJson.task_id;
-      if (!taskId) {
-        throw new Error(`IndexTTS-2 未返回 task_id: ${JSON.stringify(createJson)}`);
+      const taskId = createJson.request_id;
+      if (!taskId || !createJson.status_url || !createJson.response_url) {
+        throw new Error("fal IndexTTS-2 未返回完整任务编号，未自动重新提交");
       }
+      const statusUrl = falQueueUrl(createJson.status_url);
+      const resultUrl = falQueueUrl(createJson.response_url);
 
       // Poll for completion. Long scripts need more than the old 5-minute cap.
       const ttsTimeoutMs = Math.min(
@@ -268,22 +281,39 @@ async function generatePrimaryIndexTTS(
 
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 2500));
-        const pollResp = await fetch(`${endpoint}?task_id=${encodeURIComponent(taskId)}`, {
+        options.checkActive?.();
+        const pollResp = await fetch(statusUrl, {
+          redirect: "error",
           headers: {
-            Authorization: `Bearer ${apiKey}`,
+            Authorization: `Key ${apiKey}`,
           },
+          signal: AbortSignal.timeout(60_000),
         });
 
         if (!pollResp.ok) {
+          if (pollResp.status >= 400 && pollResp.status < 500) {
+            throw new Error(`fal IndexTTS-2 任务查询失败 (${pollResp.status}): ${await pollResp.text()}`);
+          }
           continue;
         }
 
         const pollJson = await pollResp.json();
-        if (pollJson.state === "SUCCESS") {
-          audioUrl = pollJson.audio_url;
+        if (pollJson.error || ["FAILED", "CANCELLED"].includes(pollJson.status)) {
+          throw new Error(`fal IndexTTS-2 合成失败: ${JSON.stringify(pollJson)}`);
+        }
+        if (pollJson.status === "COMPLETED") {
+          const resultResp = await fetch(resultUrl, {
+            redirect: "error",
+            headers: { Authorization: `Key ${apiKey}` },
+            signal: AbortSignal.timeout(60_000),
+          });
+          if (!resultResp.ok) {
+            throw new Error(`fal IndexTTS-2 获取结果失败 (${resultResp.status}): ${await resultResp.text()}`);
+          }
+          const result = await resultResp.json();
+          if (result.error) throw new Error(`fal IndexTTS-2 合成失败: ${JSON.stringify(result.error)}`);
+          audioUrl = typeof result.audio === "string" ? result.audio : result.audio?.url;
           break;
-        } else if (pollJson.state === "FAILURE") {
-          throw new Error(`IndexTTS-2 合成失败: ${JSON.stringify(pollJson)}`);
         }
       }
 
@@ -293,12 +323,20 @@ async function generatePrimaryIndexTTS(
 
       onLog(`TTS 合成成功，正在下载音频文件...`);
 
-      await downloadFileToDisk({
-        url: audioUrl,
-        outputPath: rawWavPath,
-        maxBytes: 100 * 1024 * 1024,
-        urlPolicy: providerUrlPolicy("indextts"),
-      });
+      const providerAudioPath = path.join(outDir, "voice-provider.audio");
+      const downloadPolicy = providerUrlPolicy("fal");
+      try {
+        await downloadFileToDisk({
+          url: audioUrl,
+          outputPath: providerAudioPath,
+          maxBytes: 100 * 1024 * 1024,
+          urlPolicy: { ...downloadPolicy, allowedHosts: [...downloadPolicy.allowedHosts, "storage.googleapis.com"] },
+        });
+        await execMediaCommand("ffmpeg", ["-v", "error", "-y", "-protocol_whitelist", "file,pipe",
+          "-i", providerAudioPath, "-vn", "-c:a", "pcm_s16le", rawWavPath]);
+      } finally {
+        fs.rmSync(providerAudioPath, { force: true });
+      }
     } finally {
       release();
     }

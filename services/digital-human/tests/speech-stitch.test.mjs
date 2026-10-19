@@ -99,7 +99,7 @@ test("IndexTTS actually submits sentence requests, stitches all parts, ignores o
     } }).outputText;
     const deps = { fs, path, crypto, './ffmpeg': media,
       '../server/safe-log': { logServerError() {} },
-      '../server/outbound-url-policy': { providerUrlPolicy: () => ({}) },
+      '../server/outbound-url-policy': { providerUrlPolicy: () => ({allowedHosts: ['fal.media']}) },
       './download-file': { downloadFileToDisk: async ({ url, outputPath }) => {
         fs.mkdirSync(path.dirname(outputPath), { recursive: true });
         fs.copyFileSync(url.endsWith('/1') ? first : second, outputPath);
@@ -111,16 +111,19 @@ test("IndexTTS actually submits sentence requests, stitches all parts, ignores o
       if (init?.method === 'POST') {
         calls.push(JSON.parse(init.body));
         if (failSecond && calls.length === 2) return Response.json({ error: 'failed' }, { status: 503 });
-        return Response.json({ task_id: String(calls.length) });
+        const id = String(calls.length);
+        return Response.json({ request_id: id, status_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}/status`,
+          response_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}` });
       }
-      return Response.json({ state: 'SUCCESS', audio_url: `https://audio.example.test/${new URL(url).searchParams.get('task_id')}` });
+      if (url.endsWith('/status')) return Response.json({ status: 'COMPLETED' });
+      return Response.json({ audio: {url: `https://fal.media/${new URL(url).pathname.split('/')[4]}`} });
     };
     const module = { exports: {} };
     new Function('require', 'module', 'exports', 'setTimeout', compiled)(name => {
       assert.ok(name in deps, `Unexpected dependency ${name}`); return deps[name];
     }, module, module.exports, callback => { callback(); });
     const text = '房间通透明亮。床品温馨舒适。';
-    const legacyKey = crypto.createHash('sha256').update(`owner|${text}|https://speaker.example.test/a.wav||0.8|low`).digest('hex');
+    const legacyKey = crypto.createHash('sha256').update(`sentence-stitch-v1|owner|${text}|https://speaker.example.test/a.wav||0.8|low`).digest('hex');
     const legacyDir = path.join(dir, '.runtime', 'tts-cache', legacyKey);
     fs.mkdirSync(legacyDir, { recursive: true });
     fs.copyFileSync(first, path.join(legacyDir, 'voice-raw.wav'));
@@ -128,9 +131,9 @@ test("IndexTTS actually submits sentence requests, stitches all parts, ignores o
     fs.writeFileSync(path.join(legacyDir, 'meta.json'), JSON.stringify({ selectedDuration: 2, rawDuration: 2, rate: 1, toneProfile: 'low' }));
     const options = { apiKey: 'test-only', speakerAudioUrl: 'https://speaker.example.test/a.wav', cacheScope: 'owner', outDir: path.join(dir, 'job') };
     const result = await module.exports.generateIndexTTS(text, options);
-    assert.equal(result.fromCache, false, 'old whole-text cache must not mask the new feature');
-    assert.deepEqual(calls.map(call => call.text), ['房间通透明亮。', '床品温馨舒适。']);
-    assert.ok(calls.every(call => call.speaker_audio_url === options.speakerAudioUrl));
+    assert.equal(result.fromCache, false, 'old 302 cache must not mask the provider switch');
+    assert.deepEqual(calls.map(call => call.prompt), ['房间通透明亮。', '床品温馨舒适。']);
+    assert.ok(calls.every(call => call.audio_url === options.speakerAudioUrl));
     assert.equal(result.audioUrl, undefined, 'a provider URL for one part is not the joined output');
     const samples = decode(result.finalWavPath);
     assert.ok(samples.length / 22050 > 1.4 && samples.length / 22050 < 1.7);

@@ -55,6 +55,8 @@ npm run dev:digital-human
 
 数字人素材是人物口播视频。真实出片需要自己的配音接口和一种对口型接口，以及外部模型可访问的媒体地址或对象存储。原页面默认引擎 `b` 对应 fal/VEED；`a` 对应 OpenLux/PixVerse，`c` 对应 HeyGen。默认音色未配置参考音频时需自行上传声音。密钥通过服务端环境变量配置，设置页不提供密钥录入。
 
+数字人口播配音与 1:1 复刻统一使用 fal.ai 的 `fal-ai/index-tts-2/text-to-speech`，按 `FAL_KEY`、`FAL_API_KEY`、`VIDEO_FAL_KEY` 顺序读取密钥。`INDEXTTS_302_API_KEY` / `INDEXTTS_BASE_URL` 保留给动效转写，不再用于新口播配音。
+
 前端流程、页面文件和真实接口见 [数字人前端对接](docs/数字人前端对接.md)；来源及本地调整见 [UPSTREAM](services/digital-human/UPSTREAM.md)。新页面为 `design/digital-human.js` 和 `design/digital-human.css`，接口适配层为 `design/digital-human-api.js`；`preview.mjs` 将数字人的接口、素材和结果请求流式转发至 3001，本站 `/api/ai/` 单独处理。
 
 可用检查命令：`npm run check`、`npm test`、`npm run check:digital-human`、`npm run test:digital-human`、`npm run build:digital-human`。数字人已执行的检查、页面联调及未完成项记录在 [数字人接入验收](docs/数字人接入验收.md)。PostgreSQL 双库账号流程已完成集成验证；数字人供应商真实成片尚未验收。
