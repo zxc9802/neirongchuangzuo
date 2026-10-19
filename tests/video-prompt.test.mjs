@@ -65,9 +65,9 @@ test('rounded-up video duration freezes the end frame without removing real pack
   assert.match(prompt, /视频1实际时长为12\.300秒/);
   assert.match(prompt, /输出超过原视频时长的部分保持末帧静止、闭嘴和无声/);
   assert.match(prompt, /不增加动作、不重复片段、不延伸表演/);
-  assert.match(prompt, /保留视频1已有字幕/);
+  assert.match(prompt, /已有字幕保持原样/);
   assert.doesNotMatch(prompt, /去除画面叠加的字幕/);
-  assert.match(prompt, /保留真实商品包装与场景标识/);
+  assert.match(prompt, /人物以外的场景、商品及包装、背景标识/);
   assert.doesNotMatch(prompt, /原视频人声从第|唯一台词依据/);
   assert.equal(payload.params.duration, -1);
   assert.equal('referAudioUrl' in payload, false);
@@ -88,10 +88,35 @@ test('direct voice replacement follows original speech emotion rather than the t
 
 test('person replacement explicitly edits the numbered video instead of requesting reference generation', () => {
   const { prompt, payload } = generationBody(task());
-  assert.match(prompt, /^严格编辑视频1/);
-  assert.match(prompt, /仅将视频1中的唯一人物改为图片1/);
+  assert.match(prompt, /^编辑视频1/);
+  assert.match(prompt, /将视频1中的唯一人物完整替换为图片1/);
   assert.doesNotMatch(prompt, /参考视频/);
-  assert.match(prompt, /不新增图片1中不存在的服饰文字或装饰/);
+  assert.match(prompt, /人物的外貌、发型和服装都采用图片1/);
+  assert.match(prompt, /去掉原人物与图片1不一致的服装、配饰和衣服文字/);
+  assert.match(prompt, /替换从第一帧开始并保持到最后一帧/);
+  assert.match(prompt, /人物以外的场景/);
   assert.deepEqual(payload.resources, ['asset:\/\/photo-1']);
   assert.deepEqual(payload.referVideoUrl, ['asset:\/\/video-1']);
 });
+
+for (const model of ['doubao-seedance-2-0-260128', 'doubao-seedance-2-5-260628']) {
+  test(`${model} keeps independent narration scripts out of the person edit request`, () => {
+    const source = task({ model, voice: { duration: 10 }, voiceEngine: 'indextts2',
+      captions: { cues: [{ start: 0.5, end: 3, text: '这段台词交给独立配音。' }] },
+      speech: { start: 0.5, end: 5, segments: [
+        { start: 0.5, end: 3, text: '这段台词交给独立配音。' },
+        { start: 3.5, end: 5, text: '不要让画面模型重新表演。' },
+      ] },
+    });
+    const before = structuredClone(source);
+    const { prompt, payload } = generationBody(source);
+    assert.doesNotMatch(prompt, /这段台词交给独立配音|不要让画面模型重新表演|0\.500|3\.500|12\.300/);
+    assert.doesNotMatch(prompt, /唯一语音文案|唯一台词依据|配音由系统单独生成/);
+    assert.match(prompt, /沿用视频1的动作、表情、说话节奏/);
+    assert.match(prompt, /已有字幕保持原样/);
+    assert.deepEqual(payload.resources, ['asset://photo-1']);
+    assert.deepEqual(payload.referVideoUrl, ['asset://video-1']);
+    assert.equal('referAudioUrl' in payload, false);
+    assert.deepEqual(source, before, 'Retain the full speech timeline for independent narration and lip sync');
+  });
+}

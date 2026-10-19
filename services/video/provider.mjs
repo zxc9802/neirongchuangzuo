@@ -4,7 +4,7 @@ export const MODELS = [
   { id: MODEL, name: '标准版', description: '最多生成15秒视频，视频质量良好，积分消耗较少', maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: 'doubao-seedance-2-5-260628', name: '至臻版', description: '最多生成30秒视频，视频质量优秀，积分消耗较多', maxDuration: 30, durations: [...DURATIONS, 20, 25, 30], resolution: '720p' },
 ];
-export const PROMPT = '严格编辑视频1，在原视频上做人物替换，不创作全新视频。仅将视频1中的唯一人物改为图片1的人物形象，严格保持图片1中的五官、脸型、发型、外观和服饰，不新增图片1中不存在的服饰文字或装饰。保留视频1的动作、镜头、场景、商品与说话内容，逐时刻保持动作和镜头顺序，不增加动作、不重复片段、不延伸表演。表情和情绪跟随视频1原表演，自然不僵硬。保留视频1已有字幕的原文、位置、排版和出现时间，字幕清晰完整，不新增字幕；禁止擦除、涂抹、打码或模糊字幕区域。保留真实商品包装与场景标识。';
+export const PROMPT = '编辑视频1。将视频1中的唯一人物完整替换为图片1中的人物。人物的外貌、发型和服装都采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样；保留字幕的原文、位置、排版和出现时间，不重画字幕。';
 export class VideoError extends Error {
   constructor(message, status = 400, code = 'VIDEO_INVALID_INPUT') { super(message); this.status = status; this.code = code; }
 }
@@ -35,12 +35,12 @@ export function videoConfig(env = {}, publicOrigin) {
   return config;
 }
 export function generationBody(task) {
-  const lengthPrompt = task.video?.duration ? `\n视频1实际时长为${task.video.duration.toFixed(3)}秒。动作严格对应原视频时刻，输出超过原视频时长的部分保持末帧静止、闭嘴和无声。` : '';
-  const captionPrompt = task.captions?.cues?.length ? `\n台词来自原视频字幕，优先于听辨结果，以下文字是唯一语音文案，不改写、不漏说，数字和价格按原字说：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)}秒：${segment.text}`).join('；')}。${task.voice ? '' : '保留视频1的人声音色。'}保留视频1已有的清晰字幕，不重画字幕，不修改字幕区域的背景；仅在成片未保留字幕时，系统会按原文补字幕。` : '';
+  // Independent TTS/lip sync consumes the speech timeline after the visual edit.
+  const separateNarration = task.voice && task.voiceEngine === 'indextts2';
+  const lengthPrompt = !separateNarration && task.video?.duration ? `\n视频1实际时长为${task.video.duration.toFixed(3)}秒。动作严格对应原视频时刻，输出超过原视频时长的部分保持末帧静止、闭嘴和无声。` : '';
+  const captionPrompt = !separateNarration && task.captions?.cues?.length ? `\n台词来自原视频字幕，优先于听辨结果，以下文字是唯一语音文案，不改写、不漏说，数字和价格按原字说：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)}秒：${segment.text}`).join('；')}。${task.voice ? '' : '保留视频1的人声音色。'}保留视频1已有的清晰字幕，不重画字幕，不修改字幕区域的背景；仅在成片未保留字幕时，系统会按原文补字幕。` : '';
   let voicePrompt = '';
-  if (task.voice && task.voiceEngine === 'indextts2') {
-    voicePrompt = `\n配音由系统单独生成，视频仅保留视频1的台词、动作、说话节奏和面部情绪，嘴部运动对应原视频同一时刻，不重新设计表演。${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。`;
-  } else if (task.voice) {
+  if (task.voice && !separateNarration) {
     const segments = task.speech.segments;
     const gaps = [];
     let end = 0;
