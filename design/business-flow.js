@@ -1,3 +1,4 @@
+import { markdownText } from './markdown.js';
 import { INDUSTRIES, PLATFORMS, getPurposes, createBrief, normalizeBrief, getBriefFields, validateBrief, buildContentPlan } from './business-catalog.js';
 
 import { accountStorageKey } from './account-storage.js';
@@ -46,7 +47,7 @@ export function renderContentPlanPreview(ctx, mode) {
   const config = ctx.configs[mode];
   const plan = config?.contentPlan;
   if (!plan) return '';
-  return `<article class="business-preview"><div class="business-preview-label"><span>${esc(labels(config.brief || {}).join(' · '))}</span><small>创作方案</small></div><h2>${esc(plan.title)}</h2><p class="business-preview-style">${esc(plan.style)}</p><section class="business-preview-caption"><h3>发布文案</h3><p>${esc(plan.caption)}</p></section><section class="business-preview-story"><h3>${mode === 'image' ? '组图顺序' : '镜头顺序'}</h3><ol>${plan.shots.map((shot, index) => `<li><span>${String(index + 1).padStart(2, '0')}</span><strong>${esc(shot.title)}</strong><p>${esc(shot.description)}</p></li>`).join('')}</ol></section><div class="business-preview-footer"><p></p>${button('business-plan', `完整方案与素材清单 ${icon('arrow')}`, 'business-link', `data-mode="${mode}"`)}</div></article>`;
+  return `<article class="business-preview"><div class="business-preview-label"><span>${esc(labels(config.brief || {}).join(' · '))}</span><small>创作方案</small></div><h2>${esc(plan.title)}</h2><p class="business-preview-style">${esc(plan.style)}</p><section class="business-preview-caption"><h3>发布文案</h3>${markdownText(plan.caption)}</section><section class="business-preview-story"><h3>${mode === 'image' ? '组图顺序' : '镜头顺序'}</h3><ol>${plan.shots.map((shot, index) => `<li><span>${String(index + 1).padStart(2, '0')}</span><strong>${esc(shot.title)}</strong><p>${esc(shot.description)}</p></li>`).join('')}</ol></section><div class="business-preview-footer"><p></p>${button('business-plan', `完整方案与素材清单 ${icon('arrow')}`, 'business-link', `data-mode="${mode}"`)}</div></article>`;
 }
 
 export function openBusinessFlow(ctx, options = {}) {
@@ -188,9 +189,9 @@ function renderPlan(ctx, existing = false) {
   ctx.openModal('宣传方案已整理好', '', `<section class="business-plan">
 
     <div class="business-plan-heading"><span>${esc(labels(session.brief).join(' / '))}</span><h3>${esc(plan.title)}</h3><p>${esc(plan.style)}</p></div>
-    <div class="business-plan-grid"><section class="business-plan-copy"><h4>${session.mode === 'avatar' ? '口播稿' : '发布文案'}</h4><p>${esc(session.mode === 'avatar' ? plan.script : plan.caption)}</p></section><section class="business-plan-shots"><h4>${session.mode === 'image' ? '组图顺序' : '镜头顺序'}</h4><ol>${plan.shots.map(shot => `<li><strong>${esc(shot.title)}</strong><p>${esc(shot.description)}</p></li>`).join('')}</ol></section></div>
+    <div class="business-plan-grid"><section class="business-plan-copy"><h4>${session.mode === 'avatar' ? '口播稿' : '发布文案'}</h4>${markdownText(session.mode === 'avatar' ? plan.script : plan.caption)}</section><section class="business-plan-shots"><h4>${session.mode === 'image' ? '组图顺序' : '镜头顺序'}</h4><ol>${plan.shots.map(shot => `<li><strong>${esc(shot.title)}</strong><p>${esc(shot.description)}</p></li>`).join('')}</ol></section></div>
     <section class="business-plan-checklist"><h4>准备这些真实素材</h4><ul>${plan.checklist.map(item => `<li>${ctx.icon('check')}${esc(item)}</li>`).join('')}</ul></section>
-    <details class="business-plan-details"><summary>查看完整创作要求</summary><p>${esc(plan.prompt)}</p></details>
+    <details class="business-plan-details"><summary>查看完整创作要求</summary>${markdownText(plan.prompt)}</details>
     ${tooLong ? '<p class="business-form-message" role="alert">这份方案超出当前模块字数限制，请返回精简宣传信息或补充要求。</p>' : ''}
     <p class="business-plan-note">${session.mode === 'avatar' ? '请选择形象和声音' : session.mode === 'image' ? '请上传原图' : session.mode === 'mix' ? '请选择素材文件夹' : '视频生成服务待接入'}${!existing && ctx.configs[session.mode].prompt ? ' 将替换当前创作要求。' : ''}</p>
     <footer class="business-plan-footer"><div><button type="button" data-plan-action="back" class="secondary">${existing ? '修改信息' : '返回修改'}</button><button type="button" data-plan-action="download" class="business-link">下载方案</button></div><button type="button" data-plan-action="${existing ? 'close' : 'apply'}" class="primary" ${tooLong && !existing ? 'disabled' : ''}>${existing ? '完成' : `用于${esc(ctx.modules[session.mode].title)} ${ctx.icon('arrow')}`}</button></footer>

@@ -1,3 +1,4 @@
+import { markdownText } from './markdown.js';
 import { getMixState, renderMixMaterials, renderMixAudio, renderMixProgress, bindMixMaterials, mixReadiness, mixFolderLocked, mixUploadLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
 
 import { estimatedSpeechSeconds, videoCreditEstimateText } from './workspace-credits.js';
@@ -219,7 +220,7 @@ export function handleStudioAction(action, el, ctx) {
       };
       if (!Object.hasOwn(scripts, skill)) break;
       if (c.prompt.trim()) {
-        ctx.openModal('使用这份口播模板？', '替换当前文案后，可继续补充门店的真实信息。', `<div class="studio-template-preview">${ctx.esc(scripts[skill]).replace(/\n/g, '<br>')}</div><footer class="modal-actions">${ctx.button('cancel', '保留原文', 'secondary')}${ctx.button('studio-use-template', '使用模板', 'primary', `data-value="${ctx.esc(skill)}"`)}</footer>`);
+        ctx.openModal('使用这份口播模板？', '替换当前文案后，可继续补充门店的真实信息。', `<div class="studio-template-preview">${markdownText(scripts[skill])}</div><footer class="modal-actions">${ctx.button('cancel', '保留原文', 'secondary')}${ctx.button('studio-use-template', '使用模板', 'primary', `data-value="${ctx.esc(skill)}"`)}</footer>`);
       } else {
         c.skill = skill;
         c.prompt = scripts[skill];

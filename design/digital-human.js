@@ -1,3 +1,4 @@
+import { markdownText } from './markdown.js';
 import { digitalHumanApi as api } from './digital-human-api.js';
 import { accountStorageKey } from './account-storage.js';
 
@@ -503,7 +504,7 @@ function showMedia(kind, id, ctx) {
   if (!url) { if (kind === 'task') showTaskDetails(id, ctx); return; }
   const title = kind === 'avatar' ? item.name : '口播作品';
   const cover = kind === 'avatar' ? safeUrl(item.coverUrl) : '';
-  ctx.openModal(title, kind === 'avatar' ? '原始视频形象 · 可重复用于新的口播内容' : `${shortDate(item.createdAt)} · ${taskLabel(item)}`, `${fallbackNotice(item)}<div class="dh-modal-video"><video controls playsinline preload="metadata" src="${ctx.esc(url)}" ${cover ? `poster="${ctx.esc(cover)}"` : ''} aria-label="${ctx.esc(title)}"></video></div>${kind === 'task' ? `<p class="dh-modal-script">${ctx.esc(item.inputs?.scriptText || '').replace(/\n/g, '<br>')}</p>` : ''}<footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${kind === 'avatar' ? ctx.button('dh-use-preview-avatar', '使用此形象', 'primary', `data-id="${ctx.esc(id)}"`) : `<a class="primary dh-modal-download" href="${ctx.esc(api.downloadUrl(item, 'preview'))}" download>${ctx.icon('save')}快速下载（小文件）</a><a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(item, 'video'))}" download>下载原片</a>${ctx.button('dh-task-details', '任务详情', 'secondary', `data-id="${ctx.esc(id)}"`)}`}</footer>`, true);
+  ctx.openModal(title, kind === 'avatar' ? '原始视频形象 · 可重复用于新的口播内容' : `${shortDate(item.createdAt)} · ${taskLabel(item)}`, `${fallbackNotice(item)}<div class="dh-modal-video"><video controls playsinline preload="metadata" src="${ctx.esc(url)}" ${cover ? `poster="${ctx.esc(cover)}"` : ''} aria-label="${ctx.esc(title)}"></video></div>${kind === 'task' ? `<div class="dh-modal-script">${markdownText(item.inputs?.scriptText || '')}</div>` : ''}<footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${kind === 'avatar' ? ctx.button('dh-use-preview-avatar', '使用此形象', 'primary', `data-id="${ctx.esc(id)}"`) : `<a class="primary dh-modal-download" href="${ctx.esc(api.downloadUrl(item, 'preview'))}" download>${ctx.icon('save')}快速下载（小文件）</a><a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(item, 'video'))}" download>下载原片</a>${ctx.button('dh-task-details', '任务详情', 'secondary', `data-id="${ctx.esc(id)}"`)}`}</footer>`, true);
   const dialog = document.querySelector('dialog[open]'), video = dialog?.querySelector('video');
   if (kind === 'task' && item.results?.deliveryMode !== 'narration_fallback') {
     const hint = document.createElement('p');
@@ -536,7 +537,7 @@ function showTemplate(kind, ctx) {
     root?.querySelector('#dh-script')?.focus();
     return;
   }
-  ctx.openModal('使用宣传方案口播稿', '根据已填写的商家信息整理。请核对内容；替换前也可返回保存当前草稿。', `<div class="studio-template-preview">${ctx.esc(script).replace(/\n/g, '<br>')}</div><footer class="modal-actions">${ctx.button('cancel', '保留原文', 'secondary')}${ctx.button('dh-confirm-template', '替换口播稿', 'primary', `data-template="${ctx.esc(kind)}"`)}</footer>`);
+  ctx.openModal('使用宣传方案口播稿', '根据已填写的商家信息整理。请核对内容；替换前也可返回保存当前草稿。', `<div class="studio-template-preview">${markdownText(script)}</div><footer class="modal-actions">${ctx.button('cancel', '保留原文', 'secondary')}${ctx.button('dh-confirm-template', '替换口播稿', 'primary', `data-template="${ctx.esc(kind)}"`)}</footer>`);
 }
 
 function showVoices(ctx) {
@@ -606,7 +607,7 @@ function showTaskDetails(id, ctx) {
   const completed = task.status === 'completed';
   const video = completed && safeUrl(task.results?.finalVideoUrl);
   const audio = completed && safeUrl(task.results?.exactAudioUrl);
-  ctx.openModal('口播任务详情', `${shortDate(task.createdAt)} · ${taskLabel(task)}`, `<div class="dh-task-detail">${fallbackNotice(task)}${billingPointsText(task) ? `<p class="credit-estimate">${ctx.esc(billingPointsText(task))}</p>` : ''}${audio ? `<h3>口播配音</h3><audio controls preload="none" src="${ctx.esc(audio)}" aria-label="试听生成的口播配音"></audio>` : ''}<h3>口播文案</h3><p>${ctx.esc(task.inputs?.scriptText || '').replace(/\n/g, '<br>')}</p>${task.error ? `<div class="dh-inline-error">${ctx.esc(task.error)}</div>` : ''}<h3>处理记录</h3><ol>${(task.logs || []).slice(-12).map(log => `<li><time>${new Date(log.timestamp).toLocaleTimeString('zh-CN')}</time><span>${ctx.esc(log.message)}</span></li>`).join('') || '<li>任务已登记，暂时没有处理记录。</li>'}</ol></div><footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${audio ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'audio'))}" download>下载配音</a>` : ''}${video ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'video'))}" download>下载视频</a>` : ''}${task.status === 'failed' && task.recoverable ? ctx.button('dh-recover-task', '继续获取成片', 'secondary', `data-id="${ctx.esc(id)}" ${state.busy.has(id) ? 'disabled' : ''}`) : ''}${ctx.button('dh-reuse-task', '复用这份文案', 'primary', `data-id="${ctx.esc(id)}"`)}</footer>`, true);
+  ctx.openModal('口播任务详情', `${shortDate(task.createdAt)} · ${taskLabel(task)}`, `<div class="dh-task-detail">${fallbackNotice(task)}${billingPointsText(task) ? `<p class="credit-estimate">${ctx.esc(billingPointsText(task))}</p>` : ''}${audio ? `<h3>口播配音</h3><audio controls preload="none" src="${ctx.esc(audio)}" aria-label="试听生成的口播配音"></audio>` : ''}<h3>口播文案</h3>${markdownText(task.inputs?.scriptText || '')}${task.error ? `<div class="dh-inline-error">${ctx.esc(task.error)}</div>` : ''}<h3>处理记录</h3><ol>${(task.logs || []).slice(-12).map(log => `<li><time>${new Date(log.timestamp).toLocaleTimeString('zh-CN')}</time><span>${ctx.esc(log.message)}</span></li>`).join('') || '<li>任务已登记，暂时没有处理记录。</li>'}</ol></div><footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${audio ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'audio'))}" download>下载配音</a>` : ''}${video ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'video'))}" download>下载视频</a>` : ''}${task.status === 'failed' && task.recoverable ? ctx.button('dh-recover-task', '继续获取成片', 'secondary', `data-id="${ctx.esc(id)}" ${state.busy.has(id) ? 'disabled' : ''}`) : ''}${ctx.button('dh-reuse-task', '复用这份文案', 'primary', `data-id="${ctx.esc(id)}"`)}</footer>`, true);
   const dialog = document.querySelector('dialog[open]'), player = dialog?.querySelector('audio');
   dialog?.addEventListener('close', () => { if (player) { player.pause(); player.removeAttribute('src'); player.load(); } }, { once: true });
 }
@@ -700,7 +701,7 @@ export function handleDigitalHumanAction(action, el, ctx) {
   else if (action === 'dh-task-details') showTaskDetails(el.dataset.id, ctx);
   else if (action === 'dh-reuse-task') {
     const task = state.tasks.find(item => item.id === el.dataset.id);
-    if (task) ctx.openModal('复用口播文案', '将替换当前编辑中的口播稿，形象和声音保持当前选择。', `<div class="studio-template-preview">${ctx.esc(task.inputs?.scriptText || '').replace(/\n/g, '<br>')}</div><footer class="modal-actions">${ctx.button('cancel', '返回', 'secondary')}${ctx.button('dh-confirm-reuse', '填入文案', 'primary', `data-id="${ctx.esc(task.id)}"`)}</footer>`);
+    if (task) ctx.openModal('复用口播文案', '将替换当前编辑中的口播稿，形象和声音保持当前选择。', `<div class="studio-template-preview">${markdownText(task.inputs?.scriptText || '')}</div><footer class="modal-actions">${ctx.button('cancel', '返回', 'secondary')}${ctx.button('dh-confirm-reuse', '填入文案', 'primary', `data-id="${ctx.esc(task.id)}"`)}</footer>`);
   } else if (action === 'dh-confirm-reuse') {
     const task = state.tasks.find(item => item.id === el.dataset.id);
     if (task) updateScript(task.inputs?.scriptText || '', ctx);
