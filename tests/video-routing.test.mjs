@@ -17,18 +17,21 @@ test('video routes use verified workspace accounts and preserve the narrow signe
   const stub = async (req, res) => { res.end(JSON.stringify({ userId: req.authenticatedUserId || null })); return true; };
   stub.shutdown = async () => { shutdown = true; };
   const app = createPreviewServer({ backendUrl: `http://127.0.0.1:${backend.address().port}`, authRequired: true,
-    createAI: () => stub, createVideo: () => stub, credits: { ready: Promise.resolve() } });
+    createAI: () => stub, createVideo: () => stub, createVideoCreator: () => stub, credits: { ready: Promise.resolve() } });
   app.listen(0, '127.0.0.1'); await once(app, 'listening');
   t.after(async () => { await app.shutdown(); backend.closeAllConnections(); await new Promise(resolve => backend.close(resolve)); });
   const base = `http://127.0.0.1:${app.address().port}`;
-  for (const path of ['/api/video-replica/tasks', '/api/video-replica/config', '/api/video-replica/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/result']) {
+  for (const path of ['/api/video-replica/tasks', '/api/video-replica/config', '/api/video-replica/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/result', '/api/video-creator/config', '/api/video-creator/conversations', '/api/video-creator/tasks']) {
     assert.equal((await fetch(base + path, { headers: { 'x-user-id': 'forged' } })).status, 401);
   }
   const response = await fetch(base + '/api/video-replica/tasks', { headers: { cookie: 'digital_human_session=valid', 'x-user-id': 'forged' } });
   assert.deepEqual(await response.json(), { userId: 'verified-alice' });
+  assert.deepEqual(await (await fetch(base + '/api/video-creator/tasks', { headers: { cookie: 'digital_human_session=valid', 'x-user-id': 'forged' } })).json(), { userId: 'verified-alice' });
   const source = await fetch(base + '/api/video-replica/source/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/video');
   assert.deepEqual(await source.json(), { userId: null }); // Only the video handler can verify this signature.
   assert.equal((await fetch(base + '/api/video-replica/source/anything')).status, 401);
+  assert.deepEqual(await (await fetch(base + '/api/video-creator/source/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee')).json(), { userId: null });
+  assert.equal((await fetch(base + '/api/video-creator/source/anything')).status, 401);
   await app.shutdown(); assert.equal(shutdown, true);
 });
 

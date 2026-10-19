@@ -41,7 +41,7 @@ function remember(task) {
   state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt);
   observeCreditTask(task);
 }
-function refresh() { if (context && document.body.dataset.page === 'video') context.refresh(); }
+function refresh() { if (context && document.body.dataset.page === 'replica') context.refresh(); }
 function failureMessage(task) {
   return displayMessage(task?.canRecheck ? task.error?.replace('请核对素材后重新生成。', '请重新检查成片。') : task?.error);
 }
@@ -124,7 +124,7 @@ export function renderVideoReplica(ctx) {
     : exempt ? task?.duration ? `${task.duration} 秒` : '上传后自动识别时长。'
       : actualCost ? task?.estimatedPoints ? `生成费用预计 ${task.estimatedPoints} 积分 · ${task.duration} 秒` : '按实际算力计费'
         : task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '按视频时长预留积分；失败退回预留积分。';
-  return `<div class="replica-heading"><div><span class="replica-eyebrow">AI 视频 · ${ctx.esc(selectedModel().name)}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
+  return `<div class="replica-heading"><div><span class="replica-eyebrow">1:1复刻 · ${ctx.esc(selectedModel().name)}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-layout"><section class="replica-form">${modelPicker(ctx)}<div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
       <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(actionMessage())}</p>

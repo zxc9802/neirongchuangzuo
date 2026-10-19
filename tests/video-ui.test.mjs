@@ -13,7 +13,7 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
   const node = selector => { if (!nodes.has(selector)) nodes.set(selector, {}); return nodes.get(selector); };
   let failing = true, poll;
   globalThis.workspaceUser = { id: crypto.randomUUID() };
-  globalThis.document = { body: { dataset: { page: 'video' } }, querySelector: node };
+  globalThis.document = { body: { dataset: { page: 'replica' } }, querySelector: node };
   globalThis.setInterval = callback => { poll = callback; return 1; };
   globalThis.clearInterval = () => {};
   globalThis.fetch = async (path, options) => {
@@ -257,7 +257,7 @@ test('edition picker keeps removed-model drafts compatible with the standard mod
   } });
   page.recover(); await page.poll(); page.select(task.id);
   assert.doesNotMatch(page.html(), /minimax\/h3-max/);
-  assert.match(page.html(), /AI 视频 · 标准版/);
+  assert.match(page.html(), /1:1复刻 · 标准版/);
   assert.match(page.html(), /id="replica-models"/);
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls.find(call => call.path.endsWith('/tasks')).body.model, seedance);

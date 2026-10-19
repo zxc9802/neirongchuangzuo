@@ -1,4 +1,5 @@
 import {renderVideoReplica,bindVideoReplica,disposeVideoReplica} from './video-replica.js';
+import {renderVideoCreator,bindVideoCreator,disposeVideoCreator,handleVideoCreatorAction} from './video-creator.js';
 import {renderHomeView,bindHomeView,handleHomeAction} from './home.js';
 import {accountStorageKey} from './account-storage.js';
 import {validatePhotoSelection} from './image-upload.js';
@@ -19,6 +20,7 @@ const paths = {
  agent:'M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 3v-3H3V6a2 2 0 0 1 2-2z M7 9h10 M7 13h6',
  image:'M4 4h16v16H4z M4 15l5-5 5 5 3-3 3 3 M15 8h.01',
  video:'M3 6h12v12H3z M15 10l6-3v10l-6-3',
+ replica:'M9 3h12v16H9z M5 7H3v14h12 M18 8a3 3 0 1 0-6 0 3 3 0 0 0 6 0 M11 16v-1a4 3 0 0 1 8 0v1',
  mix:'M4 4l16 16 M4 20L20 4 M7 7a3 3 0 1 0-6 0 3 3 0 0 0 6 0 M7 17a3 3 0 1 0-6 0 3 3 0 0 0 6 0',
  avatar:'M16 7a4 4 0 1 0-8 0 4 4 0 0 0 8 0 M4 21v-3a8 6 0 0 1 16 0v3',
  home:'M3 10l9-7 9 7v11h-6v-7H9v7H3z',
@@ -46,17 +48,15 @@ const icon = (name, cls='') => `<svg class="icon ${cls}" viewBox="0 0 24 24" fil
 const button = (action, text, cls='', more='') => `<button class="${cls}" data-action="${action}" ${more}>${text}</button>`;
 const modules = {
  image: {title:'AI 图片', action:'立即生成图片', type:'image', limit:30, max:1000, hint:'描述想生成的图片', names:[['活动海报','活动','把优惠、时间和门店信息放进一张图'],['团购套餐图','活动','让套餐内容与到店权益一目了然'],['招牌项目','门店','突出招牌菜、特色服务或主推产品'],['门店氛围','门店','保留真实空间，让环境更有吸引力'],['朋友圈九宫格','日常','用同一套风格展示门店日常'],['图片精修','日常','调整清晰度、曝光与画面细节']]},
- video: {title:'AI 视频', action:'立即生成视频', type:'image', limit:12, max:10000, hint:'描述视频画面或宣传主题', names:[['门店发现','同城到店','突出门店特色，给附近的人一个到店理由'],['到店实录','同城到店','用真实体验建立到店信任'],['招牌体验','同城到店','聚焦一道招牌菜或一个特色项目'],['同城团购','活动推广','说清优惠内容，吸引预约与到店'],['开业预热','活动推广','展示新店亮点与开业安排'],['节日活动','活动推广','为节日促销制作一条宣传短片']]},
+ video: {title:'AI 视频', action:'立即生成视频', type:'image', limit:30, max:12000, hint:'描述视频画面或宣传主题', names:[['门店发现','同城到店','突出门店特色，给附近的人一个到店理由'],['到店实录','同城到店','用真实体验建立到店信任'],['招牌体验','同城到店','聚焦一道招牌菜或一个特色项目'],['同城团购','同城到店','说清优惠内容，吸引预约与到店']]},
  mix: {title:'AI 混剪', action:'开始智能混剪', type:'video', limit:30, max:2000, hint:'填写宣传文案', names:[['日常混剪','门店日常','门头、环境与服务片段自动组合'],['探店实拍','门店日常','把拍摄的探店过程整理成片'],['活动快剪','活动推广','剪出主题清晰、节奏明快的活动短片'],['招牌合集','门店日常','集中展示门店最有特色的项目'],['批量宣传','活动推广','同一批素材，设计不同的开场和顺序']]},
  avatar: {title:'数字人', action:'生成口播视频', type:'video', limit:1, max:5000, hint:'填写口播文案', names:[['老板介绍','信任建立','让老板介绍门店与服务理念'],['招牌讲解','信任建立','讲清项目特色与适合的人群'],['活动通知','到店转化','说清活动内容、时间与参与方式'],['到店路线','到店转化','帮助顾客找到门店'],['常见问题','信任建立','回答营业时间、预约与服务问题']]}
 };
 for(const module of Object.values(modules))for(const purpose of PURPOSES)if(!module.names.some(item=>item[0]===purpose.label))module.names.push([purpose.label,'行业宣传',purpose.description]);
-const validPage=page=>page==='home'||page==='agent'||page==='assets'||Object.hasOwn(modules,page);
+const pageTitles={home:'首页',agent:'Agent 对话',replica:'1:1复刻',assets:'资产'};
+const validPage=page=>Object.hasOwn(pageTitles,page)||Object.hasOwn(modules,page);
 let mode = validPage(location.hash.slice(1)) ? location.hash.slice(1) : 'home';
 let imageMode = 'restaurant';
-const videoModes = { generation: ['视频生成', '填写创作要求，添加图片或声音，制作视频'], replica: ['人物 1:1 复刻', '上传参考视频和人物照片，替换视频中的人物'] };
-let videoMode = load('store-ai-design-video-mode','generation');
-if(!Object.hasOwn(videoModes,videoMode))videoMode='generation';
 const configs = Object.fromEntries(Object.keys(modules).map(k=>[k,{skill:modules[k].names[0][0],prompt:'',files:[],ratio:k==='image'?'3:4':'9:16',quality:k==='image'?'auto':'1080p',duration:'30',format:'PNG',generationMode:k==='image'?'series':'single',count:k==='image'?'6':'1',voice:'自然讲述',subtitles:true,music:k!=='mix',...(k==='mix'?{voice_mode:'synthesized',voice_id:'',music_id:''}:{}),director:false,person:'老板本人',background:'门店实景'}]));
 let assets = [], queueOpen = window.innerWidth>1140, previewTab = '参考示例', selectedDraft = null, activeClip = 0;
 let drafts = load('store-ai-design-drafts', []), storeInfo = load('store-ai-design-profile', {name:'',industry:'餐饮',address:'',feature:'',hours:''});
@@ -67,14 +67,13 @@ let materialIndustry = storeInfo.name ? createBrief(storeInfo).industry : 'all';
 const selectedDrafts = {};
 const modal = $('#modal');
 function load(key,fallback){try{return JSON.parse(localStorage.getItem(accountStorageKey(key))||'null')||fallback;}catch{return fallback;}}
-function setVideoMode(value){if(!Object.hasOwn(videoModes,value))return;videoMode=value;try{localStorage.setItem(accountStorageKey('store-ai-design-video-mode'),JSON.stringify(value));}catch{}}
 function persist(){try{localStorage.setItem(accountStorageKey('store-ai-design-drafts'),JSON.stringify(drafts)); localStorage.setItem(accountStorageKey('store-ai-design-profile'),JSON.stringify(storeInfo));return true;}catch{toast('浏览器存储不可用，本次数据只保留在页面中。');return false;}}
 function toast(text){$('#toast').textContent=text;$('#toast').classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').classList.remove('show'),3800);}
 function openModal(title,subtitle,content,wide=false){$('#modal-title').textContent=title;$('#modal-subtitle').textContent=subtitle;$('#modal-body').innerHTML=content;modal.classList.toggle('wide',wide);if(!modal.open)modal.showModal();}
 $('#close-modal').onclick=()=>modal.close(); modal.addEventListener('click',e=>{if(e.target===modal){const r=modal.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)modal.close();}});
 $('#guide-button').onclick=guide;
 document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=icon(el.dataset.icon));
-function guide(){openModal('使用帮助','',`<div class="prose"><dl><dt>餐饮小红书</dt><dd>上传实拍、选择方向、下载图文。</dd><dt>通用图片</dt><dd>上传原图、选择风格，可生成单张或套图。</dd><dt>AI 混剪</dt><dd>选择素材文件夹，填写宣传文案。</dd><dt>数字人</dt><dd>选择形象和声音，填写口播稿。</dd><dt>AI 视频</dt><dd>点击「视频功能」切换视频生成或人物 1:1 复刻。</dd></dl><p>成品保留 3 天，请及时下载。积分规则可在「我的账号」查看。</p></div>`);}
+function guide(){openModal('使用帮助','',`<div class="prose"><dl><dt>餐饮小红书</dt><dd>上传实拍、选择方向、下载图文。</dd><dt>通用图片</dt><dd>上传原图、选择风格，可生成单张或套图。</dd><dt>AI 混剪</dt><dd>选择素材文件夹，填写宣传文案。</dd><dt>数字人</dt><dd>选择形象和声音，填写口播稿。</dd><dt>AI 视频</dt><dd>选择宣传方向，添加素材并填写视频要求。</dd><dt>1:1复刻</dt><dd>上传参考视频、人物照片和声音，生成复刻视频。</dd></dl><p>成品保留 3 天，请及时下载。积分规则可在「我的账号」查看。</p></div>`);}
 function context(){return {mode,configs,modules,assets,storeInfo,icon,button,esc,queueOpen,previewTab,setPreviewTab:value=>{previewTab=value;},selectedDraft,drafts,navigate,beginCreation,openModal,toast,picker,saveDraft,generate,settings,personModal,scriptModal,refresh:render,businessProfileVersion,materialIndustry,setMaterialIndustry:industry=>{if(industry==='all'||INDUSTRIES.some(item=>item.id===industry))materialIndustry=industry;},selectImagePreset:(id,options)=>{imageMode='generic';return selectImagePreset(context(),id,options);},setImageMode:value=>{if(!['restaurant','generic'].includes(value))return;imageMode=value;render();},openBusinessFlow:options=>openBusinessFlow(context(),options),renderBusinessEntry:target=>renderBusinessEntry(context(),target),renderContentPlanPreview:target=>renderContentPlanPreview(context(),target),getBusinessBrief:()=>getBusinessBrief(storeInfo),importBusinessAssets,media:{owner:'/media/owner-reference.png'}};}
 function importBusinessAssets(files,target,selectedCount=0){
  const module=modules[target],ids=[];if(!module)return ids;
@@ -88,26 +87,28 @@ function importBusinessAssets(files,target,selectedCount=0){
  }
  return ids;
 }
-function beginCreation(next){if(next==='image')imageMode='generic';if(next==='video')setVideoMode('generation');if(mode===next)selectedDraft=null;selectedDrafts[next]=null;navigate(next);}
+function beginCreation(next){if(next==='image')imageMode='generic';if(mode===next)selectedDraft=null;selectedDrafts[next]=null;navigate(next);}
 function navigate(next){if(!validPage(next))return;modal.close();pickerContext=null;if(modules[mode])selectedDrafts[mode]=selectedDraft;mode=next;selectedDraft=selectedDrafts[next]||null;previewTab=configs[next]?.contentPlan?'宣传方案':'参考示例';location.hash=next;render();}
 window.addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(validPage(next)&&next!==mode)navigate(next);});
 function render(){
- if(mode!=='video'||videoMode!=='replica')disposeVideoReplica();
+ if(mode!=='replica')disposeVideoReplica();
+ if(mode!=='video')disposeVideoCreator();
  if(mode!=='image'||imageMode!=='restaurant')disposeRestaurant();
  if(mode!=='avatar')disposeDigitalHuman();
  if(mode!=='image'||imageMode==='restaurant')disposeImageGeneration();
  if(mode!=='assets')disposeGeneratedAssets();
  document.body.dataset.page=mode;
- $('#nav').innerHTML=[['home','首页'],['agent','Agent 对话'],...Object.entries(modules).map(([k,v])=>[k,v.title])].map(([k,title])=>`<a href="#${k}" class="navitem ${mode===k?'active':''}" ${mode===k?'aria-current="page"':''}>${icon(k)}<small>${title}</small></a>`).join('')+`<a href="#assets" class="navitem ${mode==='assets'?'active':''}" ${mode==='assets'?'aria-current="page"':''}>${icon('folder')}<small>资产</small></a>`+button('store',icon('store')+'<small>商家资料</small>','navitem');
+ $('#nav').innerHTML=[['home','首页'],['agent','Agent 对话'],...Object.entries(modules).flatMap(([k,v])=>k==='video'?[[k,v.title],['replica',pageTitles.replica]]:[[k,v.title]])].map(([k,title])=>`<a href="#${k}" class="navitem ${mode===k?'active':''}" ${mode===k?'aria-current="page"':''}>${icon(k)}<small>${title}</small></a>`).join('')+`<a href="#assets" class="navitem ${mode==='assets'?'active':''}" ${mode==='assets'?'aria-current="page"':''}>${icon('folder')}<small>资产</small></a>`+button('store',icon('store')+'<small>商家资料</small>','navitem');
  const ctx=context(),main=$('#main');
- $('#workbar').innerHTML=`<div class="workbar-breadcrumb"><span>创作工作台</span>${icon('chevron')}<strong>${modules[mode]?.title||(mode==='assets'?'资产':mode==='agent'?'Agent 对话':'首页')}</strong></div>${mode==='image'?`<div class="image-mode-switch" role="tablist" aria-label="图片创作模式">${['restaurant','generic'].map(value=>button('image-mode',value==='restaurant'?'餐饮小红书':'通用图片',imageMode===value?'active':'',`data-value="${value}" role="tab" aria-selected="${imageMode===value}"`)).join('')}</div>`:mode==='video'?button('video-functions',icon('video')+'视频功能：'+videoModes[videoMode][0]+icon('chevron'),'secondary video-function-trigger','aria-haspopup="dialog"'):''}<div>${mode==='video'&&videoMode==='replica'||mode==='image'&&imageMode==='restaurant'?'':button('prompts',icon('list')+'我的草稿','textbutton')}${button('store',icon('store')+(mode==='image'&&imageMode==='restaurant'?'门店资料':esc(storeInfo.name||'我的商家')),'textbutton')}</div>`;
+ $('#workbar').innerHTML=`<div class="workbar-breadcrumb"><span>创作工作台</span>${icon('chevron')}<strong>${modules[mode]?.title||pageTitles[mode]}</strong></div>${mode==='image'?`<div class="image-mode-switch" role="tablist" aria-label="图片创作模式">${['restaurant','generic'].map(value=>button('image-mode',value==='restaurant'?'餐饮小红书':'通用图片',imageMode===value?'active':'',`data-value="${value}" role="tab" aria-selected="${imageMode===value}"`)).join('')}</div>`:''}<div>${mode==='replica'||mode==='video'||mode==='image'&&imageMode==='restaurant'?'':button('prompts',icon('list')+'我的草稿','textbutton')}${button('store',icon('store')+(mode==='image'&&imageMode==='restaurant'?'门店资料':esc(storeInfo.name||'我的商家')),'textbutton')}</div>`;
  if(mode==='assets'){main.className='generated-assets-workspace';main.innerHTML=renderGeneratedAssets(ctx);bindGeneratedAssets(ctx);return;}
  if(mode==='home'){main.className='home';main.innerHTML=renderHomeView(ctx);bindHomeView(ctx);return;}
  if(mode==='agent'){main.className='agent-workspace';main.innerHTML=renderAgentChat(ctx);bindAgentChat(ctx);return;}
  if(mode==='image'&&imageMode==='restaurant'){main.className='restaurant-shell';main.innerHTML=renderRestaurant(ctx);bindRestaurant(ctx);return;}
  if(mode==='avatar'){main.className='special-workspace avatar-studio';main.innerHTML=renderDigitalHuman(ctx);bindDigitalHuman(ctx);return;}
  if(mode==='mix'){main.className='special-workspace mix-studio';main.innerHTML=renderStudio(mode,ctx);bindStudio(mode,ctx);return;}
- if(mode==='video'&&videoMode==='replica'){main.className='video-replica-workspace';main.innerHTML=renderVideoReplica(ctx);bindVideoReplica(ctx);return;}
+ if(mode==='replica'){main.className='video-replica-workspace';main.innerHTML=renderVideoReplica(ctx);bindVideoReplica(ctx);return;}
+ if(mode==='video'){main.className='video-creator-workspace';main.innerHTML=renderVideoCreator(ctx);bindVideoCreator(ctx);return;}
  main.className=`workspace ${queueOpen?'queue-expanded':'queue-hidden'}`;
  main.innerHTML=renderWorkbench(ctx);bindWorkbench(ctx);
 }
@@ -140,8 +141,7 @@ function saveDraft(){const c=configs[mode];if(!c)return;const id=selectedDraft||
 function generate(){if(mode==='mix'){handleMixMaterialAction('studio-generate',{},context());return;}const c=configs[mode];if(!c.prompt.trim()&&!c.files.length){toast('先添加素材或填写宣传要求。');return;}if(c.prompt.length>modules[mode].max){toast('创作要求超出字数限制，请缩短后继续。');return;}openModal('生成服务待接入','',`<div class="generation-notice">${icon(mode)}<p>可先保存草稿。</p><div class="generation-summary"><strong>${esc(c.skill)}</strong><span>${esc(c.ratio)} · ${esc(c.quality)}</span></div></div><footer class="modal-actions">${button('cancel','继续编辑','secondary')}${button('save-close','保存草稿','primary')}</footer>`);}
 function personModal(){const c=configs.avatar;openModal('形象与背景','选择出镜身份和画面背景',`<form id="person-form"><fieldset><legend>使用谁来讲？</legend><div class="radio-grid">${['老板本人','店员形象','授权主持人'].map(x=>`<label><input type="radio" name="person" value="${x}" ${c.person===x?'checked':''}><span>${x}</span></label>`).join('')}</div></fieldset><fieldset><legend>画面背景</legend><div class="radio-grid">${['门店实景','简洁背景','形象原背景'].map(x=>`<label><input type="radio" name="background" value="${x}" ${c.background===x?'checked':''}><span>${x}</span></label>`).join('')}</div></fieldset><footer class="modal-actions"><button class="primary">确认设置</button></footer></form>`);$('#person-form').onsubmit=e=>{e.preventDefault();Object.assign(c,Object.fromEntries(new FormData(e.target)));modal.close();render();};}
 function scriptModal(){openModal('口播文案模板','',`<div class="prose"><p>大家好，我是${esc(storeInfo.name||'【门店名称】')}的老板。</p><p>我们最想让你体验的是${esc(storeInfo.feature||'【招牌项目与特色】')}。</p><p>门店在${esc(storeInfo.address||'【门店地址】')}，欢迎你有空来坐坐。</p></div><footer class="modal-actions">${button('use-script','填入口播稿','primary')}</footer>`);}
-function handle(action,el){const ctx=context();if(action==='image-mode'){ctx.setImageMode(el.dataset.value);return;}if(action==='video-mode'){if(mode==='video'&&Object.hasOwn(videoModes,el.dataset.value)){setVideoMode(el.dataset.value);modal.close();render();}return;}if(handleMixMaterialAction(action,el,ctx)||handleRestaurantAction(action,el,ctx)||handleGeneratedAssetsAction(action,el,ctx)||handleImagePresetAction(action,el,ctx)||handleBusinessAction(action,el,ctx)||handleDigitalHumanAction(action,el,ctx)||handleAgentChatAction(action,el,ctx)||handleHomeAction(action,el,ctx)||handleWorkbenchAction(action,el,ctx)||handleStudioAction(action,el,ctx))return;const c=configs[mode];switch(action){
- case 'video-functions':if(mode==='video')openModal('选择视频功能','',`<div class="skill-grid">${Object.entries(videoModes).map(([value,[label,description]])=>button('video-mode',`<div class="skill-art">${icon('video')}</div><div><strong>${label}</strong><small>${description}</small></div>${videoMode===value?icon('check'):''}`,'skill-option '+(videoMode===value?'selected':''),`data-value="${value}" aria-pressed="${videoMode===value}"`)).join('')}</div>`);break;
+function handle(action,el){const ctx=context();if(action==='image-mode'){ctx.setImageMode(el.dataset.value);return;}if(handleVideoCreatorAction(action,el,ctx)||handleMixMaterialAction(action,el,ctx)||handleRestaurantAction(action,el,ctx)||handleGeneratedAssetsAction(action,el,ctx)||handleImagePresetAction(action,el,ctx)||handleBusinessAction(action,el,ctx)||handleDigitalHumanAction(action,el,ctx)||handleAgentChatAction(action,el,ctx)||handleHomeAction(action,el,ctx)||handleWorkbenchAction(action,el,ctx)||handleStudioAction(action,el,ctx))return;const c=configs[mode];switch(action){
  case 'skills':skills();break;
  case 'skill-category':skillCategory=el.dataset.value;document.querySelectorAll('.skill-filters button').forEach(b=>b.classList.toggle('active',b===el));filterSkills();break;
  case 'select-skill':delete c.imagePreset;c.skill=el.dataset.value;modal.close();render();break;
@@ -160,7 +160,7 @@ function handle(action,el){const ctx=context();if(action==='image-mode'){ctx.set
  case 'saveprompt':saveDraft();break;
  case 'save-close':saveDraft();modal.close();break;
  case 'prompts':openModal('我的文案草稿','素材需重新选择',`<div class="saved-prompts">${drafts.filter(d=>mode==='home'||mode==='assets'||d.mode===mode).map(d=>button('restore',`<strong>${esc(d.skill)}</strong><p>${esc(d.prompt||'未填写要求')}</p><small>${esc(d.time)}</small>`,'saved-prompt','data-id="'+d.id+'"')).join('')||'<p class="muted">还没有保存过草稿。</p>'}</div>`);break;
- case 'restore':{const d=drafts.find(x=>x.id===el.dataset.id);if(!d)return;if(d.mode==='image')imageMode='generic';if(d.mode==='video')setVideoMode('generation');mode=d.mode;location.hash=mode;configs[mode]={...structuredClone(d),files:[]};selectedDraft=d.id;selectedDrafts[mode]=d.id;previewTab='草稿详情';modal.close();render();toast('草稿已恢复。素材文件请重新选择。');break;}
+ case 'restore':{const d=drafts.find(x=>x.id===el.dataset.id);if(!d)return;if(d.mode==='image')imageMode='generic';mode=d.mode;location.hash=mode;configs[mode]={...structuredClone(d),files:[]};selectedDraft=d.id;selectedDrafts[mode]=d.id;previewTab='草稿详情';modal.close();render();toast('草稿已恢复。素材文件请重新选择。');break;}
  case 'new':openModal('开始一份新创作','将清空未保存的文字和素材选择',`<footer class="modal-actions">${button('cancel','返回','secondary')}${button('reset','新建创作','primary')}</footer>`);break;
  case 'reset':if(mode==='image'&&imageMode==='generic'&&!resetImageCreation(ctx))break;c.prompt='';c.files=[];if(c.imagePreset)c.skill=modules[mode].names[0][0];delete c.imagePreset;delete c.brief;delete c.contentPlan;selectedDraft=null;selectedDrafts[mode]=null;modal.close();render();break;
  case 'expand':openModal('展开编辑','',`<textarea id="expanded-prompt" aria-label="完整创作要求" maxlength="${modules[mode].max}">${esc(c.prompt)}</textarea><footer class="modal-actions">${button('apply-prompt','完成编辑','primary')}</footer>`,true);break;

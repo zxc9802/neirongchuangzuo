@@ -217,7 +217,7 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
     }
   }
 }
-export async function serveMedia(req, res, path, type, download = false) {
+export async function serveMedia(req, res, path, type, download = false, filename = 'person-replica.mp4') {
   const { size } = await stat(path);
   let start = 0, end = size - 1, partial = false;
   if (req.headers.range) {
@@ -232,7 +232,7 @@ export async function serveMedia(req, res, path, type, download = false) {
   res.writeHead(partial ? 206 : 200, { 'Content-Type': type, 'Content-Length': end - start + 1,
     'Cache-Control': 'private, no-store', 'Accept-Ranges': 'bytes', 'X-Content-Type-Options': 'nosniff',
     ...(partial ? { 'Content-Range': `bytes ${start}-${end}/${size}` } : {}),
-    ...(download ? { 'Content-Disposition': 'attachment; filename="person-replica.mp4"' } : {}) });
+    ...(download ? { 'Content-Disposition': `attachment; filename="${filename}"` } : {}) });
   if (req.method === 'HEAD') { res.end(); return; }
   try { await pipeline(createReadStream(path, { start, end }), res); } catch { res.destroy(); }
 }

@@ -158,7 +158,7 @@ export function renderHomeView(ctx) {
   initializeSelection(ctx);
   const { esc, icon, button, modules } = ctx;
   const tools = [
-    ['image', 'AI 图片', 'image', ''], ['video', 'AI 视频', 'video', ''], ['mix', 'AI 混剪', 'mix', ''],
+    ['image', 'AI 图片', 'image', ''], ['video', 'AI 视频', 'video', ''], ['replica', '1:1复刻', 'replica', ''], ['mix', 'AI 混剪', 'mix', ''],
     ['avatar', '数字人口播', 'avatar', ''], ['image', '图片精修', 'settings', '图片精修'], ['image', '朋友圈九宫格', 'list', '朋友圈九宫格'],
   ];
   return `<div class="home-content">
@@ -354,6 +354,7 @@ export function handleHomeAction(action, element, ctx) {
     case 'home-upload': ctx.picker(ctx.modules[currentMode].type, true, {max:ctx.modules[currentMode].limit,selected:selectedFilesFor(currentMode,ctx),onConfirm:ids=>{selectedAssetIds=new Set(ids);}}); break;
     case 'home-tool': {
       const target = element.dataset.mode;
+      if (target === 'replica') { ctx.beginCreation(target); break; }
       const input = document.getElementById('home-idea');
       if (input) prompt = input.value;
       if (!validateHomePrompt(ctx) || !validateTransfer(target, prompt, ctx)) break;

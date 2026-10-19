@@ -22,8 +22,15 @@ function localUrl(value, pattern) {
 }
 
 // Only successful generated outputs enter the library; uploads and example images never do.
-export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = Date.now(), restaurantTasks = [], videoTasks = []) {
+export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = Date.now(), restaurantTasks = [], videoTasks = [], creativeVideoTasks = []) {
   const records = [];
+  for (const task of creativeVideoTasks) {
+    const window = generatedAssetWindow(task, now);
+    if (!window || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(task.id || '') || task.billing && task.billing.status !== 'settled') continue;
+    const url = `/api/video-creator/tasks/${task.id}/result`;
+    if (task.resultUrl !== url) continue;
+    records.push({ key: `creative-video:${task.id}`, type: 'video', source: 'AI 视频', title: String(task.title || '同城到店视频').slice(0, 80), url, download: url + '?download=1', filename: 'qiya-video.mp4', ...window });
+  }
   for (const task of videoTasks) {
     const window = generatedAssetWindow(task, now);
     if (!window || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(task.id || '') || task.billing && task.billing.status !== 'settled') continue;
@@ -136,13 +143,13 @@ async function load() {
   const controller = new AbortController(); state.controller = controller;
   const timer = setTimeout(() => controller.abort(), 15000);
   state.loading = true; paint();
-  const sources = ['图片', '数字人', '餐饮图文', '人物复刻'];
-  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', controller.signal, sources[0]), fetchTasks('/api/tasks?completed=true', controller.signal, sources[1]), fetchRestaurantTasks(controller.signal), fetchTasks('/api/video-replica/tasks?completed=true', controller.signal, sources[3])]);
+  const sources = ['图片', '数字人', '餐饮图文', '人物复刻', 'AI视频'];
+  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', controller.signal, sources[0]), fetchTasks('/api/tasks?completed=true', controller.signal, sources[1]), fetchRestaurantTasks(controller.signal), fetchTasks('/api/video-replica/tasks?completed=true', controller.signal, sources[3]), fetchTasks('/api/video-creator/tasks?completed=true', controller.signal, sources[4])]);
   clearTimeout(timer);
   if (revision !== state.revision || !active()) return;
   state.errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${sources[index]}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${sources[index]}作品暂时无法读取。`] : []);
-  const [images, avatars, restaurant, videos] = results.map(result => result.status === 'fulfilled' ? result.value : []);
-  state.records = collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos);
+  const [images, avatars, restaurant, videos, creativeVideos] = results.map(result => result.status === 'fulfilled' ? result.value : []);
+  state.records = collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos, creativeVideos);
   state.loading = false; state.controller = null; paint(); scheduleExpiry();
 }
 export function bindGeneratedAssets(ctx) { state.ctx = ctx; void load(); }

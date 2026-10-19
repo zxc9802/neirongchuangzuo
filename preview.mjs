@@ -13,6 +13,7 @@ import { dailyCallExemptAccount, withDailyCallPolicy } from './services/ai/call-
 import { createCreditsLedger } from './services/credits/store.mjs';
 import { createVideoHandler, isVideoSourcePath } from './services/video/server.mjs';
 import { videoConfig } from './services/video/provider.mjs';
+import { createVideoCreatorHandler, isCreatorSourcePath } from './services/video-creator/server.mjs';
 const files = new Map([
   ['/', ['design/index.html', 'text/html; charset=utf-8']],
   ['/login', ['design/auth.html', 'text/html; charset=utf-8']],
@@ -31,6 +32,8 @@ const files = new Map([
   ['/restaurant.css', ['design/restaurant.css', 'text/css; charset=utf-8']],
   ['/video-replica.js', ['design/video-replica.js', 'text/javascript; charset=utf-8']],
   ['/video-replica.css', ['design/video-replica.css', 'text/css; charset=utf-8']],
+  ...['video-creator', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ['/video-creator.css', ['design/video-creator.css', 'text/css; charset=utf-8']],
   ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-upload', 'image-presets', 'image-preset-ui', 'generated-assets', 'model-labels'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ...['digital-human', 'digital-human-api'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ['/digital-human.css', ['design/digital-human.css', 'text/css; charset=utf-8']],
@@ -76,7 +79,7 @@ function safeError(res, status, code, message, close = false) {
   res.end(JSON.stringify({ error: message, code }));
 }
 
-export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, localUnlimitedCredits = false, aiOptions, restaurantOptions, mixOptions, videoOptions, credits: injectedCredits, creditsOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, createVideo = createVideoHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
+export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, localUnlimitedCredits = false, aiOptions, restaurantOptions, mixOptions, videoOptions, creatorOptions, credits: injectedCredits, creditsOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, createVideo = createVideoHandler, createVideoCreator = createVideoCreatorHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
  const backend = new URL(backendUrl);
  const externalOrigin = publicOrigin ? new URL(publicOrigin) : undefined;
  if (backend.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(backend.hostname)) throw new Error('The development backend must use loopback HTTP.');
@@ -93,6 +96,9 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
  let handleRestaurant;
  let handleMix;
  let handleVideo;
+ let handleVideoCreator;
+ const creator = () => handleVideoCreator ||= createVideoCreator({ storageDir: join(dataRoot, 'video-creator'), env: runtimeSettings,
+   publicOrigin: externalOrigin?.origin, credits, ...creatorOptions });
  const video = () => handleVideo ||= createVideo({ storageDir: join(dataRoot, 'video'), env: runtimeSettings,
    publicOrigin: externalOrigin?.origin, credits, ...videoOptions });
  const mix = () => handleMix ||= createMix({ dataDir: join(dataRoot, 'mix'), publicOrigin: externalOrigin?.origin,
@@ -120,8 +126,9 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
     return;
   }
   const restaurantPath = path === '/api/restaurant' || path.startsWith('/api/restaurant/');
-  const videoPath = path === '/api/video-replica' || path.startsWith('/api/video-replica/');
-  const videoSource = isVideoSourcePath(path);
+  const creatorPath = path === '/api/video-creator' || path.startsWith('/api/video-creator/');
+  const videoPath = creatorPath || path === '/api/video-replica' || path.startsWith('/api/video-replica/');
+  const videoSource = isVideoSourcePath(path) || isCreatorSourcePath(path);
   const mixPath = path === '/api/mix' || path.startsWith('/api/mix/') || path === '/api/browser-materials' || path.startsWith('/api/browser-materials/');
   if (path === '/api/workspace/session' || path === '/api/workspace/credits' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/') || restaurantPath || mixPath || videoPath && !videoSource)) {
     let user = null;
@@ -163,7 +170,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       req.authenticatedUserId = 'local-dev';
     }
     if (closing) { safeError(res, 503, 'SERVICE_STOPPING', '服务正在重启，请稍后重试。'); return; }
-    await video()(req, res); return;
+    await (creatorPath ? creator() : video())(req, res); return;
   }
   if (mixPath) {
     if (!authRequired) {
@@ -243,6 +250,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
    closing = true;
    shutdownPromise = (async () => {
      let failure;
+     try { await handleVideoCreator?.shutdown?.(); }
+     catch (error) { failure = error; report('VIDEO_CREATOR_SHUTDOWN_FAILED'); }
      try { await handleVideo?.shutdown?.(); }
      catch (error) { failure = error; report('VIDEO_SHUTDOWN_FAILED'); }
      try { await handleMix?.shutdown?.(); }
