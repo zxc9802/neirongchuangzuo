@@ -444,8 +444,8 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
           return publicReservation(record, state.wallet);
         }
         if (metadata && (typeof metadata !== 'object' || Array.isArray(metadata)
-          || Object.entries(metadata).some(([key,value]) => !['model','group','currency','unitPrice','fx'].includes(key)
-            || (['unitPrice','fx'].includes(key) ? !Number.isFinite(value) || value < 0 : typeof value !== 'string' || value.length > 160)))) throw new CreditsError('费用证据无效。');
+          || Object.entries(metadata).some(([key,value]) => !['model','group','currency','unitPrice','fx','startedAt'].includes(key)
+            || (['unitPrice','fx','startedAt'].includes(key) ? !Number.isFinite(value) || value < 0 : typeof value !== 'string' || value.length > 160)))) throw new CreditsError('费用证据无效。');
         record.costItems[receiptId] = { provider, quoteMicros, costMicros: 0, status: 'pending', ...(metadata ? { metadata: clone(metadata) } : {}) };
         adjustCostBudget(state, userId, taskId, false, 'cost_prepare:' + receiptId);
         return publicReservation(record, state.wallet);
@@ -464,9 +464,12 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
       });
     },
     /** @param {{userId?: string, taskId?: string, receiptId?: string, costCny?: number, providerRequestId?: string, uncertain?: boolean}} input */
-    finishCostCall({ userId, taskId, receiptId, costCny, providerRequestId, uncertain = false } = {}) {
+    finishCostCall({ userId, taskId, receiptId, costCny, providerRequestId, uncertain = false, responseAt, evidence } = {}) {
       identifier(receiptId, '调用'); const costMicros = uncertain ? 0 : cnyMicros(costCny);
       if (providerRequestId !== undefined) identifier(providerRequestId, '供应商调用');
+      if (responseAt !== undefined && (!Number.isSafeInteger(responseAt) || responseAt < 0)) throw new CreditsError('费用时间无效。');
+      if (evidence && (typeof evidence !== 'object' || Array.isArray(evidence) || Object.entries(evidence).some(([key,value]) =>
+        !['logIds','groups','quota'].includes(key) || (key === 'quota' ? !Number.isSafeInteger(value) || value < 0 : typeof value !== 'string' || value.length > 2000)))) throw new CreditsError('费用凭据无效。');
       return run(userId, taskId, state => {
         const record = costRecord(state), item = record.costItems[receiptId];
         if (!item) throw conflict('找不到该调用的费用预留。');
@@ -476,8 +479,11 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
         }
         if (record.status !== 'reserved') throw conflict('费用任务已结束。');
         if (providerRequestId && item.providerRequestId && providerRequestId !== item.providerRequestId) throw conflict('供应商调用编号不一致。');
-        if (uncertain && item.status === 'uncertain' && (!providerRequestId || item.providerRequestId === providerRequestId)) return publicReservation(record,state.wallet);
+        if (uncertain && item.status === 'uncertain' && (!providerRequestId || item.providerRequestId === providerRequestId)
+          && (responseAt === undefined || item.responseAt !== undefined)) return publicReservation(record,state.wallet);
         if (providerRequestId) item.providerRequestId = providerRequestId;
+        if (responseAt !== undefined && !item.responseAt) item.responseAt = responseAt;
+        if (evidence) item.evidence = clone(evidence);
         item.status = uncertain ? 'uncertain' : costMicros ? 'completed' : 'cancelled'; item.costMicros = costMicros;
         adjustCostBudget(state, userId, taskId, true, 'cost_finish:' + receiptId + ':' + item.status);
         return publicReservation(record, state.wallet);

@@ -13,6 +13,7 @@ import { createImageUploads } from './image-uploads.mjs';
 import { imageWithFallback, FAL_IMAGE_MODEL } from './image-fallback.mjs';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { CreditsError } from '../credits/store.mjs';
+import { readCompletionStream } from '../restaurant/model-stream.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const MB = 1024 * 1024;
@@ -39,6 +40,7 @@ export function loadAIConfig(env = process.env) {
     return Number(raw);
   };
   return { apiKey: value('OPENLUX_API_KEY'), chatModel: value('OPENLUX_CHAT_MODEL') || 'gpt-6-luna',
+    autoTextBilling: value('OPENLUX_TEXT_BILLING_MODE') !== 'fixed',
     imageTextModel: value('OPENLUX_IMAGE_TEXT_MODEL') || 'claude-opus-5-5',
     imageBillingGroup: value('OPENLUX_IMAGE_BILLING_GROUP'), imageTextBillingGroup: value('OPENLUX_IMAGE_TEXT_BILLING_GROUP'), chatBillingGroup: value('OPENLUX_CHAT_BILLING_GROUP'),
     imageModel: value('OPENLUX_IMAGE_MODEL') || 'gpt-image-2.5-sunburst-c', falImageKey: value('FAL_IMAGE_KEY'), falImageModel: value('FAL_IMAGE_MODEL') || FAL_IMAGE_MODEL, baseUrl: 'https://api.openlux.ai/v1', limits: { imageDaily: limit('AI_IMAGE_DAILY_LIMIT', null), chatDaily: limit('AI_CHAT_DAILY_LIMIT', 100), perMinute: limit('AI_REQUESTS_PER_MINUTE', 10) } };
@@ -255,6 +257,7 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       // The authoritative ledger may already have committed despite a lost reply.
       // An expired deliverable cannot be newly charged, and an existing charge
       // must never be refunded just because the downloadable file has expired.
+      if (saved.kind === 'api-cost' && saved.status === 'reserved' && ['completed','failed'].includes(task.status)) await costMeter.reconcile(input);
       const record = ['settled', 'released'].includes(saved.status) ? saved
         : saved.kind === 'api-cost' && ['completed','failed'].includes(task.status) ? await credits.settleCost(input)
         : retention.isExpired(task) || task.status === 'failed' ? await credits.release(input)
@@ -275,8 +278,8 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
       const response = await fetchImpl(config.baseUrl + path, { method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${config.apiKey}`, ...(body instanceof FormData ? {} : { 'Content-Type': 'application/json' }) }, body: body instanceof FormData ? body : JSON.stringify(body), signal: controller.signal });
       if (!response.ok) { await response.body?.cancel(); throw providerError(response.status); }
       let data;
-      const bytes = await boundedResponse(response);
-      try { data = JSON.parse(bytes.toString('utf8')); }
+      try { data = response.headers.get('content-type')?.includes('text/event-stream')
+        ? await readCompletionStream(response.body) : JSON.parse((await boundedResponse(response)).toString('utf8')); }
       catch (error) { if (error instanceof ApiError) throw error; throw new ApiError('模型服务返回了无法读取的内容。', 502, 'UPSTREAM_RESPONSE'); }
       if (data.error) throw providerError(502);
       return { data, providerRequestId: response.headers?.get('x-request-id') || response.headers?.get('request-id') || undefined };

@@ -3,11 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { createProviderPrices, tokenCostCny, tokenQuoteCny } from './provider-costs.mjs';
 import { readCompletionStream } from '../restaurant/model-stream.mjs';
 import { CreditsError } from './store.mjs';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const cleanId = value => typeof value === 'string' && /^[A-Za-z0-9_:@.-]{1,200}$/.test(value) ? value : undefined;
 const notReady = () => new CreditsError('该服务的实际费用核对尚未配置，暂未发送付费请求。',503,'COST_PROVIDER_NOT_CONFIGURED');
 
-export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, prices = createProviderPrices({config,fetchImpl}) } = {}) {
+export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, prices = createProviderPrices({config,fetchImpl}), sleep = delay } = {}) {
   const context = new AsyncLocalStorage();
   const enabled = credits?.costMode === true;
   async function finish(scope,receiptId,details) {
@@ -16,9 +17,27 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
     return record;
   }
   async function pending(scope,id,providerRequestId) { await finish(scope,id,{uncertain:true,...providerRequestId?{providerRequestId}:{}}); }
+  async function confirmReceipt(scope, id, item) {
+    if (!item.providerRequestId || !prices.openluxReceipt) return false;
+    const receipt = await prices.openluxReceipt(item.providerRequestId, item.metadata.startedAt, item.responseAt);
+    if (!receipt) return false;
+    await finish(scope, id, { costCny: receipt.quota * item.metadata.unitPrice, providerRequestId: item.providerRequestId,
+      evidence: { quota: receipt.quota, logIds: receipt.logIds.join(','), groups: [...new Set(receipt.groups)].join(',') } });
+    return true;
+  }
   return {
     enabled,
     run(scope,operation) { return enabled ? context.run(scope,operation) : operation(); },
+    async reconcile(scope) {
+      if (!enabled || !prices.openluxReceipt) return;
+      const saved = await credits.reservation(scope.userId, scope.taskId);
+      if (saved?.status !== 'reserved') return;
+      for (const [id,item] of Object.entries(saved.costItems || {})) {
+        if (item.provider === 'openlux' && item.metadata?.group === 'auto' && ['pending','uncertain'].includes(item.status)) {
+          await confirmReceipt(scope, id, item);
+        }
+      }
+    },
     async fetch(url,options = {}) {
       if (!enabled) return fetchImpl(url,options);
       const target = new URL(url), method = options.method || 'GET', scope = context.getStore();
@@ -51,8 +70,13 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
       let body, rate, quoteCny, provider;
       try { if (openlux) {
         body = options.body instanceof FormData ? {model:options.body.get('model')} : JSON.parse(options.body);
-        rate = await prices.openlux(body.model); provider = 'openlux';
-        quoteCny = rate.type === 'request' ? rate.requestCny : tokenQuoteCny(body,rate);
+        const automatic = config.autoTextBilling === true && target.pathname.endsWith('/chat/completions');
+        rate = automatic ? await prices.openluxAuto(body) : await prices.openlux(body.model); provider = 'openlux';
+        quoteCny = rate.type === 'receipt' ? rate.quoteCny : rate.type === 'request' ? rate.requestCny : tokenQuoteCny(body,rate);
+        if (automatic) {
+          body = { ...body, stream: true, stream_options: { ...body.stream_options, include_usage: true } };
+          options = { ...options, body: JSON.stringify(body) };
+        }
       } else {
         body = JSON.parse(options.body); provider = 'fal';
         const model = target.pathname.slice(1), key = String(new Headers(options.headers).get('Authorization') || '').replace(/^Key /,'');
@@ -61,13 +85,15 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
         quoteCny = Math.max(0.008,(body.num_images || 1)*rate.fx);
       } } catch(error) { error.providerNotDispatched=true; throw error; }
       const receiptId = randomUUID();
-      const metadata = provider==='fal' ? {model:target.pathname.slice(1),currency:'USD',unitPrice:rate.unit_price,fx:rate.fx} : {model:rate.modelName,group:rate.group,currency:'CNY',fx:rate.fx};
+      const metadata = provider==='fal' ? {model:target.pathname.slice(1),currency:'USD',unitPrice:rate.unit_price,fx:rate.fx} : {model:rate.modelName,group:rate.group,currency:'CNY',fx:rate.fx,
+        ...(rate.type === 'receipt' ? {unitPrice:rate.unitPrice,startedAt:Date.now()} : {})};
       try { await credits.prepareCostCall({...scope,receiptId,quoteCny,provider,metadata}); }
       catch(error) { error.providerNotDispatched=true; throw error; }
       let response;
       try { response = await fetchImpl(url,options); }
       catch(error) { await pending(scope,receiptId); throw error; }
-      const requestId = cleanId(response.headers.get('x-request-id') || response.headers.get('request-id'));
+      const requestId = cleanId(response.headers.get('x-api-request-id') || response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || response.headers.get('request-id'));
+      if (rate.type === 'receipt' && response.ok) await pending(scope, receiptId, requestId);
       if (!response.ok) {
         if ([400,401,402,403,422].includes(response.status)) await finish(scope,receiptId,{costCny:0,...requestId?{providerRequestId:requestId}:{}});
         else await pending(scope,receiptId,requestId);
@@ -83,6 +109,16 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
       } catch(error) { payload=error.providerPayload; }
       if (fal) {
         await pending(scope,receiptId,cleanId(payload?.request_id)); return response;
+      }
+      if (rate.type === 'receipt') {
+        const responseAt = Date.now();
+        await finish(scope, receiptId, { uncertain: true, responseAt, ...(requestId ? {providerRequestId:requestId} : {}) });
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt) await sleep(attempt * 700);
+          try { if (await confirmReceipt(scope, receiptId, { metadata, responseAt, providerRequestId: requestId })) break; }
+          catch (error) { if (error.code === 'INSUFFICIENT_POINTS') throw error; }
+        }
+        return response;
       }
       try {
         const costCny = tokenCostCny(payload?.usage,rate);

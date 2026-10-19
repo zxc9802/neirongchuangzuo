@@ -50,6 +50,7 @@ export function tokenQuoteCny(body, rate) {
 
 export function createProviderPrices({ config = {}, fetchImpl = fetch, now = Date.now } = {}) {
   let cache, expires = 0, pending;
+  const receiptReads = new Map();
   async function publicPrices() {
     if (cache && now() < expires) return cache;
     if (pending) return pending;
@@ -61,6 +62,52 @@ export function createProviderPrices({ config = {}, fetchImpl = fetch, now = Dat
     return pending;
   }
   return {
+    async openluxAuto(body) {
+      const { pricing, status } = await publicPrices();
+      const model = pricing?.data?.find(row => row.model_name === body.model);
+      const rates = (model?.enable_groups || []).flatMap(group => {
+        try { return [openluxRate(pricing, status, body.model, group)]; } catch { return []; }
+      });
+      const quotaPerUnit = status?.data?.quota_per_unit, fx = status?.data?.usd_exchange_rate;
+      if (!rates.length || !Number.isFinite(quotaPerUnit) || quotaPerUnit <= 0) throw unavailable('模型实时预算暂不可用，请稍后重试。');
+      return { type: 'receipt', modelName: body.model, group: 'auto', fx, unitPrice: fx / quotaPerUnit,
+        quoteCny: Math.max(.008, ...rates.map(rate => rate.type === 'request' ? rate.requestCny : tokenQuoteCny(body, rate))) };
+    },
+    async openluxReceipt(requestId, startedAt, responseAt = now()) {
+      if (!requestId || !config.apiKey || !Number.isFinite(startedAt)) return null;
+      const start = Math.floor(startedAt / 1000) - 5, end = Math.ceil(responseAt / 1000) + 10;
+      const key = `${start}:${end}`, old = receiptReads.get(key);
+      if (old && old.expires > now()) return (await old.promise).get(requestId) || null;
+      const promise = (async () => {
+        const rows = new Map(), seen = new Set();
+        for (let page = 1; page <= 20; page++) {
+          const url = new URL('https://www.openlux.ai/api/log/token');
+          url.searchParams.set('key', config.apiKey.replace(/^sk-/, ''));
+          url.searchParams.set('page', String(page)); url.searchParams.set('page_size', '100');
+          url.searchParams.set('start_timestamp', String(start)); url.searchParams.set('end_timestamp', String(end));
+          let data;
+          try {
+            const response = await fetchImpl(url.href, { redirect: 'error', signal: AbortSignal.timeout(15000) });
+            if (!response.ok) throw new Error(); data = await response.json();
+          } catch { throw unavailable('实际消费记录暂时无法读取，费用等待核对。'); }
+          if (data.success !== true || !Array.isArray(data.data?.items)) throw unavailable('实际消费记录暂时无法读取，费用等待核对。');
+          for (const row of data.data.items) {
+            if (row.type !== 2 || seen.has(row.id) || !Number.isSafeInteger(row.id) || !Number.isSafeInteger(row.quota) || row.quota < 0) continue;
+            seen.add(row.id); let other; try { other = JSON.parse(row.other || '{}'); } catch { continue; }
+            const id = other.request_id; if (typeof id !== 'string') continue;
+            const item = rows.get(id) || { quota: 0, logIds: [], groups: [] };
+            item.quota += row.quota; item.logIds.push(row.id); item.groups.push(String(row.group || ''));
+            rows.set(id, item);
+          }
+          if (page * 100 >= data.data.total || data.data.items.length < 100) return rows;
+        }
+        // A truncated window must not be treated as a complete receipt.
+        throw unavailable('消费记录较多，费用等待核对。');
+      })();
+      receiptReads.set(key, { expires: now() + 500, promise });
+      if (receiptReads.size > 30) receiptReads.delete(receiptReads.keys().next().value);
+      return (await promise).get(requestId) || null;
+    },
     async openlux(model) {
       const group = model === config.imageModel ? config.imageBillingGroup : model === config.imageTextModel ? config.imageTextBillingGroup : config.chatBillingGroup;
       if (!group) throw unavailable('该模型的计费分组尚未配置，请联系管理员。');

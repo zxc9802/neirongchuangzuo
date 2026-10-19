@@ -16,12 +16,14 @@ const config={apiKey:'test',baseUrl:'https://api.openlux.ai/v1',chatModel:'gpt-6
 const pricing={data:[{model_name:config.imageModel,quota_type:1,model_price:.16,enable_groups:['Gpt-Image-3']},
   {model_name:config.chatModel,quota_type:0,model_ratio:.05,completion_ratio:5,enable_groups:['Codex-Gpt-3']}],group_ratio:{'Gpt-Image-3':.13787,'Codex-Gpt-3':.07353}};
 const json=x=>new Response(JSON.stringify(x),{headers:{'Content-Type':'application/json'}});
-async function fixture(t,{invalid=false,missingUsage=false}={}) {
+async function fixture(t,{invalid=false,missingUsage=false,automatic=false}={}) {
   const root=await mkdtemp(join(tmpdir(),'qiya-cost-http-')), credits=createCreditsLedger({storageDir:join(root,'credits'),databaseUrl:null,costMode:true});
   let calls=0;
-  const handler=createAIHandler({credits,config,storageDir:join(root,'ai'),cleanupIntervalMs:0,fetchImpl:async(url,options)=>{
-    if(url.endsWith('/api/pricing_new'))return json(pricing);if(url.endsWith('/api/status'))return json({data:{usd_exchange_rate:6.72396}});
+  const handler=createAIHandler({credits,config:{...config,autoTextBilling:automatic},storageDir:join(root,'ai'),cleanupIntervalMs:0,fetchImpl:async(url,options)=>{
+    if(url.endsWith('/api/pricing_new'))return json(automatic?{data:[{...pricing.data[1],enable_groups:['current-group']}],group_ratio:{'current-group':.1}}:pricing);if(url.endsWith('/api/status'))return json({data:{usd_exchange_rate:6.72396,quota_per_unit:500000}});
+    if(url.startsWith('https://www.openlux.ai/api/log/token?'))return json({success:true,data:{total:1,items:[{id:1,type:2,quota:17,group:'current-group',other:JSON.stringify({request_id:'automatic-request'})}]}});
     calls++;
+    if(automatic){assert.equal(JSON.parse(options.body).stream,true);return new Response('data: '+JSON.stringify({choices:[{delta:{content:'## 方案\n\n**重点**'},finish_reason:'stop'}]})+'\n\ndata: [DONE]\n\n',{headers:{'Content-Type':'text/event-stream','x-api-request-id':'automatic-request'}});}
     return options.body instanceof FormData ? json({data:[{b64_json:invalid?'bm90LWltYWdl':image}]})
       : json({id:'model-response',choices:[{message:{content:'测试回答'}}],...missingUsage?{}:{usage:{prompt_tokens:1000,completion_tokens:100}}});
   }});
@@ -53,4 +55,12 @@ test('missing provider usage keeps the answer behind cost confirmation without a
   const f=await fixture(t,{missingUsage:true}),body={requestId:randomUUID(),messages:[{role:'user',content:'你好'}]};
   const response=await f.post('/api/ai/chat',body);assert.equal(response.status,202);assert.equal(response.data.status,'settling');assert.equal(response.data.text,undefined);
   await f.post('/api/ai/chat',body);assert.equal(f.calls(),1);assert.ok((await f.credits.snapshot('alice')).held>0);
+});
+
+test('automatic group chat exposes normal JSON text after SSE parsing and real receipt settlement',async t=>{
+  const f=await fixture(t,{automatic:true}),body={requestId:randomUUID(),messages:[{role:'user',content:'排版测试'}]};
+  const response=await f.post('/api/ai/chat',body);assert.equal(response.status,200);assert.equal(response.data.text,'## 方案\n\n**重点**');
+  const settled=await f.credits.reservation('alice',body.requestId);assert.equal(settled.status,'settled');
+  assert.equal(Object.values(settled.costItems)[0].evidence.quota,17);assert.equal(Object.values(settled.costItems)[0].metadata.group,'auto');
+  await f.post('/api/ai/chat',body);assert.equal(f.calls(),1);
 });

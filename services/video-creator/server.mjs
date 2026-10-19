@@ -78,6 +78,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   async function settle(scope, op) {
     if (!credits || !op.billing) return;
     try {
+      if (meter.enabled) await meter.reconcile(scope);
       const value = meter.enabled ? await credits.settleCost(scope)
         : op.status === 'completed' ? await credits.settle({ ...scope, units: Math.min(op.settings.duration, op.actualDuration || op.settings.duration) }) : await credits.release(scope);
       op.billing = { status: value.status, reservedPoints: value.reservedPoints, chargedPoints: value.chargedPoints,

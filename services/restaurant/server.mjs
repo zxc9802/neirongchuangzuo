@@ -148,6 +148,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   async function releaseTaskCredits(userId, task) {
     if (!credits || task.billing?.source !== 'workspace' || ['settled', 'released'].includes(task.billing.status)) return;
     const saved = await credits.reservation(userId, task.billing.taskId);
+    if (saved?.kind === 'api-cost' && saved.status === 'reserved') await costMeter.reconcile({userId,taskId:task.billing.taskId});
     if (saved?.status === 'settled') { await store.patchTask(userId, task.id, { billing: { ...task.billing, status: 'settled', chargedPoints: saved.chargedPoints, exempt: saved.exempt === true } }); return; }
     const record = saved ? await credits.release({ userId, taskId: task.billing.taskId }) : null;
     await store.patchTask(userId, task.id, { billing: { ...task.billing, status: record?.status || 'released', chargedPoints: record?.chargedPoints || 0,
@@ -162,7 +163,10 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
     if (!units || files.some(file => file.expired || file.expiresAt <= now())) throw new RestaurantError('成品已过期，无法结算，请重新生成。', 410, 'FILES_EXPIRED');
     const pending = task.status==='completed' ? task : await store.patchTask(userId, id, { ...patch, status: 'generating', progress: { stage: 'credits_settlement' }, billing: { ...task.billing, status: 'settle_pending', deliveredUnits: units } });
     let record;
-    try { record = task.billing.mode==='api_cost' ? await credits.settleCost({userId,taskId:task.billing.taskId}) : await credits.settle({ userId, taskId: task.billing.taskId, units }); }
+    try {
+      if (task.billing.mode === 'api_cost') await costMeter.reconcile({userId,taskId:task.billing.taskId});
+      record = task.billing.mode==='api_cost' ? await credits.settleCost({userId,taskId:task.billing.taskId}) : await credits.settle({ userId, taskId: task.billing.taskId, units });
+    }
     catch (cause) {
       if (task.billing.mode!=='api_cost' || cause.code!=='COST_CONFIRMATION_PENDING') throw cause;
       const saved=await credits.reservation(userId,task.billing.taskId),wallet=await credits.snapshot(userId);
