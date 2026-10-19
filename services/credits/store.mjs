@@ -479,8 +479,10 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
         }
         if (record.status !== 'reserved') throw conflict('费用任务已结束。');
         if (providerRequestId && item.providerRequestId && providerRequestId !== item.providerRequestId) throw conflict('供应商调用编号不一致。');
-        if (uncertain && item.status === 'uncertain' && (!providerRequestId || item.providerRequestId === providerRequestId)
-          && (responseAt === undefined || item.responseAt !== undefined)) return publicReservation(record,state.wallet);
+        if (uncertain && item.status === 'uncertain' && (!providerRequestId || item.providerRequestId === providerRequestId)) {
+          if (responseAt !== undefined && item.responseAt === undefined) { item.responseAt = responseAt; record.updatedAt = state.at; }
+          return publicReservation(record,state.wallet);
+        }
         if (providerRequestId) item.providerRequestId = providerRequestId;
         if (responseAt !== undefined && !item.responseAt) item.responseAt = responseAt;
         if (evidence) item.evidence = clone(evidence);

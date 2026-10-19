@@ -92,3 +92,18 @@ test('PostgreSQL locks keep concurrent tiny expenses and mixed old reservations 
   await ledger.settle({...scope,taskId:'old',units:2});
   assert.equal((await ledger.snapshot('alice')).available,899);
 });
+
+test('PostgreSQL receipt timing updates never insert the uncertain ledger event twice',async t=>{
+  const db=new PGlite();t.after(()=>db.close());const pool={connect:async()=>({query:(s,p)=>!p?.length&&s.includes(';')?db.exec(s).then(r=>r.at(-1)):db.query(s,p),release(){}})};
+  const {ledger}=await fixture(t,pool);await ledger.reserveCost(scope);
+  await ledger.prepareCostCall({...scope,receiptId:'stream',provider:'openlux',quoteCny:.1,metadata:{group:'auto',model:'gpt',startedAt:1000}});
+  await ledger.finishCostCall({...scope,receiptId:'stream',uncertain:true,providerRequestId:'stream-id'});
+  const before=(await db.query('SELECT count(*)::int AS n FROM workspace_credits.ledger')).rows[0].n;
+  await ledger.finishCostCall({...scope,receiptId:'stream',uncertain:true,providerRequestId:'stream-id',responseAt:2000});
+  await ledger.finishCostCall({...scope,receiptId:'stream',uncertain:true,providerRequestId:'stream-id',responseAt:3000});
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM workspace_credits.ledger')).rows[0].n,before);
+  assert.equal((await ledger.reservation(scope.userId,scope.taskId)).costItems.stream.responseAt,2000);
+  await ledger.finishCostCall({...scope,receiptId:'stream',providerRequestId:'stream-id',costCny:.008,evidence:{quota:400,logIds:'42',groups:'routed-group'}});
+  assert.equal((await ledger.settleCost(scope)).chargedPoints,1);
+  assert.equal((await ledger.settleCost(scope)).chargedPoints,1);
+});
