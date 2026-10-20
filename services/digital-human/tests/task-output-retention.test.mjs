@@ -129,7 +129,7 @@ test('completed asset listing preserves owner isolation, excludes unfinished and
     '@/lib/store/task-store': {TaskStore: {getAllAsync: async () => tasks}}, '@/lib/engine/pipeline': {},
     '@/lib/store/avatar-store': {}, '@/lib/store/voice-store': {}, '@/lib/server/public-data': publicData,
     '@/lib/main-app-billing': {}, '@/lib/billing-estimate': {}, '@/lib/server/generation-limit': {},
-    '@/lib/server/upload-policy': {}, '@/lib/server/media-response': {},
+    '@/lib/server/upload-policy': {}, '@/lib/server/media-response': {}, '@/lib/public-contract': {},
     '@/lib/server/task-worker': {}, '@/lib/server/workspace-task-recovery': {reconcileWorkspaceTask: async task => task},
     '@/lib/access-control': {resolveAccessContext: async () => access, unauthorizedResponse: () => new Response(null, {status: 401})},
   };

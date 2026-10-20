@@ -1,4 +1,11 @@
-export type PublicEngine = "a" | "b" | "c" | "d";
+export const PUBLIC_LIPSYNC_ENGINES = [
+  { id: "b", label: "qy-标准" },
+  { id: "d", label: "qy-旗舰" },
+  { id: "e", label: "qy-至臻" },
+] as const;
+
+// Keep retired engine codes readable on historical tasks.
+export type PublicEngine = "a" | "c" | (typeof PUBLIC_LIPSYNC_ENGINES)[number]["id"];
 
 export type PublicTaskStep =
   | "idle"

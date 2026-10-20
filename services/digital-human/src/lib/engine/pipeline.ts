@@ -481,8 +481,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         },
         jobDir
       );
-    } else if (lipsyncProvider === "veed" || lipsyncProvider === "latentsync") {
-      const modelLabel = lipsyncProvider === "latentsync" ? "LatentSync" : "VEED";
+    } else if (lipsyncProvider === "veed" || lipsyncProvider === "latentsync" || lipsyncProvider === "veed-v2") {
+      const modelLabel = lipsyncProvider === "veed-v2" ? "VEED v2" : lipsyncProvider === "latentsync" ? "LatentSync" : "VEED";
       log(`🛡️ 第三步: 校验 ${modelLabel} 对口型素材...`);
       if (!fs.existsSync(preparedVideoPath) || !fs.existsSync(ttsResult.finalWavPath)) {
         throw new Error("预处理视频或原声音轨不存在，无法提交对口型");

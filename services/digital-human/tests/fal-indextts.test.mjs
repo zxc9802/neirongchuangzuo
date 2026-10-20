@@ -7,6 +7,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import * as media from '../src/lib/engine/ffmpeg.ts';
 import * as stitch from '../src/lib/engine/speech-stitch.ts';
+import * as publicContract from '../src/lib/public-contract.ts';
 
 function load(relative, dependencies) {
   const source = fs.readFileSync(new URL(relative, import.meta.url), 'utf8');
@@ -125,10 +126,16 @@ test('digital-human readiness uses the same fal key precedence as replica, never
       assert.equal(config.getAppConfig().indexttsApiKey, 'test-3');
       const route = load('../src/app/api/digital-human/status/route.ts', {
         'next/server': {NextResponse: Response}, '@/lib/config': config,
+        '@/lib/public-contract': publicContract,
         '@/lib/access-control': {resolveAccessContext: async () => ({isolated: false})},
       });
       const result = await (await route.GET({})).json();
       assert.equal(result.ttsReady, i < 3);
+      assert.deepEqual(result.engines, [
+        {id: 'b', label: 'qy-标准', available: i < 3},
+        {id: 'd', label: 'qy-旗舰', available: i < 3},
+        {id: 'e', label: 'qy-至臻', available: i < 3},
+      ]);
     }
   } finally {
     for (const name of names) {if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];}

@@ -30,6 +30,7 @@ import type {
   PublicVideoSelection,
   PublicVoiceItem,
 } from "@/lib/public-contract";
+import { PUBLIC_LIPSYNC_ENGINES } from "@/lib/public-contract";
 
 const ACTIVE_TASK_KEY = "active_lipsync_task_id";
 const PRESELECTED_AVATAR_KEY = "preselected_avatar_id";
@@ -147,7 +148,7 @@ export default function StudioPage() {
           setToneProfile(taskToLoad.inputs.toneProfile || "low");
           setVideoFit(taskToLoad.inputs.videoFit || "smart");
             setEmotionIntensity(taskToLoad.inputs.emotionIntensity ?? 0.8);
-            if (taskToLoad.inputs.engine) setEngine(taskToLoad.inputs.engine);
+            setEngine(PUBLIC_LIPSYNC_ENGINES.some(item => item.id === taskToLoad.inputs.engine) ? taskToLoad.inputs.engine : "b");
           if (taskToLoad.results.originalVideoUrl) {
             const restoredVideo = taskToLoad.inputs.avatarId ? {
               avatarId: taskToLoad.inputs.avatarId,
@@ -446,62 +447,25 @@ export default function StudioPage() {
               <span className="flex h-5 w-5 items-center justify-center rounded-md bg-zinc-800 text-zinc-300 text-[11px] font-bold border border-white/[0.1]">
                 3
               </span>
-              对口型引擎
+              对口型模型
             </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-              <button
-                type="button"
-                onClick={() => setEngine("a")}
-                disabled={isRunning}
-                className={`rounded-xl border p-3 text-left transition-all ${
-                  engine === "a"
-                    ? "border-blue-500/80 bg-blue-500/15 text-blue-100 ring-1 ring-blue-500/30"
-                    : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
-                }`}
-              >
-                <div className="text-xs font-bold text-zinc-100">A</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setEngine("b")}
-                disabled={isRunning}
-                className={`rounded-xl border p-3 text-left transition-all ${
-                  engine === "b"
-                    ? "border-blue-500/80 bg-blue-500/15 text-blue-100 ring-1 ring-blue-500/30"
-                    : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
-                }`}
-              >
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-xs font-bold text-zinc-100">原版对口型（B）</span>
-                  <span className="rounded-md bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-bold text-blue-300 border border-blue-400/30">
-                    （默认，推荐）
-                  </span>
-                </div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setEngine("c")}
-                disabled={isRunning}
-                className={`rounded-xl border p-3 text-left transition-all ${
-                  engine === "c"
-                    ? "border-blue-500/80 bg-blue-500/15 text-blue-100 ring-1 ring-blue-500/30"
-                    : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
-                }`}
-              >
-                <div className="text-xs font-bold text-zinc-100">C</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setEngine("d")}
-                disabled={isRunning}
-                className={`rounded-xl border p-3 text-left transition-all ${
-                  engine === "d"
-                    ? "border-blue-500/80 bg-blue-500/15 text-blue-100 ring-1 ring-blue-500/30"
-                    : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
-                }`}
-              >
-                <div className="text-xs font-bold text-zinc-100">LatentSync 对口型</div>
-              </button>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5" role="group" aria-label="对口型模型">
+              {PUBLIC_LIPSYNC_ENGINES.map(item => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setEngine(item.id)}
+                  aria-pressed={engine === item.id}
+                  disabled={isRunning}
+                  className={`rounded-xl border p-3 text-left transition-all ${
+                    engine === item.id
+                      ? "border-blue-500/80 bg-blue-500/15 text-blue-100 ring-1 ring-blue-500/30"
+                      : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                  }`}
+                >
+                  <div className="text-xs font-bold text-zinc-100">{item.label}</div>
+                </button>
+              ))}
             </div>
           </div>}
 

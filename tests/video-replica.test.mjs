@@ -452,42 +452,79 @@ test('previously submitted H3 Max tasks can still finish without creating anothe
   assert.equal((await app.wallet.snapshot('alice')).available, 955);
 });
 
+test('previously submitted Wan tasks still download and settle actual costs without another generation', async t => {
+  const requests = [];
+  const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'test-key' },
+    fetchImpl: async (url, options) => {
+      requests.push({ url: String(url), method: options.method });
+      assert.equal(options.method, 'GET');
+      return Response.json(String(url).endsWith('/status') ? { status: 'COMPLETED' }
+        : { video: { url: 'https://fal.media/wan-result.mp4' } }, { headers: { 'x-fal-billable-units': '6' } });
+    } });
+  const id = await app.init(); await app.upload(id); await app.close();
+  const path = join(app.root, 'video', id, 'task.json');
+  const task = JSON.parse(await readFile(path, 'utf8'));
+  const scope = { userId: 'alice', taskId: id };
+  await app.wallet.reserveCost(scope);
+  await app.wallet.prepareCostCall({ ...scope, receiptId: 'wan-saved', quoteCny: 5, provider: 'fal',
+    metadata: { model: WAN_MODEL, currency: 'USD', unitPrice: 0.08, fx: 5 } });
+  const reservation = await app.wallet.finishCostCall({ ...scope, receiptId: 'wan-saved',
+    providerRequestId: 'wan-saved', uncertain: true });
+  Object.assign(task, { model: WAN_MODEL, status: 'running', startedAt: Date.now(),
+    providerId: 'wan-saved', providerDispatched: true,
+    falQueue: { status: 'https://queue.fal.run/fal-ai/wan/requests/wan-saved/status',
+      result: 'https://queue.fal.run/fal-ai/wan/requests/wan-saved' },
+    billing: { mode: 'api_cost', status: reservation.status, reservedPoints: reservation.reservedPoints,
+      chargedPoints: reservation.chargedPoints } });
+  await writeFile(path, JSON.stringify(task)); await app.open();
+  const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(completed.model, WAN_MODEL); assert.equal(completed.modelName, 'Wan 2.2 人物替换');
+  assert.equal(completed.billing.costCny, 2.4); assert.equal(completed.billing.chargedPoints, 300);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+  assert.ok(requests.length >= 2); assert.ok(requests.every(request => request.method === 'GET'));
+  assert.equal(app.state.generations, 0); assert.equal(app.state.creates.length, 0);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
 test('all four Seedance editions are offered and removed models cannot start or reserve points even with a fal key', async t => {
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
   assert.deepEqual(config.models.slice(0, 4).map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
-  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [true, 30], [true, 30]]);
+  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [true, 30]]);
   assert.equal(config.models[4].id, PIXVERSE_MODEL);
-  assert.equal(config.models[5].id, WAN_MODEL);
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '最多生成15秒视频，1元/秒');
   assert.equal(config.models[1].description, '最多生成30秒视频，1.5元/秒');
   assert.equal(config.model, 'doubao-seedance-2-0-260128');
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
-  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: FAL_MODEL } })).status, 400);
-  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: 'unknown' } })).status, 400);
   const id = await app.init(); await app.upload(id);
-  assert.equal((await app.call(`/tasks/${id}/start`, { body: { model: FAL_MODEL } })).status, 400);
+  for (const model of [FAL_MODEL, WAN_MODEL, 'unknown']) {
+    for (const path of ['/tasks', `/tasks/${id}/model`, `/tasks/${id}/start`]) {
+      const response = await app.call(path, { body: { requestId: randomUUID(), model } });
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).code, 'VIDEO_MODEL_INVALID');
+    }
+  }
   assert.equal((await app.current(id)).status, 'draft');
   assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
-test('a fal key enables PixVerse and Wan without enabling Seedance or retired models', async t => {
+test('a fal key enables PixVerse without enabling Seedance or retired models', async t => {
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, enabled: false, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
   assert.equal(config.enabled, true);
-  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [PIXVERSE_MODEL, WAN_MODEL]);
+  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [PIXVERSE_MODEL]);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID() } })).status, 503);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: PIXVERSE_MODEL } })).status, 201);
-  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: WAN_MODEL } })).status, 201);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: WAN_MODEL } })).status, 400);
 });
 
-test('an old H3 Max draft can replace its video before starting with the standard edition', async t => {
+for (const model of [FAL_MODEL, WAN_MODEL]) test(`an old ${model} draft can replace its video before starting with the standard edition`, async t => {
   const app = await fixture(t);
   const id = await app.init(); await app.upload(id); await app.close();
   const path = join(app.root, 'video', id, 'task.json');
   const task = JSON.parse(await readFile(path, 'utf8'));
-  task.model = FAL_MODEL; await writeFile(path, JSON.stringify(task)); await app.open();
+  task.model = model; await writeFile(path, JSON.stringify(task)); await app.open();
   await app.upload(id);
   assert.equal((await app.current(id)).model, 'doubao-seedance-2-0-260128');
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
@@ -1620,9 +1657,10 @@ test('rejected replica materials release the aggregate hold before paid video ge
   assert.equal((await app.wallet.snapshot('alice')).held,0);
 });
 
-for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`${model} survives restart, uploads once, restores captions and meters replacement and lip sync separately`, async t => {
+test('PixVerse survives restart, uploads once, restores captions and meters replacement and lip sync separately', async t => {
+  const model = PIXVERSE_MODEL;
   let done = false, rendered = 0;
-  const wan = model === WAN_MODEL, replacementRate = wan ? 0.08 : 0.05, replacementUnits = wan ? 6 : 4;
+  const replacementRate = 0.05, replacementUnits = 4;
   const posts = [], uploads = [];
   const job = (model, id) => ({ request_id: id, status_url: `https://queue.fal.run/${model}/requests/${id}/status`,
     response_url: `https://queue.fal.run/${model}/requests/${id}` });
@@ -1644,7 +1682,7 @@ for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`${model} survives restart
       assert.equal(target.hostname, 'queue.fal.run');
       if (options.method === 'POST') {
         posts.push({ url: String(url), body: JSON.parse(options.body) });
-        return Response.json(target.pathname === '/' + model ? job(wan ? 'fal-ai/wan' : 'fal-ai/pixverse', 'swap-1') : job('veed/lipsync', 'mouth-1'));
+        return Response.json(target.pathname === '/' + model ? job('fal-ai/pixverse', 'swap-1') : job('veed/lipsync', 'mouth-1'));
       }
       if (target.pathname.endsWith('/status')) return Response.json({ status: done ? 'COMPLETED' : 'IN_PROGRESS' });
       return Response.json({ video: { url: 'https://fal.media/result.mp4' } },
@@ -1665,11 +1703,11 @@ for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`${model} survives restart
   await app.close(); await app.open();
   done = true;
   const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
-  assert.equal(completed.modelName, wan ? 'Wan 2.2 人物替换' : 'PixVerse Swap'); assert.equal(completed.audioCheck.referenceApplied, true);
+  assert.equal(completed.modelName, 'PixVerse Swap'); assert.equal(completed.audioCheck.referenceApplied, true);
   assert.equal(completed.captionCheck.rendered, true); assert.equal(rendered, 1);
   assert.equal(posts.length, 2); assert.equal(uploads.length, 4);
   assert.equal(posts[1].url, 'https://queue.fal.run/veed/lipsync');
-  assert.equal(completed.billing.costCny, wan ? 4.4 : 3); assert.equal(completed.billing.chargedPoints, wan ? 550 : 375);
+  assert.equal(completed.billing.costCny, 3); assert.equal(completed.billing.chargedPoints, 375);
   const items = Object.values((await app.wallet.reservation('alice', id)).costItems);
   assert.deepEqual(items.map(item => item.metadata.model).sort(), [model, 'veed/lipsync']);
   assert.ok(items.every(item => item.provider === 'fal'));
@@ -1692,7 +1730,8 @@ test('PixVerse rejects incompatible dimensions and direct voice replacement befo
   assert.equal((await app.current(id)).status, 'draft'); assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
-for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`an uncertain ${model} submission is not replayed or charged as Seedance after restart`, async t => {
+test('an uncertain PixVerse submission is not replayed or charged as Seedance after restart', async t => {
+  const model = PIXVERSE_MODEL;
   let posts = 0;
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'test' },
     fetchImpl: async (url, options = {}) => {
@@ -1712,7 +1751,8 @@ for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`an uncertain ${model} sub
   assert.equal((await app.wallet.snapshot('alice')).held, 625, 'Unknown upstream cost must remain held for audit');
 });
 
-for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`a missing ${model} usage header is rechecked after restart without regenerating or guessing a charge`, async t => {
+test('a missing PixVerse usage header is rechecked after restart without regenerating or guessing a charge', async t => {
+  const model = PIXVERSE_MODEL;
   let usageReady = false, posts = 0;
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'test' },
     fetchImpl: async (url, options = {}) => {
@@ -1737,7 +1777,8 @@ for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`a missing ${model} usage 
   assert.equal(done.billing.chargedPoints, 125); assert.equal(done.billing.costCny, 1); assert.equal(posts, 1);
 });
 
-for (const model of [PIXVERSE_MODEL, WAN_MODEL]) for (const duration of [2, 15, 30, 30.1]) test(`${model} applies the workspace 30-second source limit to ${duration} seconds`, async t => {
+for (const duration of [2, 15, 30, 30.1]) test(`PixVerse applies the workspace 30-second source limit to ${duration} seconds`, async t => {
+  const model = PIXVERSE_MODEL;
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true }, probe: async () => ({ ...META, duration }) });
   const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, model } });
   const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
@@ -1746,21 +1787,22 @@ for (const model of [PIXVERSE_MODEL, WAN_MODEL]) for (const duration of [2, 15, 
   assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
-for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`${model} cannot silently use legacy fixed pricing when actual-cost billing is disabled`, async t => {
+test('PixVerse cannot silently use legacy fixed pricing when actual-cost billing is disabled', async t => {
+  const model = PIXVERSE_MODEL;
   const app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'test' } });
   const config = await (await app.call('/config')).json();
   assert.equal(config.models.find(item => item.id === model).enabled, false);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model } })).status, 503);
 });
 
-test('Wan draft switching clears the Seedance audio mode and rejects direct Seedance voice before billing', async t => {
+test('PixVerse draft switching clears the Seedance audio mode and rejects direct Seedance voice before billing', async t => {
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true }, speech: fakeSpeech(),
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; } });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent' } });
-  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: WAN_MODEL } })).status, 200);
+  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: PIXVERSE_MODEL } })).status, 200);
   const task = await app.current(id);
-  assert.equal(task.model, WAN_MODEL); assert.equal(task.sourceAudioMode, 'original');
+  assert.equal(task.model, PIXVERSE_MODEL); assert.equal(task.sourceAudioMode, 'original');
   assert.equal(task.estimatedPoints, null);
   assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent' } })).status, 400);
   const rejected = await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'seedance' } });

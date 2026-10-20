@@ -1,4 +1,4 @@
-export const LIPSYNC_PROVIDERS = ["heygen", "pixverse", "veed", "latentsync"] as const;
+export const LIPSYNC_PROVIDERS = ["heygen", "pixverse", "veed", "latentsync", "veed-v2"] as const;
 
 export type LipsyncProvider = (typeof LIPSYNC_PROVIDERS)[number];
 
@@ -14,6 +14,7 @@ export function resolveLipsyncProvider(
 }
 
 export function lipsyncModelName(provider: LipsyncProvider): string {
+  if (provider === "veed-v2") return "veed-lipsync-v2";
   if (provider === "latentsync") return "latentsync";
   if (provider === "pixverse") return "pixverse-lipsync";
   if (provider === "veed") return "veed-lipsync";
@@ -21,6 +22,7 @@ export function lipsyncModelName(provider: LipsyncProvider): string {
 }
 
 export function lipsyncModeName(provider: LipsyncProvider): string {
+  if (provider === "veed-v2") return "veed-lipsync-v2";
   if (provider === "latentsync") return "latentsync";
   if (provider === "pixverse") return "pixverse-lipsync";
   if (provider === "veed") return "veed-lipsync";

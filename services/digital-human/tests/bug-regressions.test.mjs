@@ -324,7 +324,7 @@ test("B11: deleting the selected first voice must select an existing fallback", 
   } finally { globalThis.confirm = savedConfirm; s.close(); }
 });
 
-for (const provider of ["veed", "latentsync"]) test(`B9: ${provider} recovery must recover all video segments with the saved model`, async t => {
+for (const provider of ["veed", "latentsync", "veed-v2"]) test(`B9: ${provider} recovery must recover all video segments with the saved model`, async t => {
   const s = sandbox();
   try {
     recoveryStubs(s);
@@ -552,7 +552,7 @@ test("B9: incomplete split recovery stays failed and retry only fetches the miss
   } finally { s.close(); }
 });
 
-for (const provider of ["veed", "latentsync"]) test(`B9: new ${provider} split jobs use the selected endpoint and shared fal credentials`, async () => {
+for (const provider of ["veed", "latentsync", "veed-v2"]) test(`B9: new ${provider} split jobs use the selected endpoint and shared fal credentials`, async () => {
   const s = sandbox(); const originalTimeout = globalThis.setTimeout;
   try {
     const { video, audio } = makeMedia(s.tmp, 100);
@@ -562,10 +562,11 @@ for (const provider of ["veed", "latentsync"]) test(`B9: new ${provider} split j
       getDownloadUrl: async key => `https://storage.example.test/${key}`,
     } });
     let submissions = 0;
-    const endpoint = `https://queue.fal.run/${provider === "latentsync" ? "fal-ai/latentsync" : "veed/lipsync"}`;
+    const endpoint = `https://queue.fal.run/${provider === "veed-v2" ? "veed/lipsync/v2" : provider === "latentsync" ? "fal-ai/latentsync" : "veed/lipsync"}`;
+    const requestBase = provider === "veed-v2" ? "https://queue.fal.run/veed/lipsync" : endpoint;
     const actualPolicy = s.load("src/lib/server/outbound-url-policy.ts");
     s.overrides.set("src/lib/server/outbound-url-policy.ts", { ...actualPolicy, fetchWithOutboundUrlPolicy: async (url, init) => {
-      assert.ok(url === endpoint || String(url).startsWith(`${endpoint}/requests/`), String(url));
+      assert.ok(url === endpoint || String(url).startsWith(`${requestBase}/requests/`), String(url));
       assert.equal(init.headers.Authorization, "Key test-only");
       if (init?.method === "POST") {
         assert.deepEqual(Object.keys(JSON.parse(init.body)).sort(), ["audio_url", "video_url"]);

@@ -10,6 +10,7 @@ import * as sso from "../src/lib/main-app-sso.ts";
 import * as billing from "../src/lib/main-app-billing.ts";
 import * as estimate from "../src/lib/billing-estimate.ts";
 import * as publicData from "../src/lib/server/public-data.ts";
+import * as publicContract from "../src/lib/public-contract.ts";
 import * as limit from "../src/lib/server/generation-limit.ts";
 import * as safeLog from "../src/lib/server/safe-log.ts";
 
@@ -54,6 +55,7 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
           : id === "foreign-voice" ? {id, userId: "someone-else", audioPath: "private-audio"} : undefined,
       }},
       "@/lib/server/public-data": publicData,
+      "@/lib/public-contract": publicContract,
       "@/lib/main-app-billing": billing,
       "@/lib/billing-estimate": estimate,
       "@/lib/server/generation-limit": limit,
@@ -79,6 +81,9 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
     };
     assert.equal((await post(undefined, false)).status, 401);
     assert.equal((await post({avatarId: "avatar", scriptText: "x".repeat(5001)})).status, 400);
+    for (const engine of ["a", "c", "veed-v2", "unknown", null]) {
+      assert.equal((await post({avatarId: "avatar", scriptText: "你好", engine})).status, 400);
+    }
     assert.equal(requests.length, 0);
     assert.equal((await post()).status, 402);
     assert.equal(pipelines.length, 0);
@@ -123,6 +128,14 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
       finish(); await new Promise(resolve => setImmediate(resolve));
     }
     assert.equal(tasks[0].inputs.outputType, "video");
+    user = {...user, id: "model-admin", role: "admin", billingAudience: "internal"};
+    for (const [engine, provider] of [["b", "veed"], ["d", "latentsync"], ["e", "veed-v2"]]) {
+      const response = await post({avatarId: "avatar", scriptText: "你好", engine});
+      assert.equal(response.status, 200);
+      assert.equal(tasks.at(-1).inputs.lipsyncProvider, provider);
+      assert.equal((await response.json()).task.inputs.engine, engine);
+      finish(); await new Promise(resolve => setImmediate(resolve));
+    }
   } finally {
     finish?.(); globalThis.fetch = savedFetch;
     for (const key of keys) {

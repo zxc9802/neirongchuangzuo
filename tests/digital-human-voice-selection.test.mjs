@@ -4,12 +4,13 @@ import assert from 'node:assert/strict';
 const defaultVoice = { id: 'default_speaker_1', name: '默认推荐音色', isDefault: true, audioUrl: '/api/voices/default_speaker_1/audio' };
 const uploadedVoice = { id: 'uploaded', name: '新上传声音', audioUrl: '/api/voices/uploaded/audio' };
 
-async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {} } = {}) {
+async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {}, selectEngine } = {}) {
   const originals = Object.fromEntries(['document', 'window', 'localStorage', 'fetch'].map(key => [key, globalThis[key]]));
   const storage = new Map([['store-studio:digital-human:v1', JSON.stringify(saved)]]);
   const regions = new Map();
   const node = () => ({ innerHTML: '', children: [], setAttribute() {}, querySelector: () => ({ textContent: '' }) });
-  const root = { isConnected: true, addEventListener() {}, querySelector(selector) {
+  const listeners = {};
+  const root = { isConnected: true, addEventListener(event, callback) { listeners[event] = callback; }, querySelector(selector) {
     if (!regions.has(selector)) regions.set(selector, node());
     return regions.get(selector);
   } };
@@ -18,7 +19,7 @@ async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {} } =
   globalThis.localStorage = { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) };
   globalThis.fetch = async url => {
     if (url === '/api/session') return Response.json({ data: { user: { id: 'test' } } });
-    if (url === '/api/digital-human/status') return Response.json({ ready: true, engines: [{ id: 'b', label: '原版对口型（B）', available: true }, { id: 'd', label: 'LatentSync 对口型', available: true }] });
+    if (url === '/api/digital-human/status') return Response.json({ ready: true, engines: [{ id: 'b', label: 'qy-标准', available: true }, { id: 'd', label: 'qy-旗舰', available: true }, { id: 'e', label: 'qy-至臻', available: true }] });
     if (url === '/api/voices') return Response.json({ voices });
     if (String(url).startsWith('/api/digital-human/library')) return Response.json({ items: [], counts: {}, hasMore: false });
     throw new Error('Unexpected request: ' + url);
@@ -30,6 +31,12 @@ async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {} } =
     mod.bindDigitalHuman(ctx);
     for (let n = 0; n < 100 && !regions.get('#dh-voice')?.innerHTML.includes('新上传声音'); n++) await new Promise(resolve => setTimeout(resolve, 5));
     assert.match(regions.get('#dh-voice')?.innerHTML || '', /新上传声音/, 'voice list must finish loading');
+    if (selectEngine) listeners.change({ target: { dataset: { dhOption: 'engine' }, value: selectEngine } });
+    const markup = mod.renderDigitalHuman(ctx);
+    assert.ok(markup.indexOf('id="dh-engine"') < markup.indexOf('<details class="dh-advanced">'), 'model choices are visible without expanding advanced settings');
+    assert.doesNotMatch(markup.match(/<details class="dh-advanced">[\s\S]*?<\/details>/)[0], /data-dh-option="engine"/);
+    for (const label of ['qy-标准', 'qy-旗舰', 'qy-至臻']) assert.ok(markup.includes(label));
+    assert.equal((markup.match(/name="dh-engine"/g) || []).length, 3);
     return JSON.parse(storage.get('store-studio:digital-human:v1'));
   } finally {
     mod.disposeDigitalHuman();
@@ -58,9 +65,17 @@ test('a saved user voice selection is retained', async () => {
   assert.equal((await loadPage({ saved: { voiceId: uploadedVoice.id } })).voiceId, uploadedVoice.id);
 });
 
-test('the original lipsync engine remains the default and a saved LatentSync choice survives reload', async () => {
+test('the standard engine is the default, and all active model choices survive selection and reload', async () => {
   assert.equal((await loadPage()).engine, 'b');
-  assert.equal((await loadPage({ saved: { engine: 'd' } })).engine, 'd');
+  for (const engine of ['b', 'd', 'e']) {
+    const saved = await loadPage({ selectEngine: engine });
+    assert.equal(saved.engine, engine);
+    assert.equal((await loadPage({ saved })).engine, engine);
+  }
+});
+
+test('retired A and C drafts switch to the standard engine', async () => {
+  for (const engine of ['a', 'c']) assert.equal((await loadPage({ saved: { engine } })).engine, 'b');
 });
 
 test('an unavailable saved voice falls back to the configured default', async () => {

@@ -7,6 +7,7 @@ import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import ts from "typescript";
 import { NextRequest, NextResponse } from "next/server.js";
+import * as publicContract from "../src/lib/public-contract.ts";
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "dh-workspace-credits-"));
 const saved = { AUTH_DATABASE_URL: process.env.AUTH_DATABASE_URL, NODE_ENV: process.env.NODE_ENV,
@@ -193,6 +194,7 @@ test("task creation failure refunds its reservation and the persisted task ID ma
     "@/lib/access-control": { resolveAccessContext: async () => ({ isolated: true, userId: user.id, session: { user } }),
       unauthorizedResponse: () => NextResponse.json({}, { status: 401 }), canViewAllMedia: () => false },
     "@/lib/server/upload-policy": { isOwnedUploadSource: () => true },
+    "@/lib/public-contract": publicContract,
     "@/lib/server/media-response": { isTrustedStoredMediaSource: () => true },
     "@/lib/server/task-worker": workers,
     "@/lib/server/workspace-task-recovery": { reconcileWorkspaceTask: async task => task },

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getAppConfig } from "@/lib/config";
+import { PUBLIC_LIPSYNC_ENGINES } from "@/lib/public-contract";
 import { resolveAccessContext, unauthorizedResponse } from "@/lib/access-control";
 
 export const runtime = "nodejs";
@@ -23,12 +24,9 @@ export async function GET(request: NextRequest) {
   const mediaReady = Boolean(publicAddress ||
     (config.cosSecretId && config.cosSecretKey && config.cosBucket && config.cosRegion));
   const ttsReady = Boolean(config.indexttsFalApiKey);
-  const engines = [
-    { id: "a", label: "口型方案 A", available: Boolean(config.openluxApiKey) },
-    { id: "b", label: "原版对口型（B）", available: Boolean(config.falApiKey) },
-    { id: "d", label: "LatentSync 对口型", available: Boolean(config.falApiKey) },
-    { id: "c", label: "口型方案 C", available: Boolean(config.heygenApiKey) },
-  ];
+  const engines = PUBLIC_LIPSYNC_ENGINES.map(engine => ({
+    ...engine, available: Boolean(config.falApiKey),
+  }));
   return NextResponse.json({
     service: "digital-human", ttsReady, mediaReady, engines,
     ready: ttsReady && mediaReady && engines.some(engine => engine.available),

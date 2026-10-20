@@ -8,9 +8,8 @@ const MODELS = [
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, description: '最多生成15秒视频，0.8元/秒' },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, description: '最多生成15秒视频，0.5元/秒' },
   { id: 'fal-ai/pixverse/swap', name: 'PixVerse Swap', maxDuration: 30, description: '最长30秒 · 720p · 按实际费用，配音口型另计' },
-  { id: 'fal-ai/wan/v2.2-14b/animate/replace', name: 'Wan 2.2 人物替换', maxDuration: 30, description: '最长30秒 · 720p · 按实际帧数费用，配音口型另计' },
 ];
-const isFalReplacement = model => ['fal-ai/pixverse/swap', 'fal-ai/wan/v2.2-14b/animate/replace'].includes(model);
+const isFalReplacement = model => model === 'fal-ai/pixverse/swap';
 const DEFAULT_VOICE_ENGINE = 'indextts2';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成未完成', expired: '已过期' };

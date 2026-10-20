@@ -323,7 +323,7 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     }
     let resultUrl = saved?.resultUrl;
     if (!ready) {
-      if (saved?.lipsyncId && (provider === "veed" || provider === "latentsync")) {
+      if (saved?.lipsyncId && (provider === "veed" || provider === "latentsync" || provider === "veed-v2")) {
         const remote = await FalVeedLipsyncAdapter.fetchResult(saved.lipsyncId, provider);
         if (["FAILED", "ERROR", "CANCELLED"].includes(remote.status)) {
           throw Object.assign(new Error("分段生成失败，无法组成完整成片"), { code: "LIPSYNC_GENERATION_FAILED" });
@@ -345,7 +345,7 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
         await downloadPixverseResult({ url: resultUrl, outputPath, onLog: log });
       } else {
         await downloadFileToDisk({ url: resultUrl, outputPath, onProgress: log,
-          urlPolicy: providerUrlPolicy(provider === "veed" || provider === "latentsync" ? "fal" : "heygen") });
+          urlPolicy: providerUrlPolicy(provider === "veed" || provider === "latentsync" || provider === "veed-v2" ? "fal" : "heygen") });
       }
       await verifyVideoDuration(outputPath, part.durationSeconds);
     }

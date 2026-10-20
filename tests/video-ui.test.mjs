@@ -131,7 +131,8 @@ test('polling still replaces expired reference sources and adds recovery control
 
 test('edition buttons show the requested descriptions and update the upload duration hint', async t => {
   const page = await fixture(t); page.recover(); await page.poll();
-  for (const name of ['qiya-2.0', 'qiya-2.5', 'qiya-2.0-f1', 'qiya-20-m1', 'PixVerse Swap', 'Wan 2.2 人物替换']) assert.ok(page.html().includes(`<strong>${name}</strong>`));
+  for (const name of ['qiya-2.0', 'qiya-2.5', 'qiya-2.0-f1', 'qiya-20-m1', 'PixVerse Swap']) assert.ok(page.html().includes(`<strong>${name}</strong>`));
+  assert.doesNotMatch(page.html(), /Wan 2\.2|wan\/v2\.2-14b/);
   for (const price of ['1', '0.8', '0.5']) assert.ok(page.html().includes(`最多生成15秒视频，${price}元/秒`));
   assert.match(page.html(), /最多生成30秒视频，1.5元\/秒/);
   assert.doesNotMatch(page.html(), /标准版|至臻版/);
@@ -144,7 +145,7 @@ test('edition buttons show the requested descriptions and update the upload dura
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
 
-for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'fal-ai/pixverse/swap', 'fal-ai/wan/v2.2-14b/animate/replace']) test(`${model} choice is sent during task creation and start without changing the voice engine`, async t => {
+for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'fal-ai/pixverse/swap']) test(`${model} choice is sent during task creation and start without changing the voice engine`, async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
@@ -211,7 +212,7 @@ test('saved silent drafts restore their mode and can persist a switch back to th
   assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
 });
 
-for (const model of ['fal-ai/pixverse/swap', 'fal-ai/wan/v2.2-14b/animate/replace']) test(`switching to ${model} removes the Seedance-only mode and restores original reference audio`, async t => {
+for (const model of ['fal-ai/pixverse/swap']) test(`switching to ${model} removes the Seedance-only mode and restores original reference audio`, async t => {
   const page = await fixture(t);
   page.recover(); await page.poll();
   page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: 'silent' } }) } }); await page.settle();
@@ -387,8 +388,8 @@ test('caption drafts start in one click without a transcript confirmation step',
   assert.equal(task.captions.cues[0].text, '今天吃生腌');
 });
 
-test('edition picker keeps removed-model drafts compatible with the standard model', async t => {
-  const fal = 'minimax/h3-max/reference-to-video', seedance = 'doubao-seedance-2-0-260128';
+for (const fal of ['minimax/h3-max/reference-to-video', 'fal-ai/wan/v2.2-14b/animate/replace']) test(`edition picker keeps removed ${fal} drafts compatible with the standard model`, async t => {
+  const seedance = 'doubao-seedance-2-0-260128';
   let task = { ...speechDraft(), model: fal }; const calls = [];
   const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
     if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true, model: seedance,
@@ -399,7 +400,7 @@ test('edition picker keeps removed-model drafts compatible with the standard mod
     return Response.json({ task });
   } });
   page.recover(); await page.poll(); page.select(task.id);
-  assert.doesNotMatch(page.html(), /minimax\/h3-max/);
+  assert.doesNotMatch(page.html(), /minimax\/h3-max|wan\/v2\.2-14b|Wan 2\.2/);
   assert.match(page.html(), /1:1复刻 · qiya-2\.0/);
   assert.match(page.html(), /id="replica-models"/);
   page.node('#replica-submit').onclick(); await page.settle();
@@ -411,7 +412,7 @@ test('edition picker keeps removed-model drafts compatible with the standard mod
   assert.doesNotMatch(page.html(), /极速模型/);
   assert.match(page.html(), /aria-label="人物复刻成片"/);
   page.node('#replica-new').onclick();
-  assert.doesNotMatch(page.html(), /极速模型|minimax\/h3-max/);
+  assert.doesNotMatch(page.html(), /极速模型|minimax\/h3-max|wan\/v2\.2-14b|Wan 2\.2/);
 });
 
 test('one click uploads every selected asset then starts once without analysis or confirmation requests', async t => {

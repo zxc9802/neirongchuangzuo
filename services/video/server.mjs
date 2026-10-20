@@ -123,7 +123,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       sourceAudioMode: task.sourceAudioMode || 'original',
       voiceEngine: task.voiceEngine || (task.model === FAL_MODEL ? undefined : 'seedance'), narrationProgress: task.narration && { ready: task.narration.ready,
         completed: task.narration.segments.filter(segment => segment.status === 'ready').length, total: task.narration.segments.length },
-      model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : models.find(model => model.id === (task.model || MODEL))?.name,
+      model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : task.model === WAN_MODEL ? 'Wan 2.2 人物替换' : models.find(model => model.id === (task.model || MODEL))?.name,
       resolution: task.model === FAL_MODEL ? '768p' : '720p',
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
       sourcePhotoUrl: !expired && task.photo ? `${PREFIX}/tasks/${task.id}/photo` : null,

@@ -203,7 +203,7 @@ test("public workspace billing retains the task exemption independently of later
 });
 
 test("toPublicTask maps private providers to neutral engine codes and steps to neutral names", () => {
-  const engineMap = { pixverse: "a", veed: "b", heygen: "c" };
+  const engineMap = { pixverse: "a", veed: "b", heygen: "c", latentsync: "d", "veed-v2": "e" };
   for (const [provider, code] of Object.entries(engineMap)) {
     const fromInputs = toPublicTask(
       makeTask({ inputs: { ...makeTask().inputs, lipsyncProvider: provider }, results: {} })
@@ -407,6 +407,7 @@ test("public engine codes round-trip to exactly one private provider each", () =
   assert.equal(resolvePrivateEngine("b"), "veed");
   assert.equal(resolvePrivateEngine("c"), "heygen");
   assert.equal(resolvePrivateEngine("d"), "latentsync");
+  assert.equal(resolvePrivateEngine("e"), "veed-v2");
   // 非法输入必须落到固定默认值，而不是把客户端字符串透传给流水线
   for (const junk of [undefined, null, "", "heygen", "pixverse", "z", 1, {}]) {
     assert.equal(resolvePrivateEngine(junk), "veed", `engine=${String(junk)}`);
@@ -428,6 +429,15 @@ test("LatentSync tasks keep their selected engine and recoverability without exp
   assert.equal(visible.inputs.engine, "d");
   assert.equal(visible.recoverable, true);
   assert.equal(JSON.stringify(visible).includes("private-result.mp4"), false);
+});
+
+test("VEED v2 tasks retain their model for recovery without exposing upstream URLs", () => {
+  const task = makeTask({ inputs: { ...makeTask().inputs, lipsyncProvider: "veed-v2" },
+    results: { veedResultUrl: "https://fal.media/private-v2-result.mp4", lipsyncProvider: "veed-v2" } });
+  const visible = toPublicTask(task);
+  assert.equal(visible.inputs.engine, "e");
+  assert.equal(visible.recoverable, true);
+  assert.equal(JSON.stringify(visible).includes("private-v2-result.mp4"), false);
 });
 
 

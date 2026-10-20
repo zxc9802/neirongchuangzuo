@@ -19,7 +19,7 @@ export interface FalVeedJobProgress {
 }
 
 export interface FalVeedLipsyncOptions {
-  provider?: "veed" | "latentsync";
+  provider?: "veed" | "latentsync" | "veed-v2";
   videoPath: string;
   audioPath: string;
   videoUrl?: string;
@@ -401,13 +401,14 @@ export class FalVeedLipsyncAdapter {
     return { url };
   }
 
-  public static async fetchResult(requestId: string, provider: "veed" | "latentsync" = "veed"): Promise<{
+  public static async fetchResult(requestId: string, provider: "veed" | "latentsync" | "veed-v2" = "veed"): Promise<{
     status: string;
     url?: string;
   }> {
     const config = getAppConfig();
     const apiKey = config.falApiKey?.trim();
-    const model = provider === "latentsync" ? "fal-ai/latentsync" : config.falVeedModel || "veed/lipsync";
+    const model = provider === "veed-v2" ? "veed/lipsync/v2"
+      : provider === "latentsync" ? "fal-ai/latentsync" : config.falVeedModel || "veed/lipsync";
     if (!apiKey) {
       throw new Error("未配置 fal API Key，请先在系统设置中填写");
     }
@@ -441,7 +442,8 @@ export class FalVeedLipsyncAdapter {
     const config = getAppConfig();
     const { onLog = () => {} } = options;
     const apiKey = config.falApiKey?.trim();
-    const model = options.provider === "latentsync" ? "fal-ai/latentsync" : config.falVeedModel || "veed/lipsync";
+    const model = options.provider === "veed-v2" ? "veed/lipsync/v2"
+      : options.provider === "latentsync" ? "fal-ai/latentsync" : config.falVeedModel || "veed/lipsync";
 
     if (!apiKey) {
       throw new Error("未配置 fal API Key，请先在系统设置中填写");

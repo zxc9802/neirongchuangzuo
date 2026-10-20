@@ -46,6 +46,7 @@ export function isTaskOutputDeliverable(task: TaskItem): boolean {
 }
 
 export function resolvePrivateEngine(engine: unknown): LipsyncProvider {
+  if (engine === "e") return "veed-v2";
   if (engine === "d") return "latentsync";
   if (engine === "a") return "pixverse";
   if (engine === "c") return "heygen";
@@ -53,6 +54,7 @@ export function resolvePrivateEngine(engine: unknown): LipsyncProvider {
 }
 
 function toPublicEngine(provider?: LipsyncProvider): PublicEngine {
+  if (provider === "veed-v2") return "e";
   if (provider === "latentsync") return "d";
   if (provider === "pixverse") return "a";
   if (provider === "heygen") return "c";

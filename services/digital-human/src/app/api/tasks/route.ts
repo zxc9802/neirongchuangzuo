@@ -5,6 +5,7 @@ import { runDigitalHumanPipeline } from "@/lib/engine/pipeline";
 import { AvatarStore } from "@/lib/store/avatar-store";
 import { VoiceStore } from "@/lib/store/voice-store";
 import { resolvePrivateEngine, toPublicTask } from "@/lib/server/public-data";
+import { PUBLIC_LIPSYNC_ENGINES } from "@/lib/public-contract";
 import type { MainAppUser } from "@/lib/main-app-sso";
 import {
   isExternallyBilledUser,
@@ -59,6 +60,10 @@ export async function POST(req: NextRequest) {
       speakerVoiceId,
       engine,
     } = body;
+
+    if (engine !== undefined && !PUBLIC_LIPSYNC_ENGINES.some(item => item.id === engine)) {
+      return NextResponse.json({ error: "请选择可用的对口型模型" }, { status: 400 });
+    }
 
     if ((avatarId != null && typeof avatarId !== "string") ||
       typeof scriptText !== "string" || !scriptText.trim()) {

@@ -40,10 +40,10 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       const generated = spawnSync("ffmpeg", ["-v", "error", ...args], {encoding: "utf8"});
       assert.equal(generated.status, 0, generated.stderr);
     }
-    for (const scenario of ["latentsync-success", "extended-source", "alignment-uncertain", "face-input-failure", "face-runtime-failure", "provider-failure", "provider-timeout", "composite-failure", "media-prep-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
-      const provider = scenario.startsWith("latentsync-") ? "latentsync" : "veed";
+    for (const scenario of ["veed-v2-success", "latentsync-success", "extended-source", "alignment-uncertain", "face-input-failure", "face-runtime-failure", "provider-failure", "provider-timeout", "composite-failure", "media-prep-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
+      const provider = scenario.startsWith("veed-v2-") ? "veed-v2" : scenario.startsWith("latentsync-") ? "latentsync" : "veed";
       const audioOnly = scenario.startsWith("audio-");
-      const fullFrame = scenario.startsWith("face-") || provider === "latentsync";
+      const fullFrame = scenario.startsWith("face-") || provider !== "veed";
       const fallback = ["provider-failure", "provider-timeout", "composite-failure", "media-prep-failure"].includes(scenario);
       const events = [];
       globalThis.fetch = async (url, init) => {
@@ -152,11 +152,11 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
         assert.ok(name in deps, `Unexpected dependency ${name}`); return deps[name];
       }, module, module.exports);
       await module.exports.runDigitalHumanPipeline(scenario, "fake");
-      if (provider === "latentsync") {
-        assert.equal(events.some(e => e.stage === "face-input"), false, "LatentSync uses the full frame without local mouth compositing");
-        assert.equal(task.results.lipsyncProvider, "latentsync");
-        assert.equal(task.results.latentsyncResultUrl, "https://fal.media/result.mp4");
-        assert.equal(task.results.veedResultUrl, undefined);
+      if (provider !== "veed") {
+        assert.equal(events.some(e => e.stage === "face-input"), false, `${provider} uses the full frame without local mouth compositing`);
+        assert.equal(task.results.lipsyncProvider, provider);
+        assert.equal(task.results[provider === "latentsync" ? "latentsyncResultUrl" : "veedResultUrl"], "https://fal.media/result.mp4");
+        assert.equal(task.results[provider === "latentsync" ? "veedResultUrl" : "latentsyncResultUrl"], undefined);
       }
       if (audioOnly) assert.equal(events.some(e => e.stage === "lipsync"), false, "audio must never submit paid lip-sync");
       if (fallback) {
