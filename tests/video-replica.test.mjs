@@ -1344,6 +1344,7 @@ for (const [model, voiceEngine] of [[REPLICA_PRICES[0][0], 'seedance'], [PREMIUM
         assert.equal((await probeVideo(input)).audio, true); return structuredClone(SPEECH);
       } }),
       narration: fakeNarration({ prepare: async (task, folder) => {
+        assert.equal(voiceEngine, 'indextts2', 'Direct voice must not call separate narration');
         assert.equal((await probeVideo(join(folder, 'source.mp4'))).audio, true);
         return fakeNarration().prepare(task);
       } }), lipsync: fakeLipsync(),
@@ -1353,18 +1354,22 @@ for (const [model, voiceEngine] of [[REPLICA_PRICES[0][0], 'seedance'], [PREMIUM
       '-f', 'lavfi', '-i', 'sine=frequency=220:duration=6', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=6',
       '-map', '0:v', '-map', '1:a', '-map', '2:a', '-c:v', 'libx264', '-c:a', 'aac', original]);
     const bytes = await readFile(original), id = randomUUID();
-    await app.call('/tasks', { body: { requestId: id, model, voiceEngine, sourceAudioMode: 'silent' } });
+    await app.call('/tasks', { body: { requestId: id, model } });
+    assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent', voiceEngine } })).status, 200);
     assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: bytes })).status, 200);
     assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/photo`, { method: 'PUT', body: VIDEO })).status, 200);
     await uploadVoice(app, id);
     await app.close(); await app.open();
     assert.equal((await app.current(id)).sourceAudioMode, 'silent');
+    assert.equal((await app.current(id)).voiceEngine, voiceEngine);
     assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
     await app.until(id, task => task.status === 'running');
     assert.equal(app.state.body.payload.params.generateAudio, voiceEngine === 'seedance');
     if (voiceEngine === 'seedance') {
       assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
       assert.match(app.state.body.prompt, /视频1已去除原声音轨/);
+      assert.match(app.state.body.prompt, /音频1是用户上传的声音，也是唯一音色参考/);
+      assert.match(app.state.body.prompt, /情绪表达参考视频1的表情、动作和台词语义/);
       assert.doesNotMatch(app.state.body.prompt, /视频1原声提供/);
     } else assert.equal('referAudioUrl' in app.state.body.payload, false);
     const source = new URL(app.state.creates.find(item => item.kind === 'video').url);
@@ -1383,11 +1388,14 @@ for (const [model, voiceEngine] of [[REPLICA_PRICES[0][0], 'seedance'], [PREMIUM
   });
 }
 
-test('source audio mode defaults to the existing flow, switches on drafts and rejects invalid or voiceless requests before billing', async t => {
+test('source audio mode defaults to the existing flow, switches atomically and rejects invalid or voiceless requests before billing', async t => {
   const app = await fixture(t, { config: { ...CONFIG, falEnabled: true }, costMode: true });
   const id = await app.init(); await app.upload(id);
   assert.equal((await app.current(id)).sourceAudioMode, 'original');
   assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'invalid' } })).status, 400);
+  assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent', voiceEngine: 'invalid' } })).status, 400);
+  assert.equal((await app.current(id)).sourceAudioMode, 'original');
+  assert.equal((await app.current(id)).voiceEngine, 'seedance');
   assert.equal((await app.call(`/tasks/${id}/source-audio`, { owner: 'bob', body: { sourceAudioMode: 'silent' } })).status, 404);
   for (const [model] of REPLICA_PRICES) {
     await app.call(`/tasks/${id}/model`, { body: { model } });
@@ -1402,7 +1410,7 @@ test('source audio mode defaults to the existing flow, switches on drafts and re
   assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent' } })).status, 400);
   await app.call(`/tasks/${id}/model`, { body: { model: REPLICA_PRICES[0][0] } });
   await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent' } });
-  await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'original' } });
+  await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'original', voiceEngine: 'seedance' } });
   await app.call(`/tasks/${id}/start`, { body: {} });
   await app.until(id, task => task.status === 'running');
   const source = new URL(app.state.creates.find(item => item.kind === 'video').url);
@@ -1410,13 +1418,23 @@ test('source audio mode defaults to the existing flow, switches on drafts and re
   assert.equal(app.state.body.payload.params.generateAudio, true);
 });
 
-test('silent reference preparation fails before material registration instead of falling back to original audio', async t => {
-  const app = await fixture(t, { speech: fakeSpeech(),
+test('silent direct preparation retries then saves progress without leaking errors or sending original audio', async t => {
+  let clock = Date.now();
+  const app = await fixture(t, { now: () => clock, speech: fakeSpeech(),
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 3 }; } });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   await app.call(`/tasks/${id}/start`, { body: { sourceAudioMode: 'silent' } });
-  const failed = await app.until(id, task => task.status === 'failed');
-  assert.equal(failed.code, 'VIDEO_AUDIO_REMOVE_FAILED');
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const retrying = await app.until(id, task => task.recovery?.nextAttemptAt > clock);
+    assert.equal(retrying.error, ''); assert.equal(retrying.code, undefined);
+    clock = retrying.recovery.nextAttemptAt;
+  }
+  const waiting = await app.until(id, task => task.status === 'waiting');
+  assert.equal(waiting.error, ''); assert.equal(waiting.code, undefined); assert.equal(waiting.canResume, true);
+  const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal(saved.code, 'VIDEO_AUDIO_REMOVE_FAILED');
+  await app.close(); await app.open();
+  assert.equal((await app.current(id)).status, 'waiting');
   assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
 });
 
@@ -1435,14 +1453,18 @@ test('silent mode reuses an already silent source and obtains dialogue from its 
   assert.deepEqual(Buffer.from(await (await fetch(app.base + source.pathname + source.search)).arrayBuffer()), VIDEO);
 });
 
-test('an explicit Seedance choice never calls separate TTS or lip-sync', async t => {
+for (const sourceAudioMode of ['original', 'silent']) test(`Seedance ${sourceAudioMode} voice completes without separate TTS or lip-sync`, async t => {
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    ...(sourceAudioMode === 'silent' ? {
+      probe: async input => ({ ...META, audio: !input.endsWith('upload.tmp') }),
+      captions: { extract: async () => structuredClone(CAPTIONS) },
+    } : {}),
     narration: fakeNarration({ prepare: async () => assert.fail('Seedance must not prepare IndexTTS'), advance: async () => assert.fail('Seedance must not synthesize IndexTTS') }),
     lipsync: fakeLipsync({ submit: async () => assert.fail('Seedance must not submit a lip-sync job') }) });
   const config = await (await app.call('/config')).json();
   assert.equal(config.voiceEngine, 'indextts2'); assert.equal(config.voiceEngines.find(engine => engine.id === 'indextts2').enabled, true);
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
-  const started = (await (await app.call(`/tasks/${id}/start`, { body: {} })).json()).task;
+  const started = (await (await app.call(`/tasks/${id}/start`, { body: { sourceAudioMode } })).json()).task;
   assert.equal(started.voiceEngine, 'seedance');
   await app.until(id, task => task.status === 'running');
   assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
@@ -1912,6 +1934,7 @@ test('PixVerse draft switching clears the Seedance audio mode and rejects direct
   assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: PIXVERSE_MODEL } })).status, 200);
   const task = await app.current(id);
   assert.equal(task.model, PIXVERSE_MODEL); assert.equal(task.sourceAudioMode, 'original');
+  assert.equal(task.voiceEngine, 'indextts2');
   assert.equal(task.estimatedPoints, null);
   assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent' } })).status, 400);
   const rejected = await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'seedance' } });

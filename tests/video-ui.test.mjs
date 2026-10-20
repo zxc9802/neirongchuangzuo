@@ -168,7 +168,7 @@ for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'fal-ai/pixverse/swa
   assert.match(page.html(), new RegExp(`data-replica-model="${model}"[^>]*aria-pressed="true"[^>]*disabled`));
 });
 
-for (const mode of ['original', 'silent']) test(`${mode} reference audio mode is submitted and locked without changing the default voice engine`, async t => {
+for (const mode of ['original', 'silent', 'silent-direct']) test(`${mode} reference audio mode submits its paired engine and locks after start`, async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
@@ -185,8 +185,9 @@ for (const mode of ['original', 'silent']) test(`${mode} reference audio mode is
   page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: mode } }) } }); await page.settle();
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(calls[0].body.sourceAudioMode, mode); assert.equal(calls.at(-1).body.sourceAudioMode, mode);
-  assert.equal(calls[0].body.voiceEngine, 'indextts2'); assert.equal(calls.at(-1).body.voiceEngine, 'indextts2');
+  const sourceAudioMode = mode === 'silent-direct' ? 'silent' : mode, voiceEngine = mode === 'silent-direct' ? 'seedance' : 'indextts2';
+  assert.equal(calls[0].body.sourceAudioMode, sourceAudioMode); assert.equal(calls.at(-1).body.sourceAudioMode, sourceAudioMode);
+  assert.equal(calls[0].body.voiceEngine, voiceEngine); assert.equal(calls.at(-1).body.voiceEngine, voiceEngine);
   const count = calls.length;
   page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: mode === 'silent' ? 'original' : 'silent' } }) } });
   await page.settle(); assert.equal(calls.length, count);
@@ -195,8 +196,8 @@ for (const mode of ['original', 'silent']) test(`${mode} reference audio mode is
   assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
 });
 
-test('saved silent drafts restore their mode and can persist a switch back to the original flow', async t => {
-  let task = { ...speechDraft(), model: STANDARD_MODEL, sourceAudioMode: 'silent' }; const calls = [];
+for (const voiceEngine of ['indextts2', 'seedance']) test(`saved silent ${voiceEngine} drafts restore and can switch both audio and engine together`, async t => {
+  let task = { ...speechDraft(), model: STANDARD_MODEL, sourceAudioMode: 'silent', voiceEngine }; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (path.endsWith('/tasks')) return Response.json({ tasks: [task] });
     if (path.endsWith('/source-audio')) {
@@ -204,23 +205,53 @@ test('saved silent drafts restore their mode and can persist a switch back to th
     }
   } });
   page.recover(); await page.poll(); page.select(task.id);
-  assert.match(page.html(), /data-source-audio="silent"[^>]*aria-pressed="true"/);
+  assert.match(page.html(), new RegExp(`data-source-audio="${voiceEngine === 'seedance' ? 'silent-direct' : 'silent'}"[^>]*aria-pressed="true"`));
   await page.poll();
   page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: 'original' } }) } }); await page.settle();
-  assert.deepEqual(calls, [{ sourceAudioMode: 'original' }]);
+  assert.deepEqual(calls, [{ sourceAudioMode: 'original', voiceEngine: 'indextts2' }]);
   page.select(task.id);
   assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
 });
 
-for (const model of ['fal-ai/pixverse/swap']) test(`switching to ${model} removes the Seedance-only mode and restores original reference audio`, async t => {
+test('a saved default draft can switch to direct voice and back without retaining the wrong engine', async t => {
+  let task = { ...speechDraft(), model: STANDARD_MODEL, voiceEngine: 'indextts2', sourceAudioMode: 'original' }; const calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (path.endsWith('/source-audio')) {
+      const body = JSON.parse(options.body); calls.push(body); task = { ...task, ...body }; return Response.json({ task });
+    }
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  for (const mode of ['silent-direct', 'silent', 'silent-direct', 'original']) {
+    page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: mode } }) } }); await page.settle();
+    assert.match(page.html(), new RegExp(`data-source-audio="${mode}"[^>]*aria-pressed="true"`));
+  }
+  assert.deepEqual(calls, [
+    { sourceAudioMode: 'silent', voiceEngine: 'seedance' }, { sourceAudioMode: 'silent', voiceEngine: 'indextts2' },
+    { sourceAudioMode: 'silent', voiceEngine: 'seedance' }, { sourceAudioMode: 'original', voiceEngine: 'indextts2' },
+  ]);
+});
+
+test('direct voice requires an uploaded voice before creating a paid task', async t => {
+  let writes = 0;
+  const page = await fixture(t, { apiFetch: (_path, options) => { if (options?.method) writes++; } });
+  page.recover(); await page.poll();
+  page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: 'silent-direct' } }) } });
+  for (const kind of ['video', 'photo']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.match(page.message(), /请先上传声音参考/); assert.equal(writes, 0);
+});
+
+for (const mode of ['silent', 'silent-direct']) test(`switching from ${mode} to PixVerse restores the default voice flow`, async t => {
+  const model = 'fal-ai/pixverse/swap';
   const page = await fixture(t);
   page.recover(); await page.poll();
-  page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: 'silent' } }) } }); await page.settle();
-  assert.match(page.html(), /data-source-audio="silent"[^>]*aria-pressed="true"/);
+  page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: mode } }) } }); await page.settle();
+  assert.match(page.html(), new RegExp(`data-source-audio="${mode}"[^>]*aria-pressed="true"`));
   page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: model } }) } }); await page.settle();
   assert.doesNotMatch(page.html(), /id="replica-source-audio"/);
   page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: STANDARD_MODEL } }) } }); await page.settle();
   assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
+  assert.match(page.html(), /单独生成配音并同步口型/);
 });
 
 test('saved premium drafts keep their edition and a rejected downgrade retains the original quote', async t => {

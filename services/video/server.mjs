@@ -195,7 +195,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const action = cause.recoveryAction || 'resume';
     task.recovery = { state: 'waiting', action, resumeStatus: task.status === 'waiting' ? task.recovery?.resumeStatus : task.status,
       message: action === 'input' ? !task.billing && !task.providerDispatched
-        ? '请补充至少 5 秒且包含清晰原声的视频，当前进度已保存。'
+        ? task.voiceEngine === 'indextts2' ? '请补充至少 5 秒且包含清晰原声的视频，当前进度已保存。' : '请补充可提取台词的参考视频，当前进度已保存。'
         : '素材需要调整，进度已保存；可停止处理后新建复刻。'
         : action === 'account' ? '等待账户或额度恢复，当前进度已保存。'
           : action === 'limit' ? '自动处理次数已达上限，当前进度已保存。'
@@ -589,14 +589,21 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const model = selectedModel(body.model);
           const duration = task.video ? videoDuration(task.video, model) : undefined;
           task.model = model;
-          if (isFalReplacement(model)) task.sourceAudioMode = 'original';
+          if (isFalReplacement(model)) {
+            if (task.sourceAudioMode === 'silent' && task.voiceEngine === 'seedance') task.voiceEngine = 'indextts2';
+            task.sourceAudioMode = 'original';
+          }
           if (task.video) task.duration = duration;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'source-audio' && req.method === 'POST') {
           const body = await readJSON(req);
           if (task.status !== 'draft') throw error('任务已提交，不能切换参考视频声音模式。', 409);
-          task.sourceAudioMode = selectedSourceAudioMode(body.sourceAudioMode, task.model);
+          const sourceAudioMode = selectedSourceAudioMode(body.sourceAudioMode, task.model);
+          const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
+          if (isFalReplacement(task.model) && body.voiceEngine === 'seedance') throw error('此生成版本需使用独立配音和口型同步。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
+          task.sourceAudioMode = sourceAudioMode;
+          task.voiceEngine = voiceEngine;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (['video', 'photo', 'voice'].includes(match[2]) && req.method === 'PUT') {
@@ -703,11 +710,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.duration = duration;
           task.cnyPerSecond = models.find(item => item.id === model).cnyPerSecond;
           task.voiceEngine = voiceEngine;
-          task.recoveryPolicy = voiceEngine === 'indextts2' ? 1 : undefined;
+          task.recoveryPolicy = voiceEngine === 'indextts2' || sourceAudioMode === 'silent' ? 1 : undefined;
           if (task.recoveryPolicy) task.recoveryDeadline = now() + 30 * 60_000;
           task.sourceAudioMode = sourceAudioMode;
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
-          if (task.recoveryPolicy && (!task.video.audio || task.video.duration < 5)) {
+          if (voiceEngine === 'indextts2' && (!task.video.audio || task.video.duration < 5)) {
             await hold(task, { code: 'VIDEO_NARRATION_SOURCE_REQUIRED', recoveryAction: 'input', message: '原视频需包含至少 5 秒原声。' });
             json(res, 202, { task: view(task) }); return;
           }

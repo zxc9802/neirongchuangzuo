@@ -53,7 +53,7 @@ export function generationBody(task) {
     for (const segment of segments) { if (segment.start > end) gaps.push(`${end.toFixed(3)}–${segment.start.toFixed(3)}秒`); end = segment.end; }
     if (task.duration > end) gaps.push(`${end.toFixed(3)}秒至成片结束`);
     const sourceInstruction = task.sourceAudioMode === 'silent'
-      ? '视频1已去除原声音轨，仅提供画面、动作、表情和说话节奏参考。以下从原片预先提取的台词和时间线是唯一配音依据。音频1是唯一音色参考，按视频1的表演自然配音，不推测或恢复原人物的声音。'
+      ? '视频1已去除原声音轨，仅提供画面、动作、表情和说话节奏参考。以下从原片预先提取的台词和时间线是唯一配音依据。音频1是用户上传的声音，也是唯一音色参考；生成视频中人物的音色、声线、共鸣和音质必须跟随音频1，不根据视频1中的人物外貌推测声音，不推测或恢复原人物的声音。情绪表达参考视频1的表情、动作和台词语义，在音频1音色的基础上自然表达。人物口型与新生成的配音同步。'
       : '仅替换视频1的人声音色，以下从原视频提取的台词是唯一台词依据。直接编辑视频1的声音，仅更换音色，不重新设计配音表演。视频1原声提供完整的说话情绪，逐句保留原声的语速、重音、语调、停顿、气口和情绪起伏，包括兴奋、惊讶、强调和自然口语感，不把原声改成平直的朗读。';
     voicePrompt = `\n${sourceInstruction}音频1仅提供音色，不使用音频1的台词，也不同时播放音频1，不沿用音频1的平淡语气或情绪。全片只有图片1中的一个人物说话，使用音频1的同一音色，不保留或混入原视频的人声，不添加旁白或第二个人声。原视频人声从第 ${task.speech.start.toFixed(3)} 秒开始，此前人物不得说话。严格按以下原视频时间线说话：${segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)} 秒：${segment.text}`).join('；')}。每段仅说一次，严格按顺序，价格、数字、单位按原字说，不改写、不补全、不重复。只在列出的台词区间说话，${gaps.length ? `${gaps.join('；')}必须保持静音。` : ''}最后一段结束后不得补说或复读。`;
   }

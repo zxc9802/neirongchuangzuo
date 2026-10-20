@@ -42,6 +42,7 @@ function jsonPost(body = {}) { return { method: 'POST', headers: { 'Content-Type
 function remember(task) {
   state.current = task;
   state.model = task.model || state.model;
+  state.voiceEngine = task.voiceEngine || state.voiceEngine;
   state.sourceAudioMode = task.sourceAudioMode || 'original';
   state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt);
   observeCreditTask(task);
@@ -68,7 +69,7 @@ function actionMessage() {
 function voiceHint() {
   const task = state.current;
   const selected = task && task.status !== 'draft' ? task.voiceEngine || 'seedance' : state.voiceEngine;
-  return `<p class="replica-voice-hint">${selected === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频，原片需包含至少 5 秒清晰原声。' : state.sourceAudioMode === 'silent' ? '由视频模型按原片台词和时间线配音，音色只参考上传的声音。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
+  return `<p class="replica-voice-hint">${selected === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频，原片需包含至少 5 秒清晰原声。' : state.sourceAudioMode === 'silent' ? '由视频模型按原片台词和时间线直接配音，音色只参考上传的声音，无需额外口型处理。情绪参考画面和台词，音色效果需试听。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
 }
 function selectedModel() { return MODELS.find(model => model.id === (state.current?.model || state.model)) || MODELS[0]; }
 function modelName(task) { return MODELS.find(model => model.id === (task.model || DEFAULT_MODEL))?.name || ''; }
@@ -79,13 +80,17 @@ function modelPicker(ctx) {
     return `<button type="button" class="replica-model-button ${selected.id === model.id ? 'selected' : ''}" data-replica-model="${model.id}" aria-pressed="${selected.id === model.id}" ${locked || unavailable ? 'disabled' : ''}><strong>${ctx.esc(model.name)}</strong><span>${ctx.esc(model.description)}</span></button>`;
   }).join('')}</div></div>`;
 }
+function selectedSourceAudioMode() {
+  return state.sourceAudioMode === 'silent' && state.voiceEngine === 'seedance' ? 'silent-direct' : state.sourceAudioMode;
+}
 function sourceAudioPicker() {
   if (isFalReplacement(selectedModel().id)) return '';
-  const locked = state.busy || state.current && state.current.status !== 'draft' || !state.config?.enabled;
+  const selected = selectedSourceAudioMode(), locked = state.busy || state.current && state.current.status !== 'draft' || !state.config?.enabled;
   return `<div class="replica-model-setting"><h2>参考视频声音</h2><div id="replica-source-audio" class="replica-models" role="group" aria-label="选择参考视频声音模式">${[
     ['original', '原声参考（默认）', '保留参考视频原声，沿用现有生成方式。'],
-    ['silent', '无原声参考', '先提取台词和时间线，再去掉视频音轨；配音继续使用上传的声音参考。'],
-  ].map(([id, title, description]) => `<button type="button" class="replica-model-button ${state.sourceAudioMode === id ? 'selected' : ''}" data-source-audio="${id}" aria-pressed="${state.sourceAudioMode === id}" ${locked ? 'disabled' : ''}><strong>${title}</strong><span>${description}</span></button>`).join('')}</div></div>`;
+    ['silent', '无原声参考', '去掉视频音轨，独立配音并同步口型；音色参考上传声音，情绪参考原片声音。'],
+    ['silent-direct', '无原声直配（试用）', '去掉视频音轨，按原片台词和上传音色直接生成配音；情绪参考画面与台词，无需额外口型处理。'],
+  ].map(([id, title, description]) => `<button type="button" class="replica-model-button ${selected === id ? 'selected' : ''}" data-source-audio="${id}" aria-pressed="${selected === id}" ${locked ? 'disabled' : ''}><strong>${title}</strong><span>${description}</span></button>`).join('')}</div></div>`;
 }
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind];
@@ -166,7 +171,14 @@ export function renderVideoReplica(ctx) {
 async function selectModel(id) {
   if (state.busy || state.current && state.current.status !== 'draft' || !MODELS.some(model => model.id === id) || !state.config?.enabled) return;
   if (selectedModel().id === id) return;
-  if (!state.current) { state.model = id; if (isFalReplacement(id)) state.sourceAudioMode = 'original'; state.error = ''; refresh(); return; }
+  if (!state.current) {
+    state.model = id;
+    if (isFalReplacement(id)) {
+      if (selectedSourceAudioMode() === 'silent-direct') state.voiceEngine = DEFAULT_VOICE_ENGINE;
+      state.sourceAudioMode = 'original';
+    }
+    state.error = ''; refresh(); return;
+  }
   state.busy = true; state.error = ''; refresh();
   try {
     if (state.files.video && MODELS.find(model => model.id === id).maxDuration < selectedModel().maxDuration) {
@@ -180,11 +192,13 @@ async function selectModel(id) {
   finally { state.busy = false; refresh(); }
 }
 async function selectSourceAudioMode(mode) {
-  if (state.busy || state.current && state.current.status !== 'draft' || !['original', 'silent'].includes(mode)
-    || isFalReplacement(selectedModel().id) || !state.config?.enabled || state.sourceAudioMode === mode) return;
-  if (!state.current) { state.sourceAudioMode = mode; state.error = ''; refresh(); return; }
+  if (state.busy || state.current && state.current.status !== 'draft' || !['original', 'silent', 'silent-direct'].includes(mode)
+    || isFalReplacement(selectedModel().id) || !state.config?.enabled || selectedSourceAudioMode() === mode) return;
+  const sourceAudioMode = mode === 'silent-direct' ? 'silent' : mode;
+  const voiceEngine = mode === 'silent-direct' ? 'seedance' : DEFAULT_VOICE_ENGINE;
+  if (!state.current) { state.sourceAudioMode = sourceAudioMode; state.voiceEngine = voiceEngine; state.error = ''; refresh(); return; }
   state.busy = true; state.error = ''; refresh();
-  try { remember((await request(`/tasks/${state.current.id}/source-audio`, jsonPost({ sourceAudioMode: mode }))).task); }
+  try { remember((await request(`/tasks/${state.current.id}/source-audio`, jsonPost({ sourceAudioMode, voiceEngine }))).task); }
   catch (cause) { state.error = cause.message; }
   finally { state.busy = false; refresh(); }
 }
