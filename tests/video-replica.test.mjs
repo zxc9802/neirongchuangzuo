@@ -56,7 +56,8 @@ async function fixture(t, options = {}) {
   t.after(async () => { await close(); await wallet.close(); await rm(root, { recursive: true, force: true }); });
   const call = (path, { body, method = body ? 'POST' : 'GET', owner = 'alice', headers = {} } = {}) => fetch(base + '/api/video-replica' + path, {
     method, headers: { 'x-test-owner': owner, ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body && JSON.stringify(body) });
-  async function init(id = randomUUID()) { const response = await call('/tasks', { body: { requestId: id, voiceEngine: 'seedance' } }); assert.equal(response.status, 201); return id; }
+  // Existing task/recovery tests exercise the explicit legacy parameters.
+  async function init(id = randomUUID()) { const response = await call('/tasks', { body: { requestId: id, voiceEngine: 'seedance', sourceAudioMode: 'original' } }); assert.equal(response.status, 201); return id; }
   async function upload(id) {
     for (const kind of ['video', 'photo']) {
       const response = await fetch(base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: VIDEO });
@@ -112,7 +113,7 @@ for (const [sourceDuration, generatedDuration] of [[15.1, 20], [20, 20], [20.1, 
   test(`premium replica accepts ${sourceDuration} seconds and preserves its model through generation and restart`, async t => {
     const app = await fixture(t, { probe: async () => ({ ...META, duration: sourceDuration }) });
     const id = randomUUID();
-    assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, voiceEngine: 'seedance' } })).status, 201);
+    assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, voiceEngine: 'seedance', sourceAudioMode: 'original' } })).status, 201);
     await app.upload(id);
     assert.equal((await app.current(id)).duration, generatedDuration);
     await app.close(); await app.open();
@@ -131,7 +132,7 @@ for (const [model, duration, limit] of [['doubao-seedance-2-0-260128', 15.1, 15]
   test(`replica rejects a ${duration}-second video for its ${limit}-second edition before billing`, async t => {
     const app = await fixture(t, { probe: async () => ({ ...META, duration }) });
     const id = randomUUID();
-    await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance' } });
+    await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance', sourceAudioMode: 'original' } });
     const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
     assert.equal(response.status, 400); assert.match((await response.json()).error, new RegExp('2–' + limit));
     assert.equal((await app.current(id)).video, undefined); assert.equal((await app.wallet.snapshot('alice')).held, 0);
@@ -163,7 +164,7 @@ test('draft edition switches persist, reject incompatible downgrades, and lock a
 
 for (const [model, name, price] of REPLICA_PRICES) test(`${name} quotes, reserves and settles its model price across restart exactly once`, async t => {
   const app = await fixture(t, { costMode: true }), id = randomUUID();
-  assert.equal((await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance' } })).status, 201); await app.upload(id);
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance', sourceAudioMode: 'original' } })).status, 201); await app.upload(id);
   assert.equal((await app.current(id)).estimatedPoints, 500 * price);
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   const running = await app.until(id, task => task.status === 'running');
@@ -491,8 +492,7 @@ test('all four Seedance editions are offered and removed models cannot start or 
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
   assert.deepEqual(config.models.slice(0, 4).map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
-  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [true, 30]]);
-  assert.equal(config.models[4].id, PIXVERSE_MODEL);
+  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15]]);
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '最多生成15秒视频，1元/秒');
   assert.equal(config.models[1].description, '最多生成30秒视频，1.5元/秒');
@@ -510,11 +510,11 @@ test('all four Seedance editions are offered and removed models cannot start or 
   assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
-test('a fal key enables PixVerse without enabling Seedance or retired models', async t => {
+test('a fal key alone does not enable the direct-voice creation UI while legacy requests remain compatible', async t => {
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, enabled: false, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
-  assert.equal(config.enabled, true);
-  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [PIXVERSE_MODEL]);
+  assert.equal(config.enabled, false);
+  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), []);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID() } })).status, 503);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: PIXVERSE_MODEL } })).status, 201);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: WAN_MODEL } })).status, 400);
@@ -1388,7 +1388,7 @@ for (const [model, voiceEngine] of [[REPLICA_PRICES[0][0], 'seedance'], [PREMIUM
   });
 }
 
-test('source audio mode defaults to the existing flow, switches atomically and rejects invalid or voiceless requests before billing', async t => {
+test('explicit legacy audio selections remain compatible and reject invalid or voiceless requests before billing', async t => {
   const app = await fixture(t, { config: { ...CONFIG, falEnabled: true }, costMode: true });
   const id = await app.init(); await app.upload(id);
   assert.equal((await app.current(id)).sourceAudioMode, 'original');
@@ -1505,7 +1505,8 @@ for (const sourceAudioMode of ['original', 'silent']) test(`Seedance ${sourceAud
     narration: fakeNarration({ prepare: async () => assert.fail('Seedance must not prepare IndexTTS'), advance: async () => assert.fail('Seedance must not synthesize IndexTTS') }),
     lipsync: fakeLipsync({ submit: async () => assert.fail('Seedance must not submit a lip-sync job') }) });
   const config = await (await app.call('/config')).json();
-  assert.equal(config.voiceEngine, 'indextts2'); assert.equal(config.voiceEngines.find(engine => engine.id === 'indextts2').enabled, true);
+  assert.equal(config.voiceEngine, 'seedance'); assert.equal(config.sourceAudioMode, 'silent');
+  assert.deepEqual(config.voiceEngines.map(engine => engine.id), ['seedance']);
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   if (sourceAudioMode === 'silent') {
     const source = join(app.root, 'original.mp4');
@@ -1523,20 +1524,35 @@ for (const sourceAudioMode of ['original', 'silent']) test(`Seedance ${sourceAud
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
 });
 
-test('new tasks default to IndexTTS and retain that default when starting after restart', async t => {
+test('new tasks default to ASR-only direct voice after restart without subtitle, TTS or lip-sync calls', async t => {
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
-    narration: fakeNarration(), lipsync: fakeLipsync() });
+    captions: { extract: async () => assert.fail('Direct voice must not read subtitles') },
+    narration: fakeNarration({ prepare: async () => assert.fail('Direct voice must not synthesize separate narration') }),
+    lipsync: fakeLipsync({ submit: async () => assert.fail('Direct voice must not submit lip sync') }) });
   const id = randomUUID();
   const created = await app.call('/tasks', { body: { requestId: id } });
-  assert.equal(created.status, 201); assert.equal((await created.json()).task.voiceEngine, 'indextts2');
+  assert.equal(created.status, 201);
+  const draft = (await created.json()).task;
+  assert.equal(draft.voiceEngine, 'seedance'); assert.equal(draft.sourceAudioMode, 'silent');
   await app.upload(id);
+  const source = join(app.root, 'original.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=320x480:r=24:d=6',
+    '-f', 'lavfi', '-i', 'sine=frequency=220:duration=6', '-c:v', 'libx264', '-c:a', 'aac', source]);
+  assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: await readFile(source) })).status, 200);
   const missingVoice = await app.call(`/tasks/${id}/start`, { body: {} });
   assert.equal(missingVoice.status, 400); assert.equal((await missingVoice.json()).code, 'VIDEO_VOICE_REQUIRED');
   assert.equal(await app.wallet.reservation('alice', id), null);
   await uploadVoice(app, id); await app.close(); await app.open();
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   const running = await app.until(id, task => task.status === 'running');
-  assert.equal(running.voiceEngine, 'indextts2'); assert.equal('referAudioUrl' in app.state.body.payload, false);
+  assert.equal(running.voiceEngine, 'seedance'); assert.equal(running.sourceAudioMode, 'silent');
+  assert.equal(running.speech.source, 'audio'); assert.equal(running.captions, undefined);
+  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
+  assert.equal(app.state.body.payload.params.generateAudio, true);
+  assert.equal((await probeVideo(join(app.root, 'video', id, 'source-silent.mp4'))).audio, false);
+  app.state.done = true;
+  await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 1);
 });
 
 test('legacy drafts without a recorded voice engine still start with Seedance', async t => {
@@ -1553,7 +1569,7 @@ test('a draft can switch back to Seedance without requiring IndexTTS credentials
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     narration: fakeNarration({ enabled: false, prepare: async () => assert.fail('IndexTTS is not selected') }), lipsync: fakeLipsync({ enabled: false }) });
   const id = randomUUID();
-  assert.equal((await app.call('/tasks', { body: { requestId: id, voiceEngine: 'indextts2' } })).status, 201);
+  assert.equal((await app.call('/tasks', { body: { requestId: id, voiceEngine: 'indextts2', sourceAudioMode: 'original' } })).status, 201);
   await app.upload(id); await uploadVoice(app, id);
   assert.equal((await app.current(id)).voiceEngine, 'indextts2');
   assert.equal((await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'seedance' } })).status, 202);
@@ -1566,7 +1582,7 @@ test('a draft can switch back to Seedance without requiring IndexTTS credentials
 test('a saved IndexTTS draft retains its voice engine across restart and starts without repeating the selection', async t => {
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     narration: fakeNarration(), lipsync: fakeLipsync() });
-  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, voiceEngine: 'indextts2' } });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, voiceEngine: 'indextts2', sourceAudioMode: 'original' } });
   await app.upload(id); await uploadVoice(app, id); await app.close(); await app.open();
   assert.equal((await app.current(id)).voiceEngine, 'indextts2');
   await app.call(`/tasks/${id}/start`, { body: {} });
@@ -1971,7 +1987,7 @@ test('PixVerse cannot silently use legacy fixed pricing when actual-cost billing
   const model = PIXVERSE_MODEL;
   const app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'test' } });
   const config = await (await app.call('/config')).json();
-  assert.equal(config.models.find(item => item.id === model).enabled, false);
+  assert.equal(config.models.find(item => item.id === model), undefined);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model } })).status, 503);
 });
 

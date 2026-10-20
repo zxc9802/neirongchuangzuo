@@ -536,7 +536,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers.origin && req.headers.origin !== expected) throw error('请求来源无效。', 403, 'VIDEO_ORIGIN_REJECTED');
         if (closing || fatal) throw error('视频服务暂时不可用，请稍后查询原任务。', 503, 'VIDEO_UNAVAILABLE');
       }
-      if (path === `${PREFIX}/config` && req.method === 'GET') { json(res, 200, { enabled, models, voiceEnabled: speech.enabled, voiceEngines, voiceEngine: 'indextts2', model: models.find(model => model.enabled)?.id || MODEL, prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return; }
+      if (path === `${PREFIX}/config` && req.method === 'GET') {
+        const availableModels = models.filter(model => !isFalReplacement(model.id));
+        json(res, 200, { enabled: availableModels.some(model => model.enabled), models: availableModels,
+          voiceEnabled: speech.enabled, voiceEngines: voiceEngines.filter(engine => engine.id === 'seedance'),
+          voiceEngine: 'seedance', sourceAudioMode: 'silent', model: availableModels.find(model => model.enabled)?.id || MODEL,
+          prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return;
+      }
       if (path === `${PREFIX}/tasks` && req.method === 'GET') {
         const tasks = [...jobs.values()].filter(task => task.userId === userId).sort((a, b) => b.createdAt - a.createdAt).map(view);
         json(res, 200, { tasks: url.searchParams.get('completed') === 'true' ? tasks.filter(task => task.status === 'completed') : tasks.slice(0, 50) }); return;
@@ -549,8 +555,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const existing = jobs.get(body.requestId);
           if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
           const model = selectedModel(body.model);
-          const task = { id: body.requestId, userId, model, voiceEngine: selectedVoiceEngine(body.voiceEngine),
-            sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode, model), status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
+          // Keep explicit legacy parameters compatible; new clients use direct voice only.
+          const task = { id: body.requestId, userId, model, voiceEngine: selectedVoiceEngine(body.voiceEngine ?? (isFalReplacement(model) ? 'indextts2' : 'seedance')),
+            sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode ?? (isFalReplacement(model) ? 'original' : 'silent'), model),
+            status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
@@ -709,7 +717,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           }
           const model = selectedModel(body.model ?? (models.some(model => model.id === task.model) ? task.model : MODEL));
           const sourceAudioMode = selectedSourceAudioMode(body.sourceAudioMode ?? task.sourceAudioMode, model);
-          if (sourceAudioMode === 'silent' && !task.voice) throw error('无原声参考模式请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
+          if (sourceAudioMode === 'silent' && !task.voice) throw error('请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
           if (isFalReplacement(model) && task.voice && voiceEngine !== 'indextts2') throw error(`${models.find(item => item.id === model).name} 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
           const duration = videoDuration(task.video, model);
           task.model = model;

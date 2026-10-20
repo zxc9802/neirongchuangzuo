@@ -36,7 +36,7 @@ export async function removeVideoAudio(input, output) {
     if ((await probeVideo(output)).audio) throw new Error('Audio track remains');
   } catch {
     await rm(output, { force: true });
-    throw new VideoError('参考视频去除原声失败，尚未提交生成。请新建复刻重试，或选择原声参考模式。', 422, 'VIDEO_AUDIO_REMOVE_FAILED');
+    throw new VideoError('参考视频去除原声失败，尚未提交生成。请重试或更换参考视频。', 422, 'VIDEO_AUDIO_REMOVE_FAILED');
   }
 }
 export async function normalizePhoto(bytes) {
