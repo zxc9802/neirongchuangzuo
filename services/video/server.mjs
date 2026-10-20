@@ -45,10 +45,11 @@ async function readJSON(req) {
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, fetchImpl = fetch, probe = probeVideo,
-  photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env),
+  photo = normalizePhoto, voice = normalizeVoice, speech, captions = createCaptionService(env),
   narration, lipsync, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
+  if (speech === undefined) speech = createSpeechService(env, costMeter.fetch);
   if (narration === undefined) narration = createNarrationService(env, { fetchImpl: costMeter.fetch });
   if (lipsync === undefined) lipsync = createLipsyncService(env, costMeter.fetch);
   provider ||= createVideoProvider(config,costMeter.fetch);
@@ -145,6 +146,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (isFalReplacement(task.model) && record?.kind === 'api-cost' && record.status === 'reserved') {
         // A playable result can arrive before its usage header. Re-read only saved receipts.
         const urls = [task.falQueue?.result, task.lipsync?.resultUrl, ...(task.narration?.segments || []).map(segment => segment.falQueue?.result)];
+        for (const name of ['source.mp4', 'generated.mp4', 'result.tmp']) {
+          const transcription = await readFile(join(folder(task), name + '.asr.json'), 'utf8').then(JSON.parse).catch(() => null);
+          if (transcription?.resultUrl) urls.push(transcription.resultUrl);
+        }
         await costMeter.run({ userId: task.userId, taskId }, () => Promise.allSettled(urls.filter(Boolean).map(async value => {
           const url = new URL(value), id = /\/requests\/([^/]+)$/.exec(url.pathname)?.[1];
           if (url.origin !== 'https://queue.fal.run' || url.username || url.password
@@ -196,6 +201,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         { diagnosticsPath: join(folder(task), 'verification-source.json') }), source: 'audio' };
       task.originalSpeech = structuredClone(task.speech);
     }
+    if (task.code === 'VIDEO_TRANSCRIPTION_PENDING') { task.error = ''; delete task.code; }
     await save(task);
   }
   async function renderCaptions(task, input) {
@@ -244,6 +250,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (!task.cleaned) {
         for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         await rm(join(folder(task), 'narration'), { recursive: true, force: true });
+        for (const name of ['source.mp4', 'generated.mp4', 'result.tmp']) {
+          await rm(join(folder(task), name + '.asr.json'), { force: true });
+          await rm(join(folder(task), name + '.asr.json.tmp'), { force: true });
+        }
         for (const name of ['narration.wav', 'narration.wav.pcm', 'narration.wav.tmp.wav', 'lipsync.mp4', 'lipsync.mp4.download.json']) await rm(join(folder(task), name), { force: true });
         task.cleaned = true; await save(task);
       }
@@ -403,6 +413,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         legacy:task.billing?.mode!=='api_cost',aggregate:task.billing?.mode==='api_cost' && !isFalReplacement(task.model)},()=>processTask(task)); }
       catch (cause) {
         if (fatal) return;
+        if (cause.code === 'VIDEO_TRANSCRIPTION_PENDING') {
+          task.error = cause.message; task.code = cause.code; await save(task); return;
+        }
         if (['VIDEO_NARRATION_FAILED', 'VIDEO_NARRATION_UNCERTAIN', 'VIDEO_LIPSYNC_FAILED', 'VIDEO_LIPSYNC_UNCERTAIN'].includes(cause.code)) {
           await fail(task, cause.message, cause.code); return;
         }
@@ -553,7 +566,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (match[2] === 'analyze' && req.method === 'POST') {
           await readJSON(req);
           if (task.status !== 'draft' || !task.video) throw error('请先上传参考视频，再分析台词。', 409);
-          await analyzeSource(task);
+          // Draft analysis has no reservation; generation includes transcription in its existing billing scope.
+          await costMeter.run({ legacy: true }, () => analyzeSource(task));
           json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'speech' && req.method === 'POST') {

@@ -10,6 +10,18 @@ import { probeVideo } from '../services/video/media.mjs';
 
 const enabled = Boolean(process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN);
 const voice = fileURLToPath(new URL('./fixtures/replica-speech.wav', import.meta.url));
+const transcriptionFetch = getData => async (url, options = {}) => {
+  if (String(url).includes('/storage/upload/')) return Response.json({
+    upload_url: 'https://upload.fal.media/source.wav', file_url: 'https://fal.media/source.wav',
+  });
+  if (options.method === 'PUT') return new Response('');
+  if (options.method === 'POST') return Response.json({ request_id: 'asr-1',
+    status_url: 'https://queue.fal.run/fal-ai/elevenlabs/requests/asr-1/status',
+    response_url: 'https://queue.fal.run/fal-ai/elevenlabs/requests/asr-1' });
+  if (String(url).endsWith('/status')) return Response.json({ status: 'COMPLETED' });
+  const data = getData();
+  return Response.json({ text: data.text, words: data.words.map(({ word, ...timing }) => ({ text: word, type: 'word', ...timing })) });
+};
 test('speech correction keeps burned-in captions and mouth frames on the corrected audio timeline', async t => {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'replica-picture-alignment-'));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -53,10 +65,9 @@ test('analysis preserves VAD and ASR diagnostics when a closing speech interval 
   assert.equal(intervals.length, 2);
   const words = [{ word: '你好', start: intervals[0].start, end: intervals[0].end }];
   const speech = createSpeechService({
-    VIDEO_TRANSCRIPTION_API_KEY: 'test-no-network',
-    VIDEO_TRANSCRIPTION_BASE_URL: 'https://transcription.example',
+    FAL_KEY: 'test-no-network',
     VIDEO_PYTHON_BIN: process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN,
-  }, async () => new Response(JSON.stringify({ text: '你好', words }), { headers: { 'content-type': 'application/json' } }));
+  }, transcriptionFetch(() => ({ text: '你好', words })));
   const timeline = await speech.analyze(input, 5, { diagnosticsPath: diagnosticPath });
   assert.equal(timeline.text, '你好'); assert.equal(timeline.end, intervals[1].end); assert.match(timeline.warning, /核对/);
   const diagnostic = JSON.parse(await readFile(diagnosticPath, 'utf8'));
@@ -74,12 +85,12 @@ test('analysis continues to transcription when the real detector finds no speech
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'anullsrc=r=16000:cl=mono', '-t', '3', input]);
   let transcriptions = 0;
   const speech = createSpeechService({
-    VIDEO_TRANSCRIPTION_API_KEY: 'test-no-network', VIDEO_TRANSCRIPTION_BASE_URL: 'https://transcription.example',
+    FAL_KEY: 'test-no-network',
     VIDEO_PYTHON_BIN: process.env.VIDEO_PYTHON_BIN || process.env.MIX_PYTHON_BIN,
-  }, async () => {
+  }, transcriptionFetch(() => {
     transcriptions++;
-    return Response.json({ text: '你好', words: [{ word: '你好', start: 1, end: 2 }] });
-  });
+    return { text: '你好', words: [{ word: '你好', start: 1, end: 2 }] };
+  }));
   const timeline = await speech.analyze(input, 3);
   assert.equal(transcriptions, 1); assert.equal(timeline.text, '你好'); assert.equal(timeline.timingSource, 'asr');
   assert.equal(timeline.start, 1); assert.equal(timeline.end, 2); assert.match(timeline.warning, /核对/);

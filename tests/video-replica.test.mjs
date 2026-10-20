@@ -1309,6 +1309,27 @@ test('IndexTTS preserves explicitly confirmed dialogue instead of overwriting it
   assert.equal((await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } })).status, 202);
   assert.deepEqual((await app.until(id, task => task.status === 'running')).speech, confirmed);
 });
+
+test('pending source transcription resumes after restart before any video or narration generation', async t => {
+  let ready = false, prepared = 0;
+  const app = await fixture(t, {
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async () => {
+      if (!ready) throw new VideoError('原声文稿正在识别，正在查询原任务。', 502, 'VIDEO_TRANSCRIPTION_PENDING');
+      return structuredClone(SPEECH);
+    } }),
+    narration: fakeNarration({ prepare: async task => { prepared++; return fakeNarration().prepare(task); } }),
+    lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  const pending = await app.until(id, task => task.code === 'VIDEO_TRANSCRIPTION_PENDING');
+  assert.equal(pending.status, 'preparing');
+  assert.equal(app.state.generations, 0); assert.equal(prepared, 0);
+  await app.close(); ready = true; await app.open();
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.speech.text, SPEECH.text); assert.equal(running.error, '');
+  assert.equal(app.state.generations, 1); assert.equal(prepared, 1);
+});
 const fakeLipsync = overrides => ({ enabled: true,
   submit: async () => ({ id: 'mouth-job', statusUrl: 'https://queue.fal.run/veed/lipsync/requests/mouth-job/status' }),
   query: async () => 'https://cdn.example/mouth.mp4', ...overrides });

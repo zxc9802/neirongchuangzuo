@@ -3,6 +3,7 @@ import { promisify } from 'node:util';
 import { readFile, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { VideoError } from './provider.mjs';
+import { createTranscriptionService } from './transcription.mjs';
 
 const run = promisify(execFile);
 const worker = fileURLToPath(new URL('./speech_vad.py', import.meta.url));
@@ -46,9 +47,7 @@ export function compareSpeech(expectedText, actualText) {
   return { exact: false, accepted: true, differences, mapping };
 }
 export function speechConfig(env = {}) {
-  const prefix = env.VIDEO_TRANSCRIPTION_API_KEY ? 'VIDEO_TRANSCRIPTION' : env.MOTION_API_KEY ? 'MOTION' : 'INDEXTTS';
-  return { key: env[`${prefix}_API_KEY`] || env.INDEXTTS_302_API_KEY,
-    base: env[`${prefix}_BASE_URL`] || env[`${prefix}_API_BASE_URL`] || 'https://api.302.ai',
+  return { key: env.FAL_KEY || env.FAL_API_KEY || env.VIDEO_FAL_KEY,
     python: env.VIDEO_PYTHON_BIN || env.MIX_PYTHON_BIN || 'python3' };
 }
 export async function detectSpeech(path, config = speechConfig(process.env)) {
@@ -103,9 +102,13 @@ export function speechTimeline(data, intervals, duration) {
     if (!Number.isFinite(word.start) || !Number.isFinite(word.end) || word.start < 0 || word.end < word.start
       || word.end > duration + 0.1 || word.start < previous - 0.1) return fallback();
     previous = word.start;
-    // Chinese ASR can put adjacent characters at the same instant. Retain the
-    // untimed character with its following word rather than inventing a time.
-    if (word.end === word.start) { pending += word.word; continue; }
+    // Scribe can timestamp a sentence-final character at the preceding word's
+    // end. Keep it there instead of moving it across a pause to the next phrase.
+    if (word.end === word.start) {
+      if (words.at(-1)?.end === word.start) words.at(-1).word += word.word;
+      else pending += word.word;
+      continue;
+    }
     words.push({ ...word, word: pending + word.word }); pending = '';
   }
   if (pending && words.length) words.at(-1).word += pending;
@@ -159,8 +162,9 @@ export function confirmSpeech(timeline, segments) {
 }
 export function createSpeechService(env = {}, fetchImpl = fetch) {
   const config = speechConfig(env);
+  const transcription = createTranscriptionService(env, fetchImpl);
   async function analyze(path, duration, { diagnosticsPath } = {}) {
-    if (!config.key) throw new VideoError('声音参考的语音识别服务尚未配置。', 503, 'VIDEO_SPEECH_NOT_CONFIGURED');
+    if (!config.key) throw new VideoError('语音识别尚未配置，请配置 fal 密钥 FAL_KEY、FAL_API_KEY 或 VIDEO_FAL_KEY。', 503, 'VIDEO_SPEECH_NOT_CONFIGURED');
     const intervals = await detectSpeech(path, config).catch(cause => {
       if (cause.code !== 'VIDEO_SPEECH_INVALID') throw cause;
       return [];
@@ -169,17 +173,13 @@ export function createSpeechService(env = {}, fetchImpl = fetch) {
     try {
       await run('ffmpeg', ['-v', 'error', '-y', '-protocol_whitelist', 'file,pipe', '-i', path,
         '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audio], { timeout: 30_000 });
-      const form = new FormData();
-      form.append('file', new Blob([await readFile(audio)], { type: 'audio/wav' }), 'speech.wav');
-      form.append('model', 'whisper-1'); form.append('response_format', 'verbose_json');
-      form.append('timestamp_granularities[]', 'word'); form.append('timestamp_granularities[]', 'segment');
-      const response = await fetchImpl(new URL('/v1/audio/transcriptions', config.base), {
-        method: 'POST', redirect: 'error', headers: { Authorization: `Bearer ${config.key}` }, body: form, signal: AbortSignal.timeout(120_000) });
-      if (!response.ok) throw new VideoError('语音识别服务未完成分析，请稍后重新分析素材。', 502, 'VIDEO_TRANSCRIPTION_FAILED');
-      const data = await response.json();
-      const diagnostic = { duration, vad: intervals, asr: { text: data.text, words: data.words } };
+      const result = await transcription.transcribe(audio, path + '.asr.json');
+      const data = { text: result.words.filter(word => ['word', 'spacing'].includes(word.type)).map(word => word.text).join(''),
+        words: result.words.filter(word => word.type === 'word')
+          .map(word => ({ word: word.text, start: word.start, end: word.end })) };
+      const diagnostic = { duration, vad: intervals, asr: data, provider: 'fal', model: 'scribe-v2' };
       try {
-        const timeline = speechTimeline(data, intervals, duration);
+        const timeline = { ...speechTimeline(data, intervals, duration), engine: 'silero-vad+scribe-v2' };
         if (diagnosticsPath) await writeFile(diagnosticsPath, JSON.stringify({ ...diagnostic, timeline }), { mode: 0o600 });
         return timeline;
       } catch (cause) {
