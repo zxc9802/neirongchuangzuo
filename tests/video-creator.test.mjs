@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { once } from 'node:events';
 import { mkdtemp, realpath, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,7 @@ import { createVideoCreatorHandler, normalizeVideoSettings } from '../services/v
 import { createCreatorProvider, creatorConfig, creativeGenerationBody } from '../services/video-creator/provider.mjs';
 import { createDirectorModel, validateDirectorResult, directorPacing } from '../services/video-creator/model.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
-import { VIDEO_MODELS, DEFAULT_VIDEO_SETTINGS } from '../design/video-catalog.js';
+import { VIDEO_MODELS, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES } from '../design/video-catalog.js';
 import { videoConfig } from '../services/video/provider.mjs';
 import { collectGeneratedAssets } from '../design/generated-assets.js';
 
@@ -105,6 +105,28 @@ test('new video requests only accept 720p while persisted legacy jobs retain ups
   }
   assert.equal(f.state.generates, 0);
   assert.equal(creativeGenerationBody({ ...settings, resolution: '480p', prompt: '已提交的旧任务', imageIds: ['x'], audioIds: [] }).payload.params.resolution, '480p');
+});
+
+test('image uploads accept just under 50MB, reject the exact boundary and preserve the audio limit', async t => {
+  const f = await fixture(t), id = await f.init();
+  const config = await (await f.call('/config')).json();
+  assert.equal(config.limits.imageBytes, VIDEO_IMAGE_MAX_BYTES - 1);
+  assert.equal(config.limits.audioBytes, VIDEO_AUDIO_MAX_BYTES);
+  const large = Buffer.alloc(VIDEO_IMAGE_MAX_BYTES - 1); f.image.copy(large);
+  const asset = randomUUID(), target = `/api/video-creator/conversations/${id}/assets/${asset}`;
+  const accepted = await fetch(f.base + target, { method:'PUT', headers:{'Content-Type':'image/jpeg'}, body:large });
+  assert.equal(accepted.status, 200, await accepted.text());
+  const saved = (await f.current(id)).assets.find(a => a.id === asset); assert.equal(saved.size, large.length);
+  const photo = await fetch(f.base + target); assert.equal(photo.status, 200); assert.ok((await photo.arrayBuffer()).byteLength < 1024 * 1024);
+  const tooLarge = (type, size) => new Promise((resolve,reject) => {
+    const req = httpRequest(f.base + `/api/video-creator/conversations/${id}/assets/${randomUUID()}`, {method:'PUT',headers:{'Content-Type':type,'Content-Length':size}},res=>{
+      let body='';res.setEncoding('utf8');res.on('data',chunk=>body+=chunk);res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(body)}));
+    });req.on('error',reject);req.flushHeaders();
+  });
+  const exact = await tooLarge('image/jpeg', VIDEO_IMAGE_MAX_BYTES); assert.equal(exact.status,413); assert.match(exact.body.error,/小于50MB/);
+  assert.equal((await tooLarge('image/jpeg', VIDEO_IMAGE_MAX_BYTES + 1)).status,413);
+  assert.equal((await tooLarge('audio/wav', VIDEO_AUDIO_MAX_BYTES + 1)).status,413);
+  assert.equal((await f.current(id)).assets.length,1); assert.equal(f.state.generates,0);
 });
 
 test('switching to muted generation keeps the uploaded voice but sends no audio material upstream', async t => {

@@ -6,6 +6,8 @@ export const VIDEO_SKILLS = [
 ];
 export const VIDEO_HOOKS = ['直击产品核心痛点', '利用新奇场景开场', '制造强烈情绪反转', '用反常识观点开场', '真实痛点引出需求', '强烈对比突出差异'];
 export const videoAssetPurpose = asset => asset.type === 'audio' ? 'voice' : asset.purpose === 'character' ? 'character' : 'reference';
+export const VIDEO_IMAGE_MAX_BYTES = 50 * 1024 * 1024;
+export const VIDEO_AUDIO_MAX_BYTES = 15 * 1024 * 1024;
 export const VIDEO_PROVIDER_MODELS = [
   { id: 'doubao-seedance-2-0-fast-260128', name: 'Plus模型', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p'], maxImages: 9 },
   { id: 'doubao-seedance-2-0-260128', name: 'Pro模型', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p', '1080p'], maxImages: 9 },

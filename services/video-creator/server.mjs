@@ -1,7 +1,7 @@
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { createHash, createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import { VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, videoAssetPurpose } from '../../design/video-catalog.js';
+import { VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, videoAssetPurpose } from '../../design/video-catalog.js';
 import { createCreatorStore, UUID } from './store.mjs';
 import { createDirectorModel, creatorError } from './model.mjs';
 import { DIRECTOR_PLAN_VERSION } from './director-plan.mjs';
@@ -29,11 +29,11 @@ export function normalizeVideoSettings(value = {}) {
     || typeof settings.generateAudio !== 'boolean') throw creatorError('视频设置无效，请重新选择。');
   return Object.fromEntries(Object.keys(DEFAULT_VIDEO_SETTINGS).map(key => [key, settings[key]]));
 }
-async function bytes(req, limit) {
-  if (Number(req.headers['content-length']) > limit) throw creatorError('文件过大，请压缩后重试。', 413, 'CREATOR_UPLOAD_TOO_LARGE');
+async function bytes(req, limit, message = '文件过大，请压缩后重试。') {
+  if (Number(req.headers['content-length']) > limit) throw creatorError(message, 413, 'CREATOR_UPLOAD_TOO_LARGE');
   const chunks = []; let total = 0;
   const timer = setTimeout(() => req.destroy(), 120000); timer.unref?.();
-  try { for await (const chunk of req) { total += chunk.length; if (total > limit) throw creatorError('上传内容过大。', 413, 'CREATOR_UPLOAD_TOO_LARGE'); chunks.push(chunk); } return Buffer.concat(chunks); }
+  try { for await (const chunk of req) { total += chunk.length; if (total > limit) throw creatorError(message, 413, 'CREATOR_UPLOAD_TOO_LARGE'); chunks.push(chunk); } return Buffer.concat(chunks); }
   finally { clearTimeout(timer); }
 }
 async function body(req) {
@@ -276,7 +276,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       if (req.headers.origin && ![config.publicOrigin, publicOrigin, `http://${req.headers.host}`, `https://${req.headers.host}`].includes(req.headers.origin)) throw creatorError('请求来源无效。', 403, 'CREATOR_ORIGIN_DENIED');
       if (!['GET', 'HEAD'].includes(req.method) && closing) throw creatorError('服务正在重启，尚未发起生成。', 503, 'SERVICE_CLOSING');
       if (route[0] === 'config' && req.method === 'GET') { json(res, 200, { skills: VIDEO_SKILLS.map(({ focus, ...s }) => s), models: VIDEO_MODELS, directorEnabled: director.enabled,
-        generationEnabled: Boolean(config.enabled), limits: { images: 30, characters: 10, audio: 1, imageBytes: 10 * 1024 * 1024, audioBytes: 15 * 1024 * 1024 }, costMode: meter.enabled, cnyPerSecond }); return; }
+        generationEnabled: Boolean(config.enabled), limits: { images: 30, characters: 10, audio: 1, imageBytes: VIDEO_IMAGE_MAX_BYTES - 1, audioBytes: VIDEO_AUDIO_MAX_BYTES }, costMode: meter.enabled, cnyPerSecond }); return; }
       if (route[0] === 'quote' && req.method === 'POST') {
         const settings = normalizeVideoSettings((await body(req)).settings), wallet = credits ? await credits.snapshot(userId) : null;
         json(res, 200, { points: points(settings.duration), affordable: !wallet || wallet.unlimited || wallet.available >= points(settings.duration), unlimited: wallet?.unlimited === true }); return;
@@ -326,14 +326,15 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         const id = route[3], asset = c.assets.find(a => a.id === id);
         if (['GET', 'HEAD'].includes(req.method)) { live(c); if (!asset) throw creatorError('素材不存在。', 404); await serveMedia(req, res, asset.path, asset.type === 'image' ? 'image/jpeg' : 'audio/wav'); return; }
         if (req.method === 'PUT') {
-          live(c); const data = await bytes(req, 15 * 1024 * 1024), checksum = hash(data.toString('base64'));
+          live(c);
           const image = /^image\/(jpeg|png|webp)$/.test(req.headers['content-type'] || ''), audio = /^audio\/(mpeg|wav|x-wav)$/.test(req.headers['content-type'] || '');
+          if (!image && !audio) throw creatorError('图片支持 JPG、PNG、WebP，音频支持 MP3、WAV。');
+          const data = await bytes(req, image ? VIDEO_IMAGE_MAX_BYTES - 1 : VIDEO_AUDIO_MAX_BYTES, image ? '单张图片需小于50MB。' : '声音文件不能超过15MB。'), checksum = hash(data.toString('base64'));
           const purpose = req.headers['x-asset-purpose'] || (audio ? 'voice' : 'reference');
           if (!['reference', 'character', 'voice'].includes(purpose) || audio && purpose !== 'voice' || image && purpose === 'voice') throw creatorError('素材用途与文件类型不符。');
           await lock(c.id, async () => {
             const existing = c.assets.find(a => a.id === id); if (existing) { if (existing.checksum !== checksum || videoAssetPurpose(existing) !== purpose) throw creatorError('同一素材不能替换为其他文件或用途，请重新添加。', 409); return; }
             if (active(c)) throw creatorError('请等待当前任务完成后再添加素材。', 409);
-            if (!image && !audio || image && data.length > 10 * 1024 * 1024) throw creatorError('图片支持 JPG、PNG、WebP，音频支持 MP3、WAV。');
             if (c.assets.filter(a => a.type === (image ? 'image' : 'audio')).length >= (image ? 30 : 1)) throw creatorError(image ? '最多上传30张图片。' : '最多选择一段声音参考。');
             if (purpose === 'character' && c.assets.filter(a => videoAssetPurpose(a) === 'character').length >= 10) throw creatorError('最多添加10张角色参考图。');
             const path = await store.path(c.id, id + (image ? '.jpg' : '.wav')); let metadata = {};

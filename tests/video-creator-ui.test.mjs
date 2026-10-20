@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DEFAULT_VIDEO_SETTINGS, VIDEO_MODELS } from '../design/video-catalog.js';
+import { DEFAULT_VIDEO_SETTINGS, VIDEO_MODELS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES } from '../design/video-catalog.js';
 
 async function fixture(t, api) {
   const names = ['document', 'workspaceUser', 'fetch', 'setInterval', 'clearInterval', 'EventSource', 'SpeechRecognition', 'webkitSpeechRecognition', 'FormData'];
@@ -56,6 +56,20 @@ test('resolution chooser only exposes 720p for every model and legacy scripts re
   assert.match(f.html(), /编导要求/); assert.match(f.html(), /按720p重新输出上一版完整脚本/);
   f.action('vc-stage-generation'); assert.doesNotMatch(f.html(), /旧480p生成提示词/);
   assert.match(f.html(), /9:16 · 720p/); assert.equal(data.scriptCalls, 0);
+});
+
+test('client applies the exclusive 50MB image boundary to both image groups without increasing audio size', async t => {
+  const data=composerApi(),f=await fixture(t,data.api);
+  const select = async (input,size,type='image/jpeg') => {
+    const file=new File(['test'],'素材.'+(type.startsWith('image')?'jpg':'wav'),{type});Object.defineProperty(file,'size',{value:size});
+    f.node(input).onchange({target:{files:[file]}});await delay(20);
+  };
+  await select('#vc-images',VIDEO_IMAGE_MAX_BYTES);assert.equal(data.uploads.length,0);assert.match(f.html(),/小于50MB/);
+  await select('#vc-images',VIDEO_IMAGE_MAX_BYTES-1);assert.equal(data.uploads.length,1);
+  await select('#vc-characters',VIDEO_IMAGE_MAX_BYTES);assert.equal(data.uploads.length,1);
+  await select('#vc-characters',VIDEO_IMAGE_MAX_BYTES-1);assert.equal(data.uploads.length,2);
+  await select('#vc-audio',VIDEO_AUDIO_MAX_BYTES+1,'audio/wav');assert.equal(data.uploads.length,2);assert.match(f.html(),/15MB/);
+  assert.equal(data.scriptCalls,0);
 });
 
 test('creative plan exposes material decisions, cast continuity and actionable shots without executing model markup', async t => {

@@ -1,5 +1,5 @@
 import { markdownText } from './markdown.js';
-import { VIDEO_SKILLS, VIDEO_HOOKS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, videoAssetPurpose } from './video-catalog.js';
+import { VIDEO_SKILLS, VIDEO_HOOKS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, videoAssetPurpose } from './video-catalog.js';
 import { accountStorageKey } from './account-storage.js';
 import { refreshWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 
@@ -85,7 +85,7 @@ async function upload(files, purpose) {
       if (!image && !audio) throw new Error('图片支持 JPG、PNG、WebP，声音支持 MP3、WAV。');
       const assetPurpose = purpose || (audio ? 'voice' : 'reference');
       if (image && assetPurpose === 'voice' || audio && assetPurpose !== 'voice') throw new Error('请按当前入口选择图片或声音文件。');
-      if (file.size > (image ? 10 : 15) * 1024 * 1024) throw new Error(image ? '单张图片不能超过10MB。' : '声音文件不能超过15MB。');
+      if (image ? file.size >= VIDEO_IMAGE_MAX_BYTES : file.size > VIDEO_AUDIO_MAX_BYTES) throw new Error(image ? '单张图片需小于50MB。' : '声音文件不能超过15MB。');
       if (state.session.assets.filter(a => a.type === (image ? 'image' : 'audio')).length >= (image ? 30 : 1)) throw new Error(image ? '最多添加30张图片。' : '最多选择一段声音参考。');
       if (assetPurpose === 'character' && state.session.assets.filter(a => videoAssetPurpose(a) === 'character').length >= 10) throw new Error('最多添加10张角色参考图。');
       state.uploadLabel = `上传素材 ${index + 1}/${files.length}`; refresh();
