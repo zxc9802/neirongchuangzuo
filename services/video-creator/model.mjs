@@ -80,8 +80,10 @@ const SYSTEM = `你是起芽内容创作的同城到店视频编导。先观察�
 只输出一个JSON对象，无Markdown代码围栏。正常格式：{"kind":"script","text":"简要讲述素材选择和创作思路","assets":[{"id":"实际图片ID","description":"可见内容","role":"独立看点与用途"}],"warnings":[],"script":{"title":"脚本标题","summary":"主题与到店理由","globalDirection":"全片视觉风格、连续性、声音和字幕要求，不含分镜时间轴","shots":[{"start":0,"end":3,"visual":"本镜头的具体主体、空间、景别与动作","camera":"运镜和与下镜头的衔接","referenceIds":["实际图片ID"],"voiceover":"旁白，可空","caption":"字幕，可空"}]}}。shots时间从0开始连续覆盖完整时长；示例中的单个镜头只说明字段，不代表全片镜头数。需要补充信息时格式：{"kind":"clarification","text":"具体说明","questions":["需要商家补充的问题"],"warnings":[]}。不要用未知事实占位符冒充完成脚本。`;
 
 function directorSystem(skill) {
-  const common = skill === 'signature' ? SYSTEM.split('\n').filter(line => !line.startsWith('门店或环境介绍要主动梳理')).join('\n')
+  let common = skill === 'signature' ? SYSTEM.split('\n').filter(line => !line.startsWith('门店或环境介绍要主动梳理')).join('\n')
     .replace('例如30秒素材充足的环境介绍通常需要8—10个有区别的镜头，', '招牌体验按产品看点和可见细节安排景别变化，') : SYSTEM;
+  if (skill === 'group-buy') common = common.replace('"warnings":[],"script":',
+    '"warnings":[],"offerFacts":{"package":{"value":"","sourceQuote":""},"price":{"value":"","sourceQuote":""},"validity":{"value":"","sourceQuote":""},"conditions":{"value":"","sourceQuote":""}},"script":');
   return [common, skillDirection(skill)].filter(Boolean).join('\n\n');
 }
 
