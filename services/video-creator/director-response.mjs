@@ -26,8 +26,12 @@ export async function readDirectorResponse(response, maximumBytes = DIRECTOR_RES
       const remaining = maximumBytes - bytes; bytes += value.byteLength;
       raw += decoder.decode(value.subarray(0, Math.max(0, remaining)), { stream: true });
       if (bytes > maximumBytes) {
-        await reader.cancel().catch(() => {});
+        void reader.cancel().catch(() => {});
         throw Object.assign(new Error('编导响应超过接收上限。'), { code: 'DIRECTOR_RESPONSE_TOO_LARGE', outputIssue: 'response_too_large' });
+      }
+      // Some compatible gateways keep HTTP open after the terminal SSE event.
+      if (response.ok && /(?:^|\n)data: *\[DONE\](?:\r?\n|$)/.test(raw)) {
+        void reader.cancel().catch(() => {}); break;
       }
     }
     raw += decoder.decode();

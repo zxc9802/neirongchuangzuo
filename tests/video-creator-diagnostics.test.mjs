@@ -27,6 +27,14 @@ function sse(payload) {
 }
 const streamResponse = payload => new Response(sse(payload), { headers: { 'content-type': 'text/event-stream', 'x-api-request-id': 'outer-receipt-id' } });
 
+test('a terminal SSE event completes even if the gateway leaves the HTTP connection open', async () => {
+  let cancelled = false;
+  const body = new ReadableStream({ start(controller) { controller.enqueue(Buffer.from(sse(completion('{"ok":true}')))); }, cancel() { cancelled = true; } });
+  const result = await readDirectorResponse(new Response(body, { headers: { 'content-type': 'text/event-stream' } }));
+  assert.equal(result.payload.choices[0].finish_reason, 'stop'); assert.equal(cancelled, true);
+  assert.match(result.rawResponse, /\[DONE\]/);
+});
+
 test('director raises output budget and preserves finish reason, raw wire response and usage without secrets', async t => {
   const { input, output } = await setup(t); output.script.globalDirection += config.apiKey;
   const attempts = []; let sent;
