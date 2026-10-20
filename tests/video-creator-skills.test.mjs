@@ -93,3 +93,13 @@ test('missing offer facts yield a clarification without format retries or a paid
   } }).generate(input);
   assert.equal(calls, 1); assert.equal(result.kind, 'clarification'); assert.equal(result.script, undefined);
 });
+
+test('unused images are excluded and prompt numbering matches only the selected image order', () => {
+  const input = { ...baseInput, skill: 'signature', assets: [{ id: 'unwanted-person', type: 'image' }, { id: 'food', type: 'image' },
+    { id: 'unrelated-product', type: 'image' }, { id: 'space', type: 'image' }] };
+  const result = validateDirectorResult(output(), input).script;
+  assert.deepEqual(result.referenceImageIds, ['food', 'space']);
+  assert.match(result.videoPrompt, /镜头1.*参考图片2/);
+  assert.match(result.videoPrompt, /镜头2.*参考图片1/);
+  assert.doesNotMatch(result.videoPrompt, /图片3|图片4|unwanted-person|unrelated-product/);
+});

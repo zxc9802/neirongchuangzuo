@@ -99,3 +99,28 @@ test('successful polling clears a recovered connection error without clearing a 
   failPoll = true; await f.poll(); assert.match(f.html(), /请确认主推产品/); assert.doesNotMatch(f.html(), /Temporary connection failure/);
   failPoll = false; await f.poll(); assert.match(f.html(), /请确认主推产品/);
 });
+
+test('applying and reopening a video keeps the exact planned images in the editor and generation request', async t => {
+  let conversation, op, task, submitted;
+  const f = await fixture(t, async (path, options) => {
+    const body = options?.body && options?.method !== 'PUT' ? JSON.parse(options.body) : null;
+    if (path.endsWith('/config')) return Response.json({ directorEnabled: true, generationEnabled: true });
+    if (path.endsWith('/quote')) return Response.json({ unlimited: true, affordable: true });
+    if (path.endsWith('/tasks')) return Response.json({ tasks: task ? [task] : [] });
+    if (path.endsWith('/conversations') && body) { conversation = { id: body.requestId, version: 1, skill: body.skill, settings: body.settings, operations: [], tasks: [], assets: [] }; return Response.json({ conversation }); }
+    if (path.endsWith('/conversations')) return Response.json({ conversations: [] });
+    if (options?.method === 'PUT') { const name = decodeURIComponent(options.headers['X-File-Name']); conversation.assets.push({ id: crypto.randomUUID(), name, type: 'image', url: '/'+name }); return Response.json({ conversation }); }
+    if (path.endsWith('/script')) { op = { id: body.requestId, status: 'completed', skill: conversation.skill, settings: body.settings, message: body.message,
+      result: { kind: 'script', script: { title: '只用产品与环境', shots: [], videoPrompt: '图片1是产品，图片2是环境', referenceImageIds: conversation.assets.slice(1).map(a => a.id) }, warnings: [] } };
+      conversation.operations=[op]; return Response.json({ operation: op }); }
+    if (path.endsWith('/generate')) { submitted=body; task={id:body.requestId,conversationId:conversation.id,status:'completed',title:'产品',duration:25,createdAt:Date.now(),settings:body.settings,scriptId:op.id,referenceImageIds:body.referenceImageIds,prompt:body.prompt,resultUrl:'/result.mp4'};conversation.tasks=[task];return Response.json({task}); }
+    return Response.json({ conversation });
+  });
+  f.node('#vc-images').onchange({ target: { files: ['person.jpg','food.jpg','space.jpg'].map(n => new File(['photo'],n,{type:'image/jpeg'})) } }); await delay(25);
+  f.action('vc-send'); await delay(25); f.action('vc-apply',{id:op.id}); await delay(10);
+  assert.doesNotMatch(f.html(), /alt="person.jpg"/); assert.match(f.html(), /alt="food.jpg"/); assert.match(f.html(), /alt="space.jpg"/);
+  f.action('vc-generate'); await delay(25); assert.deepEqual(submitted.referenceImageIds,op.result.script.referenceImageIds);
+  f.action('vc-new'); f.action('vc-select-task',{id:task.id}); await delay(25);
+  assert.doesNotMatch(f.html(), /alt="person.jpg"/);
+  f.action('vc-generate'); await delay(25); assert.equal(submitted.scriptId,op.id); assert.deepEqual(submitted.referenceImageIds,op.result.script.referenceImageIds);
+});

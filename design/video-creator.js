@@ -10,7 +10,7 @@ let context, timer, stream, loading = false, quoteVersion = 0;
 let state;
 function owner() { return globalThis.workspaceUser?.id || 'local-dev'; }
 function reset() { state = { owner: owner(), skill: VIDEO_SKILLS[0].id, settings: { ...DEFAULT_VIDEO_SETTINGS }, config: null, session: null,
-  tasks: [], conversations: [], input: '', prompt: '', scriptId: null, stage: 'director', busy: false, error: '', errorSource: '', selectedTask: null,
+  tasks: [], conversations: [], input: '', prompt: '', scriptId: null, referenceImageIds: null, stage: 'director', busy: false, error: '', errorSource: '', selectedTask: null,
   preview: 'result', queue: true, quote: null, quoteError: '', uploadLabel: '', bridge: null }; }
 function refresh() { if (context && document.body.dataset.page === 'video' && state.owner === owner()) context.refresh(); }
 function currentTask() { return state.tasks.find(t => t.id === state.selectedTask); }
@@ -50,7 +50,7 @@ async function upload(files) {
       const data = await request(`/conversations/${id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name) }, body: file });
       if (state.owner !== account) return; saveSession(data.conversation);
     }
-    state.scriptId = null; state.quote = null; void quote();
+    state.scriptId = null; state.referenceImageIds = null; state.quote = null; void quote();
   });
 }
 async function quote() {
@@ -83,7 +83,9 @@ async function load() {
 function editor(ctx) {
   const { esc, icon, button } = ctx, assets = state.session?.assets || [], disabled = locked(), op = pendingOp();
   const current = VIDEO_SKILLS.find(s => s.id === state.skill), imageCount = assets.filter(a => a.type === 'image').length;
-  const media = `<div class="vc-uploads">${assets.map(a => `<div class="vc-asset" title="${esc(a.name)}">${a.type === 'image' ? `<img src="${esc(a.url || '')}" alt="${esc(a.name)}">` : icon('audio')}<small>${esc(a.name)}</small>${!state.session.operations.length && !state.session.tasks.length ? button('vc-remove', '×', 'vc-remove', `data-id="${a.id}" aria-label="移除 ${esc(a.name)}" ${disabled ? 'disabled' : ''}`) : ''}</div>`).join('')}
+  const generationImages = state.referenceImageIds?.map(id => assets.find(a => a.id === id)).filter(Boolean);
+  const displayedAssets = state.stage === 'generation' && generationImages ? [...generationImages, ...assets.filter(a => a.type === 'audio')] : assets;
+  const media = `<div class="vc-uploads">${displayedAssets.map(a => `<div class="vc-asset" title="${esc(a.name)}">${a.type === 'image' ? `<img src="${esc(a.url || '')}" alt="${esc(a.name)}">` : icon('audio')}<small>${state.stage === 'generation' && generationImages && a.type === 'image' ? `图片${generationImages.indexOf(a) + 1}` : esc(a.name)}</small>${!state.session.operations.length && !state.session.tasks.length ? button('vc-remove', '×', 'vc-remove', `data-id="${a.id}" aria-label="移除 ${esc(a.name)}" ${disabled ? 'disabled' : ''}`) : ''}</div>`).join('')}
     ${imageCount < 30 ? button('vc-upload-image', icon('image') + '<span>添加图片</span>', 'vc-add', disabled ? 'disabled' : '') : ''}
     ${!assets.some(a => a.type === 'audio') ? button('vc-upload-audio', icon('audio') + '<span>添加声音<small>选填</small></span>', 'vc-add', disabled ? 'disabled' : '') : ''}</div>`;
   const settings = button('vc-settings', icon('settings') + `${esc(VIDEO_LANGUAGES.find(l => l.id === state.settings.language).name)} · ${state.settings.duration}s`, 'textbutton', disabled ? 'disabled' : '');
@@ -154,7 +156,7 @@ function savedPrompts() { try { return JSON.parse(localStorage.getItem(accountSt
 async function openConversation(id, task) {
   const account = state.owner, data = await request(`/conversations/${id}`); if (state.owner !== account) return; saveSession(data.conversation);
   state.settings = { ...(task?.settings || data.conversation.settings) }; state.input = ''; state.prompt = task?.prompt || '';
-  state.scriptId = null; state.stage = task ? 'generation' : 'director'; state.selectedTask = task?.id || null; state.preview = 'result'; void quote();
+  state.scriptId = task?.scriptId || null; state.referenceImageIds = task?.referenceImageIds || null; state.stage = task ? 'generation' : 'director'; state.selectedTask = task?.id || null; state.preview = 'result'; void quote();
 }
 export function handleVideoCreatorAction(action, el, ctx) {
   if (!action.startsWith('vc-') || ctx.mode !== 'video') return false;
@@ -164,7 +166,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-hook') { state.input = el.dataset.value; refresh(); }
   else if (action === 'vc-new') { const config = state.config, tasks = state.tasks, conversations = state.conversations, bridge = state.bridge; reset(); Object.assign(state, { config, tasks, conversations, bridge }); refresh(); void quote(); }
   else if (action === 'vc-skills') ctx.openModal('同城到店', '', `<div class="skill-grid">${VIDEO_SKILLS.map(s => button('vc-skill', `<div class="skill-art">${icon('store')}</div><div><strong>${s.name}</strong><small>${s.description}</small></div>${state.skill === s.id ? icon('check') : ''}`, 'skill-option', `data-value="${s.id}"`)).join('')}</div>`);
-  else if (action === 'vc-skill') { document.querySelector('#modal').close(); void perform(async () => { const skill = VIDEO_SKILLS.find(s => s.id === el.dataset.value); if (!skill) return; if (state.session) { const data = await request(`/conversations/${state.session.id}`, { ...post({ skill: skill.id, settings: state.settings }), method: 'PATCH' }); saveSession(data.conversation); } state.skill = skill.id; state.scriptId = null; state.pendingScriptRequest = null; state.generationRequest = null; state.stage = 'director'; state.prompt = ''; }); }
+  else if (action === 'vc-skill') { document.querySelector('#modal').close(); void perform(async () => { const skill = VIDEO_SKILLS.find(s => s.id === el.dataset.value); if (!skill) return; if (state.session) { const data = await request(`/conversations/${state.session.id}`, { ...post({ skill: skill.id, settings: state.settings }), method: 'PATCH' }); saveSession(data.conversation); } state.skill = skill.id; state.scriptId = null; state.pendingScriptRequest = null; state.generationRequest = null; state.stage = 'director'; state.prompt = ''; state.referenceImageIds = null; }); }
   else if (action === 'vc-settings' || action === 'vc-models') settings(ctx);
   else if (action === 'vc-stage-director') { state.stage = 'director'; refresh(); }
   else if (action === 'vc-stage-generation') { state.stage = 'generation'; refresh(); void quote(); }
@@ -181,7 +183,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
     if (state.pendingScriptRequest?.fingerprint !== fingerprint) state.pendingScriptRequest = { fingerprint,
       body: { requestId: crypto.randomUUID(), message, settings: { ...state.settings }, expectedScriptId: state.session.operations.findLast(o => o.status === 'completed')?.id || null } };
     const data = await request(`/conversations/${id}/script`, post(state.pendingScriptRequest.body));
-    state.pendingScriptRequest = null; state.input = ''; state.scriptId = null;
+    state.pendingScriptRequest = null; state.input = ''; state.scriptId = null; state.referenceImageIds = null;
     state.session.operations = [...state.session.operations.filter(o => o.id !== data.operation.id), data.operation];
     stream?.close();
     if (typeof EventSource !== 'undefined') {
@@ -198,20 +200,20 @@ export function handleVideoCreatorAction(action, el, ctx) {
   });
   else if (action === 'vc-apply') {
     const op = state.session.operations.find(o => o.id === el.dataset.id && o.skill === state.skill && o.result?.script); if (!op) return true;
-    state.prompt = op.result.script.videoPrompt; state.settings = { ...op.settings }; state.scriptId = op.id; state.stage = 'generation'; state.quote = null; refresh(); void quote();
+    state.prompt = op.result.script.videoPrompt; state.settings = { ...op.settings }; state.scriptId = op.id; state.referenceImageIds = op.result.script.referenceImageIds || null; state.stage = 'generation'; state.quote = null; refresh(); void quote();
   }
   else if (action === 'vc-copy') { const op = state.session.operations.find(o => o.id === el.dataset.id); if (op?.result?.script) void navigator.clipboard.writeText(op.result.script.videoPrompt).then(() => ctx.toast('脚本已复制。')).catch(() => ctx.toast('复制失败，请手动选择脚本。')); }
   else if (action === 'vc-generate') void perform(async () => {
-    const id = await ensureSession(), fingerprint = JSON.stringify({ id, prompt: state.prompt, settings: state.settings, scriptId: state.scriptId });
+    const id = await ensureSession(), fingerprint = JSON.stringify({ id, prompt: state.prompt, settings: state.settings, scriptId: state.scriptId, referenceImageIds: state.referenceImageIds });
     if (state.generationRequest?.fingerprint !== fingerprint) state.generationRequest = { fingerprint, id: crypto.randomUUID() };
-    const data = await request(`/conversations/${id}/generate`, post({ requestId: state.generationRequest.id, prompt: state.prompt, settings: state.settings, scriptId: state.scriptId }));
+    const data = await request(`/conversations/${id}/generate`, post({ requestId: state.generationRequest.id, prompt: state.prompt, settings: state.settings, scriptId: state.scriptId, referenceImageIds: state.referenceImageIds }));
     state.tasks = [data.task, ...state.tasks.filter(t => t.id !== data.task.id)]; state.session.tasks = [data.task, ...state.session.tasks.filter(t => t.id !== data.task.id)];
     state.selectedTask = data.task.id; state.preview = 'result'; state.generationRequest = null; void refreshWorkspaceCredits();
   });
   else if (action === 'vc-recover') void perform(async () => { const data = await request(`/tasks/${el.dataset.id}/recover`, post({})); state.tasks = state.tasks.map(t => t.id === data.task.id ? data.task : t); });
   else if (action === 'vc-save-prompt') { if (!state.prompt.trim()) { ctx.toast('先填写或应用一份脚本。'); return true; } try { const items = [{ id: crypto.randomUUID(), prompt: state.prompt, settings: state.settings }, ...savedPrompts()].slice(0, 40); localStorage.setItem(accountStorageKey('video-creator-prompts'), JSON.stringify(items)); ctx.toast('提示词已保存。'); } catch { ctx.toast('保存失败，请复制提示词后保留。'); } }
   else if (action === 'vc-saved-prompts') ctx.openModal('我的提示词', '', `<div class="saved-prompts">${savedPrompts().map(p => button('vc-use-prompt', `<p>${esc(p.prompt.slice(0, 160))}</p>`, 'saved-prompt', `data-id="${p.id}"`)).join('') || '<p class="muted">还没有保存的提示词</p>'}</div>`);
-  else if (action === 'vc-use-prompt') { const item = savedPrompts().find(p => p.id === el.dataset.id); if (item) { state.prompt = item.prompt; if (VIDEO_MODELS.some(m => m.id === item.settings?.model)) state.settings = { ...item.settings }; state.scriptId = null; state.quote = null; document.querySelector('#modal').close(); refresh(); void quote(); } }
+  else if (action === 'vc-use-prompt') { const item = savedPrompts().find(p => p.id === el.dataset.id); if (item) { state.prompt = item.prompt; if (VIDEO_MODELS.some(m => m.id === item.settings?.model)) state.settings = { ...item.settings }; state.scriptId = null; state.referenceImageIds = null; state.quote = null; document.querySelector('#modal').close(); refresh(); void quote(); } }
   return true;
 }
 export function disposeVideoCreator() { clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }

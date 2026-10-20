@@ -27,8 +27,8 @@ function script(input) {
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-creator-'));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode: true }); await wallet.ready;
-  const state = { generates: 0, materialCreates: 0, scripts: 0, review: 2, done: false, failed: false, downloads: 0, diagnosticErrors: [] };
-  const provider = { async createMaterial(url) { state.materialCreates++; state.source = url; if (options.createMaterial) return options.createMaterial(url); return { id: 'material-' + state.materialCreates, status: state.review }; },
+  const state = { generates: 0, materialCreates: 0, scripts: 0, review: 2, done: false, failed: false, downloads: 0, diagnosticErrors: [], sources: [] };
+  const provider = { async createMaterial(url) { state.materialCreates++; state.source = url; state.sources.push(url); if (options.createMaterial) return options.createMaterial(url); return { id: 'material-' + state.materialCreates, status: state.review }; },
     async queryMaterial() { return state.review; }, async generateCreative(input) { state.generates++; state.input = input;
       if (state.uncertain) throw new Error('Connection reset'); return { taskId: 'provider-task' }; },
     async query() { return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; } };
@@ -178,6 +178,28 @@ test('switching modules keeps materials while isolating director history and rej
   const history = inputs.at(-1).history;
   assert.equal(history.length, 2); assert.equal(history[0].content, '展示进店与体验');
   assert.ok(!JSON.stringify(history).includes('主推可见产品'));
+});
+
+test('only planned images reach material preparation and reopening a result preserves that selection', async t => {
+  const f = await fixture(t, { director: async input => {
+    const out = script(input); out.script.referenceImageIds = input.assets.slice(1).map(a => a.id);
+    out.script.shots[0].referenceIds = out.script.referenceImageIds; out.script.videoPrompt = '图片1展示食品，图片2展示桌面'; return out;
+  } });
+  const id = await f.init('signature'), person = await f.upload(id), food = await f.upload(id), room = await f.upload(id), opId = randomUUID();
+  const res = await f.call(`/conversations/${id}/script`, { body: { requestId: opId, message: '只展示产品，不用人物照片', settings, expectedScriptId: null } });
+  assert.equal(res.status, 202); await f.until(async () => (await f.current(id)).operations.find(o => o.id === opId && o.status === 'completed'));
+  const wrong = await f.generate(id, randomUUID(), { scriptId: opId, referenceImageIds: [person, food] });
+  assert.equal(wrong.status, 409); assert.equal(f.state.generates, 0);
+  const invalid = await f.generate(id, randomUUID(), { referenceImageIds: [randomUUID()] }); assert.equal(invalid.status, 400);
+  assert.equal((await f.generate(id, randomUUID(), { scriptId: opId, referenceImageIds: [food, room] })).status, 202);
+  await f.until(() => f.state.generates === 1);
+  assert.equal(f.state.materialCreates, 2); assert.deepEqual(f.state.input.imageIds, ['material-1', 'material-2']);
+  assert.ok(f.state.sources.some(s => new URL(s).pathname.endsWith(food))); assert.ok(f.state.sources.some(s => new URL(s).pathname.endsWith(room)));
+  assert.ok(f.state.sources.every(s => !new URL(s).pathname.endsWith(person)));
+  f.state.done = true;
+  const task = await f.until(async () => (await f.current(id)).tasks.find(t => t.status === 'completed'));
+  assert.equal(task.scriptId, opId); assert.deepEqual(task.referenceImageIds, [food, room]); assert.equal(task.materialProgress.total, 2);
+  assert.equal((await f.current(id)).assets.length, 3);
 });
 
 test('provider failure releases held points and ambiguous submission survives restart without replay or refund', async t => {

@@ -69,7 +69,8 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       error: task.error || '', code: task.code, warning: task.warning, billing: task.billing, estimatedPoints: points(task.settings.duration),
       materialProgress: { total: task.assetIds?.length || 0, prepared: Object.keys(task.materials || {}).length, approved: Object.values(task.materials || {}).filter(m => m.status === 2).length },
       canRecover: task.status === 'failed' && paid && Boolean(task.resultSource) && !expired,
-      prompt: task.prompt, resultUrl: task.status === 'completed' && paid && !expired ? `${PREFIX}/tasks/${task.id}/result` : null };
+      prompt: task.prompt, scriptId: task.scriptId || null, referenceImageIds: task.assetIds?.filter(id => c.assets.find(a => a.id === id)?.type === 'image'),
+      resultUrl: task.status === 'completed' && paid && !expired ? `${PREFIX}/tasks/${task.id}/result` : null };
   }
   function operationView(op) { return { id: op.id, skill: op.skill, settings: op.settings, status: op.status, message: op.message, createdAt: op.createdAt,
     startedAt: op.startedAt, completedAt: op.completedAt, diagnostics: op.diagnostics,
@@ -383,21 +384,32 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         await lock(c.id, async () => {
           live(c); const settings = normalizeVideoSettings(input.settings);
           if (!UUID.test(input.requestId || '') || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 12000) throw creatorError('请填写完整的视频提示词。');
-          const fingerprint = hash({ settings, prompt: input.prompt.trim(), scriptId: input.scriptId || null, assetIds: c.assets.map(a => a.id) });
+          const fingerprint = hash({ settings, prompt: input.prompt.trim(), scriptId: input.scriptId || null, referenceImageIds: input.referenceImageIds ?? null, assetIds: c.assets.map(a => a.id) });
           task = c.tasks.find(t => t.id === input.requestId); if (task) { if (task.fingerprint !== fingerprint) throw creatorError('同一任务不能重复提交不同内容。', 409); return; }
           if ([...store.records.values()].some(x => x.userId === userId && x.tasks.some(t => t.id === input.requestId))) throw creatorError('该任务标识已用于其他创作，请重新发起。', 409, 'VIDEO_REQUEST_CONFLICT');
           if (!config.enabled) throw creatorError('视频生成接口尚未配置，请联系管理员。', 503, 'VIDEO_NOT_CONFIGURED');
           if (active(c)) throw creatorError('请等待当前任务完成。', 409);
           if (!c.assets.some(a => a.type === 'image')) throw creatorError('请先添加图片素材。');
+          let referenceImageIds = input.referenceImageIds ?? c.assets.filter(a => a.type === 'image').map(a => a.id);
+          if (!Array.isArray(referenceImageIds) || !referenceImageIds.length || new Set(referenceImageIds).size !== referenceImageIds.length
+            || referenceImageIds.some(id => !c.assets.some(a => a.id === id && a.type === 'image'))) throw creatorError('视频参考图片无效，请重新应用脚本。', 400, 'CREATOR_INVALID_REFERENCES');
+          if (input.scriptId) {
+            const op = c.operations.find(o => o.id === input.scriptId && o.status === 'completed' && o.result?.script);
+            if (!op || op.skill !== c.skill || hash(op.settings) !== hash(settings) || hash(op.assetIds) !== hash(c.assets.map(a => a.id))) throw creatorError('脚本与当前素材或设置不一致，请重新应用脚本。', 409, 'SCRIPT_SETTINGS_CHANGED');
+            if (op.result.script.referenceImageIds) {
+              if (input.referenceImageIds && hash(input.referenceImageIds) !== hash(op.result.script.referenceImageIds)) throw creatorError('参考图片与编导脚本不一致，请重新应用脚本。', 409, 'SCRIPT_SETTINGS_CHANGED');
+              referenceImageIds = op.result.script.referenceImageIds;
+              if (!referenceImageIds.length || referenceImageIds.some(id => !c.assets.some(a => a.id === id && a.type === 'image'))) throw creatorError('编导参考图片无效，请重新编导。', 409, 'SCRIPT_SETTINGS_CHANGED');
+            }
+          }
           const model = VIDEO_MODELS.find(m => m.id === settings.model);
-          if (c.assets.filter(a => a.type === 'image').length > model.maxImages) throw creatorError(`所选模型最多支持${model.maxImages}张图片，请选择Max模型或新建创作。`, 400, 'CREATOR_MODEL_LIMIT');
+          if (referenceImageIds.length > model.maxImages) throw creatorError(`所选模型最多支持${model.maxImages}张图片，请选择Max模型或新建创作。`, 400, 'CREATOR_MODEL_LIMIT');
           if (settings.model === 'doubao-seedance-2-5-260628' && config.dedicated25 && !Object.values(config.dedicated25).every(Boolean)) throw creatorError('所选模型的独立接口配置不完整。', 503, 'CREATOR_MODEL_NOT_CONFIGURED');
           if (!settings.generateAudio && c.assets.some(a => a.type === 'audio')) throw creatorError('已选择声音参考，请开启音频或移除声音素材。');
-          if (input.scriptId) { const op = c.operations.find(o => o.id === input.scriptId && o.status === 'completed' && o.result?.script); if (!op || op.skill !== c.skill || hash(op.settings) !== hash(settings) || hash(op.assetIds) !== hash(c.assets.map(a => a.id))) throw creatorError('脚本与当前素材或设置不一致，请重新应用脚本。', 409, 'SCRIPT_SETTINGS_CHANGED'); }
           if ([...store.records.values()].filter(x => x.userId === userId).flatMap(x => x.tasks).filter(pending).length >= 2) throw creatorError('已有两条视频处理中，请稍后再试。', 429);
           if (c.tasks.length >= 20) throw creatorError('本次创作视频较多，请新建创作。');
-          task = { id: input.requestId, settings, skill: c.skill, title: c.operations.find(o => o.id === input.scriptId)?.result?.script?.title || VIDEO_SKILLS.find(s => s.id === c.skill).name,
-            prompt: input.prompt.trim(), fingerprint, assetIds: c.assets.map(a => a.id), status: 'reserving', createdAt: now(), startedAt: now() };
+          task = { id: input.requestId, settings, skill: c.skill, scriptId: input.scriptId || null, title: c.operations.find(o => o.id === input.scriptId)?.result?.script?.title || VIDEO_SKILLS.find(s => s.id === c.skill).name,
+            prompt: input.prompt.trim(), fingerprint, assetIds: [...referenceImageIds, ...c.assets.filter(a => a.type === 'audio').map(a => a.id)], status: 'reserving', createdAt: now(), startedAt: now() };
           c.tasks.push(task); c.recordExpiresAt = now() + 30 * DAY; await save(c);
           try {
             if (credits) {
