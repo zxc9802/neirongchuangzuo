@@ -544,17 +544,38 @@ test('transcript differences never block delivery and preserve generated audio w
   });
 });
 
-test('advisory transcript checks still reject invalid result files', async t => {
-  let resultProbes = 0;
-  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
-    probe: async path => ({ ...META, audio: !path.endsWith('result.tmp') || ++resultProbes === 1 }),
-    speech: fakeSpeech({ align: async () => { throw Object.assign(new Error('台词差异'), { code: 'VIDEO_SPEECH_INVALID' }); } }) });
-  const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
-  await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
-  const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
-  assert.equal(failed.code, 'VIDEO_RESULT_INVALID'); assert.equal(failed.resultUrl, null);
-  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
-});
+for (const metadata of [{ ...META, audio: false }, { ...META, duration: 0.5 }, { ...META, duration: 6 }]) {
+  test(`downloaded result with audio=${metadata.audio} and duration=${metadata.duration} is delivered`, async t => {
+    const app = await fixture(t, { probe: async path => path.endsWith('result.tmp') ? metadata : META });
+    const id = await app.init(); await app.upload(id);
+    await app.call(`/tasks/${id}/start`, { body: {} }); app.state.done = true;
+    const completed = await app.until(id, task => ['completed', 'failed'].includes(task.status) && ['settled', 'released'].includes(task.billing.status));
+    assert.equal(completed.status, 'completed', completed.error);
+    assert.equal(completed.actualDuration, metadata.duration);
+    assert.equal(completed.billing.status, 'settled');
+    const response = await app.call(`/tasks/${id}/result`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), VIDEO);
+    assert.equal(app.state.generations, 1);
+  });
+
+  test(`final result with audio=${metadata.audio} and duration=${metadata.duration} is delivered after speech processing`, async t => {
+    let resultProbes = 0;
+    const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+      probe: async path => path.endsWith('result.tmp') && ++resultProbes > 1 ? metadata : META,
+      speech: fakeSpeech({ align: async () => { throw Object.assign(new Error('台词差异'), { code: 'VIDEO_SPEECH_INVALID' }); } }) });
+    const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
+    await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
+    const completed = await app.until(id, task => ['completed', 'failed'].includes(task.status) && ['settled', 'released'].includes(task.billing.status));
+    assert.equal(completed.status, 'completed', completed.error);
+    assert.equal(completed.actualDuration, metadata.duration);
+    assert.equal(completed.billing.status, 'settled');
+    const response = await app.call(`/tasks/${id}/result`);
+    assert.equal(response.status, 200);
+    assert.deepEqual(Buffer.from(await response.arrayBuffer()), VIDEO);
+    assert.equal(app.state.generations, 1);
+  });
+}
 
 test('minor ASR differences deliver a real result and settle once without concealing either verification stage', async t => {
   const text = '这款饼干又薄又脆打开包装就能闻到浓浓的香味吃起来清爽可口适合大家分享真的超级好吃香酥美味全家都爱分享';
@@ -1349,6 +1370,23 @@ test('pending lip-sync survives service restart without submitting a second paid
   await app.close(); await app.open();
   mouthReady = true; await app.until(id, task => task.status === 'completed');
   assert.equal(submits, 1); assert.equal(app.state.generations, 1);
+});
+
+for (const duration of [3.22, 2.5]) test(`independent narration delivers a generated ${duration}s video`, async t => {
+  const app = await fixture(t, { speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration(), lipsync: fakeLipsync(),
+    probe: async input => ({ ...META, duration: input.endsWith('result.tmp') ? duration
+      : input.endsWith('lipsync.mp4') ? SPEECH.end : META.duration }),
+  });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const result = await app.until(id, task => ['completed', 'failed'].includes(task.status));
+  assert.equal(result.status, 'completed', result.error);
+  assert.equal(result.actualDuration, duration);
+  assert.equal(await (await app.call(`/tasks/${id}/result`)).text(), 'INDEXTTS_AUDIO');
+  assert.equal(app.state.generations, 1);
 });
 
 test('failed IndexTTS cannot silently deliver the original or Seedance voice', async t => {

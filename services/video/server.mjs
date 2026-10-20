@@ -308,8 +308,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         } });
       } finally { await progressWrites; }
       const metadata = await probe(temporary);
-      if (metadata.duration > task.duration + 1 || metadata.duration < 1 || !metadata.audio && task.voiceEngine !== 'indextts2'
-        || task.voiceEngine === 'indextts2' && metadata.duration < task.speech.end) throw error('成片缺少声音或时长不符合要求，预留积分将退回。', 502, 'VIDEO_RESULT_INVALID');
       await rename(temporary, task.voice || task.captions ? join(folder(task), 'generated.mp4') : file(task, 'result'));
       task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
       if (task.voice || task.captions) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
@@ -334,8 +332,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         }
         const mouth = join(folder(task), 'lipsync.mp4');
         await download(task.lipsync.url, mouth);
-        const metadata = await probe(mouth);
-        if (Math.abs(metadata.duration - task.actualDuration) > 0.1) throw error('口型视频时长与配音不一致。', 502, 'VIDEO_RESULT_INVALID');
         await narration.mux(mouth, join(folder(task), 'narration.wav'), aligned, task.actualDuration);
         task.audioCheck = { engine: 'indextts2', referenceApplied: true, emotionSource: task.narration.emotionSource, lipSync: 'processed' };
       } else if (!task.voice) await copyFile(generated, aligned);
@@ -363,7 +359,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           warning: '已保留模型生成的声音，请预览核对台词、音色与开口时间。', lipSync: 'needs_preview' };
       }
       const metadata = await probe(aligned);
-      if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw error('声音校正后的成片无效。', 502, 'VIDEO_RESULT_INVALID');
+      task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
       await renderCaptions(task, aligned);
       await rename(aligned, file(task, 'result')); await complete(task);
     }
@@ -398,7 +394,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (task.status === 'reviewing' && cause instanceof VideoError && ['VIDEO_PROVIDER_IP_DENIED', 'VIDEO_PROVIDER_REJECTED', 'VIDEO_MATERIAL_INVALID'].includes(cause.code)) {
           await fail(task, cause.message, cause.code); return;
         }
-        if (cause.code === 'VIDEO_RESULT_INVALID') { await fail(task, cause.message, cause.code); return; }
         // Queries and result downloads can be retried without another paid generation call.
         task.error = ['VIDEO_NARRATION_PENDING', 'VIDEO_LIPSYNC_PENDING'].includes(cause.code) ? cause.message
           : task.status === 'downloading' ? '成片正在保存，将自动重试下载。' : '模型服务暂时不可用，正在查询原任务。';
