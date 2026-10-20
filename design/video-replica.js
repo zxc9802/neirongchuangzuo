@@ -45,6 +45,12 @@ function remember(task) {
   observeCreditTask(task);
 }
 function refresh() { if (context && document.body.dataset.page === 'replica') context.refresh(); }
+function refreshCredits() {
+  if (!context || document.body.dataset.page !== 'replica') return;
+  const cost = document.querySelector('#replica-cost'), details = document.querySelector('#replica-result-summary');
+  if (cost) cost.textContent = costText();
+  if (details) details.innerHTML = summary(context);
+}
 function failureMessage(task) {
   return displayMessage(task?.canRecheck ? task.error?.replace('请核对素材后重新生成。', '请重新检查成片。') : task?.error);
 }
@@ -116,24 +122,31 @@ function playerStyle(task) {
   let width = Number(task?.video?.width), height = Number(task?.video?.height);
   if (!(width > 0 && height > 0)) [width, height] = String(task?.ratio || '').split(':').map(Number);
   return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
-    ? `style="--replica-aspect:${width}/${height};--replica-max-width:${Math.round(440 * width / height)}px"` : '';
+    ? `--replica-aspect:${width}/${height};--replica-max-width:${Math.round(440 * width / height)}px` : '';
 }
-export function renderVideoReplica(ctx) {
-  account(); context = ctx;
-  const task = state.current, finished = task && ['completed', 'failed', 'expired'].includes(task.status);
+function costText() {
+  const task = state.current;
   const unlimited = workspaceCreditsState().snapshot?.unlimited === true, exempt = task?.billing?.exempt === true;
   const actualCost=workspaceCreditsState().snapshot?.pricing?.mode==='api_cost';
-  const cost = unlimited ? `${creditEstimateText(task?.estimatedPoints)}${task?.duration ? ` · ${task.duration} 秒` : ''}`
+  return unlimited ? `${creditEstimateText(task?.estimatedPoints)}${task?.duration ? ` · ${task.duration} 秒` : ''}`
     : exempt ? task?.duration ? `${task.duration} 秒` : '上传后自动识别时长。'
       : actualCost ? task?.estimatedPoints ? `生成费用预计 ${task.estimatedPoints} 积分 · ${task.duration} 秒` : '按实际算力计费'
         : task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '按视频时长预留积分；失败退回预留积分。';
+}
+function submitArea(ctx) {
+  const task = state.current, finished = task && ['completed', 'failed', 'expired'].includes(task.status);
+  return `<p id="replica-cost">${ctx.esc(costText())}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(actionMessage())}</p>
+    <button type="button" id="replica-submit" class="primary" ${finished ? 'hidden' : ''} ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传并提交…' : pending(task) ? taskLabel(task) : '一键生成'}</button>
+    ${task?.status === 'failed' && task.canRecheck === true ? `<button type="button" id="replica-recheck" class="primary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在提交复核…' : '重新检查成片'}</button>` : ''}<button type="button" id="replica-new" class="textbutton" ${state.busy ? 'disabled' : ''}>新建复刻</button>`;
+}
+export function renderVideoReplica(ctx) {
+  account(); context = ctx;
+  const task = state.current;
   return `<div class="replica-heading"><div><span class="replica-eyebrow">1:1复刻 · ${ctx.esc(selectedModel().name)}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-layout"><section class="replica-form">${modelPicker(ctx)}<div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
-      <div class="replica-submit-area"><p id="replica-cost">${ctx.esc(cost)}</p><p id="replica-error" class="replica-error" role="alert">${ctx.esc(actionMessage())}</p>
-        <button type="button" id="replica-submit" class="primary" ${finished ? 'hidden' : ''} ${state.busy || pending(task) || finished || !state.config?.enabled ? 'disabled' : ''}>${state.busy ? '正在上传并提交…' : pending(task) ? taskLabel(task) : '一键生成'}</button>
-        ${task?.status === 'failed' && task.canRecheck === true ? `<button type="button" id="replica-recheck" class="primary" ${state.busy ? 'disabled' : ''}>${state.busy ? '正在提交复核…' : '重新检查成片'}</button>` : ''}<button type="button" id="replica-new" class="textbutton" ${state.busy ? 'disabled' : ''}>新建复刻</button></div></section>
-      <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player" ${playerStyle(task)}>${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
+      <div id="replica-submit-area" class="replica-submit-area">${submitArea(ctx)}</div></section>
+      <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
 async function selectModel(id) {
   if (state.busy || state.current && state.current.status !== 'draft' || !MODELS.some(model => model.id === id) || !state.config?.enabled) return;
@@ -198,13 +211,27 @@ async function poll() {
   try {
     const [config, data] = await Promise.all([state.config ? Promise.resolve(state.config) : request('/config'), request('/tasks')]);
     if (state.owner !== owner) return;
-    const previous = state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }), firstLoad = state.loading;
+    const inputs = () => ['video', 'photo', 'voice'].map(kind => slot(kind, context)).join('');
+    const previous = { inputs: inputs(), models: modelPicker(context), result: result(context), style: playerStyle(state.current), actions: submitArea(context) };
+    const firstLoad = state.loading;
     state.config = config; state.tasks = data.tasks; state.loading = false; state.pollError = '';
     if (state.current) state.current = data.tasks.find(item => item.id === state.current.id) || state.current;
     for (const task of data.tasks) observeCreditTask(task);
     if (!document.querySelector('#replica-submit')) return;
-    if (firstLoad || previous !== (state.current && JSON.stringify({ ...state.current, lastCheckedAt: null }))) refresh();
-    else { document.querySelector('#replica-history').innerHTML = history(context); document.querySelector('#replica-error').textContent = actionMessage(); }
+    // Progress changes must not replace the reference video/audio elements.
+    if (firstLoad || previous.inputs !== inputs() || previous.models !== modelPicker(context)) refresh();
+    else {
+      const output = document.querySelector('#replica-result'), actions = submitArea(context);
+      if (previous.result !== result(context)) output.innerHTML = result(context);
+      if (previous.style !== playerStyle(state.current)) output.setAttribute('style', playerStyle(state.current));
+      document.querySelector('#replica-result-summary').innerHTML = summary(context);
+      document.querySelector('#replica-history').innerHTML = history(context);
+      if (previous.actions !== actions) {
+        document.querySelector('#replica-submit-area').innerHTML = actions;
+        bindVideoReplica(context);
+      }
+      document.querySelector('#replica-error').textContent = actionMessage();
+    }
     const details = document.querySelector('#replica-progress'); if (details) details.innerHTML = progress(context);
   } catch (cause) {
     state.pollError = cause.message;
@@ -214,7 +241,7 @@ async function poll() {
 }
 export function bindVideoReplica(ctx) {
   context = ctx;
-  if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refresh);
+  if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
   document.querySelector('#replica-models').onclick = event => {
     const button = event.target.closest('[data-replica-model]'); if (button) void selectModel(button.dataset.replicaModel);
   };

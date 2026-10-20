@@ -36,7 +36,7 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
   const keys = ['workspaceUser', 'document', 'fetch', 'setInterval', 'clearInterval'];
   const original = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
   const nodes = new Map();
-  const node = selector => { if (!nodes.has(selector)) nodes.set(selector, {}); return nodes.get(selector); };
+  const node = selector => { if (!nodes.has(selector)) nodes.set(selector, { setAttribute(name, value) { this[name] = value; } }); return nodes.get(selector); };
   let failing = true, poll;
   globalThis.workspaceUser = { id: crypto.randomUUID() };
   globalThis.document = { body: { dataset: { page: 'replica' } }, querySelector: node };
@@ -49,8 +49,9 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
       : Response.json({ enabled: true, prompt: '人物复刻' });
   };
   const module = await import(`../design/video-replica.js?test-${crypto.randomUUID()}`);
-  let html;
+  let html, renders = 0;
   const ctx = { esc: value => String(value ?? ''), icon: () => '', refresh() {
+    renders++;
     html = module.renderVideoReplica(ctx);
     node('#replica-error').textContent = html.match(/id="replica-error"[^>]*>(.*?)<\/p>/s)[1];
     node('#replica-cost').textContent = html.match(/id="replica-cost"[^>]*>(.*?)<\/p>/s)[1];
@@ -64,10 +65,69 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
   await settle();
   return { node, ctx, recover: () => { failing = false; }, fail: () => { failing = true; },
     poll: async () => { poll(); await settle(); }, message: () => node('#replica-error').textContent,
-    html: () => html, cost: () => node('#replica-cost').textContent, settle,
+    html: () => html, cost: () => node('#replica-cost').textContent, renders: () => renders, settle,
     select: id => node('#replica-history').onclick({ target: { closest: () => ({ dataset: { replicaTask: id } }) } }),
     wallet: async value => { wallet = value; await refreshWorkspaceCredits(); } };
 }
+
+test('generation polling and credit updates preserve reference players while updating each task stage', async t => {
+  const task = { id: 'stable-preview', status: 'running', createdAt: Date.now(), voiceEngine: 'indextts2',
+    video: { width: 720, height: 1280 }, photo: {}, voice: {},
+    sourceVideoUrl: '/source.mp4', sourcePhotoUrl: '/photo.jpg', sourceVoiceUrl: '/voice.wav',
+    narrationProgress: { ready: false, completed: 0, total: 2 } };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll(); page.select(task.id); await page.settle();
+  const renders = page.renders();
+  for (const update of [
+    { narrationProgress: { ready: false, completed: 1, total: 2 } },
+    { status: 'downloading', downloadProgress: { receivedBytes: 1024 * 1024, totalBytes: 4 * 1024 * 1024 } },
+    { downloadProgress: { receivedBytes: 2 * 1024 * 1024, totalBytes: 4 * 1024 * 1024 } },
+    { status: 'verifying', actualDuration: 14.709, narrationProgress: { ready: true, completed: 2, total: 2 } },
+  ]) {
+    Object.assign(task, update);
+    await page.poll();
+    assert.equal(page.renders(), renders, 'Progress and billing notifications must not replace the page containing the reference players');
+  }
+  assert.match(page.node('#replica-progress').innerHTML, /保存成片：2.0 MB \/ 4.0 MB/);
+  assert.match(page.node('#replica-result').innerHTML, /正在同步口型与参考配音/);
+  assert.match(page.node('#replica-result-summary').innerHTML, /14.709 秒/);
+  assert.match(page.node('#replica-submit-area').innerHTML, /id="replica-submit"[^>]*disabled[^>]*>正在同步口型与参考配音/);
+  await page.wallet({ ...finiteWallet(), unlimited: true });
+  assert.equal(page.cost(), '无限积分');
+  assert.equal(page.renders(), renders);
+  Object.assign(task, { status: 'completed', resultUrl: '/result.mp4' });
+  await page.poll();
+  assert.equal(page.renders(), renders);
+  assert.match(page.node('#replica-result').innerHTML, /src="\/result.mp4"/);
+  assert.match(page.node('#replica-submit-area').innerHTML, /id="replica-submit"[^>]*hidden/);
+  const output = page.node('#replica-result'), resultHtml = output.innerHTML;
+  let resultReplacements = 0;
+  Object.defineProperty(output, 'innerHTML', { get: () => resultHtml, set() { resultReplacements++; } });
+  Object.assign(task, { billing: { status: 'settled', chargedPoints: 20 } });
+  await page.poll();
+  assert.equal(page.renders(), renders);
+  assert.equal(resultReplacements, 0, 'An unchanged result player must not be recreated');
+  assert.match(page.node('#replica-result-summary').innerHTML, /已使用 20 积分/);
+});
+
+test('polling still replaces expired reference sources and adds recovery controls for failures', async t => {
+  const task = { id: 'failed-preview', status: 'verifying', createdAt: Date.now(), voiceEngine: 'indextts2',
+    video: { width: 720, height: 1280 }, photo: {}, voice: {},
+    sourceVideoUrl: '/source.mp4', sourcePhotoUrl: '/photo.jpg', sourceVoiceUrl: '/voice.wav' };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll(); page.select(task.id); await page.settle();
+  const renders = page.renders();
+  Object.assign(task, { status: 'failed', canRecheck: true, error: '配音暂时无法处理' });
+  await page.poll();
+  assert.equal(page.renders(), renders);
+  assert.match(page.node('#replica-submit-area').innerHTML, /id="replica-recheck"/);
+  assert.equal(typeof page.node('#replica-recheck').onclick, 'function');
+  assert.equal(page.message(), task.error);
+  Object.assign(task, { status: 'expired', canRecheck: false, sourceVideoUrl: null, sourcePhotoUrl: null, sourceVoiceUrl: null });
+  await page.poll();
+  assert.equal(page.renders(), renders + 1);
+  assert.doesNotMatch(page.html(), /src="\/source.mp4"|src="\/voice.wav"|src="\/photo.jpg"/);
+});
 
 test('edition buttons show the requested descriptions and update the upload duration hint', async t => {
   const page = await fixture(t); page.recover(); await page.poll();
@@ -440,8 +500,8 @@ test('downloading output shows received size and progress with or without conten
   assert.match(page.html(), /progress aria-label="成片保存进度" max="4194304" value="1048576"/);
   task.downloadProgress.totalBytes = null;
   await page.poll();
-  assert.match(page.html(), /保存成片：1.0 MB/);
-  assert.doesNotMatch(page.html(), /progress aria-label="成片保存进度"/);
+  assert.match(page.node('#replica-progress').innerHTML, /保存成片：1.0 MB/);
+  assert.doesNotMatch(page.node('#replica-progress').innerHTML, /progress aria-label="成片保存进度"/);
 });
 
 test('successful status polling preserves input validation errors', async t => {
