@@ -91,7 +91,10 @@ test('person replacement explicitly edits the numbered video instead of requesti
   assert.match(prompt, /^编辑视频1/);
   assert.match(prompt, /将视频1中的唯一人物完整替换为图片1/);
   assert.doesNotMatch(prompt, /参考视频/);
-  assert.match(prompt, /人物的外貌、发型和服装都采用图片1/);
+  assert.match(prompt, /图片1是人物外貌的唯一参考/);
+  assert.match(prompt, /脸型、五官/);
+  assert.match(prompt, /发型都必须采用图片1/);
+  assert.match(prompt, /人物的服装采用图片1/);
   assert.match(prompt, /去掉原人物与图片1不一致的服装、配饰和衣服文字/);
   assert.match(prompt, /替换从第一帧开始并保持到最后一帧/);
   assert.match(prompt, /人物以外的场景/);
@@ -112,7 +115,7 @@ for (const model of ['doubao-seedance-2-0-260128', 'doubao-seedance-2-5-260628']
     const { prompt, payload } = generationBody(source);
     assert.doesNotMatch(prompt, /这段台词交给独立配音|不要让画面模型重新表演|0\.500|3\.500|12\.300/);
     assert.doesNotMatch(prompt, /唯一语音文案|唯一台词依据|配音由系统单独生成/);
-    assert.match(prompt, /沿用视频1的动作、表情、说话节奏/);
+    assert.match(prompt, /沿用视频1的动作、表情(?:变化)?、说话节奏/);
     assert.match(prompt, /已有字幕保持原样/);
     assert.deepEqual(payload.resources, ['asset://photo-1']);
     assert.deepEqual(payload.referVideoUrl, ['asset://video-1']);
