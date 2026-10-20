@@ -6,11 +6,12 @@ export const VIDEO_SKILLS = [
 ];
 export const VIDEO_HOOKS = ['直击产品核心痛点', '利用新奇场景开场', '制造强烈情绪反转', '用反常识观点开场', '真实痛点引出需求', '强烈对比突出差异'];
 export const videoAssetPurpose = asset => asset.type === 'audio' ? 'voice' : asset.purpose === 'character' ? 'character' : 'reference';
-export const VIDEO_MODELS = [
+export const VIDEO_PROVIDER_MODELS = [
   { id: 'doubao-seedance-2-0-fast-260128', name: 'Plus模型', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p'], maxImages: 9 },
   { id: 'doubao-seedance-2-0-260128', name: 'Pro模型', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p', '1080p'], maxImages: 9 },
   { id: 'doubao-seedance-2-5-260628', name: 'Max模型', durations: [4, 5, 6, 8, 10, 12, 15, 20, 25, 30], resolutions: ['480p', '720p', '1080p'], maxImages: 30 },
 ];
+export const VIDEO_MODELS = VIDEO_PROVIDER_MODELS.map(model => ({ ...model, resolutions: ['720p'] }));
 export const VIDEO_RATIOS = ['9:16', '16:9', '3:4', '4:3', '1:1', '21:9'];
 export const VIDEO_LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英文' }, { id: 'th', name: '泰语' }, { id: 'ms', name: '马来语' }, { id: 'pt', name: '葡萄牙语' }];
 export const DEFAULT_VIDEO_SETTINGS = { model: VIDEO_MODELS[2].id, duration: 25, ratio: '9:16', resolution: '720p', language: 'zh', generateAudio: true };

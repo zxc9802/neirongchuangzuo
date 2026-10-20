@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
-import { DEFAULT_VIDEO_SETTINGS } from '../design/video-catalog.js';
+import { DEFAULT_VIDEO_SETTINGS, VIDEO_MODELS } from '../design/video-catalog.js';
 
 async function fixture(t, api) {
   const names = ['document', 'workspaceUser', 'fetch', 'setInterval', 'clearInterval', 'EventSource', 'SpeechRecognition', 'webkitSpeechRecognition', 'FormData'];
@@ -37,6 +37,26 @@ function composerApi() {
   };
   return data;
 }
+
+test('resolution chooser only exposes 720p for every model and legacy scripts require a matching new plan', async t => {
+  const data = composerApi(), f = await fixture(t, data.api), form = f.node('#vc-settings-form');
+  form.elements = Object.fromEntries(Object.entries(DEFAULT_VIDEO_SETTINGS).map(([key,value]) => [key,{value:String(value)}]));
+  f.action('vc-settings');
+  assert.match(f.modal().content, /<select name="resolution"><option selected>720p<\/option><\/select>/);
+  assert.doesNotMatch(f.modal().content, /480p|1080p/);
+  for (const model of VIDEO_MODELS) {
+    form.elements.model.value = model.id; form.elements.model.onchange();
+    assert.match(form.elements.resolution.innerHTML, /720p/);
+    assert.doesNotMatch(form.elements.resolution.innerHTML, /480p|1080p/);
+  }
+  f.node('#vc-images').onchange({ target:{files:[new File(['photo'],'餐位.jpg',{type:'image/jpeg'})]} }); await delay(25);
+  data.conversation.operations=[{id:'legacy',status:'completed',skill:'store-discovery',settings:{...DEFAULT_VIDEO_SETTINGS,resolution:'480p'},message:'介绍门店',
+    result:{script:{title:'旧版脚本',shots:[],videoPrompt:'旧480p生成提示词',referenceImageIds:data.conversation.assets.map(a=>a.id)}}}];
+  await f.poll(); f.action('vc-apply',{id:'legacy'});
+  assert.match(f.html(), /编导要求/); assert.match(f.html(), /按720p重新输出上一版完整脚本/);
+  f.action('vc-stage-generation'); assert.doesNotMatch(f.html(), /旧480p生成提示词/);
+  assert.match(f.html(), /9:16 · 720p/); assert.equal(data.scriptCalls, 0);
+});
 
 test('creative plan exposes material decisions, cast continuity and actionable shots without executing model markup', async t => {
   const data = composerApi(), f = await fixture(t, data.api);

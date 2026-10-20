@@ -1,6 +1,6 @@
 import { createVideoProvider, parseGeneration, VideoError } from '../video/provider.mjs';
 import { createProviderStorage } from '../video/provider-storage.mjs';
-import { VIDEO_MODELS } from '../../design/video-catalog.js';
+import { VIDEO_PROVIDER_MODELS } from '../../design/video-catalog.js';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export function creatorConfig(env = {}, publicOrigin) {
@@ -30,7 +30,7 @@ export function creatorConfig(env = {}, publicOrigin) {
 }
 
 export function creativeGenerationBody(input) {
-  const model = VIDEO_MODELS.find(m => m.id === input.model);
+  const model = VIDEO_PROVIDER_MODELS.find(m => m.id === input.model);
   if (!model || input.imageIds.length < 1 || input.imageIds.length > model.maxImages || input.audioIds.length > 1
     || !model.resolutions.includes(input.resolution) || !model.durations.includes(input.duration)) {
     throw new VideoError('当前素材数量或视频设置超出所选模型的支持范围。', 400, 'CREATOR_MODEL_LIMIT');

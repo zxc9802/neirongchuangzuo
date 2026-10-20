@@ -90,6 +90,23 @@ test('Seedance request matches reference repository and enforces model-specific 
   await assert.rejects(createCreatorProvider(dedicated).generateCreative({ ...settings, prompt: '门店', imageIds: ['x'], audioIds: [] }), /独立接口配置不完整/);
 });
 
+test('new video requests only accept 720p while persisted legacy jobs retain upstream resolution support', async t => {
+  assert.equal(DEFAULT_VIDEO_SETTINGS.resolution, '720p');
+  const f = await fixture(t), id = await f.init(); await f.upload(id);
+  for (const model of VIDEO_MODELS) {
+    assert.deepEqual(model.resolutions, ['720p']);
+    for (const resolution of ['480p', '1080p']) {
+      const input = { ...settings, model: model.id, resolution };
+      assert.throws(() => normalizeVideoSettings(input), /设置无效/);
+      assert.equal((await f.call('/quote', { body: { settings: input } })).status, 400);
+      assert.equal((await f.generate(id, randomUUID(), { settings: input })).status, 400);
+      assert.equal((await f.call(`/conversations/${id}/script`, { body: { requestId: randomUUID(), message: '介绍门店', settings: input } })).status, 400);
+    }
+  }
+  assert.equal(f.state.generates, 0);
+  assert.equal(creativeGenerationBody({ ...settings, resolution: '480p', prompt: '已提交的旧任务', imageIds: ['x'], audioIds: [] }).payload.params.resolution, '480p');
+});
+
 test('switching to muted generation keeps the uploaded voice but sends no audio material upstream', async t => {
   const f = await fixture(t, {voice:async (_input,path)=>{await writeFile(path,Buffer.from('test-wav'));return {duration:4};}}), id=await f.init();
   const image=await f.upload(id), audio=randomUUID();

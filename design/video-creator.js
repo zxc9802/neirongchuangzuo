@@ -9,6 +9,11 @@ const busyTask = task => ['reserving', 'preparing', 'reviewing', 'submitting', '
 let context, timer, stream, voiceSession, loading = false, quoteVersion = 0;
 let state;
 function owner() { return globalThis.workspaceUser?.id || 'local-dev'; }
+const editableSettings = settings => ({ ...DEFAULT_VIDEO_SETTINGS, ...settings, resolution: DEFAULT_VIDEO_SETTINGS.resolution });
+function replanResolution(settings) {
+  state.settings = editableSettings(settings); state.stage = 'director'; state.scriptId = null; state.referenceImageIds = null; state.prompt = '';
+  state.input = '按720p重新输出上一版完整脚本，保留原有分镜、内容和其他设置。';
+}
 function reset() { stopVoice(); state = { owner: owner(), skill: VIDEO_SKILLS[0].id, settings: { ...DEFAULT_VIDEO_SETTINGS }, config: null, session: null,
   tasks: [], conversations: [], input: '', prompt: '', scriptId: null, referenceImageIds: null, stage: 'director', busy: false, error: '', errorSource: '', selectedTask: null,
   preview: 'result', queue: true, quote: null, quoteError: '', uploadLabel: '', bridge: null }; }
@@ -235,8 +240,10 @@ function settings(ctx) {
 function savedPrompts() { try { return JSON.parse(localStorage.getItem(accountStorageKey('video-creator-prompts')) || '[]').filter(p => typeof p.prompt === 'string').slice(0, 40); } catch { return []; } }
 async function openConversation(id, task) {
   const account = state.owner, data = await request(`/conversations/${id}`); if (state.owner !== account) return; saveSession(data.conversation);
-  state.settings = { ...(task?.settings || data.conversation.settings) }; state.input = ''; state.prompt = task?.prompt || '';
+  const previousSettings = task?.settings || data.conversation.settings;
+  state.settings = editableSettings(previousSettings); state.input = ''; state.prompt = task?.prompt || '';
   state.scriptId = task?.scriptId || null; state.referenceImageIds = task?.referenceImageIds || null; state.stage = task ? 'generation' : 'director'; state.selectedTask = task?.id || null; state.preview = 'result'; void quote();
+  if (previousSettings.resolution !== state.settings.resolution && data.conversation.operations.some(o => o.result?.script)) replanResolution(previousSettings);
 }
 export function handleVideoCreatorAction(action, el, ctx) {
   if (!action.startsWith('vc-') || ctx.mode !== 'video') return false;
@@ -285,6 +292,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
   });
   else if (action === 'vc-apply') {
     const op = state.session.operations.find(o => o.id === el.dataset.id && o.skill === state.skill && o.result?.script); if (!op) return true;
+    if (op.settings.resolution !== DEFAULT_VIDEO_SETTINGS.resolution) { replanResolution(op.settings); state.quote = null; ctx.toast('当前仅支持720p，请让编导调整旧脚本。'); refresh(); void quote(); return true; }
     state.prompt = op.result.script.videoPrompt; state.settings = { ...op.settings }; state.scriptId = op.id; state.referenceImageIds = op.result.script.referenceImageIds || null; state.stage = 'generation'; state.quote = null; refresh(); void quote();
   }
   else if (action === 'vc-copy') { const op = state.session.operations.find(o => o.id === el.dataset.id); if (op?.result?.script) void navigator.clipboard.writeText(op.result.script.videoPrompt).then(() => ctx.toast('脚本已复制。')).catch(() => ctx.toast('复制失败，请手动选择脚本。')); }
@@ -298,7 +306,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-recover') void perform(async () => { const data = await request(`/tasks/${el.dataset.id}/recover`, post({})); state.tasks = state.tasks.map(t => t.id === data.task.id ? data.task : t); });
   else if (action === 'vc-save-prompt') { if (!state.prompt.trim()) { ctx.toast('先填写或应用一份脚本。'); return true; } try { const items = [{ id: crypto.randomUUID(), prompt: state.prompt, settings: state.settings }, ...savedPrompts()].slice(0, 40); localStorage.setItem(accountStorageKey('video-creator-prompts'), JSON.stringify(items)); ctx.toast('提示词已保存。'); } catch { ctx.toast('保存失败，请复制提示词后保留。'); } }
   else if (action === 'vc-saved-prompts') ctx.openModal('我的提示词', '', `<div class="saved-prompts">${savedPrompts().map(p => button('vc-use-prompt', `<p>${esc(p.prompt.slice(0, 160))}</p>`, 'saved-prompt', `data-id="${p.id}"`)).join('') || '<p class="muted">还没有保存的提示词</p>'}</div>`);
-  else if (action === 'vc-use-prompt') { const item = savedPrompts().find(p => p.id === el.dataset.id); if (item) { state.prompt = item.prompt; if (VIDEO_MODELS.some(m => m.id === item.settings?.model)) state.settings = { ...item.settings }; state.scriptId = null; state.referenceImageIds = null; state.quote = null; document.querySelector('#modal').close(); refresh(); void quote(); } }
+  else if (action === 'vc-use-prompt') { const item = savedPrompts().find(p => p.id === el.dataset.id); if (item) { state.prompt = item.prompt; if (VIDEO_MODELS.some(m => m.id === item.settings?.model)) state.settings = editableSettings(item.settings); state.scriptId = null; state.referenceImageIds = null; state.quote = null; document.querySelector('#modal').close(); refresh(); void quote(); } }
   return true;
 }
 export function disposeVideoCreator() { stopVoice(); clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }
