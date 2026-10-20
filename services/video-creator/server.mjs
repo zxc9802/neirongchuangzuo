@@ -111,7 +111,8 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       op.status = 'running'; op.startedAt = now(); op.progress = '正在分析素材并编排分镜'; op.dispatched = true; await save(c);
       const result = await meter.run(scope, () => director.generate({ skill: op.skill, settings: op.settings, message: op.message,
         assets: op.assetIds.map(id => ({ ...c.assets.find(a => a.id === id) })),
-        history: c.messages.slice(-10) }, { signal: controller.signal, onAttempt,
+        history: c.operations.filter(o => o.skill === op.skill && o.status === 'completed' && o.result)
+          .flatMap(o => [{ role: 'user', content: o.message }, { role: 'assistant', content: JSON.stringify(o.result) }]).slice(-10) }, { signal: controller.signal, onAttempt,
         onProgress: progress => { op.progress = progress; } }));
       delete result.usage; op.result = result; op.status = 'completed'; op.progress = '';
       c.messages.push({ role: 'user', content: op.message }, { role: 'assistant', content: JSON.stringify(result) });

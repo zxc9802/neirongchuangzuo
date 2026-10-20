@@ -47,7 +47,7 @@ async function fixture(t, options = {}) {
   await open(); t.after(async () => { await close(); await wallet.close(); await rm(root, { recursive: true, force: true }); });
   const call = (path, { body, method = body ? 'POST' : 'GET', owner = 'alice', headers = {} } = {}) => fetch(base + '/api/video-creator' + path,
     { method, headers: { 'x-owner': owner, ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body && JSON.stringify(body) });
-  async function init() { const id = randomUUID(), res = await call('/conversations', { body: { requestId: id, skill: 'store-discovery', settings } }); assert.equal(res.status, 201, await res.text()); return id; }
+  async function init(skill = 'store-discovery') { const id = randomUUID(), res = await call('/conversations', { body: { requestId: id, skill, settings } }); assert.equal(res.status, 201, await res.text()); return id; }
   const image = await sharp({ create: { width: 256, height: 320, channels: 3, background: '#335545' } }).jpeg().toBuffer();
   async function upload(id, asset = randomUUID()) { const res = await fetch(base + `/api/video-creator/conversations/${id}/assets/${asset}`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', 'X-File-Name': encodeURIComponent('门店实拍.jpg') }, body: image }); assert.equal(res.status, 200, await res.text()); return asset; }
   async function current(id) { return (await (await call(`/conversations/${id}`)).json()).conversation; }
@@ -75,7 +75,7 @@ test('director validates real asset references and timeline, supports clarificat
   const id = randomUUID(), root = await mkdtemp(join(tmpdir(), 'director-model-')), path = join(root, 'photo.jpg');
   try {
     await sharp({ create: { width: 320, height: 160, channels: 3, background: '#445544' } }).withMetadata({ orientation: 6 }).jpeg().toFile(path);
-    const input = { skill: 'group-buy', settings, message: '做一条宣传', assets: [{ id, path, type: 'image', name: '门店' }], history: [] };
+    const input = { skill: 'store-discovery', settings, message: '做一条宣传', assets: [{ id, path, type: 'image', name: '门店' }], history: [] };
     assert.equal(validateDirectorResult({ kind: 'clarification', questions: ['套餐价格和使用条件是什么？'] }, input).kind, 'clarification');
     const bad = script(input); bad.script.shots[0].referenceIds = ['invented']; assert.throws(() => validateDirectorResult(bad, input), /素材引用/);
     const timing = script(input); timing.script.shots[0].end = 15; assert.throws(() => validateDirectorResult(timing, input), /时长/);
@@ -154,6 +154,30 @@ test('full workflow: upload, director, apply, single idempotent render, correct 
   assert.equal((await f.call('/config', { owner: 'none' })).status, 401);
   assert.equal((await f.call(`/conversations/${id}`, { method: 'PATCH', body: { skill: 'signature', settings }, headers: { Origin: 'https://attacker.example' } })).status, 403);
   const assets = collectGeneratedAssets([], [], Date.now(), [], [], [task]); assert.equal(assets.length, 1); assert.equal(assets[0].source, 'AI 视频');
+});
+
+test('switching modules keeps materials while isolating director history and rejecting an old applied script', async t => {
+  const inputs = [], f = await fixture(t, { director: async input => { inputs.push(structuredClone(input)); return script(input); } });
+  const id = await f.init('store-visit'); await f.upload(id);
+  async function direct(message) {
+    const c = await f.current(id), opId = randomUUID();
+    const res = await f.call(`/conversations/${id}/script`, { body: { requestId: opId, settings, message,
+      expectedScriptId: c.operations.findLast(o => o.status === 'completed')?.id || null } });
+    assert.equal(res.status, 202);
+    await f.until(async () => (await f.current(id)).operations.find(o => o.id === opId && o.status === 'completed'));
+    return opId;
+  }
+  const visitId = await direct('展示进店与体验');
+  await f.call(`/conversations/${id}`, { method: 'PATCH', body: { skill: 'signature', settings } });
+  assert.equal((await f.current(id)).assets.length, 1);
+  const stale = await f.generate(id, randomUUID(), { scriptId: visitId });
+  assert.equal(stale.status, 409); assert.equal(f.state.generates, 0);
+  await direct('主推可见产品'); assert.equal(inputs.at(-1).skill, 'signature'); assert.deepEqual(inputs.at(-1).history, []);
+  await f.call(`/conversations/${id}`, { method: 'PATCH', body: { skill: 'store-visit', settings } });
+  await direct('保留上次动线，增加细节');
+  const history = inputs.at(-1).history;
+  assert.equal(history.length, 2); assert.equal(history[0].content, '展示进店与体验');
+  assert.ok(!JSON.stringify(history).includes('主推可见产品'));
 });
 
 test('provider failure releases held points and ambiguous submission survives restart without replay or refund', async t => {

@@ -3,6 +3,7 @@ import sharp from 'sharp';
 import { VIDEO_SKILLS, VIDEO_LANGUAGES } from '../../design/video-catalog.js';
 import { parseStructuredOutput } from '../restaurant/structured-output.mjs';
 import { DIRECTOR_OUTPUT_TOKENS, readDirectorResponse, directorFailure, redactDirectorValue } from './director-response.mjs';
+import { skillDirection, verifyOfferFacts, offerClarification, offerDirection } from './skill-directions.mjs';
 
 export const creatorError = (message, status = 400, code = 'VIDEO_CREATOR_INVALID') => Object.assign(new Error(message), { status, code });
 const text = (value, maximum = 4000) => typeof value === 'string' && value.trim().length <= maximum ? value.trim() : '';
@@ -38,6 +39,8 @@ export function validateDirectorResult(value, input) {
     if (!questions.length) throw invalidOutput('编导未说明需要补充什么。', 'invalid_schema', { field: 'questions', expected: 'non-empty array' });
     return { kind: 'clarification', text: text(value.text, 3000) || questions.join('\n'), questions, warnings };
   }
+  const offer = input.skill === 'group-buy' ? verifyOfferFacts(value.offerFacts, input) : null;
+  if (value.kind === 'script' && offer?.missing.length) return offerClarification(offer.missing);
   const s = value.script, images = input.assets.filter(a => a.type === 'image'), ids = new Set(images.map(a => a.id));
   if (value.kind !== 'script' || !s || !text(s.title, 80) || !(text(s.globalDirection, 3000) || text(s.videoPrompt, 12000))
     || !Array.isArray(s.shots) || !s.shots.length || s.shots.length > 15) throw invalidOutput('编导未返回可执行的完整脚本。', 'invalid_schema', {
@@ -57,9 +60,11 @@ export function validateDirectorResult(value, input) {
   if (Math.abs(end - input.settings.duration) > .15) throw invalidOutput('脚本总时长与选择时长不一致，请重新编导。', 'invalid_timeline', { actualDuration: end, expectedDuration: input.settings.duration });
   const assets = Array.isArray(value.assets) ? value.assets.filter(a => a && ids.has(a.id) && text(a.description, 600)).map(a => ({ id: a.id, description: text(a.description, 600), role: text(a.role, 120) })).slice(0, 30) : [];
   const globalDirection = text(s.globalDirection, 3000);
-  const videoPrompt = globalDirection ? compileVideoPrompt(globalDirection, shots, images, input.settings) : text(s.videoPrompt, 12000);
+  const compiledDirection = [globalDirection, offer && offerDirection(offer.facts)].filter(Boolean).join('\n\n');
+  const videoPrompt = globalDirection ? compileVideoPrompt(compiledDirection, shots, images, input.settings)
+    : [text(s.videoPrompt, 12000), offer && offerDirection(offer.facts)].filter(Boolean).join('\n\n');
   if (videoPrompt.length > 12000) throw invalidOutput('完整分镜内容过长，请精简后重新编导。', 'invalid_schema', { field: 'videoPrompt', actualLength: videoPrompt.length, maximumLength: 12000 });
-  return { kind: 'script', text: text(value.text, 3000) || text(s.title, 80), assets, warnings,
+  return { kind: 'script', text: text(value.text, 3000) || text(s.title, 80), assets, warnings, ...(offer ? { offerFacts: offer.facts } : {}),
     script: { title: text(s.title, 80), summary: text(s.summary, 1000), shots, ...(globalDirection ? { globalDirection } : {}), videoPrompt } };
 }
 
@@ -98,7 +103,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
       try {
         response = await fetchImpl(config.baseUrl + '/chat/completions', { method: 'POST', redirect: 'error',
           headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: correction ? [...content, { type: 'text', text: correction }] : content }],
+          body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: [SYSTEM, skillDirection(input.skill)].filter(Boolean).join('\n\n') }, { role: 'user', content: correction ? [...content, { type: 'text', text: correction }] : content }],
             stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: budget, temperature: .45 }), signal: callSignal });
         record.phase = 'response'; record.httpStatus = response.status; record.contentType = response.headers.get('content-type') || '';
         record.providerRequestId = response.headers.get('x-api-request-id') || response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || null;
