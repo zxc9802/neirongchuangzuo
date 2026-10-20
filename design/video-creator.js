@@ -1,21 +1,55 @@
 import { markdownText } from './markdown.js';
-import { VIDEO_SKILLS, VIDEO_HOOKS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS } from './video-catalog.js';
+import { VIDEO_SKILLS, VIDEO_HOOKS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, videoAssetPurpose } from './video-catalog.js';
 import { accountStorageKey } from './account-storage.js';
 import { refreshWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 
 const API = '/api/video-creator';
 const labels = { reserving: '预留积分', preparing: '准备素材', reviewing: '素材审核', submitting: '提交生成', running: '生成中', downloading: '保存成片', completed: '已完成', failed: '未完成', uncertain: '结果待核对', settling: '费用待核对', expired: '已过期' };
 const busyTask = task => ['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'settling'].includes(task.status);
-let context, timer, stream, loading = false, quoteVersion = 0;
+let context, timer, stream, voiceSession, loading = false, quoteVersion = 0;
 let state;
 function owner() { return globalThis.workspaceUser?.id || 'local-dev'; }
-function reset() { state = { owner: owner(), skill: VIDEO_SKILLS[0].id, settings: { ...DEFAULT_VIDEO_SETTINGS }, config: null, session: null,
+function reset() { stopVoice(); state = { owner: owner(), skill: VIDEO_SKILLS[0].id, settings: { ...DEFAULT_VIDEO_SETTINGS }, config: null, session: null,
   tasks: [], conversations: [], input: '', prompt: '', scriptId: null, referenceImageIds: null, stage: 'director', busy: false, error: '', errorSource: '', selectedTask: null,
   preview: 'result', queue: true, quote: null, quoteError: '', uploadLabel: '', bridge: null }; }
 function refresh() { if (context && document.body.dataset.page === 'video' && state.owner === owner()) context.refresh(); }
 function currentTask() { return state.tasks.find(t => t.id === state.selectedTask); }
 function pendingOp() { return state.session?.operations.findLast(o => ['queued', 'running', 'settling'].includes(o.status)); }
-function locked() { return state.busy || Boolean(pendingOp()) || state.session?.tasks.some(busyTask); }
+function locked() { return state.busy || Boolean(voiceSession) || Boolean(pendingOp()) || state.session?.tasks.some(busyTask); }
+const speechEngine = () => globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
+const composerIcon = name => `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${name === 'person' ? 'M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M4 21v-2a8 8 0 0 1 16 0v2' : name === 'voice' ? 'M11 5 6 9H3v6h3l5 4V5 M15 8a6 6 0 0 1 0 8 M18 5a10 10 0 0 1 0 14' : 'M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5 M5 10v2a7 7 0 0 0 14 0v-2 M12 19v3 M8 22h8'}"/></svg>`;
+function stopVoice() {
+  const current = voiceSession; if (!current) return;
+  voiceSession = null; clearTimeout(current.timer);
+  if (state?.owner === current.owner) state.input = current.final ? (current.prefix + current.final).slice(0, 8000) : current.initial;
+  try { current.recognition.abort(); } catch {}
+}
+function toggleVoice() {
+  if (voiceSession) { try { voiceSession.recognition.stop(); } catch { stopVoice(); refresh(); } return; }
+  if (locked()) return;
+  const Engine = speechEngine(); if (!Engine) { context.toast('当前浏览器不支持语音输入，请使用 Chrome 或直接输入文字。'); return; }
+  const recognition = new Engine(), current = { recognition, owner: state.owner, initial: state.input, prefix: state.input ? state.input + '\n' : '', final: '' };
+  voiceSession = current; state.error = ''; state.errorSource = '';
+  recognition.lang = ({ zh: 'zh-CN', en: 'en-US', th: 'th-TH', ms: 'ms-MY', pt: 'pt-BR' })[state.settings.language] || 'zh-CN';
+  recognition.continuous = true; recognition.interimResults = true;
+  const valid = () => voiceSession === current && state.owner === current.owner && owner() === current.owner && document.body.dataset.page === 'video';
+  const finish = () => { if (voiceSession !== current) return; clearTimeout(current.timer); voiceSession = null; if (state.owner === current.owner) state.input = current.final ? (current.prefix + current.final).slice(0, 8000) : current.initial; refresh(); };
+  recognition.onresult = event => {
+    if (!valid()) return; let final = '', interim = '';
+    for (let i = 0; i < event.results.length; i++) { const result = event.results[i]; if (result.isFinal) final += result[0].transcript; else interim += result[0].transcript; }
+    current.final = final; state.input = (current.prefix + final + interim).slice(0, 8000);
+    const input = document.querySelector('#vc-message'); if (input) input.value = state.input;
+    if (current.prefix.length + final.length + interim.length >= 8000) recognition.stop();
+  };
+  recognition.onerror = event => {
+    if (!valid()) return;
+    if (event.error !== 'aborted') { state.error = ({ 'not-allowed': '请允许浏览器使用麦克风后重试。', 'service-not-allowed': '浏览器暂不允许语音识别，请直接输入文字。', 'audio-capture': '未找到可用麦克风，请检查设备。', network: '语音识别连接失败，请重试或直接输入文字。', 'no-speech': '没有识别到声音，请重试。' })[event.error] || '语音识别未完成，请重试或直接输入文字。'; state.errorSource = 'action'; }
+    finish();
+  };
+  recognition.onend = finish;
+  try { recognition.start(); current.timer = setTimeout(() => { if (valid()) recognition.stop(); }, 90000); refresh(); }
+  catch { state.error = '无法启动语音输入，请检查浏览器和麦克风权限。'; state.errorSource = 'action'; finish(); }
+}
 async function request(path, options = {}) {
   const response = await fetch(API + path, { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(options.method === 'PUT' ? 120000 : 20000), ...options });
   let data; try { data = await response.json(); } catch { throw new Error('视频服务暂时不可用，请稍后重试。'); }
@@ -23,7 +57,7 @@ async function request(path, options = {}) {
 }
 const post = value => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
 async function perform(work) {
-  if (state.busy) return;
+  if (state.busy || voiceSession) return;
   const account = state.owner; state.busy = true; state.error = ''; state.errorSource = ''; refresh();
   try { await work(); }
   catch (cause) { if (state.owner === account) { state.error = cause.message; state.errorSource = 'action'; } }
@@ -37,21 +71,55 @@ async function ensureSession() {
   if (account !== state.owner) throw new Error('账号已切换，请重新打开创作。');
   saveSession(data.conversation); return state.session.id;
 }
-async function upload(files) {
+async function upload(files, purpose) {
   await perform(async () => {
     const account = state.owner, id = await ensureSession();
     for (let index = 0; index < files.length; index++) {
       if (state.owner !== account) return;
       const file = files[index], image = ['image/jpeg', 'image/png', 'image/webp'].includes(file.type), audio = ['audio/mpeg', 'audio/wav', 'audio/x-wav'].includes(file.type);
       if (!image && !audio) throw new Error('图片支持 JPG、PNG、WebP，声音支持 MP3、WAV。');
+      const assetPurpose = purpose || (audio ? 'voice' : 'reference');
+      if (image && assetPurpose === 'voice' || audio && assetPurpose !== 'voice') throw new Error('请按当前入口选择图片或声音文件。');
       if (file.size > (image ? 10 : 15) * 1024 * 1024) throw new Error(image ? '单张图片不能超过10MB。' : '声音文件不能超过15MB。');
       if (state.session.assets.filter(a => a.type === (image ? 'image' : 'audio')).length >= (image ? 30 : 1)) throw new Error(image ? '最多添加30张图片。' : '最多选择一段声音参考。');
+      if (assetPurpose === 'character' && state.session.assets.filter(a => videoAssetPurpose(a) === 'character').length >= 10) throw new Error('最多添加10张角色参考图。');
       state.uploadLabel = `上传素材 ${index + 1}/${files.length}`; refresh();
-      const data = await request(`/conversations/${id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name) }, body: file });
+      const data = await request(`/conversations/${id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': assetPurpose }, body: file });
       if (state.owner !== account) return; saveSession(data.conversation);
     }
     state.scriptId = null; state.referenceImageIds = null; state.quote = null; void quote();
   });
+}
+function composerMedia(ctx, assets, disabled) {
+  const { esc, icon, button } = ctx;
+  return `<div class="vc-reference-groups" aria-label="创作参考素材">${[['reference', '添加图片', 'image'], ['character', '添加角色', 'person'], ['voice', '添加声音', 'voice']].map(([purpose, label, symbol]) => {
+    const selected = assets.filter(a => videoAssetPurpose(a) === purpose), image = selected.find(a => a.type === 'image');
+    return button('vc-reference-group', `<span class="vc-reference-tile">${image ? `<img src="${esc(image.url || '')}" alt="${esc(image.name)}">` : symbol === 'image' ? icon('image') : composerIcon(symbol)}${selected.length ? `<span class="vc-reference-count">${selected.length}</span>` : ''}<span class="vc-reference-plus">+</span></span><span class="vc-reference-label">${label}${purpose !== 'reference' ? '<small>（可选）</small>' : ''}</span>`, 'vc-reference-group', `data-purpose="${purpose}" aria-label="${label}" title="${label}${selected.length ? ` · 已选${selected.length}${purpose === 'voice' ? '段' : '张'}` : ''}" ${disabled ? 'disabled' : ''}`);
+  }).join('')}</div>`;
+}
+function referencePicker(purpose, ctx) {
+  const { esc, button } = ctx, files = state.session?.assets.filter(a => videoAssetPurpose(a) === purpose) || [];
+  const input = ({ reference: '#vc-images', character: '#vc-characters', voice: '#vc-audio' })[purpose]; if (!input || locked()) return;
+  if (!files.length) { document.querySelector(input).click(); return; }
+  const editable = !state.session.operations.length && !state.session.tasks.length;
+  ctx.openModal(({ reference: '图片素材', character: '角色参考', voice: '声音参考' })[purpose], '', `<div class="vc-reference-library">${files.map(a => `<figure>${a.type === 'image' ? `<img src="${esc(a.url || '')}" alt="${esc(a.name)}">` : `<audio src="${esc(a.url || '')}" controls></audio>`}<figcaption>${esc(a.name)}</figcaption>${editable ? button('vc-remove-reference', '移除', 'textbutton', `data-id="${a.id}"`) : ''}</figure>`).join('')}</div><footer class="modal-actions">${button('vc-add-reference', '继续添加', 'secondary', `data-purpose="${purpose}" ${purpose === 'voice' ? 'disabled' : ''}`)}${button('vc-close-reference', '完成', 'primary')}</footer>`);
+}
+function consumedCredits() {
+  const operations = state.session?.operations || [];
+  const points = operations.reduce((sum, op) => sum + (op.billing?.status === 'settled' && Number.isSafeInteger(op.billing.chargedPoints) ? op.billing.chargedPoints : 0), 0);
+  return `已消耗 ${points.toLocaleString('zh-CN')} 积分${operations.some(op => op.billing && !['settled', 'released'].includes(op.billing.status)) ? ' · 核对中' : ''}`;
+}
+function creativePlan(result, assets, ctx, withAudio) {
+  const { esc } = ctx, plan = result.script.plan;
+  if (!plan) return result.script.globalDirection ? `<details class="vc-plan-details"><summary>全片设定</summary>${markdownText(result.script.globalDirection)}</details>` : '';
+  const images = assets.filter(a => a.type === 'image'), selected = new Set(result.script.referenceImageIds || []);
+  const field = (label, value) => value ? `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>` : '';
+  return `<div class="vc-creative-brief"><dl>${field('到店理由', plan.objective)}${field('目标顾客', plan.audience)}${field('叙事视角', plan.perspective)}${field('体验与情绪', plan.storyArc)}</dl></div>
+    <details class="vc-plan-details"><summary>素材与职责</summary><div class="vc-asset-roles">${(result.assets || []).map(role => {
+      const asset = assets.find(a => a.id === role.id); if (!asset) return '';
+      return `<article>${asset.type === 'image' ? `<img src="${esc(asset.url || '')}" alt="${esc(asset.name)}" loading="lazy">` : composerIcon('voice')}<div><strong>${asset.type === 'image' ? `图片${images.indexOf(asset) + 1}` : '声音参考'}${asset.type === 'image' && !selected.has(asset.id) ? '<small>未选用</small>' : ''}</strong><p>${esc(role.role)}</p><p>采用：${esc(role.adopt || role.description)}</p>${role.exclude ? `<p class="vc-role-exclude">不采用：${esc(role.exclude)}</p>` : ''}</div></article>`;
+    }).join('')}</div></details>
+    <details class="vc-plan-details"><summary>人物、风格与声音</summary><dl>${plan.cast.map(c => field(c.name, `${c.role}；${c.appearance}`)).join('')}${field('画面风格', plan.visualStyle)}${withAudio ? field('口播', plan.audio.voiceDirection) + field('配乐', plan.audio.music) + field('环境声', plan.audio.ambience) : field('声音', '静音')}</dl><div class="vc-continuity"><strong>保持</strong><ul>${plan.keep.map(v => `<li>${esc(v)}</li>`).join('')}</ul><strong>禁止</strong><ul>${plan.avoid.map(v => `<li>${esc(v)}</li>`).join('')}</ul></div></details>`;
 }
 async function quote() {
   const revision = ++quoteVersion, account = state.owner;
@@ -84,23 +152,23 @@ function editor(ctx) {
   const { esc, icon, button } = ctx, assets = state.session?.assets || [], disabled = locked(), op = pendingOp();
   const current = VIDEO_SKILLS.find(s => s.id === state.skill), imageCount = assets.filter(a => a.type === 'image').length;
   const generationImages = state.referenceImageIds?.map(id => assets.find(a => a.id === id)).filter(Boolean);
-  const displayedAssets = state.stage === 'generation' && generationImages ? [...generationImages, ...assets.filter(a => a.type === 'audio')] : assets;
+  const displayedAssets = state.stage === 'generation' ? (generationImages || assets.filter(a => a.type === 'image')).concat(state.settings.generateAudio ? assets.filter(a => a.type === 'audio') : []) : assets;
   const media = `<div class="vc-uploads">${displayedAssets.map(a => `<div class="vc-asset" title="${esc(a.name)}">${a.type === 'image' ? `<img src="${esc(a.url || '')}" alt="${esc(a.name)}">` : icon('audio')}<small>${state.stage === 'generation' && generationImages && a.type === 'image' ? `图片${generationImages.indexOf(a) + 1}` : esc(a.name)}</small>${!state.session.operations.length && !state.session.tasks.length ? button('vc-remove', '×', 'vc-remove', `data-id="${a.id}" aria-label="移除 ${esc(a.name)}" ${disabled ? 'disabled' : ''}`) : ''}</div>`).join('')}
     ${imageCount < 30 ? button('vc-upload-image', icon('image') + '<span>添加图片</span>', 'vc-add', disabled ? 'disabled' : '') : ''}
     ${!assets.some(a => a.type === 'audio') ? button('vc-upload-audio', icon('audio') + '<span>添加声音<small>选填</small></span>', 'vc-add', disabled ? 'disabled' : '') : ''}</div>`;
   const settings = button('vc-settings', icon('settings') + `${esc(VIDEO_LANGUAGES.find(l => l.id === state.settings.language).name)} · ${state.settings.duration}s`, 'textbutton', disabled ? 'disabled' : '');
   const scriptCards = (state.session?.operations || []).map(o => `<article class="vc-message">
     <p class="vc-user-message">${esc(o.message)}</p>
-    ${o.status === 'completed' && o.result ? `<div class="vc-assistant-message">${o.result.script ? `<span class="vc-message-skill">${esc(VIDEO_SKILLS.find(s => s.id === o.skill)?.name || '')}</span><h2>${esc(o.result.script.title)}</h2>${markdownText(o.result.script.summary || o.result.text)}<ol class="vc-shots">${o.result.script.shots.map(s => `<li><span>${s.start}–${s.end}s</span><div><strong>${esc(s.visual)}</strong>${s.camera ? `<small>${esc(s.camera)}</small>` : ''}${s.voiceover ? `<p>旁白：${esc(s.voiceover)}</p>` : ''}${s.caption ? `<p>字幕：${esc(s.caption)}</p>` : ''}<div class="vc-shot-images">${s.referenceIds.map(id => assets.find(a => a.id === id)).filter(Boolean).map(a => `<img src="${esc(a.url || '')}" alt="${esc(a.name)}" loading="lazy">`).join('')}</div></div></li>`).join('')}</ol>
+    ${o.status === 'completed' && o.result ? `<div class="vc-assistant-message">${o.result.script ? `<span class="vc-message-skill">${esc(VIDEO_SKILLS.find(s => s.id === o.skill)?.name || '')}</span><h2>${esc(o.result.script.title)}</h2>${markdownText(o.result.script.summary || o.result.text)}${creativePlan(o.result, assets, ctx, o.settings?.generateAudio !== false)}<ol class="vc-shots">${o.result.script.shots.map(s => `<li><span>${s.start}–${s.end}s</span><div>${s.intent ? `<strong>${esc(s.intent)}</strong><p>${esc(s.visual)}</p>` : `<strong>${esc(s.visual)}</strong>`}${s.action ? `<p>动作：${esc(s.action)}</p>` : ''}${s.emotion ? `<p>情绪：${esc(s.emotion)}</p>` : ''}${s.camera ? `<small>${esc(s.camera)}</small>` : ''}${s.voiceover ? `<p>旁白：${esc(s.voiceover)}</p>` : ''}${s.sound ? `<p>拟音：${esc(s.sound)}</p>` : ''}${s.caption ? `<p>字幕：${esc(s.caption)}</p>` : ''}<div class="vc-shot-images">${s.referenceIds.map(id => assets.find(a => a.id === id)).filter(Boolean).map(a => `<img src="${esc(a.url || '')}" alt="${esc(a.name)}" loading="lazy">`).join('')}</div></div></li>`).join('')}</ol>
       <div class="vc-script-actions">${button('vc-copy', '复制脚本', 'textbutton', `data-id="${o.id}"`)}${button('vc-apply', '应用脚本 ' + icon('arrow'), 'vc-apply', `data-id="${o.id}" ${disabled || o.skill !== state.skill ? 'disabled' : ''}`)}</div>`
       : `${markdownText(o.result.text)}${o.result.questions?.length ? `<ul>${o.result.questions.map(q => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}`}
       ${o.result.warnings?.length ? `<details class="vc-warnings"><summary>需要确认</summary>${o.result.warnings.map(w => `<p>${esc(w)}</p>`).join('')}</details>` : ''}</div>`
     : `<div class="vc-assistant-message ${o.status === 'failed' ? 'vc-error' : 'vc-thinking'}" role="status">${['failed', 'settling'].includes(o.status) ? esc(o.error || '费用待核对，请稍后查看。') : icon('star') + esc(o.progress || '编导处理中…')}</div>`}</article>`).join('');
   return `<section class="vc-editor panel" aria-label="AI视频创作编辑区"><header class="vc-editor-heading">${button('vc-skills', `<span class="skill-symbol">${icon('store')}</span><span><strong>${esc(current.name)}</strong><small>${esc(current.description)}</small></span>${icon('chevron')}`, 'skill-trigger', disabled ? 'disabled' : '')}${button('vc-new', '＋ 新建', 'textbutton', state.busy ? 'disabled' : '')}</header>
-    <input type="file" id="vc-images" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-audio" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" hidden>
+    <input type="file" id="vc-images" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-characters" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-audio" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" hidden>
     ${state.stage === 'director' ? `<div class="vc-conversation" aria-label="编导对话">${scriptCards || `<div class="vc-empty-director">${icon('star')}<h1>你想创作一条什么视频？</h1><div class="vc-hooks">${VIDEO_HOOKS.map(h => button('vc-hook', esc(h), 'vc-hook', `data-value="${esc(h)}"`)).join('')}</div></div>`}</div>
-      <div class="vc-composer">${media}<label class="sr-only" for="vc-message">编导要求</label><textarea id="vc-message" maxlength="8000" placeholder="${state.session?.operations.some(o => o.skill === state.skill) ? '说说哪里需要调整，或补充门店信息…' : esc(current.placeholder || '上传实拍，告诉编导你的宣传要求…')}" ${state.busy ? 'disabled' : ''}>${esc(state.input)}</textarea><div class="vc-composer-bottom">${settings}<span>${state.uploadLabel ? esc(state.uploadLabel) : imageCount ? `${imageCount}/30 张图片` : ''}</span>${button('vc-send', op ? icon('clock') : icon('arrow'), 'vc-send', `aria-label="发送给超级编导" ${disabled || !imageCount || state.config?.directorEnabled === false ? 'disabled' : ''}`)}</div></div>
-      <div class="vc-stage-link">${button('vc-stage-generation', '自己填写视频提示词', 'textbutton', disabled ? 'disabled' : '')}</div>`
+      <div class="vc-stage-link">${button('vc-stage-generation', '退出编导', 'vc-exit-director', disabled ? 'disabled' : '')}</div>
+      <div class="vc-composer">${composerMedia(ctx, assets, disabled)}<label class="sr-only" for="vc-message">编导要求</label><textarea id="vc-message" maxlength="8000" placeholder="${state.session?.operations.some(o => o.skill === state.skill) ? '说说哪里需要调整，或补充门店信息…' : esc(current.placeholder || '上传实拍，告诉编导你的宣传要求…')}" ${state.busy ? 'disabled' : voiceSession ? 'readonly' : ''}>${esc(state.input)}</textarea>${state.uploadLabel ? `<p class="vc-upload-status" role="status">${esc(state.uploadLabel)}</p>` : ''}<div class="vc-composer-bottom">${settings}<span class="vc-consumed" aria-label="编导积分消耗" title="本次编导对话已结算的积分">✦ ${esc(consumedCredits())}</span>${button('vc-voice', composerIcon('mic'), `vc-voice ${voiceSession ? 'is-listening' : ''}`, `aria-label="${voiceSession ? '停止语音输入' : '语音输入'}" aria-pressed="${Boolean(voiceSession)}" title="${voiceSession ? '正在听，点击停止' : speechEngine() ? '语音输入' : '当前浏览器不支持语音输入'}" ${!voiceSession && (disabled || !speechEngine()) ? 'disabled' : ''}`)}${button('vc-send', op ? icon('clock') : icon('arrow'), 'vc-send', `aria-label="发送给超级编导" ${disabled || !imageCount || state.config?.directorEnabled === false ? 'disabled' : ''}`)}</div>${voiceSession ? '<p class="vc-voice-status" role="status">正在听，点击麦克风停止</p>' : ''}</div>`
     : `<div class="vc-generation"><div class="vc-generation-top">${button('vc-stage-director', icon('back') + '超级编导', 'textbutton', disabled ? 'disabled' : '')}<span>${button('vc-save-prompt', icon('save'), 'iconbutton', 'aria-label="保存当前提示词"')}${button('vc-saved-prompts', icon('list'), 'iconbutton', 'aria-label="我的提示词"')}</span></div>${media}<label for="vc-prompt">视频提示词</label><textarea id="vc-prompt" maxlength="12000" placeholder="描述画面、镜头、氛围和声音…" ${disabled ? 'disabled' : ''}>${esc(state.prompt)}</textarea><div class="vc-generation-settings">${button('vc-models', icon('star') + (VIDEO_MODELS.find(m => m.id === state.settings.model)?.name || ''), 'setting-button', disabled ? 'disabled' : '')}${button('vc-settings', icon('settings') + `${state.settings.ratio} · ${state.settings.resolution} · ${state.settings.duration}s`, 'setting-button', disabled ? 'disabled' : '')}</div>${button('vc-generate', state.busy ? state.uploadLabel || '提交中…' : '立即生成视频 ' + icon('arrow'), 'primary vc-generate', disabled || !imageCount || !state.prompt.trim() || !state.config?.generationEnabled || state.quote?.affordable === false ? 'disabled' : '')}<p class="vc-quote">${state.config?.generationEnabled === false ? '视频接口尚未配置' : state.quote?.unlimited ? '无限积分' : state.quote ? `预计 ${state.quote.points} 积分${state.quote.affordable ? '' : ' · 积分不足'}` : esc(state.quoteError || '正在读取费用…')}</p></div>`}
     <p class="vc-error" id="vc-error" role="alert">${esc(state.error)}</p></section>`;
 }
@@ -132,7 +200,8 @@ export function bindVideoCreator(ctx) {
     const button = document.querySelector('[data-action="vc-generate"]'); if (button) button.disabled = locked() || !state.session?.assets.some(a => a.type === 'image') || !state.prompt.trim() || !state.config?.generationEnabled || state.quote?.affordable === false;
   });
   document.querySelector('#vc-images').onchange = e => { if (e.target.files.length) void upload([...e.target.files]); };
-  document.querySelector('#vc-audio').onchange = e => { if (e.target.files.length) void upload([...e.target.files]); };
+  document.querySelector('#vc-characters').onchange = e => { if (e.target.files.length) void upload([...e.target.files], 'character'); };
+  document.querySelector('#vc-audio').onchange = e => { if (e.target.files.length) void upload([...e.target.files], 'voice'); };
   if (!timer) { void load(); timer = setInterval(() => void load(), 3000); }
   const bridge = ctx.configs.video, fingerprint = JSON.stringify({ prompt: bridge.prompt, files: bridge.files, skill: bridge.skill });
   if (state.bridge !== fingerprint) {
@@ -150,7 +219,18 @@ function settings(ctx) {
   ctx.openModal('视频设置', '', `<form id="vc-settings-form" class="vc-settings-form"><label>生成模型<select name="model">${VIDEO_MODELS.map(m => `<option value="${m.id}" ${m.id === s.model ? 'selected' : ''}>${m.name}</option>`).join('')}</select></label><label>视频时长<select name="duration" id="vc-duration">${VIDEO_MODELS.find(m => m.id === s.model).durations.map(d => `<option value="${d}" ${d === s.duration ? 'selected' : ''}>${d} 秒</option>`).join('')}</select></label><label>画面比例<select name="ratio">${VIDEO_RATIOS.map(r => `<option ${r === s.ratio ? 'selected' : ''}>${r}</option>`).join('')}</select></label><label>分辨率<select name="resolution">${VIDEO_MODELS.find(m => m.id === s.model).resolutions.map(r => `<option ${r === s.resolution ? 'selected' : ''}>${r}</option>`).join('')}</select></label><label>脚本语言<select name="language">${VIDEO_LANGUAGES.map(l => `<option value="${l.id}" ${l.id === s.language ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></label><label>音频<select name="generateAudio"><option value="true" ${s.generateAudio ? 'selected' : ''}>含音频</option><option value="false" ${!s.generateAudio ? 'selected' : ''}>静音</option></select></label><footer class="modal-actions"><button type="submit" class="primary">应用设置</button></footer></form>`);
   const form = document.querySelector('#vc-settings-form');
   form.elements.model.onchange = () => { const m = VIDEO_MODELS.find(m => m.id === form.elements.model.value), selected = Number(form.elements.duration.value); form.elements.resolution.innerHTML = m.resolutions.map(r => `<option ${r === (m.resolutions.includes(form.elements.resolution.value) ? form.elements.resolution.value : '720p') ? 'selected' : ''}>${r}</option>`).join(''); form.elements.duration.innerHTML = m.durations.map(d => `<option value="${d}" ${d === (m.durations.includes(selected) ? selected : m.durations.at(-1)) ? 'selected' : ''}>${d} 秒</option>`).join(''); };
-  form.onsubmit = e => { e.preventDefault(); const data = Object.fromEntries(new FormData(form)); state.settings = { ...data, duration: Number(data.duration), generateAudio: data.generateAudio === 'true' }; state.scriptId = null; state.quote = null; state.quoteError = ''; document.querySelector('#modal').close(); refresh(); void quote(); };
+  form.onsubmit = e => {
+    e.preventDefault(); const data = Object.fromEntries(new FormData(form)), next = { ...data, duration: Number(data.duration), generateAudio: data.generateAudio === 'true' };
+    const applied = state.session?.operations.find(o => o.skill === state.skill && o.result?.script && (o.id === state.scriptId || o.result.script.videoPrompt === state.prompt));
+    const changed = applied && Object.keys(DEFAULT_VIDEO_SETTINGS).some(key => applied.settings[key] !== next[key]);
+    state.settings = next; state.quote = null; state.quoteError = '';
+    if (changed) {
+      state.stage = 'director'; state.scriptId = null; state.referenceImageIds = null; state.prompt = '';
+      state.input = `按当前${next.duration}秒、${VIDEO_LANGUAGES.find(l => l.id === next.language).name}、${next.generateAudio ? '含音频' : '静音'}设置调整上一版脚本，保留未要求改变的创作方向与事实。`;
+      ctx.toast('设置已更改，请让编导调整脚本后再生成。');
+    }
+    document.querySelector('#modal').close(); refresh(); void quote();
+  };
 }
 function savedPrompts() { try { return JSON.parse(localStorage.getItem(accountStorageKey('video-creator-prompts')) || '[]').filter(p => typeof p.prompt === 'string').slice(0, 40); } catch { return []; } }
 async function openConversation(id, task) {
@@ -163,6 +243,11 @@ export function handleVideoCreatorAction(action, el, ctx) {
   const { button, icon, esc } = ctx;
   if (action === 'vc-upload-image') document.querySelector('#vc-images').click();
   else if (action === 'vc-upload-audio') document.querySelector('#vc-audio').click();
+  else if (action === 'vc-reference-group') referencePicker(el.dataset.purpose, ctx);
+  else if (action === 'vc-add-reference') { document.querySelector('#modal').close(); document.querySelector(({ reference: '#vc-images', character: '#vc-characters', voice: '#vc-audio' })[el.dataset.purpose])?.click(); }
+  else if (action === 'vc-close-reference') document.querySelector('#modal').close();
+  else if (action === 'vc-remove-reference') { document.querySelector('#modal').close(); void perform(async () => { saveSession((await request(`/conversations/${state.session.id}/assets/${el.dataset.id}`, { method: 'DELETE' })).conversation); state.scriptId = null; state.referenceImageIds = null; }); }
+  else if (action === 'vc-voice') toggleVoice();
   else if (action === 'vc-hook') { state.input = el.dataset.value; refresh(); }
   else if (action === 'vc-new') { const config = state.config, tasks = state.tasks, conversations = state.conversations, bridge = state.bridge; reset(); Object.assign(state, { config, tasks, conversations, bridge }); refresh(); void quote(); }
   else if (action === 'vc-skills') ctx.openModal('同城到店', '', `<div class="skill-grid">${VIDEO_SKILLS.map(s => button('vc-skill', `<div class="skill-art">${icon('store')}</div><div><strong>${s.name}</strong><small>${s.description}</small></div>${state.skill === s.id ? icon('check') : ''}`, 'skill-option', `data-value="${s.id}"`)).join('')}</div>`);
@@ -216,4 +301,4 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-use-prompt') { const item = savedPrompts().find(p => p.id === el.dataset.id); if (item) { state.prompt = item.prompt; if (VIDEO_MODELS.some(m => m.id === item.settings?.model)) state.settings = { ...item.settings }; state.scriptId = null; state.referenceImageIds = null; state.quote = null; document.querySelector('#modal').close(); refresh(); void quote(); } }
   return true;
 }
-export function disposeVideoCreator() { clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }
+export function disposeVideoCreator() { stopVoice(); clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }

@@ -38,7 +38,7 @@ async function fixture(t, options = {}) {
       director: { enabled: true, async generate(input, hooks) { state.scripts++; if (options.director) return options.director(input, hooks); return script(input); } },
       logger: { error: (...items) => state.diagnosticErrors.push(items) },
       aiConfig: {}, download: async (_url, path) => { state.downloads++; if (state.downloadFailed) throw new Error('Disk full'); await writeFile(path, MP4); },
-      probe: async () => ({ duration: 4, width: 720, height: 1280, audio: true }), pollIntervalMs: 15, now: () => clock });
+      probe: async () => ({ duration: 4, width: 720, height: 1280, audio: true }), ...(options.voice ? { voice: options.voice } : {}), pollIntervalMs: 15, now: () => clock });
     await handler.ready;
     app = createServer((req, res) => { req.authenticatedUserId = req.headers['x-owner'] === 'none' ? null : req.headers['x-owner'] || 'alice'; void handler(req, res); });
     app.listen(0, '127.0.0.1'); await once(app, 'listening'); base = `http://127.0.0.1:${app.address().port}`;
@@ -49,12 +49,31 @@ async function fixture(t, options = {}) {
     { method, headers: { 'x-owner': owner, ...(body ? { 'Content-Type': 'application/json' } : {}), ...headers }, body: body && JSON.stringify(body) });
   async function init(skill = 'store-discovery') { const id = randomUUID(), res = await call('/conversations', { body: { requestId: id, skill, settings } }); assert.equal(res.status, 201, await res.text()); return id; }
   const image = await sharp({ create: { width: 256, height: 320, channels: 3, background: '#335545' } }).jpeg().toBuffer();
-  async function upload(id, asset = randomUUID()) { const res = await fetch(base + `/api/video-creator/conversations/${id}/assets/${asset}`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', 'X-File-Name': encodeURIComponent('门店实拍.jpg') }, body: image }); assert.equal(res.status, 200, await res.text()); return asset; }
+  async function upload(id, asset = randomUUID(), purpose) { const res = await fetch(base + `/api/video-creator/conversations/${id}/assets/${asset}`, { method: 'PUT', headers: { 'Content-Type': 'image/jpeg', 'X-File-Name': encodeURIComponent('门店实拍.jpg'), ...(purpose ? { 'X-Asset-Purpose': purpose } : {}) }, body: image }); assert.equal(res.status, 200, await res.text()); return asset; }
   async function current(id) { return (await (await call(`/conversations/${id}`)).json()).conversation; }
   async function until(check) { for (let i = 0; i < 300; i++) { const value = await check(); if (value) return value; await delay(12); } assert.fail('Task did not reach expected state'); }
   const generate = (id, requestId = randomUUID(), extra = {}) => call(`/conversations/${id}/generate`, { body: { requestId, settings, prompt: '图片1展示真实门店', ...extra } });
-  return { state, wallet, call, init, upload, current, until, generate, close, open, root, get base() { return base; }, advance(ms) { clock += ms; } };
+  return { state, wallet, call, init, upload, current, until, generate, close, open, root, image, get base() { return base; }, advance(ms) { clock += ms; } };
 }
+
+test('reference purposes persist after restart, reach the director, enforce limits and cannot change on upload replay', async t => {
+  let directorInput;
+  const f = await fixture(t, { director(input) { directorInput = input; return script(input); } }), id = await f.init();
+  const photo = await f.upload(id), character = await f.upload(id, randomUUID(), 'character');
+  await f.upload(id, character, 'character');
+  let c = await f.current(id); assert.equal(c.assets.length, 2); assert.equal(c.assets.find(a=>a.id===photo).purpose,'reference'); assert.equal(c.assets.find(a=>a.id===character).purpose,'character');
+  const put = (asset, purpose) => fetch(f.base+`/api/video-creator/conversations/${id}/assets/${asset}`, {method:'PUT',headers:{'Content-Type':'image/jpeg','X-Asset-Purpose':purpose},body:f.image});
+  assert.equal((await put(randomUUID(),'voice')).status,400); assert.equal((await put(randomUUID(),'arbitrary')).status,400);
+  await f.close(); await f.open(); c=await f.current(id); assert.equal(c.assets.find(a=>a.id===character).purpose,'character');
+  const response = await f.call(`/conversations/${id}/script`,{body:{requestId:randomUUID(),message:'让角色介绍门店',settings}}); assert.equal(response.status,202);
+  await f.until(async()=> (await f.current(id)).operations.some(o=>o.status==='completed'));
+  assert.equal(directorInput.assets.find(a=>a.id===character).purpose,'character');
+  assert.equal(directorInput.planningVersion, 2);
+  for(let i=0;i<9;i++) await f.upload(id,randomUUID(),'character');
+  assert.equal((await put(randomUUID(),'character')).status,400);
+  const changed = await put(character,'reference'); assert.equal(changed.status,409);
+  assert.equal(f.state.generates,0);
+});
 
 test('Seedance request matches reference repository and enforces model-specific capabilities', async () => {
   const env = { VIDEO_CREATOR_VIDEO_API_BASE_URL: 'http://upstream.example', VIDEO_CREATOR_VIDEO_PROJECT_CODE: 'project', VIDEO_CREATOR_VIDEO_ACCESS_KEY: 'access', VIDEO_CREATOR_VIDEO_SECRET_KEY: 'secret',
@@ -71,11 +90,23 @@ test('Seedance request matches reference repository and enforces model-specific 
   await assert.rejects(createCreatorProvider(dedicated).generateCreative({ ...settings, prompt: '门店', imageIds: ['x'], audioIds: [] }), /独立接口配置不完整/);
 });
 
+test('switching to muted generation keeps the uploaded voice but sends no audio material upstream', async t => {
+  const f = await fixture(t, {voice:async (_input,path)=>{await writeFile(path,Buffer.from('test-wav'));return {duration:4};}}), id=await f.init();
+  const image=await f.upload(id), audio=randomUUID();
+  const upload=await fetch(f.base+`/api/video-creator/conversations/${id}/assets/${audio}`,{method:'PUT',headers:{'Content-Type':'audio/wav','X-Asset-Purpose':'voice'},body:Buffer.from('test-wav')});
+  assert.equal(upload.status,200);
+  const response=await f.generate(id,randomUUID(),{settings:{...settings,generateAudio:false},referenceImageIds:[image]});
+  assert.equal(response.status,202,await response.text());
+  await f.until(()=>f.state.generates===1);
+  assert.deepEqual(f.state.input.audioIds,[]); assert.equal(f.state.materialCreates,1);
+  assert.equal((await f.current(id)).assets.some(a=>a.id===audio),true);
+});
+
 test('director validates real asset references and timeline, supports clarification and consumes streaming structured output', async () => {
   const id = randomUUID(), root = await mkdtemp(join(tmpdir(), 'director-model-')), path = join(root, 'photo.jpg');
   try {
     await sharp({ create: { width: 320, height: 160, channels: 3, background: '#445544' } }).withMetadata({ orientation: 6 }).jpeg().toFile(path);
-    const input = { skill: 'store-discovery', settings, message: '做一条宣传', assets: [{ id, path, type: 'image', name: '门店' }], history: [] };
+    const input = { skill: 'store-discovery', settings, message: '做一条宣传', assets: [{ id, path, type: 'image', purpose: 'character', name: '角色' }], history: [] };
     assert.equal(validateDirectorResult({ kind: 'clarification', questions: ['套餐价格和使用条件是什么？'] }, input).kind, 'clarification');
     const bad = script(input); bad.script.shots[0].referenceIds = ['invented']; assert.throws(() => validateDirectorResult(bad, input), /素材引用/);
     const timing = script(input); timing.script.shots[0].end = 15; assert.throws(() => validateDirectorResult(timing, input), /时长/);
@@ -90,6 +121,8 @@ test('director validates real asset references and timeline, supports clarificat
     const photo = await sharp(Buffer.from(prepared, 'base64')).metadata();
     assert.equal(photo.width, 160); assert.equal(photo.height, 320); assert.equal(photo.orientation, undefined);
     assert.match(sent.messages[0].content, /团购缺少套餐内容/);
+    assert.equal(JSON.parse(sent.messages[1].content[0].text).assets[0].purpose, 'character');
+    assert.match(sent.messages[0].content, /不把角色照片的背景当作真实门店/);
     assert.equal(JSON.parse(sent.messages[1].content[0].text).pacing.duration, settings.duration);
     assert.ok(result.script.videoPrompt.includes(`镜头1｜0–${settings.duration}秒｜参考图片1`));
   } finally { await rm(root, { force: true, recursive: true }); }

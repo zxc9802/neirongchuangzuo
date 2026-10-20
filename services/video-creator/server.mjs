@@ -1,9 +1,10 @@
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { createHash, createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import { VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS } from '../../design/video-catalog.js';
+import { VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, videoAssetPurpose } from '../../design/video-catalog.js';
 import { createCreatorStore, UUID } from './store.mjs';
 import { createDirectorModel, creatorError } from './model.mjs';
+import { DIRECTOR_PLAN_VERSION } from './director-plan.mjs';
 import { DIRECTOR_OUTPUT_TOKENS, directorAttemptSummary } from './director-response.mjs';
 import { createCreatorProvider, creatorConfig } from './provider.mjs';
 import { downloadVideo, probeVideo, serveMedia } from '../video/media.mjs';
@@ -76,7 +77,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
     startedAt: op.startedAt, completedAt: op.completedAt, diagnostics: op.diagnostics,
     progress: op.progress, result: op.status === 'completed' ? op.result : undefined, error: op.error, code: op.code, billing: op.billing }; }
   const sessionView = c => ({ id: c.id, version: c.version, skill: c.skill, settings: c.settings, mediaExpiresAt: c.mediaExpiresAt,
-    assets: c.assets.map(a => ({ id: a.id, name: a.name, type: a.type, size: a.size, duration: a.duration,
+    assets: c.assets.map(a => ({ id: a.id, name: a.name, type: a.type, purpose: videoAssetPurpose(a), size: a.size, duration: a.duration,
       expired: now() >= c.mediaExpiresAt, url: now() < c.mediaExpiresAt ? `${PREFIX}/conversations/${c.id}/assets/${a.id}` : null })),
     operations: c.operations.map(operationView), tasks: c.tasks.map(t => taskView(c, t)) });
   async function settle(scope, op) {
@@ -110,7 +111,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
     try {
       if (meter.enabled) { const hold = await credits.reserveCost(scope); op.billing = { status: hold.status, exempt: hold.exempt, mode: 'api_cost' }; }
       op.status = 'running'; op.startedAt = now(); op.progress = '正在分析素材并编排分镜'; op.dispatched = true; await save(c);
-      const result = await meter.run(scope, () => director.generate({ skill: op.skill, settings: op.settings, message: op.message,
+      const result = await meter.run(scope, () => director.generate({ planningVersion: op.planningVersion || 1, skill: op.skill, settings: op.settings, message: op.message,
         assets: op.assetIds.map(id => ({ ...c.assets.find(a => a.id === id) })),
         history: c.operations.filter(o => o.skill === op.skill && o.status === 'completed' && o.result)
           .flatMap(o => [{ role: 'user', content: o.message }, { role: 'assistant', content: JSON.stringify(o.result) }]).slice(-10) }, { signal: controller.signal, onAttempt,
@@ -275,7 +276,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       if (req.headers.origin && ![config.publicOrigin, publicOrigin, `http://${req.headers.host}`, `https://${req.headers.host}`].includes(req.headers.origin)) throw creatorError('请求来源无效。', 403, 'CREATOR_ORIGIN_DENIED');
       if (!['GET', 'HEAD'].includes(req.method) && closing) throw creatorError('服务正在重启，尚未发起生成。', 503, 'SERVICE_CLOSING');
       if (route[0] === 'config' && req.method === 'GET') { json(res, 200, { skills: VIDEO_SKILLS.map(({ focus, ...s }) => s), models: VIDEO_MODELS, directorEnabled: director.enabled,
-        generationEnabled: Boolean(config.enabled), limits: { images: 30, audio: 1, imageBytes: 10 * 1024 * 1024, audioBytes: 15 * 1024 * 1024 }, costMode: meter.enabled, cnyPerSecond }); return; }
+        generationEnabled: Boolean(config.enabled), limits: { images: 30, characters: 10, audio: 1, imageBytes: 10 * 1024 * 1024, audioBytes: 15 * 1024 * 1024 }, costMode: meter.enabled, cnyPerSecond }); return; }
       if (route[0] === 'quote' && req.method === 'POST') {
         const settings = normalizeVideoSettings((await body(req)).settings), wallet = credits ? await credits.snapshot(userId) : null;
         json(res, 200, { points: points(settings.duration), affordable: !wallet || wallet.unlimited || wallet.available >= points(settings.duration), unlimited: wallet?.unlimited === true }); return;
@@ -326,12 +327,15 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         if (['GET', 'HEAD'].includes(req.method)) { live(c); if (!asset) throw creatorError('素材不存在。', 404); await serveMedia(req, res, asset.path, asset.type === 'image' ? 'image/jpeg' : 'audio/wav'); return; }
         if (req.method === 'PUT') {
           live(c); const data = await bytes(req, 15 * 1024 * 1024), checksum = hash(data.toString('base64'));
+          const image = /^image\/(jpeg|png|webp)$/.test(req.headers['content-type'] || ''), audio = /^audio\/(mpeg|wav|x-wav)$/.test(req.headers['content-type'] || '');
+          const purpose = req.headers['x-asset-purpose'] || (audio ? 'voice' : 'reference');
+          if (!['reference', 'character', 'voice'].includes(purpose) || audio && purpose !== 'voice' || image && purpose === 'voice') throw creatorError('素材用途与文件类型不符。');
           await lock(c.id, async () => {
-            const existing = c.assets.find(a => a.id === id); if (existing) { if (existing.checksum !== checksum) throw creatorError('同一素材不能替换为其他文件，请重新添加。', 409); return; }
+            const existing = c.assets.find(a => a.id === id); if (existing) { if (existing.checksum !== checksum || videoAssetPurpose(existing) !== purpose) throw creatorError('同一素材不能替换为其他文件或用途，请重新添加。', 409); return; }
             if (active(c)) throw creatorError('请等待当前任务完成后再添加素材。', 409);
-            const image = /^image\/(jpeg|png|webp)$/.test(req.headers['content-type'] || ''), audio = /^audio\/(mpeg|wav|x-wav)$/.test(req.headers['content-type'] || '');
             if (!image && !audio || image && data.length > 10 * 1024 * 1024) throw creatorError('图片支持 JPG、PNG、WebP，音频支持 MP3、WAV。');
             if (c.assets.filter(a => a.type === (image ? 'image' : 'audio')).length >= (image ? 30 : 1)) throw creatorError(image ? '最多上传30张图片。' : '最多选择一段声音参考。');
+            if (purpose === 'character' && c.assets.filter(a => videoAssetPurpose(a) === 'character').length >= 10) throw creatorError('最多添加10张角色参考图。');
             const path = await store.path(c.id, id + (image ? '.jpg' : '.wav')); let metadata = {};
             if (image) {
               try { const img = sharp(data, { limitInputPixels: 40000000, animated: false }), info = await img.metadata();
@@ -340,7 +344,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
               } catch { throw creatorError('图片无法读取，请上传清晰的 JPG、PNG 或 WebP 图片。'); }
             } else { const input = await store.path(c.id, id + '.upload'); try { await writeFile(input, data, { mode: 0o600 }); metadata = await voice(input, path); } finally { await rm(input, { force: true }); } }
             let name = ''; try { name = decodeURIComponent(req.headers['x-file-name'] || ''); } catch {}
-            c.assets.push({ id, path, type: image ? 'image' : 'audio', name: name.replace(/[\u0000-\u001f]/g, '').slice(0, 100) || (image ? '实拍图片' : '声音参考'), size: data.length, checksum, ...metadata });
+            c.assets.push({ id, path, type: image ? 'image' : 'audio', purpose, name: name.replace(/[\u0000-\u001f]/g, '').slice(0, 100) || (image ? '实拍图片' : '声音参考'), size: data.length, checksum, ...metadata });
             await save(c);
           }); json(res, 200, { conversation: sessionView(c) }); return;
         }
@@ -375,7 +379,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           const last = c.operations.findLast(o => o.status === 'completed');
           if ((input.expectedScriptId || null) !== (last?.id || null)) throw creatorError('脚本已更新，请刷新后继续修改。', 409, 'DIRECTOR_REVISION_CONFLICT');
           c.settings = normalizeVideoSettings(input.settings);
-          operation = { id: input.requestId, fingerprint, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
+          operation = { id: input.requestId, fingerprint, planningVersion: DIRECTOR_PLAN_VERSION, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
           c.operations.push(operation); c.recordExpiresAt = now() + 30 * DAY; await save(c); fresh = true;
         }); json(res, 202, { operation: operationView(operation), conversationId: c.id }); if (fresh) launch(operation.id, () => runScript(c, operation)); return;
       }
@@ -406,11 +410,10 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           const model = VIDEO_MODELS.find(m => m.id === settings.model);
           if (referenceImageIds.length > model.maxImages) throw creatorError(`所选模型最多支持${model.maxImages}张图片，请选择Max模型或新建创作。`, 400, 'CREATOR_MODEL_LIMIT');
           if (settings.model === 'doubao-seedance-2-5-260628' && config.dedicated25 && !Object.values(config.dedicated25).every(Boolean)) throw creatorError('所选模型的独立接口配置不完整。', 503, 'CREATOR_MODEL_NOT_CONFIGURED');
-          if (!settings.generateAudio && c.assets.some(a => a.type === 'audio')) throw creatorError('已选择声音参考，请开启音频或移除声音素材。');
           if ([...store.records.values()].filter(x => x.userId === userId).flatMap(x => x.tasks).filter(pending).length >= 2) throw creatorError('已有两条视频处理中，请稍后再试。', 429);
           if (c.tasks.length >= 20) throw creatorError('本次创作视频较多，请新建创作。');
           task = { id: input.requestId, settings, skill: c.skill, scriptId: input.scriptId || null, title: c.operations.find(o => o.id === input.scriptId)?.result?.script?.title || VIDEO_SKILLS.find(s => s.id === c.skill).name,
-            prompt: input.prompt.trim(), fingerprint, assetIds: [...referenceImageIds, ...c.assets.filter(a => a.type === 'audio').map(a => a.id)], status: 'reserving', createdAt: now(), startedAt: now() };
+            prompt: input.prompt.trim(), fingerprint, assetIds: [...referenceImageIds, ...(settings.generateAudio ? c.assets.filter(a => a.type === 'audio').map(a => a.id) : [])], status: 'reserving', createdAt: now(), startedAt: now() };
           c.tasks.push(task); c.recordExpiresAt = now() + 30 * DAY; await save(c);
           try {
             if (credits) {
