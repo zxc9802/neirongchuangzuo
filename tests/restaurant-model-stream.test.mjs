@@ -35,6 +35,13 @@ test('stream parser preserves split UTF-8, CRLF events, complete content, provid
   assert.deepEqual(payload.usage, { prompt_tokens: 32, completion_tokens: 48 });
 });
 
+test('meter-compatible parser finishes a terminal SSE without waiting for HTTP EOF', async () => {
+  const response = new Response(new ReadableStream({ start(controller) { controller.enqueue(Buffer.from(complete('{"ok":true}'))); } }));
+  const result = await readCompletionStream(response.clone().body);
+  assert.equal(result.choices[0].finish_reason, 'stop'); assert.equal(result.usage.completion_tokens, 48);
+  void response.body.cancel().catch(() => {});
+});
+
 test('planning actually requests streaming and only records completion after the full structured result', async () => {
   const board = { theme: '深青夜色', foodGroups: [], shots: [] };
   const app = harness(() => new Response(fragmented(complete(JSON.stringify(board))), { headers: { 'Content-Type': 'text/event-stream' } }));

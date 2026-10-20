@@ -24,16 +24,25 @@ export async function readCompletionStream(body, maximumBytes = 16 * 1024 * 1024
     if (!value) event();
     else if (value.startsWith('data:')) data.push(value.slice(5).replace(/^ /, ''));
   };
-  for await (const chunk of body) {
-    size += chunk.length;
-    if (size > maximumBytes) throw new RestaurantError('模型返回过大，已停止接收。', 502, 'MODEL_INVALID_OUTPUT');
-    pending += decoder.decode(chunk, { stream: true });
-    let split;
-    while ((split = pending.indexOf('\n')) >= 0) { line(pending.slice(0, split).replace(/\r$/, '')); pending = pending.slice(split + 1); }
+  const iterator = body[Symbol.asyncIterator]();
+  try {
+    while (!ended) {
+      const { value: chunk, done } = await iterator.next(); if (done) break;
+      size += chunk.length;
+      if (size > maximumBytes) throw new RestaurantError('模型返回过大，已停止接收。', 502, 'MODEL_INVALID_OUTPUT');
+      pending += decoder.decode(chunk, { stream: true });
+      let split;
+      while (!ended && (split = pending.indexOf('\n')) >= 0) { line(pending.slice(0, split).replace(/\r$/, '')); pending = pending.slice(split + 1); }
+    }
+  } finally {
+    // A response clone may wait for its peer to cancel; do not block delivery.
+    try { void Promise.resolve(iterator.return?.()).catch(() => {}); } catch {}
   }
-  pending += decoder.decode();
-  if (pending) line(pending.replace(/\r$/, ''));
-  event();
+  if (!ended) {
+    pending += decoder.decode();
+    if (pending) line(pending.replace(/\r$/, ''));
+    event();
+  }
   const payload = { id, model, usage, choices: [{ message: { content, ...(refusal ? { refusal } : {}) }, finish_reason: finishReason }] };
   if (providerError) throw Object.assign(new RestaurantError('内容分析服务暂时不可用，请稍后重试。', 502, 'PROVIDER_ERROR'), { streamComplete: true, providerPayload: payload, validationIssue: JSON.stringify(providerError).slice(0, 1500) });
   if (!ended && !finishReason) throw Object.assign(new Error('Incomplete model stream'), { code: 'MODEL_STREAM_INCOMPLETE', providerPayload: payload });
