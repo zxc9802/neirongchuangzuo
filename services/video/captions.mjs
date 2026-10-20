@@ -10,6 +10,20 @@ const worker = fileURLToPath(new URL('./captions.py', import.meta.url));
 export function captionSpeech(captions, intervals = []) {
   const segments = intervals.length ? intervals.map(interval => ({ ...interval, text: '', words: [] }))
     : captions.cues.map(cue => ({ start: cue.start, end: cue.end, text: '', words: [] }));
+  // One subtitle can span several VAD intervals. Keep its entire spoken range
+  // instead of squeezing all its words into whichever interval overlaps most.
+  // Ignore overlaps within the OCR's 100 ms sampling precision at cue edges.
+  if (intervals.length) for (const cue of captions.cues) {
+    const covered = segments.map((segment, index) =>
+      Math.min(cue.end, segment.end) - Math.max(cue.start, segment.start) > .1 ? index : -1)
+      .filter(index => index >= 0);
+    if (covered.length > 1) {
+      const first = covered[0], last = covered.at(-1);
+      segments.splice(first, last - first + 1, {
+        start: segments[first].start, end: segments[last].end, text: '', words: [],
+      });
+    }
+  }
   for (const cue of captions.cues) {
     const overlap = segment => Math.max(0, Math.min(cue.end, segment.end) - Math.max(cue.start, segment.start));
     const distance = segment => Math.max(segment.start - cue.end, cue.start - segment.end, 0);

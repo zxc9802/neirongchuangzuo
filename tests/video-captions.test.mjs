@@ -46,6 +46,32 @@ test('caption wording overrides misheard speech while retaining VAD openings and
   assert.doesNotMatch(prompt, /去除画面叠加的字幕|原字幕将由系统在成片中按原时间线合成/);
 });
 
+test('a subtitle spanning a speech pause keeps both spoken intervals for narration', () => {
+  const captions = { engine: 'rapidocr', cues: [
+    { start: .2, end: 1.7, text: '我从来都不会说' },
+    { start: 1.7, end: 3.1, text: '我们家的麻辣烫是' },
+    { start: 3.1, end: 4.2, text: '最好吃的' },
+    { start: 4.4, end: 6.4, text: '因为味道这个事' },
+    { start: 6.4, end: 8.4, text: '它本来就没有一个' },
+    { start: 8.4, end: 9.6, text: '标准的答案' },
+  ] };
+  const intervals = [
+    { start: .288, end: 1.408 }, { start: 1.664, end: 3.968 },
+    { start: 4.448, end: 5.184 }, { start: 5.504, end: 6.4 },
+    { start: 6.624, end: 9.408 },
+  ];
+  const original = structuredClone(intervals);
+  const timeline = captionSpeech(captions, intervals);
+  assert.deepEqual(timeline.segments.map(({ start, end, text }) => ({ start, end, text })), [
+    { start: .288, end: 1.408, text: '我从来都不会说' },
+    { start: 1.664, end: 3.968, text: '我们家的麻辣烫是最好吃的' },
+    { start: 4.448, end: 6.4, text: '因为味道这个事' },
+    { start: 6.624, end: 9.408, text: '它本来就没有一个标准的答案' },
+  ]);
+  assert.deepEqual(intervals, original, 'Analysis must not mutate the stored source intervals');
+  assert.deepEqual(captionSpeech(captions, timeline.segments), timeline, 'Confirming the same subtitles preserves timing');
+});
+
 test('embedded and burned captions preserve text, prices and cue times without changing audio', { skip: !available }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'video-captions-'));
   t.after(() => rm(root, { recursive: true, force: true }));
