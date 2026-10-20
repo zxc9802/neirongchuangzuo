@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
-import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL } from '../services/video/provider.mjs';
+import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL, WAN_MODEL } from '../services/video/provider.mjs';
 import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
@@ -456,8 +456,9 @@ test('all four Seedance editions are offered and removed models cannot start or 
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
   assert.deepEqual(config.models.slice(0, 4).map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
-  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [true, 30]]);
+  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [true, 30], [true, 30]]);
   assert.equal(config.models[4].id, PIXVERSE_MODEL);
+  assert.equal(config.models[5].id, WAN_MODEL);
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '最多生成15秒视频，1元/秒');
   assert.equal(config.models[1].description, '最多生成30秒视频，1.5元/秒');
@@ -471,13 +472,14 @@ test('all four Seedance editions are offered and removed models cannot start or 
   assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
-test('a fal key enables only PixVerse without enabling Seedance or retired models', async t => {
+test('a fal key enables PixVerse and Wan without enabling Seedance or retired models', async t => {
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, enabled: false, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
   assert.equal(config.enabled, true);
-  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [PIXVERSE_MODEL]);
+  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [PIXVERSE_MODEL, WAN_MODEL]);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID() } })).status, 503);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: PIXVERSE_MODEL } })).status, 201);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: WAN_MODEL } })).status, 201);
 });
 
 test('an old H3 Max draft can replace its video before starting with the standard edition', async t => {
@@ -1618,8 +1620,9 @@ test('rejected replica materials release the aggregate hold before paid video ge
   assert.equal((await app.wallet.snapshot('alice')).held,0);
 });
 
-test('PixVerse survives restart, uploads once, restores captions and meters swap and lip sync separately', async t => {
+for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`${model} survives restart, uploads once, restores captions and meters replacement and lip sync separately`, async t => {
   let done = false, rendered = 0;
+  const wan = model === WAN_MODEL, replacementRate = wan ? 0.08 : 0.05, replacementUnits = wan ? 6 : 4;
   const posts = [], uploads = [];
   const job = (model, id) => ({ request_id: id, status_url: `https://queue.fal.run/${model}/requests/${id}/status`,
     response_url: `https://queue.fal.run/${model}/requests/${id}` });
@@ -1634,21 +1637,22 @@ test('PixVerse survives restart, uploads once, restores captions and meters swap
     fetchImpl: async (url, options = {}) => {
       const target = new URL(url);
       if (target.hostname === 'api.fal.ai') {
-        const model = target.searchParams.get('endpoint_id');
-        return Response.json({ prices: [{ endpoint_id: model, currency: 'USD', unit_price: model === PIXVERSE_MODEL ? 0.05 : 0.1 }] });
+        const endpoint = target.searchParams.get('endpoint_id');
+        return Response.json({ prices: [{ endpoint_id: endpoint, currency: 'USD', unit_price: endpoint === model ? replacementRate : 0.1 }] });
       }
       if (target.hostname === 'www.openlux.ai') return Response.json({ data: target.pathname.endsWith('/status') ? { usd_exchange_rate: 5 } : [] });
       assert.equal(target.hostname, 'queue.fal.run');
       if (options.method === 'POST') {
         posts.push({ url: String(url), body: JSON.parse(options.body) });
-        return Response.json(target.pathname.includes('pixverse') ? job('fal-ai/pixverse', 'swap-1') : job('veed/lipsync', 'mouth-1'));
+        return Response.json(target.pathname === '/' + model ? job(wan ? 'fal-ai/wan' : 'fal-ai/pixverse', 'swap-1') : job('veed/lipsync', 'mouth-1'));
       }
       if (target.pathname.endsWith('/status')) return Response.json({ status: done ? 'COMPLETED' : 'IN_PROGRESS' });
-      return Response.json({ video: { url: 'https://fal.media/result.mp4' } }, { headers: { 'x-fal-billable-units': '4' } });
+      return Response.json({ video: { url: 'https://fal.media/result.mp4' } },
+        { headers: { 'x-fal-billable-units': String(target.pathname.endsWith('/swap-1') ? replacementUnits : 4) } });
     },
   });
   const id = randomUUID();
-  await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL } });
+  await app.call('/tasks', { body: { requestId: id, model } });
   await app.upload(id); await uploadVoice(app, id);
   assert.equal((await app.current(id)).estimatedPoints, null);
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
@@ -1657,16 +1661,17 @@ test('PixVerse survives restart, uploads once, restores captions and meters swap
   assert.equal(app.state.creates.length, 0);
   assert.equal(posts[0].body.image_url, 'https://fal.media/file-1');
   assert.equal(posts[0].body.video_url, 'https://fal.media/file-2');
+  assert.equal(posts[0].url, `https://queue.fal.run/${model}`);
   await app.close(); await app.open();
   done = true;
   const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
-  assert.equal(completed.modelName, 'PixVerse Swap'); assert.equal(completed.audioCheck.referenceApplied, true);
+  assert.equal(completed.modelName, wan ? 'Wan 2.2 人物替换' : 'PixVerse Swap'); assert.equal(completed.audioCheck.referenceApplied, true);
   assert.equal(completed.captionCheck.rendered, true); assert.equal(rendered, 1);
   assert.equal(posts.length, 2); assert.equal(uploads.length, 4);
   assert.equal(posts[1].url, 'https://queue.fal.run/veed/lipsync');
-  assert.equal(completed.billing.costCny, 3); assert.equal(completed.billing.chargedPoints, 375);
+  assert.equal(completed.billing.costCny, wan ? 4.4 : 3); assert.equal(completed.billing.chargedPoints, wan ? 550 : 375);
   const items = Object.values((await app.wallet.reservation('alice', id)).costItems);
-  assert.deepEqual(items.map(item => item.metadata.model).sort(), [PIXVERSE_MODEL, 'veed/lipsync']);
+  assert.deepEqual(items.map(item => item.metadata.model).sort(), [model, 'veed/lipsync']);
   assert.ok(items.every(item => item.provider === 'fal'));
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
   await app.close(); await app.open(); await delay(50);
@@ -1687,17 +1692,17 @@ test('PixVerse rejects incompatible dimensions and direct voice replacement befo
   assert.equal((await app.current(id)).status, 'draft'); assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
-test('an uncertain PixVerse submission is not replayed or charged as Seedance after restart', async t => {
+for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`an uncertain ${model} submission is not replayed or charged as Seedance after restart`, async t => {
   let posts = 0;
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'test' },
     fetchImpl: async (url, options = {}) => {
       const target = new URL(url);
-      if (target.hostname === 'api.fal.ai') return Response.json({ prices: [{ endpoint_id: PIXVERSE_MODEL, currency: 'USD', unit_price: 0.05 }] });
+      if (target.hostname === 'api.fal.ai') return Response.json({ prices: [{ endpoint_id: model, currency: 'USD', unit_price: 0.05 }] });
       if (target.hostname === 'www.openlux.ai') return Response.json({ data: { usd_exchange_rate: 5 } });
       assert.equal(options.method, 'POST'); posts++; throw new Error('Lost receipt');
     } });
   const id = randomUUID();
-  await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL, voiceEngine: 'seedance' } });
+  await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance' } });
   await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
   assert.equal((await app.until(id, task => task.status === 'failed')).code, 'VIDEO_SUBMISSION_UNCERTAIN');
   await app.close(); await app.open();
@@ -1707,23 +1712,23 @@ test('an uncertain PixVerse submission is not replayed or charged as Seedance af
   assert.equal((await app.wallet.snapshot('alice')).held, 625, 'Unknown upstream cost must remain held for audit');
 });
 
-test('a missing PixVerse usage header is rechecked after restart without regenerating or guessing a charge', async t => {
+for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`a missing ${model} usage header is rechecked after restart without regenerating or guessing a charge`, async t => {
   let usageReady = false, posts = 0;
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'test' },
     fetchImpl: async (url, options = {}) => {
       const target = new URL(url);
-      if (target.hostname === 'api.fal.ai') return Response.json({ prices: [{ endpoint_id: PIXVERSE_MODEL, currency: 'USD', unit_price: 0.05 }] });
+      if (target.hostname === 'api.fal.ai') return Response.json({ prices: [{ endpoint_id: model, currency: 'USD', unit_price: 0.05 }] });
       if (target.hostname === 'www.openlux.ai') return Response.json({ data: { usd_exchange_rate: 5 } });
       if (options.method === 'POST') {
         posts++; return Response.json({ request_id: 'receipt-late',
-          status_url: 'https://queue.fal.run/fal-ai/pixverse/requests/receipt-late/status',
-          response_url: 'https://queue.fal.run/fal-ai/pixverse/requests/receipt-late' });
+          status_url: `https://queue.fal.run/${model}/requests/receipt-late/status`,
+          response_url: `https://queue.fal.run/${model}/requests/receipt-late` });
       }
       if (target.pathname.endsWith('/status')) return Response.json({ status: 'COMPLETED' });
       return Response.json({ video: { url: 'https://fal.media/result.mp4' } }, { headers: usageReady ? { 'x-fal-billable-units': '4' } : {} });
     } });
   const id = randomUUID();
-  await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL, voiceEngine: 'seedance' } });
+  await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance' } });
   await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
   const pending = await app.until(id, task => task.status === 'settling');
   assert.equal(pending.resultUrl, null); assert.equal(pending.billing.chargedPoints, 0);
@@ -1732,18 +1737,34 @@ test('a missing PixVerse usage header is rechecked after restart without regener
   assert.equal(done.billing.chargedPoints, 125); assert.equal(done.billing.costCny, 1); assert.equal(posts, 1);
 });
 
-for (const duration of [2, 15, 30, 30.1]) test(`PixVerse applies its 30-second source limit to ${duration} seconds`, async t => {
+for (const model of [PIXVERSE_MODEL, WAN_MODEL]) for (const duration of [2, 15, 30, 30.1]) test(`${model} applies the workspace 30-second source limit to ${duration} seconds`, async t => {
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true }, probe: async () => ({ ...META, duration }) });
-  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL } });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, model } });
   const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
   assert.equal(response.status, duration <= 30 ? 200 : 400);
   if (duration <= 30) assert.equal((await app.current(id)).duration, duration);
   assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
-test('PixVerse cannot silently use legacy fixed pricing when actual-cost billing is disabled', async t => {
+for (const model of [PIXVERSE_MODEL, WAN_MODEL]) test(`${model} cannot silently use legacy fixed pricing when actual-cost billing is disabled`, async t => {
   const app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'test' } });
   const config = await (await app.call('/config')).json();
-  assert.equal(config.models.find(model => model.id === PIXVERSE_MODEL).enabled, false);
-  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: PIXVERSE_MODEL } })).status, 503);
+  assert.equal(config.models.find(item => item.id === model).enabled, false);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model } })).status, 503);
+});
+
+test('Wan draft switching clears the Seedance audio mode and rejects direct Seedance voice before billing', async t => {
+  const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true }, speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; } });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent' } });
+  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: WAN_MODEL } })).status, 200);
+  const task = await app.current(id);
+  assert.equal(task.model, WAN_MODEL); assert.equal(task.sourceAudioMode, 'original');
+  assert.equal(task.estimatedPoints, null);
+  assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent' } })).status, 400);
+  const rejected = await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'seedance' } });
+  assert.equal(rejected.status, 400); assert.equal((await rejected.json()).code, 'VIDEO_VOICE_ENGINE_INVALID');
+  assert.equal((await app.current(id)).status, 'draft');
+  assert.equal((await app.wallet.snapshot('alice')).held, 0); assert.equal(app.state.generations, 0);
 });

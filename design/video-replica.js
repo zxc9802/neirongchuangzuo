@@ -8,7 +8,9 @@ const MODELS = [
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, description: '最多生成15秒视频，0.8元/秒' },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, description: '最多生成15秒视频，0.5元/秒' },
   { id: 'fal-ai/pixverse/swap', name: 'PixVerse Swap', maxDuration: 30, description: '最长30秒 · 720p · 按实际费用，配音口型另计' },
+  { id: 'fal-ai/wan/v2.2-14b/animate/replace', name: 'Wan 2.2 人物替换', maxDuration: 30, description: '最长30秒 · 720p · 按实际帧数费用，配音口型另计' },
 ];
+const isFalReplacement = model => ['fal-ai/pixverse/swap', 'fal-ai/wan/v2.2-14b/animate/replace'].includes(model);
 const DEFAULT_VOICE_ENGINE = 'indextts2';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成未完成', expired: '已过期' };
@@ -77,7 +79,7 @@ function modelPicker(ctx) {
   }).join('')}</div></div>`;
 }
 function sourceAudioPicker() {
-  if (selectedModel().id === 'fal-ai/pixverse/swap') return '';
+  if (isFalReplacement(selectedModel().id)) return '';
   const locked = state.busy || state.current && state.current.status !== 'draft' || !state.config?.enabled;
   return `<div class="replica-model-setting"><h2>参考视频声音</h2><div id="replica-source-audio" class="replica-models" role="group" aria-label="选择参考视频声音模式">${[
     ['original', '原声参考（默认）', '保留参考视频原声，沿用现有生成方式。'],
@@ -160,7 +162,7 @@ export function renderVideoReplica(ctx) {
 async function selectModel(id) {
   if (state.busy || state.current && state.current.status !== 'draft' || !MODELS.some(model => model.id === id) || !state.config?.enabled) return;
   if (selectedModel().id === id) return;
-  if (!state.current) { state.model = id; if (id === 'fal-ai/pixverse/swap') state.sourceAudioMode = 'original'; state.error = ''; refresh(); return; }
+  if (!state.current) { state.model = id; if (isFalReplacement(id)) state.sourceAudioMode = 'original'; state.error = ''; refresh(); return; }
   state.busy = true; state.error = ''; refresh();
   try {
     if (state.files.video && MODELS.find(model => model.id === id).maxDuration < selectedModel().maxDuration) {
@@ -175,7 +177,7 @@ async function selectModel(id) {
 }
 async function selectSourceAudioMode(mode) {
   if (state.busy || state.current && state.current.status !== 'draft' || !['original', 'silent'].includes(mode)
-    || selectedModel().id === 'fal-ai/pixverse/swap' || !state.config?.enabled || state.sourceAudioMode === mode) return;
+    || isFalReplacement(selectedModel().id) || !state.config?.enabled || state.sourceAudioMode === mode) return;
   if (!state.current) { state.sourceAudioMode = mode; state.error = ''; refresh(); return; }
   state.busy = true; state.error = ''; refresh();
   try { remember((await request(`/tasks/${state.current.id}/source-audio`, jsonPost({ sourceAudioMode: mode }))).task); }

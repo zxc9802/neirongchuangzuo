@@ -131,7 +131,7 @@ test('polling still replaces expired reference sources and adds recovery control
 
 test('edition buttons show the requested descriptions and update the upload duration hint', async t => {
   const page = await fixture(t); page.recover(); await page.poll();
-  for (const name of ['qiya-2.0', 'qiya-2.5', 'qiya-2.0-f1', 'qiya-20-m1']) assert.ok(page.html().includes(`<strong>${name}</strong>`));
+  for (const name of ['qiya-2.0', 'qiya-2.5', 'qiya-2.0-f1', 'qiya-20-m1', 'PixVerse Swap', 'Wan 2.2 人物替换']) assert.ok(page.html().includes(`<strong>${name}</strong>`));
   for (const price of ['1', '0.8', '0.5']) assert.ok(page.html().includes(`最多生成15秒视频，${price}元/秒`));
   assert.match(page.html(), /最多生成30秒视频，1.5元\/秒/);
   assert.doesNotMatch(page.html(), /标准版|至臻版/);
@@ -144,7 +144,7 @@ test('edition buttons show the requested descriptions and update the upload dura
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
 
-for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'fal-ai/pixverse/swap']) test(`${model} choice is sent during task creation and start without changing the voice engine`, async t => {
+for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'fal-ai/pixverse/swap', 'fal-ai/wan/v2.2-14b/animate/replace']) test(`${model} choice is sent during task creation and start without changing the voice engine`, async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
@@ -211,12 +211,12 @@ test('saved silent drafts restore their mode and can persist a switch back to th
   assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
 });
 
-test('switching to PixVerse removes the Seedance-only mode and restores original reference audio', async t => {
+for (const model of ['fal-ai/pixverse/swap', 'fal-ai/wan/v2.2-14b/animate/replace']) test(`switching to ${model} removes the Seedance-only mode and restores original reference audio`, async t => {
   const page = await fixture(t);
   page.recover(); await page.poll();
   page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: 'silent' } }) } }); await page.settle();
   assert.match(page.html(), /data-source-audio="silent"[^>]*aria-pressed="true"/);
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: 'fal-ai/pixverse/swap' } }) } }); await page.settle();
+  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: model } }) } }); await page.settle();
   assert.doesNotMatch(page.html(), /id="replica-source-audio"/);
   page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: STANDARD_MODEL } }) } }); await page.settle();
   assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);

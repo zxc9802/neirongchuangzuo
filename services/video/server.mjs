@@ -6,11 +6,12 @@ import { calculateCredits } from '../credits/store.mjs';
 import { costPoints } from '../credits/costs.mjs';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
-import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL } from './provider.mjs';
+import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL } from './provider.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, removeVideoAudio, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createPixverseProvider } from './pixverse.mjs';
+import { createWanProvider } from './wan.mjs';
 import { createCaptionService, captionSpeech } from './captions.mjs';
 import { createNarrationService } from './narration.mjs';
 import { createLipsyncService } from './lipsync.mjs';
@@ -22,6 +23,7 @@ const DAY = 86400_000;
 const MATERIAL_QUERY_RETRIES = 5;
 const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'verifying']);
 const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
+const isFalReplacement = model => model === PIXVERSE_MODEL || model === WAN_MODEL;
 const error = (message, status = 400, code) => new VideoError(message, status, code);
 const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' }); res.end(JSON.stringify(value)); };
 export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo|voice|generated|narration|emotion-\d{1,2})$/.test(path);
@@ -42,7 +44,7 @@ async function readJSON(req) {
 }
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
-  config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, fetchImpl = fetch, probe = probeVideo,
+  config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, fetchImpl = fetch, probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env),
   narration, lipsync, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
@@ -52,7 +54,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   provider ||= createVideoProvider(config,costMeter.fetch);
   falProvider ||= createFalVideoProvider(config,costMeter.fetch);
   pixverseProvider ||= createPixverseProvider(config,costMeter.fetch);
-  const models = MODELS.map(model => ({ ...model, enabled: Boolean(model.id === PIXVERSE_MODEL
+  wanProvider ||= createWanProvider(config,costMeter.fetch);
+  const models = MODELS.map(model => ({ ...model, enabled: Boolean(isFalReplacement(model.id)
     ? config.falEnabled && (!credits || costMeter.enabled) : config.enabled) }));
   const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
     { id: 'indextts2', name: 'IndexTTS2', enabled: Boolean(narration?.enabled && lipsync?.enabled) }];
@@ -68,7 +71,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return model.id;
   }
   function selectedSourceAudioMode(mode = 'original', model = MODEL) {
-    if (!['original', 'silent'].includes(mode) || mode === 'silent' && !MODELS.some(item => item.id === model && item.id !== PIXVERSE_MODEL)) {
+    if (!['original', 'silent'].includes(mode) || mode === 'silent' && !MODELS.some(item => item.id === model && !isFalReplacement(item.id))) {
       throw error('参考视频声音模式无效，无原声参考模式仅适用于 Seedance 生成版本。', 400, 'VIDEO_SOURCE_AUDIO_MODE_INVALID');
     }
     return mode;
@@ -129,7 +132,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         && (!credits || task.billing?.status === 'released'),
       downloadProgress: task.downloadProgress,
       estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? costPricing
-        ? task.model === PIXVERSE_MODEL ? null : costPoints(task.duration * cnyPerSecond(task)) : calculateCredits('video', task.duration) : null,
+        ? isFalReplacement(task.model) ? null : costPoints(task.duration * cnyPerSecond(task)) : calculateCredits('video', task.duration) : null,
       billing: task.billing && { source: 'workspace', status: task.billing.status, reservedPoints: task.billing.reservedPoints, chargedPoints: task.billing.chargedPoints, exempt: task.billing.exempt === true,
         ...(task.billing.mode==='api_cost'?{mode:'api_cost',costCny:task.billing.costCny}:{}) },
       resultUrl: !expired && task.status === 'completed' && settled ? `${PREFIX}/tasks/${task.id}/result` : null };
@@ -139,7 +142,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     try {
       const taskId = task.billingTaskId || task.id;
       let record = await credits.reservation(task.userId, taskId);
-      if (task.model === PIXVERSE_MODEL && record?.kind === 'api-cost' && record.status === 'reserved') {
+      if (isFalReplacement(task.model) && record?.kind === 'api-cost' && record.status === 'reserved') {
         // A playable result can arrive before its usage header. Re-read only saved receipts.
         const urls = [task.falQueue?.result, task.lipsync?.resultUrl, ...(task.narration?.segments || []).map(segment => segment.falQueue?.result)];
         await costMeter.run({ userId: task.userId, taskId }, () => Promise.allSettled(urls.filter(Boolean).map(async value => {
@@ -232,7 +235,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   async function processVideoTask(task) {
     if (closing || fatal) return;
     // Retain the provider only to finish tasks submitted before H3 Max was removed.
-    const taskProvider = task.model === PIXVERSE_MODEL ? pixverseProvider : task.model === FAL_MODEL ? falProvider : provider;
+    const taskProvider = task.model === WAN_MODEL ? wanProvider : task.model === PIXVERSE_MODEL ? pixverseProvider : task.model === FAL_MODEL ? falProvider : provider;
     if (isExpired(task)) {
       if (task.status !== 'expired') {
         task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; await save(task);
@@ -263,7 +266,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (task.status === 'reviewing') {
       for (const kind of ['photo', 'video', ...(task.voice && task.voiceEngine !== 'indextts2' ? ['voice'] : [])]) {
         if (!task.materials[kind]) {
-          task.materials[kind] = task.model === PIXVERSE_MODEL
+          task.materials[kind] = isFalReplacement(task.model)
             ? { id: await providerStorage.upload(file(task, kind), mime(kind)), status: 2 }
             : await taskProvider.createMaterial(sourceUrl(task, kind), kind);
           await save(task);
@@ -286,7 +289,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         await save(task);
       }
       if (Object.values(task.materials).some(value => value.status !== 2)) return;
-      if(task.billing?.mode==='api_cost' && task.model !== PIXVERSE_MODEL && !task.seedanceCostPrepared) {
+      if(task.billing?.mode==='api_cost' && !isFalReplacement(task.model) && !task.seedanceCostPrepared) {
         try { await credits.prepareCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',quoteCny:task.duration * cnyPerSecond(task),provider:'seedance',
           metadata:{model:task.model || MODEL,currency:'CNY',unitPrice:cnyPerSecond(task)}}); }
         catch(cause) {await fail(task,cause.message,cause.code||'CREDITS_UNAVAILABLE');return;}
@@ -397,7 +400,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (processors.has(task.id)) continue;
       const processing = serialize(task.id, async () => {
       try { await costMeter.run({userId:task.userId,taskId:task.billingTaskId||task.id,
-        legacy:task.billing?.mode!=='api_cost',aggregate:task.billing?.mode==='api_cost' && task.model !== PIXVERSE_MODEL},()=>processTask(task)); }
+        legacy:task.billing?.mode!=='api_cost',aggregate:task.billing?.mode==='api_cost' && !isFalReplacement(task.model)},()=>processTask(task)); }
       catch (cause) {
         if (fatal) return;
         if (['VIDEO_NARRATION_FAILED', 'VIDEO_NARRATION_UNCERTAIN', 'VIDEO_LIPSYNC_FAILED', 'VIDEO_LIPSYNC_UNCERTAIN'].includes(cause.code)) {
@@ -499,7 +502,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const model = selectedModel(body.model);
           const duration = task.video ? videoDuration(task.video, model) : undefined;
           task.model = model;
-          if (model === PIXVERSE_MODEL) task.sourceAudioMode = 'original';
+          if (isFalReplacement(model)) task.sourceAudioMode = 'original';
           if (task.video) task.duration = duration;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
@@ -603,7 +606,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const model = selectedModel(body.model ?? (models.some(model => model.id === task.model) ? task.model : MODEL));
           const sourceAudioMode = selectedSourceAudioMode(body.sourceAudioMode ?? task.sourceAudioMode, model);
           if (sourceAudioMode === 'silent' && !task.voice) throw error('无原声参考模式请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
-          if (model === PIXVERSE_MODEL && task.voice && voiceEngine !== 'indextts2') throw error('PixVerse 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
+          if (isFalReplacement(model) && task.voice && voiceEngine !== 'indextts2') throw error(`${models.find(item => item.id === model).name} 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
           const duration = videoDuration(task.video, model);
           task.model = model;
           task.duration = duration;
@@ -613,14 +616,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           try {
             if (credits) {
-              if(costMeter.enabled && model !== PIXVERSE_MODEL) {
+              if(costMeter.enabled && !isFalReplacement(model)) {
                 const wallet=await credits.snapshot(userId);
                 if(wallet.unlimited!==true&&costPoints(task.duration * cnyPerSecond(task))>wallet.available) throw error('积分不足，请选择更短的视频。',402,'INSUFFICIENT_POINTS');
               }
               let record;
               if (costMeter.enabled) {
                 record = await credits.reserveCost({userId,taskId:task.id});
-                if (model !== PIXVERSE_MODEL) {
+                if (!isFalReplacement(model)) {
                   record = await credits.prepareCostCall({userId,taskId:task.id,receiptId:'seedance',quoteCny:task.duration * cnyPerSecond(task),
                     provider:'video-replica',metadata:{model:task.model,currency:'CNY',unitPrice:cnyPerSecond(task)}});
                   task.seedanceCostPrepared = true;
