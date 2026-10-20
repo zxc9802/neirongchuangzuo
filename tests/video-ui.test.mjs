@@ -257,14 +257,37 @@ test('a shorter local replacement is saved before downgrading a premium draft an
 
 test('automatic successful polling clears restart errors on first load and after a loaded page', async t => {
   const page = await fixture(t);
-  assert.match(page.message(), /视频服务暂时不可用/);
+  assert.match(page.message(), /正在重新连接/);
   page.recover(); await page.poll();
   assert.equal(page.message(), '');
   page.fail(); await page.poll();
-  assert.match(page.message(), /视频服务暂时不可用/);
+  assert.match(page.message(), /正在重新连接/);
   page.recover(); await page.poll();
   assert.equal(page.message(), '');
   page.ctx.refresh(); assert.equal(page.message(), '');
+});
+
+test('saved progress uses a neutral waiting state and resumes or stops the same task', async t => {
+  const task = { id: 'recovery-task', status: 'waiting', createdAt: Date.now(), voiceEngine: 'indextts2',
+    recovery: { state: 'waiting', message: '进度已保存，可以继续处理。' }, canResume: true, canCancel: true,
+    narrationProgress: { completed: 2, total: 3, ready: false } };
+  const calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (options?.method !== 'POST') return;
+    calls.push(path);
+    assert.ok(path.endsWith('/resume') || path.endsWith('/cancel'));
+    Object.assign(task, { status: path.endsWith('/resume') ? 'running' : 'cancelled', recovery: undefined, canResume: false });
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id); await page.settle();
+  assert.match(page.message(), /进度已保存/);
+  assert.match(page.html(), /role="status"/); assert.doesNotMatch(page.html(), /role="alert"|class="replica-error"/);
+  assert.match(page.html(), /id="replica-resume"/); assert.match(page.html(), /id="replica-cancel"/);
+  page.node('#replica-resume').onclick(); await page.settle();
+  assert.equal(task.status, 'running');
+  await page.poll(); page.node('#replica-cancel').onclick(); await page.settle();
+  assert.equal(task.status, 'cancelled');
+  assert.deepEqual(calls, ['/api/video-replica/tasks/recovery-task/resume', '/api/video-replica/tasks/recovery-task/cancel']);
 });
 
 for (const [width, height] of [[720, 1280], [1280, 720], [720, 720], [720, 960]]) {
@@ -638,7 +661,7 @@ for (const stalledPart of ['headers', 'body']) test(`a stalled ${stalledPart} re
   assert.ok(controller, 'status requests need a bounded timeout');
   controller.abort(new DOMException('Timed out', 'TimeoutError'));
   await page.poll();
-  assert.match(page.message(), /查询任务超时/);
+  assert.match(page.message(), /正在重新连接/);
   stall = false; await page.poll();
   assert.equal(page.message(), '');
   assert.equal(calls, 2);

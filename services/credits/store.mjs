@@ -444,7 +444,7 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
           return publicReservation(record, state.wallet);
         }
         if (metadata && (typeof metadata !== 'object' || Array.isArray(metadata)
-          || Object.entries(metadata).some(([key,value]) => !['model','group','currency','unitPrice','fx','startedAt'].includes(key)
+          || Object.entries(metadata).some(([key,value]) => !['model','group','currency','unitPrice','fx','startedAt','inputHash'].includes(key)
             || (['unitPrice','fx','startedAt'].includes(key) ? !Number.isFinite(value) || value < 0 : typeof value !== 'string' || value.length > 160)))) throw new CreditsError('费用证据无效。');
         record.costItems[receiptId] = { provider, quoteMicros, costMicros: 0, status: 'pending', ...(metadata ? { metadata: clone(metadata) } : {}) };
         adjustCostBudget(state, userId, taskId, false, 'cost_prepare:' + receiptId);

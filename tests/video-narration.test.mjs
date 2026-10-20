@@ -48,8 +48,8 @@ test('IndexTTS uses uploaded timbre and per-segment source emotion, at most thre
   const folder = await mkdtemp(join(tmpdir(), 'replica-narration-'));
   t.after(async () => { await credits.close(); await rm(folder, { recursive: true, force: true }); });
   const source = join(folder, 'source.mp4'), wav = join(folder, 'fixture.wav');
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=black:s=160x240:r=30:d=6',
-    '-f', 'lavfi', '-i', 'sine=frequency=220:duration=6', '-c:v', 'libx264', '-c:a', 'aac', source]);
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=black:s=160x240:r=30:d=36',
+    '-f', 'lavfi', '-i', 'sine=frequency=220:duration=36', '-c:v', 'libx264', '-c:a', 'aac', source]);
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=1', '-ar', '24000', wav]);
   const requests = [], events = [];
   const uploads = [];
@@ -71,7 +71,7 @@ test('IndexTTS uses uploaded timbre and per-segment source emotion, at most thre
     upload: async input => { uploads.push(input); return `https://fal.media/${basename(input)}`; }, fetchImpl: meter.fetch,
     download: async (_url, output) => writeFile(output, await readFile(wav)), detect: async () => [{ start: 0.1, end: 0.9 }],
   });
-  const task = { duration: 6, actualDuration: 6, video: { audio: true }, speech: { segments: Array.from({ length: 5 }, (_, i) => ({ start: i + 0.25, end: i + 0.75, text: `第${i}句` })) } };
+  const task = { duration: 36, actualDuration: 36, video: { audio: true }, speech: { segments: Array.from({ length: 5 }, (_, i) => ({ start: i * 7 + 0.25, end: i * 7 + 6.25, text: `第${i}句` })) } };
   task.narration = await service.prepare(task, folder);
   assert.equal(task.narration.provider, 'fal');
   const advance = () => meter.run(scope, () => service.advance(task, folder, kind => `https://workspace.example/${kind}`, async () => {}));
@@ -89,12 +89,12 @@ test('IndexTTS uses uploaded timbre and per-segment source emotion, at most thre
   }
   assert.equal(uploads.filter(input => input.endsWith('reference.wav')).length, 1, 'The shared voice must be uploaded once and reused');
   assert.equal(uploads.length, 6);
-  const output = join(folder, 'result.mp4'); await muxNarration(source, join(folder, 'narration.wav'), output, 6);
+  const output = join(folder, 'result.mp4'); await muxNarration(source, join(folder, 'narration.wav'), output, 36);
   for (let i = 0; i < 5; i++) {
-    assert.ok(rms(pcm(output, i + 0.35, 0.1)) > 0.05);
-    assert.ok(rms(pcm(output, i + 0.85, 0.1)) < 0.002);
+    assert.ok(rms(pcm(output, i * 7 + 0.35, 0.1)) > 0.05);
+    assert.ok(rms(pcm(output, i * 7 + 6.6, 0.1)) < 0.002);
   }
-  assert.ok(rms(pcm(output, 5.2, 0.5)) < 0.002);
+  assert.ok(rms(pcm(output, 35.2, 0.5)) < 0.002);
   const frames = input => execFileSync('ffmpeg', ['-v', 'error', '-i', input, '-map', '0:v', '-c', 'copy', '-f', 'hash', 'pipe:1']).toString();
   assert.equal(frames(output), frames(source));
   const tone = pcm(output, 0.35, 0.2), correlate = frequency => Math.abs(Array.from({ length: tone.length / 4 }, (_, i) => tone.readFloatLE(i * 4) * Math.sin(2 * Math.PI * frequency * i / 16000)).reduce((a, b) => a + b, 0));

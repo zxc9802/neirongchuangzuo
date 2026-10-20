@@ -41,7 +41,8 @@ async function fixture(t, options = {}) {
   let app, handler, base;
   async function open(overrides = {}) {
     handler = createVideoHandler({ storageDir: join(root, 'video'), config: CONFIG, provider, credits: wallet,
-      photo: async () => Buffer.from('photo'), probe: async () => META, download: async (_url, path) => writeFile(path, VIDEO),
+      photo: async () => Buffer.from('photo'), probe: async input => ({ ...META, duration: options.narration && input.endsWith('upload.tmp') ? 6 : META.duration }),
+      download: async (_url, path) => writeFile(path, VIDEO),
       captions: { extract: async () => null },
       narration: null, lipsync: null,
       providerStorage: { upload: async input => `https://fal.media/${input.split('/').at(-1)}` },
@@ -1311,8 +1312,9 @@ test('IndexTTS preserves explicitly confirmed dialogue instead of overwriting it
 });
 
 test('pending source transcription resumes after restart before any video or narration generation', async t => {
-  let ready = false, prepared = 0;
+  let ready = false, prepared = 0, clock = Date.now();
   const app = await fixture(t, {
+    now: () => clock,
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
     speech: fakeSpeech({ analyze: async () => {
       if (!ready) throw new VideoError('原声文稿正在识别，正在查询原任务。', 502, 'VIDEO_TRANSCRIPTION_PENDING');
@@ -1322,10 +1324,10 @@ test('pending source transcription resumes after restart before any video or nar
     lipsync: fakeLipsync() });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
-  const pending = await app.until(id, task => task.code === 'VIDEO_TRANSCRIPTION_PENDING');
+  const pending = await app.until(id, task => task.recovery?.state === 'retrying');
   assert.equal(pending.status, 'preparing');
   assert.equal(app.state.generations, 0); assert.equal(prepared, 0);
-  await app.close(); ready = true; await app.open();
+  await app.close(); ready = true; clock += 60_000; await app.open();
   const running = await app.until(id, task => task.status === 'running');
   assert.equal(running.speech.text, SPEECH.text); assert.equal(running.error, '');
   assert.equal(app.state.generations, 1); assert.equal(prepared, 1);
@@ -1347,8 +1349,8 @@ for (const [model, voiceEngine] of [[REPLICA_PRICES[0][0], 'seedance'], [PREMIUM
       } }), lipsync: fakeLipsync(),
     });
     const original = join(app.root, 'original.mp4');
-    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x480:r=24:d=4',
-      '-f', 'lavfi', '-i', 'sine=frequency=220:duration=4', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=4',
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x480:r=24:d=6',
+      '-f', 'lavfi', '-i', 'sine=frequency=220:duration=6', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=6',
       '-map', '0:v', '-map', '1:a', '-map', '2:a', '-c:v', 'libx264', '-c:a', 'aac', original]);
     const bytes = await readFile(original), id = randomUUID();
     await app.call('/tasks', { body: { requestId: id, model, voiceEngine, sourceAudioMode: 'silent' } });
@@ -1554,23 +1556,25 @@ test('IndexTTS and Seedance start in parallel, and new audio waits for real lip-
 });
 
 test('pending lip-sync survives service restart without submitting a second paid job', async t => {
-  let submits = 0, mouthReady = false;
+  let submits = 0, mouthReady = false, clock = Date.now();
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    now: () => clock,
     narration: fakeNarration(), lipsync: fakeLipsync({
       submit: async () => { submits++; return { id: 'persisted-mouth' }; },
       query: async job => { assert.equal(job.id, 'persisted-mouth'); if (!mouthReady) throw new VideoError('正在查询原口型任务。', 502, 'VIDEO_LIPSYNC_PENDING'); return 'https://cdn.example/mouth.mp4'; },
     }) });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
   await app.until(id, task => task.status === 'running'); app.state.done = true;
-  await app.until(id, task => task.status === 'verifying' && task.code === 'VIDEO_QUERY_PENDING');
-  await app.close(); await app.open();
-  mouthReady = true; await app.until(id, task => task.status === 'completed');
+  await app.until(id, task => task.status === 'verifying' && task.recovery?.state === 'retrying');
+  await app.close(); mouthReady = true; clock += 60_000; await app.open();
+  await app.until(id, task => task.status === 'completed');
   assert.equal(submits, 1); assert.equal(app.state.generations, 1);
 });
 
 test('a temporary lip-sync download failure retries the saved result without paying twice', async t => {
-  let submits = 0, downloads = 0, available = false;
+  let submits = 0, downloads = 0, available = false, clock = Date.now();
   const app = await fixture(t, { speech: fakeSpeech(),
+    now: () => clock,
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     narration: fakeNarration(),
     lipsync: fakeLipsync({ submit: async () => { submits++; return { id: 'saved-mouth' }; } }),
@@ -1582,10 +1586,9 @@ test('a temporary lip-sync download failure retries the saved result without pay
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
   await app.until(id, task => task.status === 'running'); app.state.done = true;
-  const pending = await app.until(id, task => task.code === 'VIDEO_QUERY_PENDING' || task.status === 'failed');
+  const pending = await app.until(id, task => task.recovery?.state === 'retrying');
   assert.equal(pending.status, 'verifying');
-  await app.close(); await app.open();
-  available = true;
+  await app.close(); available = true; clock += 60_000; await app.open();
   await app.until(id, task => task.status === 'completed');
   assert.ok(downloads >= 2); assert.equal(submits, 1); assert.equal(app.state.generations, 1);
 });
@@ -1607,7 +1610,7 @@ for (const duration of [3.22, 2.5]) test(`independent narration delivers a gener
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     narration: fakeNarration(), lipsync: fakeLipsync(),
     probe: async input => ({ ...META, duration: input.endsWith('result.tmp') ? duration
-      : input.endsWith('lipsync.mp4') ? SPEECH.end : META.duration }),
+      : input.endsWith('lipsync.mp4') ? SPEECH.end : input.endsWith('upload.tmp') ? 6 : META.duration }),
   });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
@@ -1619,13 +1622,98 @@ for (const duration of [3.22, 2.5]) test(`independent narration delivers a gener
   assert.equal(app.state.generations, 1);
 });
 
-test('failed IndexTTS cannot silently deliver the original or Seedance voice', async t => {
+test('failed IndexTTS preserves progress without exposing technical errors or substituting another voice', async t => {
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     narration: fakeNarration({ advance: async () => { throw new VideoError('配音失败', 502, 'VIDEO_NARRATION_FAILED'); } }), lipsync: fakeLipsync() });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
-  const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
-  assert.equal(failed.code, 'VIDEO_NARRATION_FAILED'); assert.equal(failed.resultUrl, null);
+  const failed = await app.until(id, task => task.status === 'waiting');
+  assert.equal(failed.code, undefined); assert.equal(failed.error, ''); assert.equal(failed.resultUrl, null);
+  assert.equal(failed.canResume, true); assert.equal(failed.canCancel, true);
+  const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal(saved.code, 'VIDEO_NARRATION_FAILED');
   assert.equal(app.state.generations, 1);
+  assert.equal((await app.call(`/tasks/${id}/cancel`, { body: {} })).status, 200);
+  assert.equal((await app.current(id)).status, 'cancelled');
+});
+
+test('short original references wait before billing and can be replaced in the same draft', async t => {
+  let duration = 4;
+  const app = await fixture(t, { probe: async () => ({ ...META, duration }), speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration(), lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  const response = await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  assert.equal(response.status, 202);
+  const waiting = (await response.json()).task;
+  assert.equal(waiting.status, 'waiting'); assert.equal(waiting.canReplaceSource, true);
+  assert.equal(waiting.error, ''); assert.equal(waiting.canResume, false);
+  assert.equal(await app.wallet.reservation('alice', id), null); assert.equal(app.state.generations, 0);
+  duration = 6;
+  assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO })).status, 200);
+  assert.equal((await app.current(id)).status, 'draft');
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.generations, 1);
+});
+
+test('recovery resumes after restart with the saved video and narration progress, without another video generation', async t => {
+  let clock = Date.now(), available = false;
+  const app = await fixture(t, { now: () => clock, speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration({ advance: async (...args) => {
+      if (!available) throw new VideoError('internal provider details', 502, 'VIDEO_NARRATION_PENDING');
+      return fakeNarration().advance(...args);
+    } }), lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  await app.until(id, task => task.recovery?.state === 'retrying');
+  app.state.done = true; clock += 10_000;
+  await app.until(id, task => task.status === 'verifying');
+  clock += 31 * 60_000;
+  const waiting = await app.until(id, task => task.status === 'waiting');
+  assert.equal(waiting.canResume, true); assert.equal(waiting.error, ''); assert.equal(waiting.code, undefined);
+  assert.equal(waiting.resultUrl, null);
+  assert.ok((await readFile(join(app.root, 'video', id, 'generated.mp4'))).length);
+  await app.close(); available = true; await app.open();
+  assert.equal((await app.current(id)).status, 'waiting');
+  assert.equal((await app.call(`/tasks/${id}/resume`, { body: {} })).status, 200);
+  assert.equal((await app.call(`/tasks/${id}/resume`, { body: {} })).status, 200);
+  await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 1);
+});
+
+test('a provider that stays queued eventually waits for continuation instead of showing endless activity', async t => {
+  let clock = Date.now();
+  const app = await fixture(t, { now: () => clock, speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration(), lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  await app.until(id, task => task.status === 'running');
+  clock += 31 * 60_000;
+  const waiting = await app.until(id, task => task.status === 'waiting');
+  assert.equal(waiting.canResume, true); assert.equal(waiting.resultUrl, null);
+  app.state.done = true; await app.call(`/tasks/${id}/resume`, { body: {} });
+  await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 1);
+});
+
+test('exhausted narration cannot be reset by resume, and stopping is owner-scoped and idempotent', async t => {
+  let advances = 0;
+  const app = await fixture(t, { speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration({ advance: async () => {
+      advances++; throw Object.assign(new VideoError('attempt limit', 502, 'VIDEO_NARRATION_WAITING'), { recoveryAction: 'limit' });
+    } }), lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  assert.equal((await app.until(id, task => task.status === 'waiting')).canResume, false);
+  await app.call(`/tasks/${id}/resume`, { body: {} });
+  assert.equal((await app.current(id)).status, 'waiting'); assert.equal(advances, 1);
+  assert.equal((await app.call(`/tasks/${id}/cancel`, { body: {}, owner: 'bob' })).status, 404);
+  await app.call(`/tasks/${id}/cancel`, { body: {} }); await app.call(`/tasks/${id}/cancel`, { body: {} });
+  assert.equal((await app.current(id)).status, 'cancelled'); assert.equal(advances, 1);
+  assert.equal((await app.wallet.reservation('alice', id)).status, 'released');
 });
 
 test('missing reference voice or lip-sync configuration fails before reserving credits or generating video', async t => {
@@ -1667,7 +1755,7 @@ test('replica includes IndexTTS and lip-sync in its 1 CNY per second cost, witho
   assert.equal((await app.call(`/tasks/${id}/start`,{body:{voiceEngine:'indextts2'}})).status,202);
   await app.until(id,task=>task.status==='running');app.state.done=true;
   const done=await app.until(id,task=>task.status==='completed'&&task.billing.status==='settled');
-  assert.equal(done.billing.chargedPoints,500);assert.equal(done.billing.costCny,4);assert.equal(mouths,1);
+  assert.equal(done.billing.chargedPoints,750);assert.equal(done.billing.costCny,6);assert.equal(mouths,1);
   assert.equal(Object.keys((await app.wallet.reservation('alice',id)).costItems).length,1);
 });
 test('rejected replica materials release the aggregate hold before paid video generation',async t=>{

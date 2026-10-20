@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { createProviderPrices, tokenCostCny, tokenQuoteCny } from './provider-costs.mjs';
 import { readCompletionStream } from '../restaurant/model-stream.mjs';
 import { CreditsError } from './store.mjs';
@@ -28,6 +28,19 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
   return {
     enabled,
     run(scope,operation) { return enabled ? context.run(scope,operation) : operation(); },
+    async recoverFalRequest(model, body, requestId) {
+      const scope = context.getStore();
+      if (!enabled || scope?.legacy || scope?.aggregate) return true;
+      if (!scope || !cleanId(requestId)) return false;
+      const saved = await credits.reservation(scope.userId, scope.taskId);
+      if (Object.values(saved?.costItems || {}).some(item => item.providerRequestId === requestId)) return true;
+      const inputHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
+      const matches = Object.entries(saved?.costItems || {}).filter(([, item]) => item.provider === 'fal'
+        && ['pending', 'uncertain'].includes(item.status) && !item.providerRequestId
+        && item.metadata?.model === model && item.metadata.inputHash === inputHash);
+      if (matches.length !== 1) return false;
+      await pending(scope, matches[0][0], requestId); return true;
+    },
     async reconcile(scope) {
       if (!enabled || !prices.openluxReceipt) return;
       const saved = await credits.reservation(scope.userId, scope.taskId);
@@ -52,7 +65,7 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
       if (fal && method === 'GET') {
         const response = await fetchImpl(url,options);
         const requestId = cleanId(/\/requests\/([^/]+)/.exec(target.pathname)?.[1]);
-        if (requestId && !target.pathname.endsWith('/status') && response.ok) {
+        if (requestId && !target.pathname.endsWith('/status') && (response.ok || response.status === 422)) {
           const saved = await credits.reservation(scope.userId,scope.taskId);
           const found = Object.entries(saved?.costItems||{}).find(([,item])=>item.providerRequestId===requestId);
           if (found && ['pending','uncertain'].includes(found[1].status)) {
@@ -85,7 +98,8 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
         quoteCny = Math.max(0.008,(body.num_images || 1)*rate.fx);
       } } catch(error) { error.providerNotDispatched=true; throw error; }
       const receiptId = randomUUID();
-      const metadata = provider==='fal' ? {model:target.pathname.slice(1),currency:'USD',unitPrice:rate.unit_price,fx:rate.fx} : {model:rate.modelName,group:rate.group,currency:'CNY',fx:rate.fx,
+      const metadata = provider==='fal' ? {model:target.pathname.slice(1),currency:'USD',unitPrice:rate.unit_price,fx:rate.fx,
+        inputHash:createHash('sha256').update(JSON.stringify(body)).digest('hex')} : {model:rate.modelName,group:rate.group,currency:'CNY',fx:rate.fx,
         ...(rate.type === 'receipt' ? {unitPrice:rate.unitPrice,startedAt:Date.now()} : {})};
       try { await credits.prepareCostCall({...scope,receiptId,quoteCny,provider,metadata}); }
       catch(error) { error.providerNotDispatched=true; throw error; }

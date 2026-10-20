@@ -50,7 +50,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
   if (speech === undefined) speech = createSpeechService(env, costMeter.fetch);
-  if (narration === undefined) narration = createNarrationService(env, { fetchImpl: costMeter.fetch });
+  if (narration === undefined) narration = createNarrationService(env, { fetchImpl: costMeter.fetch, recoverReceipt: costMeter.recoverFalRequest, now });
   if (lipsync === undefined) lipsync = createLipsyncService(env, costMeter.fetch);
   provider ||= createVideoProvider(config,costMeter.fetch);
   falProvider ||= createFalVideoProvider(config,costMeter.fetch);
@@ -120,7 +120,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
-      captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
+      captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck,
+      error: task.recoveryPolicy ? '' : task.error || '', code: task.recoveryPolicy ? undefined : task.code,
+      recovery: task.recovery && { state: task.recovery.state, message: task.recovery.message, nextAttemptAt: task.recovery.nextAttemptAt },
+      canResume: !expired && task.status === 'waiting' && task.recovery?.resumeStatus !== 'submitting' && !task.lipsync?.submitting
+        && ['resume', 'account', 'confirm'].includes(task.recovery?.action),
+      canReplaceSource: !expired && task.status === 'waiting' && task.recovery?.action === 'input' && !task.billing && !task.providerDispatched,
+      canCancel: !expired && (ACTIVE.has(task.status) || task.status === 'waiting'),
       sourceAudioMode: task.sourceAudioMode || 'original',
       voiceEngine: task.voiceEngine || (task.model === FAL_MODEL ? undefined : 'seedance'), narrationProgress: task.narration && { ready: task.narration.ready,
         completed: task.narration.segments.filter(segment => segment.status === 'ready').length, total: task.narration.segments.length },
@@ -139,13 +145,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       resultUrl: !expired && task.status === 'completed' && settled ? `${PREFIX}/tasks/${task.id}/result` : null };
   }
   async function reconcile(task) {
-    if (!credits || !['completed', 'failed', 'expired'].includes(task.status) || ['settled', 'released'].includes(task.billing?.status)) return;
+    if (!credits || !['completed', 'failed', 'expired', 'cancelled'].includes(task.status) || ['settled', 'released'].includes(task.billing?.status)) return;
     try {
       const taskId = task.billingTaskId || task.id;
       let record = await credits.reservation(task.userId, taskId);
       if (isFalReplacement(task.model) && record?.kind === 'api-cost' && record.status === 'reserved') {
         // A playable result can arrive before its usage header. Re-read only saved receipts.
-        const urls = [task.falQueue?.result, task.lipsync?.resultUrl, ...(task.narration?.segments || []).map(segment => segment.falQueue?.result)];
+        const urls = [task.falQueue?.result, task.lipsync?.resultUrl, ...(task.narration?.segments || []).flatMap(segment =>
+          [segment.falQueue?.result, ...(segment.previousJobs || []).map(job => job.falQueue?.result)])];
         for (const name of ['source.mp4', 'generated.mp4', 'result.tmp']) {
           const transcription = await readFile(join(folder(task), name + '.asr.json'), 'utf8').then(JSON.parse).catch(() => null);
           if (transcription?.resultUrl) urls.push(transcription.resultUrl);
@@ -174,9 +181,42 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     await save(task);
   }
   async function fail(task, message, code) {
+    if (task.recoveryPolicy) {
+      const action = /REVIEW_REJECTED|MATERIAL_INVALID|SPEECH_INVALID/.test(code || '') ? 'input'
+        : /POINTS|CREDITS|NOT_CONFIGURED|IP_DENIED|PROVIDER_REJECTED/.test(code || '') ? 'account'
+          : /UNCERTAIN|INTERRUPTED|SUBMISSION/.test(code || '') ? 'confirm' : 'resume';
+      await hold(task, { message, code, recoveryAction: action }); return;
+    }
     if(task.billing?.mode==='api_cost') message=message.replace(/预留积分将退回[，。]?/g,'费用将按实际调用核对。');
     task.status = 'failed'; task.error = message; task.code = code;
     await save(task); await reconcile(task);
+  }
+  async function hold(task, cause) {
+    const action = cause.recoveryAction || 'resume';
+    task.recovery = { state: 'waiting', action, resumeStatus: task.status === 'waiting' ? task.recovery?.resumeStatus : task.status,
+      message: action === 'input' ? !task.billing && !task.providerDispatched
+        ? '请补充至少 5 秒且包含清晰原声的视频，当前进度已保存。'
+        : '素材需要调整，进度已保存；可停止处理后新建复刻。'
+        : action === 'account' ? '等待账户或额度恢复，当前进度已保存。'
+          : action === 'limit' ? '自动处理次数已达上限，当前进度已保存。'
+            : action === 'confirm' ? '等待确认原生成记录，当前进度已保存。' : '进度已保存，可以继续处理。',
+      code: cause.code, at: now() };
+    task.error = cause.message; task.code = cause.code; task.status = 'waiting'; await save(task);
+  }
+  async function recover(task, cause) {
+    if (cause.code === 'VIDEO_NARRATION_WAITING') { await hold(task, cause); return; }
+    if (['VIDEO_NARRATION_FAILED', 'VIDEO_LIPSYNC_FAILED', 'VIDEO_LIPSYNC_UNCERTAIN'].includes(cause.code)) {
+      await hold(task, { message: cause.message, code: cause.code, recoveryAction: cause.code.endsWith('UNCERTAIN') ? 'confirm' : 'resume' }); return;
+    }
+    const startedAt = task.recovery?.startedAt || now(), attempts = (task.recovery?.attempts || 0) + 1;
+    if (now() - startedAt >= 30 * 60_000 || task.status === 'preparing' && attempts >= 3) {
+      await hold(task, { message: cause.message, code: cause.code, recoveryAction: 'resume' }); return;
+    }
+    task.recovery = { state: 'retrying', startedAt, attempts, code: cause.code,
+      nextAttemptAt: now() + Math.min(60_000, 5000 * 2 ** Math.min(attempts - 1, 4)),
+      message: task.status === 'preparing' ? '正在整理原视频声音。' : task.status === 'downloading' ? '正在保存已有成片。'
+        : '正在确认生成进度，已完成内容已保留。' };
+    task.error = cause.message; task.code = cause.code; await save(task);
   }
   function signature(id, kind, expires) {
     return createHmac('sha256', config.signingSecret).update(`${id}:${kind}:${expires}`).digest('hex');
@@ -244,7 +284,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const taskProvider = task.model === WAN_MODEL ? wanProvider : task.model === PIXVERSE_MODEL ? pixverseProvider : task.model === FAL_MODEL ? falProvider : provider;
     if (isExpired(task)) {
       if (task.status !== 'expired') {
-        task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; await save(task);
+        task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; delete task.recovery; await save(task);
       }
       await reconcile(task);
       if (!task.cleaned) {
@@ -259,7 +299,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       return;
     }
-    if (['completed', 'failed', 'expired'].includes(task.status)) { await reconcile(task); return; }
+    if (['completed', 'failed', 'expired', 'cancelled'].includes(task.status)) { await reconcile(task); return; }
     if (!ACTIVE.has(task.status)) return;
     if (task.status === 'preparing') {
       await analyzeSource(task);
@@ -312,6 +352,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (fatal) throw cause;
         if (cause.providerNotDispatched) {
           task.providerDispatched = false;
+          if (task.recoveryPolicy) task.status = 'reviewing';
           await fail(task, cause.message, cause.code || 'CREDITS_UNAVAILABLE'); return;
         }
         if(task.billing?.mode==='api_cost' && task.seedanceCostPrepared) await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,
@@ -392,6 +433,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
   }
   async function processTask(task) {
+    if (!isExpired(task) && (task.status === 'waiting' || task.recovery?.nextAttemptAt > now())) return;
+    if (task.recoveryPolicy && ACTIVE.has(task.status) && now() >= (task.recoveryDeadline || task.startedAt + 30 * 60_000)) {
+      await hold(task, { code: 'VIDEO_RECOVERY_WAITING', recoveryAction: 'resume', message: '本轮等待时间已到，进度已保存。' }); return;
+    }
     if (task.voiceEngine !== 'indextts2' || !task.narration || !ACTIVE.has(task.status) || closing || fatal) return processVideoTask(task);
     const replies = await Promise.allSettled([processVideoTask(task),
       narration.advance(task, folder(task), kind => sourceUrl(task, kind), () => save(task))]);
@@ -400,6 +445,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   async function complete(task) {
       task.status = 'completed'; task.error = ''; delete task.code;
+      delete task.recovery;
       task.completedAt = now();
       task.expiresAt = now() + 3 * DAY;
       await save(task); await reconcile(task);
@@ -409,10 +455,17 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     for (const task of jobs.values()) {
       if (processors.has(task.id)) continue;
       const processing = serialize(task.id, async () => {
-      try { await costMeter.run({userId:task.userId,taskId:task.billingTaskId||task.id,
-        legacy:task.billing?.mode!=='api_cost',aggregate:task.billing?.mode==='api_cost' && !isFalReplacement(task.model)},()=>processTask(task)); }
+      try {
+        const recovery = task.recovery;
+        await costMeter.run({userId:task.userId,taskId:task.billingTaskId||task.id,
+          legacy:task.billing?.mode!=='api_cost',aggregate:task.billing?.mode==='api_cost' && !isFalReplacement(task.model)},()=>processTask(task));
+        if (recovery?.state === 'retrying' && recovery === task.recovery && recovery.nextAttemptAt <= now()) {
+          delete task.recovery; task.error = ''; delete task.code; await save(task);
+        }
+      }
       catch (cause) {
         if (fatal) return;
+        if (task.recoveryPolicy) { await recover(task, cause); return; }
         if (cause.code === 'VIDEO_TRANSCRIPTION_PENDING') {
           task.error = cause.message; task.code = cause.code; await save(task); return;
         }
@@ -495,7 +548,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
-      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|source-audio|analyze|speech|recheck|start|result))?$/.exec(path);
+      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|source-audio|analyze|speech|recheck|start|result|resume|cancel))?$/.exec(path);
       const task = match && jobs.get(match[1]);
       if (!task || task.userId !== userId) throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
       if (!match[2] && req.method === 'GET') { json(res, 200, { task: view(task) }); return; }
@@ -509,6 +562,27 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         await serveMedia(req, res, file(task, 'result'), 'video/mp4', url.searchParams.get('download') === '1'); return;
       }
       await serialize(task.id, async () => {
+        if (match[2] === 'cancel' && req.method === 'POST') {
+          await readJSON(req);
+          if (view(task).canCancel) {
+            task.status = 'cancelled'; task.error = ''; delete task.code; delete task.recovery;
+            await save(task); await reconcile(task);
+          }
+          json(res, 200, { task: view(task) }); return;
+        }
+        if (match[2] === 'resume' && req.method === 'POST') {
+          await readJSON(req);
+          if (view(task).canResume) {
+            for (const segment of task.narration?.segments || []) {
+              if (segment.status !== 'waiting' || segment.recoveryAction === 'limit') continue;
+              segment.status = segment.id ? 'pending' : undefined;
+            }
+            task.status = task.recovery.resumeStatus === 'reserving' ? 'draft' : task.recovery.resumeStatus;
+            task.recoveryDeadline = now() + 30 * 60_000;
+            delete task.recovery; task.error = ''; delete task.code; await save(task);
+          }
+          json(res, 200, { task: view(task) }); return;
+        }
         if (match[2] === 'model' && req.method === 'POST') {
           const body = await readJSON(req);
           if (task.status !== 'draft') throw error('任务已提交，不能切换生成版本。', 409);
@@ -526,7 +600,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (['video', 'photo', 'voice'].includes(match[2]) && req.method === 'PUT') {
-          if (task.status !== 'draft') throw error('任务已提交，不能替换素材。', 409);
+          const replacingSource = match[2] === 'video' && view(task).canReplaceSource;
+          if (task.status !== 'draft' && !replacingSource) throw error('任务已提交，不能替换素材。', 409);
           const kind = match[2], bytes = await readBody(req, kind === 'video' ? VIDEO_LIMIT : kind === 'voice' ? VOICE_LIMIT : PHOTO_LIMIT);
           const temporary = join(folder(task), 'upload.tmp');
           if (kind === 'photo') {
@@ -561,7 +636,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
               return Math.abs(value(ratio) - metadata.width / metadata.height) < Math.abs(value(best) - metadata.width / metadata.height) ? ratio : best;
             });
           }
-          await rename(temporary, file(task, kind)); await save(task); json(res, 200, { task: view(task) }); return;
+          await rename(temporary, file(task, kind));
+          if (replacingSource) { task.status = 'draft'; delete task.recovery; task.error = ''; delete task.code; }
+          await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'analyze' && req.method === 'POST') {
           await readJSON(req);
@@ -626,8 +703,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.duration = duration;
           task.cnyPerSecond = models.find(item => item.id === model).cnyPerSecond;
           task.voiceEngine = voiceEngine;
+          task.recoveryPolicy = voiceEngine === 'indextts2' ? 1 : undefined;
+          if (task.recoveryPolicy) task.recoveryDeadline = now() + 30 * 60_000;
           task.sourceAudioMode = sourceAudioMode;
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
+          if (task.recoveryPolicy && (!task.video.audio || task.video.duration < 5)) {
+            await hold(task, { code: 'VIDEO_NARRATION_SOURCE_REQUIRED', recoveryAction: 'input', message: '原视频需包含至少 5 秒原声。' });
+            json(res, 202, { task: view(task) }); return;
+          }
           try {
             if (credits) {
               if(costMeter.enabled && !isFalReplacement(model)) {
@@ -649,6 +732,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           } catch (cause) {
             if (fatal) throw cause;
             await fail(task, cause.code === 'INSUFFICIENT_POINTS' ? '积分不足，未开始生成。' : '积分预留失败，未开始生成。', cause.code || 'CREDITS_UNAVAILABLE');
+            if (task.recoveryPolicy) { json(res, 202, { task: view(task) }); return; }
             throw cause;
           }
           json(res, 202, { task: view(task) }); return;
