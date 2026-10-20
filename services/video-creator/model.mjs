@@ -71,12 +71,13 @@ export function validateDirectorResult(value, input) {
   if (Math.abs(end - input.settings.duration) > .15) throw invalidOutput('脚本总时长与选择时长不一致，请重新编导。', 'invalid_timeline', { actualDuration: end, expectedDuration: input.settings.duration });
   const balancedShots = balanceNarrationTiming(shots, input, invalidOutput), timingAdjusted = balancedShots !== shots;
   shots = balancedShots;
-  const allIds = new Set(input.assets.map(a => a.id));
+  const allIds = new Set(input.assets.map(a => a.id)), used = new Set(shots.flatMap(shot => shot.referenceIds));
+  const adoptedIds = new Set([...used, ...(input.settings.generateAudio ? input.assets.filter(a => a.type === 'audio').map(a => a.id) : [])]);
   const assets = Array.isArray(value.assets) ? value.assets.filter(a => a && allIds.has(a.id) && text(a.description, 600)).map(a => ({ id: a.id, description: text(a.description, 600), role: text(a.role, 240), adopt: text(a.adopt, 500), exclude: text(a.exclude, 500) })).slice(0, 31) : [];
+  const incompleteRoles = assets.filter(a => !a.role || adoptedIds.has(a.id) && !a.adopt).map(a => ({ id:a.id, field:!a.role ? 'role' : 'adopt' }));
   if (input.planningVersion === DIRECTOR_PLAN_VERSION && (assets.length !== input.assets.length || new Set(assets.map(a => a.id)).size !== assets.length
-    || assets.some(a => !a.role || !a.adopt))) throw invalidOutput('素材职责不完整，请重新编导。', 'invalid_schema', { field: 'assets', expectedCount: input.assets.length, actualCount: assets.length });
+    || incompleteRoles.length)) throw invalidOutput('素材职责不完整，请重新编导。', 'invalid_schema', { field: 'assets', expectedCount: input.assets.length, actualCount: assets.length, incompleteRoles });
   const globalDirection = text(s.globalDirection, 3000);
-  const used = new Set(shots.flatMap(shot => shot.referenceIds));
   const referenceImages = images.filter(a => used.has(a.id));
   const plan = normalizeDirectorPlan(s.plan, input, used, invalidOutput);
   const remap = value => value.replace(/@?图片\s*(\d+)/g, (label, number) => {

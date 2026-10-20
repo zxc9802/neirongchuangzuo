@@ -71,7 +71,7 @@ test('v2 rejects incomplete plans, missing material roles, missing intent and in
     [o => { o.script.plan.cast[0].referenceIds = ['invented']; }, 'invalid_plan'],
     [o => { o.script.plan.cast[0].referenceIds = ['unused']; }, 'invalid_plan'],
     [o => { o.assets.pop(); }, 'invalid_schema'],
-    [o => { o.assets[0].adopt = ''; }, 'invalid_schema'],
+    [o => { o.assets[1].adopt = ''; }, 'invalid_schema'],
     [o => { o.assets[0] = o.assets[1]; }, 'invalid_schema'],
     [o => { delete o.script.shots[1].intent; }, 'invalid_schema'],
   ]) {
@@ -81,6 +81,15 @@ test('v2 rejects incomplete plans, missing material roles, missing intent and in
   const { input, output } = sample(); delete input.planningVersion; delete output.script.plan;
   output.script.globalDirection = '旧版全片设定'; output.assets = [];
   assert.match(validateDirectorResult(output, input).script.videoPrompt, /旧版全片设定/);
+});
+
+test('unused references can have empty adoption details without retrying or entering the video prompt', () => {
+  const {input,output}=sample();output.assets[0].adopt='';
+  const result=validateDirectorResult(output,input);
+  assert.equal(result.assets[0].role,'不选用');assert.equal(result.assets[0].adopt,'');
+  assert.deepEqual(result.script.referenceImageIds,['space','actor']);assert.doesNotMatch(result.script.videoPrompt,/重复空间|重复角度/);
+  output.assets[1].adopt='';
+  assert.throws(()=>validateDirectorResult(output,input),e=>e.outputIssue==='invalid_schema'&&e.validationIssue.includes('space')&&e.validationIssue.includes('adopt'));
 });
 
 test('Chinese narration must fit each shot rather than cramming all offer restrictions into the closing seconds', () => {
