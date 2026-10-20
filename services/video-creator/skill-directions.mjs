@@ -28,8 +28,13 @@ export function verifyOfferFacts(facts, input) {
   const verified = {}, missing = [];
   for (const [key, label] of OFFER_FIELDS) {
     const fact = facts?.[key], value = normalize(fact?.value), quote = normalize(fact?.sourceQuote);
-    if (!value || value.length > 800 || !quote || quote.length > 1600 || !quote.includes(value) || !sources.some(source => source.includes(quote))) missing.push(label);
-    else verified[key] = { value: fact.value.trim(), sourceQuote: fact.sourceQuote.trim() };
+    if (!value || value.length > 800 || !quote || quote.length > 1600 || !sources.some(source => source.includes(quote))
+      || key === 'price' && !quote.includes(value)) missing.push(label);
+    else {
+      const sourceQuote = fact.sourceQuote.trim();
+      const canonical = key === 'price' ? fact.value.trim() : sourceQuote.replace(new RegExp(`^${label}\\s*[:：]\\s*`), '');
+      verified[key] = { value: canonical, sourceQuote };
+    }
   }
   return { facts: verified, missing };
 }

@@ -66,10 +66,23 @@ test('group-buy accepts facts across user clarification turns and includes all r
   ], message: facts.validity.sourceQuote + facts.conditions.sourceQuote };
   assert.deepEqual(verifyOfferFacts(facts, input).missing, []);
   const result = validateDirectorResult({ ...output(), offerFacts: facts }, input);
-  assert.equal(result.kind, 'script'); assert.deepEqual(result.offerFacts, facts);
+  assert.equal(result.kind, 'script');
+  for (const [key, fact] of Object.entries(facts)) assert.equal(result.offerFacts[key].sourceQuote, fact.sourceQuote);
   for (const fact of Object.values(facts)) assert.ok(result.script.videoPrompt.includes(fact.value));
   const partial = structuredClone(facts); delete partial.conditions;
   assert.deepEqual(verifyOfferFacts(partial, input).missing, ['使用条件']);
+});
+
+test('confirmed package wording can be summarized by the model without forcing the merchant to repeat it', () => {
+  const input = { ...baseInput, skill: 'group-buy', message: '套餐内容：双人共享套餐，图片5所示锡纸菜品1份、烤串1份、蔬菜1份。' + message };
+  const offer = structuredClone(facts);
+  offer.package = { value: '双人共享套餐，锡纸菜品1份、烤串1份、蔬菜1份', sourceQuote: '套餐内容：双人共享套餐，图片5所示锡纸菜品1份、烤串1份、蔬菜1份' };
+  offer.conditions.value = '需提前一天预约';
+  const result = validateDirectorResult({ ...output(), offerFacts: offer }, input);
+  assert.equal(result.kind, 'script'); assert.ok(result.offerFacts.package.value.includes('图片5所示'));
+  assert.match(result.script.videoPrompt, /仅周一到周四使用，需提前一天预约，不含酒水/);
+  const invented = structuredClone(offer); invented.price.value = '88元';
+  assert.equal(validateDirectorResult({ ...output(), offerFacts: invented }, input).kind, 'clarification');
 });
 
 test('missing offer facts yield a clarification without format retries or a paid video prompt', async () => {
