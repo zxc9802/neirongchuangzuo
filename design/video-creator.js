@@ -10,7 +10,7 @@ let context, timer, stream, loading = false, quoteVersion = 0;
 let state;
 function owner() { return globalThis.workspaceUser?.id || 'local-dev'; }
 function reset() { state = { owner: owner(), skill: VIDEO_SKILLS[0].id, settings: { ...DEFAULT_VIDEO_SETTINGS }, config: null, session: null,
-  tasks: [], conversations: [], input: '', prompt: '', scriptId: null, stage: 'director', busy: false, error: '', selectedTask: null,
+  tasks: [], conversations: [], input: '', prompt: '', scriptId: null, stage: 'director', busy: false, error: '', errorSource: '', selectedTask: null,
   preview: 'result', queue: true, quote: null, quoteError: '', uploadLabel: '', bridge: null }; }
 function refresh() { if (context && document.body.dataset.page === 'video' && state.owner === owner()) context.refresh(); }
 function currentTask() { return state.tasks.find(t => t.id === state.selectedTask); }
@@ -24,9 +24,9 @@ async function request(path, options = {}) {
 const post = value => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
 async function perform(work) {
   if (state.busy) return;
-  const account = state.owner; state.busy = true; state.error = ''; refresh();
+  const account = state.owner; state.busy = true; state.error = ''; state.errorSource = ''; refresh();
   try { await work(); }
-  catch (cause) { if (state.owner === account) state.error = cause.message; }
+  catch (cause) { if (state.owner === account) { state.error = cause.message; state.errorSource = 'action'; } }
   finally { if (state.owner === account) { state.busy = false; state.uploadLabel = ''; refresh(); } }
 }
 function saveSession(session) { if (state.session?.id === session.id && state.session.version > session.version) return; state.session = session; state.skill = session.skill; }
@@ -74,9 +74,10 @@ async function load() {
       changed ||= JSON.stringify(data.conversation) !== JSON.stringify(state.session);
       saveSession(data.conversation);
     }
+    if (state.errorSource === 'poll') { state.error = ''; state.errorSource = ''; changed = true; }
     if (changed) { refresh(); if (state.tasks.some(t => t.status === 'completed') || state.session?.operations.some(o => o.status === 'completed')) void refreshWorkspaceCredits(); }
     if (!state.quote && !state.quoteError) void quote();
-  } catch (cause) { if (state.owner === account) { state.error = cause.message; refresh(); } }
+  } catch (cause) { if (state.owner === account && state.errorSource !== 'action') { state.error = cause.name === 'TimeoutError' ? '读取视频任务超时，正在重新连接。' : cause.message; state.errorSource = 'poll'; refresh(); } }
   finally { loading = false; }
 }
 function editor(ctx) {
@@ -169,7 +170,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-stage-generation') { state.stage = 'generation'; refresh(); void quote(); }
   else if (action === 'vc-preview') { state.preview = el.dataset.value; refresh(); }
   else if (action === 'vc-queue') { state.queue = !state.queue; refresh(); }
-  else if (action === 'vc-refresh') { state.error = ''; void load(); }
+  else if (action === 'vc-refresh') { state.error = ''; state.errorSource = ''; void load(); }
   else if (action === 'vc-current') { state.selectedTask = null; state.preview = 'result'; refresh(); }
   else if (action === 'vc-select-task') { const task = state.tasks.find(t => t.id === el.dataset.id); if (task) void perform(() => openConversation(task.conversationId, task)); }
   else if (action === 'vc-open-conversation') void perform(() => openConversation(el.dataset.id));

@@ -80,3 +80,22 @@ test('each module uses its own initial request, and switching direction prevents
   f.action('vc-apply', { id: oldOp.id }); assert.doesNotMatch(f.html(), /<label for="vc-prompt">/);
   assert.match(f.html(), new RegExp(`data-id="${oldOp.id}" disabled`));
 });
+
+test('successful polling clears a recovered connection error without clearing a user action error', async t => {
+  let failPoll = false, conversation;
+  const f = await fixture(t, async (path, options) => {
+    const body = options?.body ? JSON.parse(options.body) : null;
+    if (path.endsWith('/config')) return Response.json({ directorEnabled: true, generationEnabled: true });
+    if (path.endsWith('/quote')) return Response.json({ unlimited: true, affordable: true });
+    if (path.endsWith('/tasks')) { if (failPoll) throw new Error('Temporary connection failure'); return Response.json({ tasks: [] }); }
+    if (path.endsWith('/conversations') && body) { conversation = { id: body.requestId, version: 1, skill: body.skill, settings: body.settings, operations: [], tasks: [], assets: [] }; return Response.json({ conversation }); }
+    if (path.endsWith('/conversations')) return Response.json({ conversations: [] });
+    if (path.endsWith('/script')) return Response.json({ error: '请确认主推产品。' }, { status: 400 });
+    return Response.json({ conversation });
+  });
+  failPoll = true; await f.poll(); assert.match(f.html(), /Temporary connection failure/);
+  failPoll = false; await f.poll(); assert.doesNotMatch(f.html(), /Temporary connection failure/);
+  f.action('vc-send'); await delay(20); assert.match(f.html(), /请确认主推产品/);
+  failPoll = true; await f.poll(); assert.match(f.html(), /请确认主推产品/); assert.doesNotMatch(f.html(), /Temporary connection failure/);
+  failPoll = false; await f.poll(); assert.match(f.html(), /请确认主推产品/);
+});
