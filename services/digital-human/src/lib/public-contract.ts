@@ -1,4 +1,4 @@
-export type PublicEngine = "a" | "b" | "c";
+export type PublicEngine = "a" | "b" | "c" | "d";
 
 export type PublicTaskStep =
   | "idle"

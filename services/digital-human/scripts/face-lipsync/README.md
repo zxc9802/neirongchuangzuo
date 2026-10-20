@@ -4,6 +4,13 @@ New VEED video tasks use the source-resolution face workflow. All video
 providers and recovered video tasks use advisory timing calibration.
 MP3-only tasks are unchanged. There is no automatic paid regeneration.
 
+The model selector also offers LatentSync (`fal-ai/latentsync`). It uses the same
+fal queue, storage and server-side API key as VEED. LatentSync receives the prepared
+full-frame video and returns a full-frame result; it does not enter the VEED face
+crop/composite workflow. Saved tasks retain their model during result recovery.
+Local hand/foreground occlusion protection has been removed from the VEED
+compositor, along with its MediaPipe dependencies and model downloads.
+
 1. Prepare the full-frame 30 fps base as before. Independently track the face in
    the original, autorotated source; crop before reducing resolution. Reject
    missing/multiple faces, cuts and insufficient native resolution before a
@@ -17,12 +24,6 @@ MP3-only tasks are unchanged. There is no automatic paid regeneration.
    and private COS before paid submission so recovery can reconstruct the frame.
 4. Compare background motion to establish one fixed frame offset. Remove the
    leading context and composite a feathered mouth region into the original
-   frame. On every full source frame, MediaPipe HandLandmarker locates hands;
-   SelfieMulticlass then refines protection within those hand regions on the face
-   crop. Segmentation classes alone never activate protection: body skin also
-   includes the neck, and clothes/other labels can meet the jaw or mouth. Without
-   a detected hand, keep the original mouth blend exactly. Detect on the source,
-   never on the provider result; do not carry a previous hand mask into a later
    frame. Reject unstable frame correspondence; never retime individual frames.
 5. Measure AV alignment in overlapping speech windows using SyncNet. Use the
    median reliable offset when at least 60% of windows are measurable and 80%
@@ -42,28 +43,12 @@ larger poses, occlusion, different voices and long/chunked clips need further
 acceptance footage. Existing 90-second provider chunking is unchanged; padding
 is applied to the utterance, not separately to every provider chunk.
 
-Occlusion protection is part of the local VEED face composite, including recovery
-from an existing face manifest. It does not repair an already exported video or
-control other providers' full-frame rendering. Segmentation is approximate: fast
-motion, blur and partially visible hands can be missed and still need footage-based
-acceptance. Original pixels remain exact in the protected blend region before normal
-video encoding.
-Hand detection runs once per frame; segmentation runs only when hands are found.
-No paid API calls are added. Non-hand objects do not activate protection on their own.
-
 ## Runtime
 
 Production Docker installs CPU PyTorch 2.6.0, the pinned Python requirements and
 checksum-verified model files. No model download occurs in a user task. Worker
 invocations are serialized within a Node server process and stream frames to
 bound memory. Python subprocesses have a 30-minute timeout.
-
-Deployments must rebuild/install the updated requirements and run
-`download_models.py` to add the pinned `selfie_multiclass_256x256.tflite` and
-`hand_landmarker.task` weights.
-The root Dockerfile also installs the OpenCV runtime libraries. Face preparation
-checks that both occlusion models can load before provider submission; a local
-composite never silently skips protection when that runtime fails.
 
 For a local environment with Python 3.11/3.12 and FFmpeg:
 
@@ -93,10 +78,7 @@ through compositing/alignment and preserves billing on actual media failures.
 `tests/bug-regressions.test.mjs` checks padded-duration recovery, the shared
 finalizer and preservation of existing provider work without resubmission.
 Python checks cover native crop bounds, rejection of low-resolution input,
-sample-exact PCM padding, robust offsets and non-blocking uncertainty. Occlusion
-regressions cover partial/full coverage, uncovered-mouth equivalence, moving
-hands without stale masks, false neck/mouth labels, full-frame hand coordinates,
-model preflight failure, and actual FFmpeg encoding.
+sample-exact PCM padding, robust offsets and non-blocking uncertainty.
 
 To measure a private video without sending it to a provider, save a JSON file
 with absolute `videoPath` and `audioPath` fields (both may point to the video),

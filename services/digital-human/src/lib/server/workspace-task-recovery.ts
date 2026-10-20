@@ -14,7 +14,7 @@ export async function reconcileWorkspaceTask(task: TaskItem): Promise<TaskItem> 
     if (!unfinished && !(current.status === "failed" && ["reserving", "reserved"].includes(current.billing.status))) return current;
     if (unfinished && !taskWorkerInterrupted(current.id, current.executionOwner)) return current;
     const submitted = Boolean(current.results.heygenLipsyncId || current.results.lipsyncChunks?.length ||
-      current.results.finalVideoUrl || current.results.pixverseResultUrl || current.results.veedResultUrl);
+      current.results.finalVideoUrl || current.results.pixverseResultUrl || current.results.veedResultUrl || current.results.latentsyncResultUrl);
     if (["reserving", "reserved"].includes(current.billing.status) && !submitted && !current.results.exactAudioUrl) {
       await releaseMainAppCredits({ userId: current.userId, requestId: current.billing.requestId, source: "workspace" });
       return TaskStore.update(current.id, { status: "failed", step: "error", failedStep: current.step,

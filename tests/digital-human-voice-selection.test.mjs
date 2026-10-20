@@ -18,7 +18,7 @@ async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {} } =
   globalThis.localStorage = { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) };
   globalThis.fetch = async url => {
     if (url === '/api/session') return Response.json({ data: { user: { id: 'test' } } });
-    if (url === '/api/digital-human/status') return Response.json({ ready: true, engines: [{ id: 'b', available: true }] });
+    if (url === '/api/digital-human/status') return Response.json({ ready: true, engines: [{ id: 'b', label: '原版对口型（B）', available: true }, { id: 'd', label: 'LatentSync 对口型', available: true }] });
     if (url === '/api/voices') return Response.json({ voices });
     if (String(url).startsWith('/api/digital-human/library')) return Response.json({ items: [], counts: {}, hasMore: false });
     throw new Error('Unexpected request: ' + url);
@@ -56,6 +56,11 @@ test('legacy drafts adopt the reference emotion without losing script or selecte
 
 test('a saved user voice selection is retained', async () => {
   assert.equal((await loadPage({ saved: { voiceId: uploadedVoice.id } })).voiceId, uploadedVoice.id);
+});
+
+test('the original lipsync engine remains the default and a saved LatentSync choice survives reload', async () => {
+  assert.equal((await loadPage()).engine, 'b');
+  assert.equal((await loadPage({ saved: { engine: 'd' } })).engine, 'd');
 });
 
 test('an unavailable saved voice falls back to the configured default', async () => {

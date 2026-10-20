@@ -40,9 +40,10 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       const generated = spawnSync("ffmpeg", ["-v", "error", ...args], {encoding: "utf8"});
       assert.equal(generated.status, 0, generated.stderr);
     }
-    for (const scenario of ["extended-source", "alignment-uncertain", "face-input-failure", "face-runtime-failure", "provider-failure", "provider-timeout", "composite-failure", "media-prep-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
+    for (const scenario of ["latentsync-success", "extended-source", "alignment-uncertain", "face-input-failure", "face-runtime-failure", "provider-failure", "provider-timeout", "composite-failure", "media-prep-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
+      const provider = scenario.startsWith("latentsync-") ? "latentsync" : "veed";
       const audioOnly = scenario.startsWith("audio-");
-      const fullFrame = scenario.startsWith("face-");
+      const fullFrame = scenario.startsWith("face-") || provider === "latentsync";
       const fallback = ["provider-failure", "provider-timeout", "composite-failure", "media-prep-failure"].includes(scenario);
       const events = [];
       globalThis.fetch = async (url, init) => {
@@ -60,7 +61,7 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
         billing: {isExternalUser: reservation.chargeRequired, status: reservation.chargeRequired ? "reserved" : "not_applicable",
           requestId: reservation.requestId, estimatedDuration: 6, estimatedPoints: reservation.requiredPoints, reservedPoints: reservation.reservedPoints},
         inputs: {videoPath: audioOnly ? "" : scenario === "extended-source" ? short : scenario === "silent-smart" ? silent : sound, videoUrl: "", outputType: audioOnly ? "audio" : "video", scriptText: "你好",
-          speakerAudioUrl: speaker, videoFit: scenario === "preserve-failure" ? "preserve" : "smart", lipsyncProvider: "veed"}, results: {}};
+          speakerAudioUrl: speaker, videoFit: scenario === "preserve-failure" ? "preserve" : "smart", lipsyncProvider: provider}, results: {}};
       const TaskStore = {get: () => task, isDeleted: () => false,
         addLog: (_id, message, level, publicMessage) => task.logs.push({message, level, publicMessage}),
         update: (_id, update) => {task = {...task, ...update, results: {...task.results, ...update.results}}; return task;}};
@@ -114,6 +115,7 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
         "../mcp/heygen-adapter": {HeyGenMcpAdapter: {}},
         "./openlux-lipsync": {OpenLuxLipsyncAdapter: {}},
         "./fal-veed-lipsync": {FalVeedLipsyncAdapter: {execute: async options => {
+          assert.equal(options.provider, provider);
           assert.equal(path.basename(options.videoPath), fullFrame ? "source-video.mp4" : "face-input.mp4");
           assert.equal(path.basename(options.audioPath), fullFrame ? "voice-track.wav" : "face-audio.wav");
           assert.equal(options.objectKeyPrefix, fullFrame ? `jobs/${scenario}` : `jobs/${scenario}/face-provider`);
@@ -121,10 +123,11 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
           options.onJobCreated({lipsyncId: "test-job"});
           if (scenario === "provider-failure") throw Object.assign(new Error("provider rejected"), {code: "LIPSYNC_GENERATION_FAILED"});
           if (scenario === "provider-timeout") throw new Error("provider timed out");
+          options.onResultReady({lipsyncId: "test-job", downloadUrl: "https://fal.media/result.mp4"});
           return {lipsyncId: "test-job", status: "completed"};
         }}},
         "../cos": {CosService: {isConfigured: () => false}},
-        "../lipsync-provider": {resolveLipsyncProvider: () => "veed"},
+        "../lipsync-provider": {resolveLipsyncProvider: () => provider},
         "../media-path-policy": {resolveAllowedLocalMediaPath: value => value},
         "../server/media-response": {getTrustedExternalMediaUrl: async () => {throw new Error("local fixture");}},
         "../main-app-billing": billing,
@@ -149,6 +152,12 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
         assert.ok(name in deps, `Unexpected dependency ${name}`); return deps[name];
       }, module, module.exports);
       await module.exports.runDigitalHumanPipeline(scenario, "fake");
+      if (provider === "latentsync") {
+        assert.equal(events.some(e => e.stage === "face-input"), false, "LatentSync uses the full frame without local mouth compositing");
+        assert.equal(task.results.lipsyncProvider, "latentsync");
+        assert.equal(task.results.latentsyncResultUrl, "https://fal.media/result.mp4");
+        assert.equal(task.results.veedResultUrl, undefined);
+      }
       if (audioOnly) assert.equal(events.some(e => e.stage === "lipsync"), false, "audio must never submit paid lip-sync");
       if (fallback) {
         assert.equal(task.status, "completed", `${scenario}: ${task.error}`);

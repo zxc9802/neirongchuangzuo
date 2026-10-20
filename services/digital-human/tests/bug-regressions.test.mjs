@@ -324,7 +324,7 @@ test("B11: deleting the selected first voice must select an existing fallback", 
   } finally { globalThis.confirm = savedConfirm; s.close(); }
 });
 
-test("B9: recovery of a split job must recover all video segments", async t => {
+for (const provider of ["veed", "latentsync"]) test(`B9: ${provider} recovery must recover all video segments with the saved model`, async t => {
   const s = sandbox();
   try {
     recoveryStubs(s);
@@ -340,7 +340,8 @@ test("B9: recovery of a split job must recover all video segments", async t => {
       assert.equal(created.status, 0, created.stderr);
     }
     const fetchedJobs = [];
-    s.overrides.set("src/lib/engine/fal-veed-lipsync.ts", { FalVeedLipsyncAdapter: { fetchResult: async id => {
+    s.overrides.set("src/lib/engine/fal-veed-lipsync.ts", { FalVeedLipsyncAdapter: { fetchResult: async (id, selectedProvider) => {
+      assert.equal(selectedProvider, provider);
       fetchedJobs.push(id); return { status: "COMPLETED", url: `https://provider.example.test/${id}.mp4` };
     } } });
     s.overrides.set("src/lib/engine/download-file.ts", { downloadFileToDisk: async ({ url, outputPath }) => {
@@ -348,7 +349,8 @@ test("B9: recovery of a split job must recover all video segments", async t => {
     } });
     const { TaskStore } = s.load("src/lib/store/task-store.ts");
     const task = TaskStore.create({ ...baseTask(), status: "failed", billing: { ...baseTask().billing, isExternalUser: false, status: "not_applicable" },
-      results: { heygenLipsyncId: "segment-2", veedResultUrl: "https://provider.example.test/last-segment.mp4" } });
+      inputs: { ...baseTask().inputs, lipsyncProvider: provider },
+      results: { heygenLipsyncId: "segment-2", [provider === "latentsync" ? "latentsyncResultUrl" : "veedResultUrl"]: "https://provider.example.test/last-segment.mp4" } });
     TaskStore.addLog(task.id, "[VEED] 任务已建立 (ID: segment-1)，开始轮询进度...", "info");
     TaskStore.addLog(task.id, "[VEED] 任务已建立 (ID: segment-2)，开始轮询进度...", "info");
     const dir = path.join(s.tmp, ".runtime/jobs", task.id); fs.mkdirSync(dir, { recursive: true });
@@ -361,6 +363,7 @@ test("B9: recovery of a split job must recover all video segments", async t => {
     assert.deepEqual(fetchedJobs, ["segment-1", "segment-2"], "Only the last paid segment was fetched; full audio is muxed with an incomplete picture");
     assert.ok(Number(streams.find(stream => stream.codec_type === "video").duration) >= 99.9);
     assert.equal(recovered.billing.status, "not_applicable");
+    assert.equal(recovered.results.lipsyncProvider, provider);
   } finally { s.close(); }
 });
 
@@ -549,7 +552,7 @@ test("B9: incomplete split recovery stays failed and retry only fetches the miss
   } finally { s.close(); }
 });
 
-test("B9: new VEED split jobs emit persistent identities for every segment", async () => {
+for (const provider of ["veed", "latentsync"]) test(`B9: new ${provider} split jobs use the selected endpoint and shared fal credentials`, async () => {
   const s = sandbox(); const originalTimeout = globalThis.setTimeout;
   try {
     const { video, audio } = makeMedia(s.tmp, 100);
@@ -559,9 +562,13 @@ test("B9: new VEED split jobs emit persistent identities for every segment", asy
       getDownloadUrl: async key => `https://storage.example.test/${key}`,
     } });
     let submissions = 0;
+    const endpoint = `https://queue.fal.run/${provider === "latentsync" ? "fal-ai/latentsync" : "veed/lipsync"}`;
     const actualPolicy = s.load("src/lib/server/outbound-url-policy.ts");
     s.overrides.set("src/lib/server/outbound-url-policy.ts", { ...actualPolicy, fetchWithOutboundUrlPolicy: async (url, init) => {
+      assert.ok(url === endpoint || String(url).startsWith(`${endpoint}/requests/`), String(url));
+      assert.equal(init.headers.Authorization, "Key test-only");
       if (init?.method === "POST") {
+        assert.deepEqual(Object.keys(JSON.parse(init.body)).sort(), ["audio_url", "video_url"]);
         submissions++;
         return Response.json({ request_id: `part-${submissions}` });
       }
@@ -578,7 +585,7 @@ test("B9: new VEED split jobs emit persistent identities for every segment", asy
     globalThis.setTimeout = (fn, ms, ...args) => originalTimeout(fn, ms === 6000 ? 0 : ms, ...args);
     const chunks = new Map(); let accepted = 0;
     const { FalVeedLipsyncAdapter } = s.load("src/lib/engine/fal-veed-lipsync.ts");
-    const result = await FalVeedLipsyncAdapter.execute({ videoPath: video, audioPath: audio, objectKeyPrefix: "jobs/fixture",
+    const result = await FalVeedLipsyncAdapter.execute({ provider, videoPath: video, audioPath: audio, objectKeyPrefix: "jobs/fixture",
       onProviderAccepted: () => accepted++,
       onChunkProgress: chunk => chunks.set(chunk.index, { ...chunks.get(chunk.index), ...chunk }),
     }, dir);
@@ -587,6 +594,10 @@ test("B9: new VEED split jobs emit persistent identities for every segment", asy
       [0, "part-1", "downloaded"], [1, "part-2", "downloaded"],
     ]);
     assert.ok([...chunks.values()].every(chunk => chunk.resultUrl && chunk.outputName));
+    const recovered = await FalVeedLipsyncAdapter.fetchResult("part-1", provider);
+    assert.equal(recovered.status, "COMPLETED");
+    assert.match(recovered.url, /part-1.mp4$/);
+    assert.equal(submissions, 2, "fetching a saved result must never submit another paid job");
   } finally { globalThis.setTimeout = originalTimeout; s.close(); }
 });
 

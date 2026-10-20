@@ -448,7 +448,7 @@ export default function StudioPage() {
               </span>
               对口型引擎
             </h2>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               <button
                 type="button"
                 onClick={() => setEngine("a")}
@@ -472,7 +472,7 @@ export default function StudioPage() {
                 }`}
               >
                 <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-xs font-bold text-zinc-100">B</span>
+                  <span className="text-xs font-bold text-zinc-100">原版对口型（B）</span>
                   <span className="rounded-md bg-blue-500/20 px-1.5 py-0.5 text-[10px] font-bold text-blue-300 border border-blue-400/30">
                     （默认，推荐）
                   </span>
@@ -489,6 +489,18 @@ export default function StudioPage() {
                 }`}
               >
                 <div className="text-xs font-bold text-zinc-100">C</div>
+              </button>
+              <button
+                type="button"
+                onClick={() => setEngine("d")}
+                disabled={isRunning}
+                className={`rounded-xl border p-3 text-left transition-all ${
+                  engine === "d"
+                    ? "border-blue-500/80 bg-blue-500/15 text-blue-100 ring-1 ring-blue-500/30"
+                    : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                }`}
+              >
+                <div className="text-xs font-bold text-zinc-100">LatentSync 对口型</div>
               </button>
             </div>
           </div>}

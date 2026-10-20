@@ -39,7 +39,7 @@ export async function GET(
       Boolean(
         task.results?.heygenLipsyncId ||
           task.results?.pixverseResultUrl ||
-          task.results?.veedResultUrl
+          task.results?.veedResultUrl || task.results?.latentsyncResultUrl
       ));
 
   if (stuckDownloading && CosService.isConfigured()) {

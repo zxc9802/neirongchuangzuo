@@ -406,6 +406,7 @@ test("public engine codes round-trip to exactly one private provider each", () =
   assert.equal(resolvePrivateEngine("a"), "pixverse");
   assert.equal(resolvePrivateEngine("b"), "veed");
   assert.equal(resolvePrivateEngine("c"), "heygen");
+  assert.equal(resolvePrivateEngine("d"), "latentsync");
   // 非法输入必须落到固定默认值，而不是把客户端字符串透传给流水线
   for (const junk of [undefined, null, "", "heygen", "pixverse", "z", 1, {}]) {
     assert.equal(resolvePrivateEngine(junk), "veed", `engine=${String(junk)}`);
@@ -418,6 +419,15 @@ test("public engine codes round-trip to exactly one private provider each", () =
   assert.equal(resolveLipsyncProvider("HeyGen", "veed"), "veed", "大小写不匹配时应落到默认值");
   assert.equal(resolveLipsyncProvider(undefined, "pixverse"), "pixverse");
   assert.equal(isLipsyncProvider(null), false);
+});
+
+test("LatentSync tasks keep their selected engine and recoverability without exposing upstream URLs", () => {
+  const task = makeTask({ inputs: { ...makeTask().inputs, lipsyncProvider: "latentsync" },
+    results: { latentsyncResultUrl: "https://fal.media/private-result.mp4" } });
+  const visible = toPublicTask(task);
+  assert.equal(visible.inputs.engine, "d");
+  assert.equal(visible.recoverable, true);
+  assert.equal(JSON.stringify(visible).includes("private-result.mp4"), false);
 });
 
 

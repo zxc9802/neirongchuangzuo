@@ -19,6 +19,7 @@ export interface FalVeedJobProgress {
 }
 
 export interface FalVeedLipsyncOptions {
+  provider?: "veed" | "latentsync";
   videoPath: string;
   audioPath: string;
   videoUrl?: string;
@@ -124,7 +125,7 @@ export class FalVeedLipsyncAdapter {
     try {
       return JSON.parse(text) as T;
     } catch {
-      throw new Error(`VEED / fal 返回了无法解析的响应 (${resp.status}): ${text.slice(0, 240)}`);
+      throw new Error(`fal 返回了无法解析的响应 (${resp.status}): ${text.slice(0, 240)}`);
     }
   }
 
@@ -153,7 +154,7 @@ export class FalVeedLipsyncAdapter {
         await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
       }
     }
-    throw lastError || new Error("VEED / fal 请求失败");
+    throw lastError || new Error("fal 请求失败");
   }
 
   private static async uploadToFalStorage(params: {
@@ -174,7 +175,7 @@ export class FalVeedLipsyncAdapter {
       "https://rest.alpha.fal.ai/storage/upload/initiate",
     ];
 
-    onLog(`[VEED] 正在上传本地${label}到 fal 存储...`);
+    onLog(`[fal] 正在上传本地${label}到 fal 存储...`);
     let lastError: Error | null = null;
 
     for (const endpoint of endpoints) {
@@ -213,7 +214,7 @@ export class FalVeedLipsyncAdapter {
           lastError = new Error(`上传${label}失败 (${putResp.status})`);
           continue;
         }
-        onLog(`[VEED] ${label}已上传 (${(buf.length / 1024 / 1024).toFixed(2)} MB)`);
+        onLog(`[fal] ${label}已上传 (${(buf.length / 1024 / 1024).toFixed(2)} MB)`);
         return initiated.file_url;
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
@@ -233,11 +234,11 @@ export class FalVeedLipsyncAdapter {
   }): Promise<string> {
     const { apiKey, filePath, fileUrl, objectKey, label, onLog } = params;
     if (isPublicHttpUrl(fileUrl)) {
-      onLog(`[VEED] 使用公网直链作为${label}`);
+      onLog(`[fal] 使用公网直链作为${label}`);
       return fileUrl as string;
     }
     if (objectKey && CosService.isConfigured()) {
-      onLog(`[VEED] 正在将${label}同步到 COS 公网直链...`);
+      onLog(`[fal] 正在将${label}同步到 COS 公网直链...`);
       await CosService.uploadFile(filePath, objectKey);
       return CosService.getDownloadUrl(objectKey, undefined, 6 * 60 * 60);
     }
@@ -273,7 +274,7 @@ export class FalVeedLipsyncAdapter {
       onLog,
     });
 
-    onLog(`[VEED] 正在提交 ${model} 对口型任务...`);
+    onLog(`[fal] 正在提交 ${model} 对口型任务...`);
     await options.onProviderSubmitting?.();
     const submitResp = await this.fetchWithRetry(queueBase, {
       method: "POST",
@@ -284,12 +285,12 @@ export class FalVeedLipsyncAdapter {
       }),
     }, options.onProviderSubmitting ? 1 : 4);
     if (submitResp.status >= 400 && submitResp.status < 500) {
-      throw Object.assign(new Error(`创建 VEED 对口型任务被拒绝 (${submitResp.status})`), { code: "LIPSYNC_GENERATION_FAILED" });
+      throw Object.assign(new Error(`创建 fal 对口型任务被拒绝 (${submitResp.status})`), { code: "LIPSYNC_GENERATION_FAILED" });
     }
     const submitted = await this.parseJson<FalQueueSubmit>(submitResp);
     if (!submitResp.ok || !submitted.request_id) {
       throw new Error(
-        `创建 VEED 对口型任务失败: ${formatFalError(
+        `创建 fal 对口型任务失败: ${formatFalError(
           submitted.detail || submitted.error || submitted,
           `HTTP ${submitResp.status}`
         )}`
@@ -304,7 +305,7 @@ export class FalVeedLipsyncAdapter {
     const responseUrl = submitted.response_url || `${queueBase}/requests/${lipsyncId}`;
     assertSameOrigin(statusUrl, queueBase);
     assertSameOrigin(responseUrl, queueBase);
-    onLog(`[VEED] 任务已建立 (ID: ${lipsyncId})，开始轮询进度...`);
+    onLog(`[fal] 任务已建立 (ID: ${lipsyncId})，开始轮询进度...`);
 
     const timeoutMs = pollTimeoutMs(options.durationSeconds || 90);
     const pollDeadline = Date.now() + timeoutMs;
@@ -332,38 +333,38 @@ export class FalVeedLipsyncAdapter {
             lipsyncId,
             downloadUrl: completedUrl,
           });
-          onLog("[VEED] 对口型渲染完成，成片地址已保存，开始下载（失败可免费恢复，不会再扣费）...");
+          onLog("[fal] 对口型渲染完成，成片地址已保存，开始下载（失败可免费恢复，不会再扣费）...");
           break;
         }
         if (status === "FAILED" || status === "ERROR" || status === "CANCELLED") {
           throw Object.assign(new Error(
-            `[VEED] 对口型生成失败: ${formatFalError(polled.error || polled.detail, status)}`
+            `[fal] 对口型生成失败: ${formatFalError(polled.error || polled.detail, status)}`
           ), { code: "LIPSYNC_GENERATION_FAILED" });
         }
         if (pollCount % 3 === 0) {
           const remainMin = Math.max(1, Math.round((pollDeadline - Date.now()) / 60000));
-          onLog(`[VEED] 正在渲染中 (轮询第 ${pollCount} 次，最长还等 ${remainMin} 分钟)...`);
+          onLog(`[fal] 正在渲染中 (轮询第 ${pollCount} 次，最长还等 ${remainMin} 分钟)...`);
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         if (message.includes("对口型生成失败")) {
           throw err;
         }
-        onLog(`[VEED] 轮询暂时失败，将重试: ${message}`);
+        onLog(`[fal] 轮询暂时失败，将重试: ${message}`);
       }
     }
 
     if (!completedUrl) {
-      throw new Error("[VEED] 对口型任务超时");
+      throw new Error("[fal] 对口型任务超时");
     }
 
     const downloaded = await downloadFileToDisk({
       url: completedUrl,
       outputPath,
-      onProgress: (msg) => onLog(`[VEED] ${msg}`),
+      onProgress: (msg) => onLog(`[fal] ${msg}`),
       urlPolicy: providerUrlPolicy("fal"),
     });
-    onLog(`[VEED] 成片已下载 (${(downloaded.bytes / 1024 / 1024).toFixed(2)} MB)`);
+    onLog(`[fal] 成片已下载 (${(downloaded.bytes / 1024 / 1024).toFixed(2)} MB)`);
 
     return {
       lipsyncId,
@@ -383,23 +384,23 @@ export class FalVeedLipsyncAdapter {
     const payload = await this.parseJson<FalQueueResult>(resp);
     if (!resp.ok) {
       throw new Error(
-        `读取 VEED 成片失败: ${formatFalError(payload.detail || payload.error || payload, `HTTP ${resp.status}`)}`
+        `读取 fal 成片失败: ${formatFalError(payload.detail || payload.error || payload, `HTTP ${resp.status}`)}`
       );
     }
     const url = payload.video?.url || payload.video_url;
     if (!url) {
-      throw new Error("VEED 任务已完成但未返回成片地址");
+      throw new Error("fal 任务已完成但未返回成片地址");
     }
     return { url };
   }
 
-  public static async fetchResult(requestId: string): Promise<{
+  public static async fetchResult(requestId: string, provider: "veed" | "latentsync" = "veed"): Promise<{
     status: string;
     url?: string;
   }> {
     const config = getAppConfig();
     const apiKey = config.falApiKey?.trim();
-    const model = config.falVeedModel || "veed/lipsync";
+    const model = provider === "latentsync" ? "fal-ai/latentsync" : config.falVeedModel || "veed/lipsync";
     if (!apiKey) {
       throw new Error("未配置 fal API Key，请先在系统设置中填写");
     }
@@ -431,7 +432,7 @@ export class FalVeedLipsyncAdapter {
     const config = getAppConfig();
     const { onLog = () => {} } = options;
     const apiKey = config.falApiKey?.trim();
-    const model = config.falVeedModel || "veed/lipsync";
+    const model = options.provider === "latentsync" ? "fal-ai/latentsync" : config.falVeedModel || "veed/lipsync";
 
     if (!apiKey) {
       throw new Error("未配置 fal API Key，请先在系统设置中填写");
@@ -443,7 +444,7 @@ export class FalVeedLipsyncAdapter {
     const ctx = { apiKey, model };
 
     onLog(
-      `[VEED] 口播时长 ${audioProbe.durationSeconds.toFixed(1)}s，将按每段不超过 ${LIPSYNC_CHUNK_SECONDS}s 提交 ${chunks.length} 个对口型任务`
+      `[fal] 口播时长 ${audioProbe.durationSeconds.toFixed(1)}s，将按每段不超过 ${LIPSYNC_CHUNK_SECONDS}s 提交 ${chunks.length} 个对口型任务`
     );
 
     if (chunks.length === 1) {
@@ -465,7 +466,7 @@ export class FalVeedLipsyncAdapter {
     for (const chunk of chunks) {
       const label = `${chunk.index + 1}/${chunks.length}`;
       onLog(
-        `[VEED] 正在处理第 ${label} 段 (${chunk.startSeconds.toFixed(1)}s–${(
+        `[fal] 正在处理第 ${label} 段 (${chunk.startSeconds.toFixed(1)}s–${(
           chunk.startSeconds + chunk.durationSeconds
         ).toFixed(1)}s)...`
       );
@@ -518,7 +519,7 @@ export class FalVeedLipsyncAdapter {
         outputName: `lipsync-chunks/result-${chunk.index}.mp4`, status: "downloaded" });
     }
 
-    onLog(`[VEED] ${chunks.length} 段已完成，正在拼接成完整画面...`);
+    onLog(`[fal] ${chunks.length} 段已完成，正在拼接成完整画面...`);
     await concatVideos(rendered, rawVideoPath, chunks.map(chunk => chunk.durationSeconds));
 
     return {

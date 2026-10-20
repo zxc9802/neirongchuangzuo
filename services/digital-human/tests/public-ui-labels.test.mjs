@@ -12,11 +12,13 @@ test("navbar does not render the HeyGen connection button", async () => {
   assert.doesNotMatch(source, /连接 HeyGen/);
 });
 
-test("public lipsync choices are labeled only A, B, and C", async () => {
+test("public lipsync choices retain the original option and expose the requested LatentSync option", async () => {
   const source = await read("src/app/page.tsx");
 
   assert.match(source, />A<\/div>/);
-  assert.match(source, />B<\/span>/);
+  assert.match(source, />原版对口型（B）<\/span>/);
+  assert.match(source, />LatentSync 对口型<\/div>/);
+  assert.match(source, /setEngine\("d"\)/);
   assert.match(source, />C<\/div>/);
   assert.doesNotMatch(
     source,

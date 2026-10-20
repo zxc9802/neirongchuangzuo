@@ -46,12 +46,14 @@ export function isTaskOutputDeliverable(task: TaskItem): boolean {
 }
 
 export function resolvePrivateEngine(engine: unknown): LipsyncProvider {
+  if (engine === "d") return "latentsync";
   if (engine === "a") return "pixverse";
   if (engine === "c") return "heygen";
   return "veed";
 }
 
 function toPublicEngine(provider?: LipsyncProvider): PublicEngine {
+  if (provider === "latentsync") return "d";
   if (provider === "pixverse") return "a";
   if (provider === "heygen") return "c";
   return "b";
@@ -81,6 +83,7 @@ export function toPublicTask(task: TaskItem): PublicTaskItem {
         task.results.heygenLipsyncId ||
         task.results.pixverseResultUrl ||
         task.results.veedResultUrl ||
+        task.results.latentsyncResultUrl ||
         task.results.lipsyncChunks?.length)
   );
 

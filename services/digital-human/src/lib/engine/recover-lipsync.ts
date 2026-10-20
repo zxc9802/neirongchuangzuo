@@ -61,7 +61,7 @@ function taskLipsyncProvider(task: TaskItem) {
 }
 
 function savedResultUrl(task: TaskItem): string | undefined {
-  return task.results?.veedResultUrl || task.results?.pixverseResultUrl || task.results?.heygenResultUrl;
+  return task.results?.latentsyncResultUrl || task.results?.veedResultUrl || task.results?.pixverseResultUrl || task.results?.heygenResultUrl;
 }
 
 export function extractPixverseJobId(task: TaskItem): string | null {
@@ -323,8 +323,8 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
     }
     let resultUrl = saved?.resultUrl;
     if (!ready) {
-      if (saved?.lipsyncId && provider === "veed") {
-        const remote = await FalVeedLipsyncAdapter.fetchResult(saved.lipsyncId);
+      if (saved?.lipsyncId && (provider === "veed" || provider === "latentsync")) {
+        const remote = await FalVeedLipsyncAdapter.fetchResult(saved.lipsyncId, provider);
         if (["FAILED", "ERROR", "CANCELLED"].includes(remote.status)) {
           throw Object.assign(new Error("分段生成失败，无法组成完整成片"), { code: "LIPSYNC_GENERATION_FAILED" });
         }
@@ -345,7 +345,7 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
         await downloadPixverseResult({ url: resultUrl, outputPath, onLog: log });
       } else {
         await downloadFileToDisk({ url: resultUrl, outputPath, onProgress: log,
-          urlPolicy: providerUrlPolicy(provider === "veed" ? "fal" : "heygen") });
+          urlPolicy: providerUrlPolicy(provider === "veed" || provider === "latentsync" ? "fal" : "heygen") });
       }
       await verifyVideoDuration(outputPath, part.durationSeconds);
     }
@@ -414,6 +414,7 @@ async function recoverTask(taskId: string, sessionToken?: string): Promise<TaskI
       lipsyncCredits: creditsUsed,
       pixverseResultUrl: task.results.pixverseResultUrl,
       veedResultUrl: task.results.veedResultUrl,
+      latentsyncResultUrl: task.results.latentsyncResultUrl,
       heygenResultUrl: task.results.heygenResultUrl,
       videoDuration: finalProbe.durationSeconds,
       audioDuration: (await probeMedia(audioPath)).durationSeconds,

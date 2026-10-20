@@ -100,6 +100,7 @@ export interface TaskItem {
     pixverseResultUrl?: string;
     heygenResultUrl?: string;
     veedResultUrl?: string;
+    latentsyncResultUrl?: string;
     chargedPoints?: number;
     costCny?: number;
     billingDuration?: number;

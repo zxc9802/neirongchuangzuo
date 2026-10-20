@@ -481,22 +481,24 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         },
         jobDir
       );
-    } else if (lipsyncProvider === "veed") {
-      log("🛡️ 第三步: 校验 VEED 对口型素材...");
+    } else if (lipsyncProvider === "veed" || lipsyncProvider === "latentsync") {
+      const modelLabel = lipsyncProvider === "latentsync" ? "LatentSync" : "VEED";
+      log(`🛡️ 第三步: 校验 ${modelLabel} 对口型素材...`);
       if (!fs.existsSync(preparedVideoPath) || !fs.existsSync(ttsResult.finalWavPath)) {
-        throw new Error("预处理视频或原声音轨不存在，无法提交 VEED 对口型");
+        throw new Error("预处理视频或原声音轨不存在，无法提交对口型");
       }
-      log("素材校验通过，准备提交至 fal.ai / VEED Lipsync", "success");
+      log(`素材校验通过，准备提交至 fal.ai / ${modelLabel}`, "success");
 
       currentStep = "mcp_lipsync_submit";
       TaskStore.update(taskId, {
         step: "mcp_lipsync_submit",
         progress: 65,
       });
-      log("🔌 第四步: 正在调度 VEED Lipsync (fal.ai) 对口型...");
+      log(`🔌 第四步: 正在调度 ${modelLabel} (fal.ai) 对口型...`);
 
       heygenResult = await FalVeedLipsyncAdapter.execute(
         {
+          provider: lipsyncProvider,
           videoPath: providerVideoPath,
           audioPath: providerAudioPath,
           videoUrl: publicVideoUrl,
@@ -511,7 +513,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
             TaskStore.update(taskId, {
               results: {
                 heygenLipsyncId: lipsyncId,
-                lipsyncProvider: "veed",
+                lipsyncProvider,
               },
             });
           },
@@ -519,8 +521,10 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
             TaskStore.update(taskId, {
               results: {
                 heygenLipsyncId: lipsyncId,
-                lipsyncProvider: "veed",
-                veedResultUrl: downloadUrl,
+                lipsyncProvider,
+                ...(lipsyncProvider === "latentsync"
+                  ? { latentsyncResultUrl: downloadUrl }
+                  : { veedResultUrl: downloadUrl }),
               },
             });
           },

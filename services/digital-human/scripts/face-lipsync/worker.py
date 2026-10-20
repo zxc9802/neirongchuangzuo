@@ -17,7 +17,6 @@ import wave
 import cv2
 import numpy as np
 from scipy.ndimage import median_filter
-from occlusion import create_hand_detector, create_segmenter, source_protection
 
 MODELS = Path(os.environ.get("LIPSYNC_MODEL_DIR", "/opt/lipsync/models"))
 FPS = 30
@@ -165,9 +164,6 @@ def prepare(req):
         raise QualityError("Narration is too short to measure reliably", "LIPSYNC_INPUT_DURATION")
     # Check the full inference runtime before the server submits paid work.
     load_syncnet()
-    with create_segmenter(MODELS / "selfie_multiclass_256x256.tflite"), \
-         create_hand_detector(MODELS / "hand_landmarker.task"):
-        pass
     info, data = track(req["inputVideoPath"], duration=duration, extend=True)
     crop = crop_plan(info, data)
     x, y, size, out = (crop[k] for k in ["x", "y", "size", "outputSize"])
@@ -214,7 +210,7 @@ def frame_offset(source, rendered, prepad_frames):
     return best - 3
 
 
-def blend_mouth(frame, patch, x, y, cx, cy, rx, ry, protection=None):
+def blend_mouth(frame, patch, x, y, cx, cy, rx, ry):
     h, w = patch.shape[:2]
     left, right = max(0, math.floor(cx - rx)), min(w, math.ceil(cx + rx))
     top, bottom = max(0, math.floor(cy - ry)), min(h, math.ceil(cy + ry))
@@ -225,8 +221,6 @@ def blend_mouth(frame, patch, x, y, cx, cy, rx, ry, protection=None):
     radius = np.sqrt(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2)
     alpha = np.clip((1 - radius) / 0.3, 0, 1)
     alpha = (alpha * alpha * (3 - 2 * alpha))[:, :, None]
-    if protection is not None:
-        alpha *= 1 - protection[top:bottom, left:right, None]
     region = result[y + top:y + bottom, x + left:x + right]
     result[y + top:y + bottom, x + left:x + right] = np.clip(
         region * (1 - alpha) + patch[top:bottom, left:right] * alpha, 0, 255).astype(np.uint8)
@@ -268,20 +262,17 @@ def composite(req):
                         str(job / "face-composited.mp4")], stdin=sp.PIPE)
     count = 0
     try:
-        with create_segmenter(MODELS / "selfie_multiclass_256x256.tflite") as segmenter, \
-             create_hand_detector(MODELS / "hand_landmarker.task") as hand_detector:
-            for i, frame in enumerate(frames(job / "source-video.mp4", base["width"], base["height"])):
-                patch = next(patches, None)
-                if patch is None or i >= len(manifest["track"]):
-                    raise QualityError("Missing provider/source frames", "LIPSYNC_MEDIA")
-                row = np.array(manifest["track"][i])
-                cx = ((row[10] + row[12]) / 2 - c["x"]) * scale_x
-                cy = ((row[11] + row[13]) / 2 - c["y"]) * scale_y
-                rx, ry = row[2] * scale_x * 0.42, row[3] * scale_y * 0.28
-                protection = source_protection(segmenter, hand_detector, frame, (x, y, w, h))
-                result = blend_mouth(frame, patch, x, y, cx, cy, rx, ry, protection)
-                encoder.stdin.write(result.tobytes())
-                count += 1
+        for i, frame in enumerate(frames(job / "source-video.mp4", base["width"], base["height"])):
+            patch = next(patches, None)
+            if patch is None or i >= len(manifest["track"]):
+                raise QualityError("Missing provider/source frames", "LIPSYNC_MEDIA")
+            row = np.array(manifest["track"][i])
+            cx = ((row[10] + row[12]) / 2 - c["x"]) * scale_x
+            cy = ((row[11] + row[13]) / 2 - c["y"]) * scale_y
+            rx, ry = row[2] * scale_x * 0.42, row[3] * scale_y * 0.28
+            result = blend_mouth(frame, patch, x, y, cx, cy, rx, ry)
+            encoder.stdin.write(result.tobytes())
+            count += 1
     finally:
         patches.close()
         encoder.stdin.close()

@@ -25,7 +25,8 @@ export async function GET(request: NextRequest) {
   const ttsReady = Boolean(config.indexttsFalApiKey);
   const engines = [
     { id: "a", label: "口型方案 A", available: Boolean(config.openluxApiKey) },
-    { id: "b", label: "口型方案 B", available: Boolean(config.falApiKey) },
+    { id: "b", label: "原版对口型（B）", available: Boolean(config.falApiKey) },
+    { id: "d", label: "LatentSync 对口型", available: Boolean(config.falApiKey) },
     { id: "c", label: "口型方案 C", available: Boolean(config.heygenApiKey) },
   ];
   return NextResponse.json({
