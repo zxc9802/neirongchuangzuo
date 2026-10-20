@@ -1438,32 +1438,81 @@ test('silent direct preparation retries then saves progress without leaking erro
   assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
 });
 
-test('silent mode reuses an already silent source and obtains dialogue from its subtitles', async t => {
+test('silent direct mode requires source audio before billing and never substitutes subtitles', async t => {
   const app = await fixture(t, { probe: async () => ({ ...META, audio: false }),
-    captions: { extract: async () => structuredClone(CAPTIONS) },
-    speech: fakeSpeech({ analyze: async () => assert.fail('A silent source must use extracted subtitles') }),
+    captions: { extract: async () => assert.fail('Direct voice must not inspect subtitles') },
+    speech: fakeSpeech({ analyze: async () => assert.fail('No source audio to transcribe') }),
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 3 }; },
   });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   await app.call(`/tasks/${id}/start`, { body: { sourceAudioMode: 'silent' } });
-  const running = await app.until(id, task => task.status === 'running');
-  assert.equal(running.speech.source, 'subtitles');
+  const waiting = await app.until(id, task => task.status === 'waiting');
+  assert.equal(waiting.error, ''); assert.equal(waiting.canReplaceSource, true);
+  assert.equal(await app.wallet.reservation('alice', id), null);
+  assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
   assert.equal((await readdir(join(app.root, 'video', id))).includes('source-silent.mp4'), false);
-  const source = new URL(app.state.creates.find(item => item.kind === 'video').url);
-  assert.deepEqual(Buffer.from(await (await fetch(app.base + source.pathname + source.search)).arrayBuffer()), VIDEO);
+});
+
+for (const savedSubtitles of [false, true]) test(`silent direct transcribes all speech without OCR, including after a subtitle draft switch (${savedSubtitles})`, async t => {
+  let extracts = 0, transcriptions = 0;
+  const spoken = { ...structuredClone(SPEECH), text: '你好世界没有字幕的这句也要保留' };
+  spoken.segments[0].text = spoken.text;
+  const app = await fixture(t, { speech: fakeSpeech({ analyze: async input => {
+    assert.ok(input.endsWith('source.mp4'), 'Transcribe the original audio before removing it');
+    transcriptions++; return structuredClone(spoken);
+  } }), captions: { extract: async () => { extracts++; return structuredClone(CAPTIONS); } },
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 3 }; },
+  });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  if (savedSubtitles) {
+    await app.call(`/tasks/${id}/analyze`, { body: {} });
+    assert.equal((await app.current(id)).speech.source, 'subtitles');
+  }
+  await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent', voiceEngine: 'seedance' } });
+  await app.close(); await app.open();
+  for (let i = 0; i < 2; i++) {
+    assert.equal((await app.call(`/tasks/${id}/analyze`, { body: {} })).status, 200);
+    const task = await app.current(id);
+    assert.equal(task.speech.source, 'audio'); assert.equal(task.speech.text, spoken.text);
+    assert.equal(task.captions, undefined); assert.equal(task.captionCheck, undefined);
+  }
+  await app.close(); await app.open();
+  await app.call(`/tasks/${id}/analyze`, { body: {} });
+  assert.equal(transcriptions, 1, 'Reuse the saved audio transcript after restart');
+  assert.equal(extracts, savedSubtitles ? 1 : 0, 'Direct voice must not run OCR');
+  const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal(saved.originalSpeech.source, 'audio'); assert.equal(saved.originalSpeech.text, spoken.text);
+});
+
+test('silent direct waits for source transcription without falling back to partial captions or dispatching generation', async t => {
+  const app = await fixture(t, { speech: fakeSpeech({ analyze: async () => {
+    throw new VideoError('ASR still processing', 502, 'VIDEO_TRANSCRIPTION_PENDING');
+  } }), captions: { extract: async () => assert.fail('No subtitle fallback while ASR is pending') },
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 3 }; },
+  });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: { sourceAudioMode: 'silent' } });
+  const task = await app.until(id, item => item.recovery?.state === 'retrying');
+  assert.equal(task.status, 'preparing'); assert.equal(task.speech, undefined); assert.equal(task.error, '');
+  assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
 });
 
 for (const sourceAudioMode of ['original', 'silent']) test(`Seedance ${sourceAudioMode} voice completes without separate TTS or lip-sync`, async t => {
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     ...(sourceAudioMode === 'silent' ? {
-      probe: async input => ({ ...META, audio: !input.endsWith('upload.tmp') }),
-      captions: { extract: async () => structuredClone(CAPTIONS) },
+      captions: { extract: async () => assert.fail('Direct voice must not inspect subtitles') },
     } : {}),
     narration: fakeNarration({ prepare: async () => assert.fail('Seedance must not prepare IndexTTS'), advance: async () => assert.fail('Seedance must not synthesize IndexTTS') }),
     lipsync: fakeLipsync({ submit: async () => assert.fail('Seedance must not submit a lip-sync job') }) });
   const config = await (await app.call('/config')).json();
   assert.equal(config.voiceEngine, 'indextts2'); assert.equal(config.voiceEngines.find(engine => engine.id === 'indextts2').enabled, true);
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  if (sourceAudioMode === 'silent') {
+    const source = join(app.root, 'original.mp4');
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=320x480:r=24:d=6',
+      '-f', 'lavfi', '-i', 'sine=frequency=220:duration=6', '-c:v', 'libx264', '-c:a', 'aac', source]);
+    assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: await readFile(source) })).status, 200);
+  }
   const started = (await (await app.call(`/tasks/${id}/start`, { body: { sourceAudioMode } })).json()).task;
   assert.equal(started.voiceEngine, 'seedance');
   await app.until(id, task => task.status === 'running');

@@ -13,7 +13,8 @@ const isFalReplacement = model => model === 'fal-ai/pixverse/swap';
 const DEFAULT_VOICE_ENGINE = 'indextts2';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '进度已保存', waiting: '等待继续处理', cancelled: '已停止处理', expired: '已过期' };
-const taskLabel = task => task.voiceEngine === 'indextts2' && task.status === 'verifying'
+const taskLabel = task => task.voiceEngine === 'seedance' && task.sourceAudioMode === 'silent' && task.status === 'preparing'
+  ? '正在将原视频语音转为台词' : task.voiceEngine === 'indextts2' && task.status === 'verifying'
   ? task.narrationProgress?.ready ? '正在同步口型与参考配音' : '正在完成参考声音配音'
   : task.voiceEngine === 'indextts2' && task.status === 'running' && !task.narrationProgress?.ready
     ? '正在替换人物并生成参考配音' : labels[task.status] || '正在处理';
@@ -89,7 +90,7 @@ function sourceAudioPicker() {
   return `<div class="replica-model-setting"><h2>参考视频声音</h2><div id="replica-source-audio" class="replica-models" role="group" aria-label="选择参考视频声音模式">${[
     ['original', '原声参考（默认）', '保留参考视频原声，沿用现有生成方式。'],
     ['silent', '无原声参考', '去掉视频音轨，独立配音并同步口型；音色参考上传声音，情绪参考原片声音。'],
-    ['silent-direct', '无原声直配（试用）', '去掉视频音轨，按原片台词和上传音色直接生成配音；情绪参考画面与台词，无需额外口型处理。'],
+    ['silent-direct', '无原声直配（试用）', '先将原视频语音转为台词，再去掉音轨，按上传音色直接配音；不使用画面字幕提取台词，无需额外口型处理。'],
   ].map(([id, title, description]) => `<button type="button" class="replica-model-button ${selected === id ? 'selected' : ''}" data-source-audio="${id}" aria-pressed="${selected === id}" ${locked ? 'disabled' : ''}><strong>${title}</strong><span>${description}</span></button>`).join('')}</div></div>`;
 }
 function slot(kind, ctx) {

@@ -195,7 +195,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const action = cause.recoveryAction || 'resume';
     task.recovery = { state: 'waiting', action, resumeStatus: task.status === 'waiting' ? task.recovery?.resumeStatus : task.status,
       message: action === 'input' ? !task.billing && !task.providerDispatched
-        ? task.voiceEngine === 'indextts2' ? '请补充至少 5 秒且包含清晰原声的视频，当前进度已保存。' : '请补充可提取台词的参考视频，当前进度已保存。'
+        ? task.voiceEngine === 'indextts2' ? '请补充至少 5 秒且包含清晰原声的视频，当前进度已保存。' : '请补充包含清晰原声的参考视频，当前进度已保存。'
         : '素材需要调整，进度已保存；可停止处理后新建复刻。'
         : action === 'account' ? '等待账户或额度恢复，当前进度已保存。'
           : action === 'limit' ? '自动处理次数已达上限，当前进度已保存。'
@@ -226,20 +226,26 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return `${config.publicOrigin}${PREFIX}/source/${task.id}/${kind}?expires=${expires}&signature=${signature(task.id, kind, expires)}`;
   }
   async function analyzeSource(task) {
-    if (!task.captionsChecked) {
+    const audioOnly = task.voiceEngine === 'seedance' && task.sourceAudioMode === 'silent';
+    if (audioOnly) {
+      // A draft may already contain a partial subtitle transcript from another mode.
+      delete task.captions; delete task.captionsChecked; delete task.captionCheck;
+    }
+    if (!audioOnly && !task.captionsChecked) {
       try { task.captions = await captions.extract(file(task, 'video')); }
       catch { task.captionCheck = { warning: '原视频字幕未能提取，将继续使用原视频人声。' }; }
       task.captionsChecked = true;
     }
-    if ((!task.speech || task.speech.source !== 'subtitles') && task.captions?.cues?.length) {
+    if (!audioOnly && (!task.speech || task.speech.source !== 'subtitles') && task.captions?.cues?.length) {
       const intervals = task.video.audio ? await speech.detect(file(task, 'video')).catch(() => []) : [];
       task.speech = captionSpeech(task.captions, intervals);
       task.originalSpeech = structuredClone(task.speech);
-    } else if (!task.speech && task.voice) {
+    } else if (audioOnly ? task.speech?.source !== 'audio' : !task.speech && task.voice) {
       if (!task.video.audio) throw error('参考视频没有音轨，无法保留原台词。', 422, 'VIDEO_SPEECH_INVALID');
       task.speech = { ...await speech.analyze(file(task, 'video'), task.video.duration,
         { diagnosticsPath: join(folder(task), 'verification-source.json') }), source: 'audio' };
       task.originalSpeech = structuredClone(task.speech);
+      delete task.speechConfirmedAt;
     }
     if (task.code === 'VIDEO_TRANSCRIPTION_PENDING') { task.error = ''; delete task.code; }
     await save(task);
@@ -716,6 +722,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           if (voiceEngine === 'indextts2' && (!task.video.audio || task.video.duration < 5)) {
             await hold(task, { code: 'VIDEO_NARRATION_SOURCE_REQUIRED', recoveryAction: 'input', message: '原视频需包含至少 5 秒原声。' });
+            json(res, 202, { task: view(task) }); return;
+          }
+          if (sourceAudioMode === 'silent' && !task.video.audio) {
+            await hold(task, { code: 'VIDEO_SOURCE_AUDIO_REQUIRED', recoveryAction: 'input', message: '无原声直配需先识别原视频的人声。' });
             json(res, 202, { task: view(task) }); return;
           }
           try {

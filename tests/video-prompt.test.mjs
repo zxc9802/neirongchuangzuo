@@ -59,6 +59,21 @@ test('a continuous full-duration speech track does not invent a silent gap', () 
   assert.match(prompt, /最后一段结束后不得补说或复读/);
 });
 
+test('silent direct voice uses the original audio transcript even if stale partial subtitles remain', () => {
+  const source = task({ voice: {}, voiceEngine: 'seedance', sourceAudioMode: 'silent',
+    captions: { cues: [{ start: 0, end: 1, text: '只有这句有字幕' }] },
+    speech: { source: 'audio', start: 0, end: 5, segments: [
+      { start: 0, end: 1, text: '只有这句有字幕' },
+      { start: 2, end: 5, text: '这句没有字幕也必须说出来' },
+    ] },
+  });
+  const { prompt } = generationBody(source);
+  assert.match(prompt, /原视频原声转写/);
+  assert.match(prompt, /这句没有字幕也必须说出来/);
+  assert.doesNotMatch(prompt, /台词来自原视频字幕|优先于听辨结果/);
+  assert.match(prompt, /画面字幕可能不完整/);
+});
+
 test('rounded-up video duration freezes the end frame without removing real packaging text', () => {
   const { prompt, payload } = generationBody(task());
 
