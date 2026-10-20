@@ -1,11 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import sharp from 'sharp';
 import { VIDEO_SKILLS, VIDEO_LANGUAGES } from '../../design/video-catalog.js';
-import { readCompletionStream } from '../restaurant/model-stream.mjs';
 import { parseStructuredOutput } from '../restaurant/structured-output.mjs';
+import { DIRECTOR_OUTPUT_TOKENS, readDirectorResponse, directorFailure, redactDirectorValue } from './director-response.mjs';
 
 export const creatorError = (message, status = 400, code = 'VIDEO_CREATOR_INVALID') => Object.assign(new Error(message), { status, code });
 const text = (value, maximum = 4000) => typeof value === 'string' && value.trim().length <= maximum ? value.trim() : '';
+const invalidOutput = (message, issue, detail) => Object.assign(creatorError(message, 502, 'DIRECTOR_INVALID_OUTPUT'), { outputIssue: issue, validationIssue: JSON.stringify(detail) });
 
 export function directorPacing(settings) {
   const duration = settings.duration;
@@ -30,31 +31,34 @@ function compileVideoPrompt(direction, shots, images, settings) {
 }
 
 export function validateDirectorResult(value, input) {
-  if (!value || typeof value !== 'object') throw creatorError('编导返回的内容不完整，请重新调整要求。', 502, 'DIRECTOR_INVALID_OUTPUT');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalidOutput('编导返回的内容不完整，请重新调整要求。', 'invalid_schema', { field: 'result', expected: 'object' });
   const warnings = Array.isArray(value.warnings) ? value.warnings.filter(x => text(x, 300)).slice(0, 8) : [];
   if (value.kind === 'clarification') {
     const questions = Array.isArray(value.questions) ? value.questions.filter(x => text(x, 300)).slice(0, 5) : [];
-    if (!questions.length) throw creatorError('编导未说明需要补充什么。', 502, 'DIRECTOR_INVALID_OUTPUT');
+    if (!questions.length) throw invalidOutput('编导未说明需要补充什么。', 'invalid_schema', { field: 'questions', expected: 'non-empty array' });
     return { kind: 'clarification', text: text(value.text, 3000) || questions.join('\n'), questions, warnings };
   }
   const s = value.script, images = input.assets.filter(a => a.type === 'image'), ids = new Set(images.map(a => a.id));
   if (value.kind !== 'script' || !s || !text(s.title, 80) || !(text(s.globalDirection, 3000) || text(s.videoPrompt, 12000))
-    || !Array.isArray(s.shots) || !s.shots.length || s.shots.length > 15) throw creatorError('编导未返回可执行的完整脚本。', 502, 'DIRECTOR_INVALID_OUTPUT');
+    || !Array.isArray(s.shots) || !s.shots.length || s.shots.length > 15) throw invalidOutput('编导未返回可执行的完整脚本。', 'invalid_schema', {
+      kind: value.kind, titleValid: Boolean(text(s?.title, 80)), directionValid: Boolean(text(s?.globalDirection, 3000) || text(s?.videoPrompt, 12000)), shotCount: s?.shots?.length });
   let end = 0;
-  const shots = s.shots.map(shot => {
+  const shots = s.shots.map((shot, index) => {
+    if (!shot || typeof shot !== 'object' || Array.isArray(shot)) throw invalidOutput('分镜数据格式不完整，请重新编导。', 'invalid_schema', { shot: index + 1, expected: 'object' });
     if (!Number.isFinite(shot.start) || !Number.isFinite(shot.end) || Math.abs(shot.start - end) > .15
-      || shot.end <= shot.start || shot.end > input.settings.duration + .15 || !text(shot.visual, 1600)
-      || !Array.isArray(shot.referenceIds) || !shot.referenceIds.length || shot.referenceIds.length > 6
-      || shot.referenceIds.some(id => !ids.has(id))) throw creatorError('分镜时长或素材引用不完整，请调整要求后重新编导。', 502, 'DIRECTOR_INVALID_OUTPUT');
+      || shot.end <= shot.start || shot.end > input.settings.duration + .15) throw invalidOutput('分镜时长不完整，请调整要求后重新编导。', 'invalid_timeline', { shot: index + 1, start: shot.start, end: shot.end, expectedStart: end, duration: input.settings.duration });
+    if (!text(shot.visual, 1600)) throw invalidOutput('分镜画面描述不完整，请重新编导。', 'invalid_visual', { shot: index + 1, field: 'visual', maximumLength: 1600 });
+    if (!Array.isArray(shot.referenceIds) || !shot.referenceIds.length || shot.referenceIds.length > 6
+      || shot.referenceIds.some(id => !ids.has(id))) throw invalidOutput('分镜素材引用不完整，请调整要求后重新编导。', 'invalid_reference', { shot: index + 1, referenceIds: shot.referenceIds });
     end = shot.end;
     return { start: shot.start, end: shot.end, visual: text(shot.visual, 1600), camera: text(shot.camera, 500),
       referenceIds: [...new Set(shot.referenceIds)], caption: text(shot.caption, 160), voiceover: text(shot.voiceover, 800) };
   });
-  if (Math.abs(end - input.settings.duration) > .15) throw creatorError('脚本总时长与选择时长不一致，请重新编导。', 502, 'DIRECTOR_INVALID_OUTPUT');
-  const assets = Array.isArray(value.assets) ? value.assets.filter(a => ids.has(a.id) && text(a.description, 600)).map(a => ({ id: a.id, description: text(a.description, 600), role: text(a.role, 120) })).slice(0, 30) : [];
+  if (Math.abs(end - input.settings.duration) > .15) throw invalidOutput('脚本总时长与选择时长不一致，请重新编导。', 'invalid_timeline', { actualDuration: end, expectedDuration: input.settings.duration });
+  const assets = Array.isArray(value.assets) ? value.assets.filter(a => a && ids.has(a.id) && text(a.description, 600)).map(a => ({ id: a.id, description: text(a.description, 600), role: text(a.role, 120) })).slice(0, 30) : [];
   const globalDirection = text(s.globalDirection, 3000);
   const videoPrompt = globalDirection ? compileVideoPrompt(globalDirection, shots, images, input.settings) : text(s.videoPrompt, 12000);
-  if (videoPrompt.length > 12000) throw creatorError('完整分镜内容过长，请精简后重新编导。', 502, 'DIRECTOR_INVALID_OUTPUT');
+  if (videoPrompt.length > 12000) throw invalidOutput('完整分镜内容过长，请精简后重新编导。', 'invalid_schema', { field: 'videoPrompt', actualLength: videoPrompt.length, maximumLength: 12000 });
   return { kind: 'script', text: text(value.text, 3000) || text(s.title, 80), assets, warnings,
     script: { title: text(s.title, 80), summary: text(s.summary, 1000), shots, ...(globalDirection ? { globalDirection } : {}), videoPrompt } };
 }
@@ -70,8 +74,9 @@ const SYSTEM = `你是起芽内容创作的同城到店视频编导。先观察�
 返回前自行检查：时间轴是否完整覆盖settings.duration；连续镜头是否增加新信息；不同区域和景别是否有变化；最后一段是否有明确内容；每个画面和宣传信息是否有素材依据。存在重复空景或过长综合段时，在本次输出前自行重新编排。
 只输出一个JSON对象，无Markdown代码围栏。正常格式：{"kind":"script","text":"简要讲述素材选择和创作思路","assets":[{"id":"实际图片ID","description":"可见内容","role":"独立看点与用途"}],"warnings":[],"script":{"title":"脚本标题","summary":"主题与到店理由","globalDirection":"全片视觉风格、连续性、声音和字幕要求，不含分镜时间轴","shots":[{"start":0,"end":3,"visual":"本镜头的具体主体、空间、景别与动作","camera":"运镜和与下镜头的衔接","referenceIds":["实际图片ID"],"voiceover":"旁白，可空","caption":"字幕，可空"}]}}。shots时间从0开始连续覆盖完整时长；示例中的单个镜头只说明字段，不代表全片镜头数。需要补充信息时格式：{"kind":"clarification","text":"具体说明","questions":["需要商家补充的问题"],"warnings":[]}。不要用未知事实占位符冒充完成脚本。`;
 
-export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 180000 } = {}) {
-  return { enabled: Boolean(config.apiKey), async generate(input, { signal, onProgress } = {}) {
+export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300000, maxOutputTokens = DIRECTOR_OUTPUT_TOKENS } = {}) {
+  if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 4096 || maxOutputTokens > 65536) throw creatorError('编导输出长度配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
+  return { enabled: Boolean(config.apiKey), async generate(input, { signal, onProgress, onAttempt } = {}) {
     if (!config.apiKey) throw creatorError('编导服务尚未配置，请联系管理员。', 503, 'DIRECTOR_NOT_CONFIGURED');
     const images = input.assets.filter(a => a.type === 'image');
     const content = [{ type: 'text', text: JSON.stringify({ direction: VIDEO_SKILLS.find(s => s.id === input.skill), settings: input.settings, pacing: directorPacing(input.settings),
@@ -81,15 +86,51 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 180
       const bytes = await sharp(await readFile(images[index].path)).rotate().resize({ width: 960, height: 960, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
       content.push({ type: 'text', text: `图片${index + 1}，ID=${images[index].id}` }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + bytes.toString('base64'), detail: 'high' } });
     }
-    onProgress?.('正在分析素材并编排分镜');
-    const response = await fetchImpl(config.baseUrl + '/chat/completions', { method: 'POST', redirect: 'error',
-      headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: config.imageTextModel || config.chatModel, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content }],
-        stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: 8192, temperature: .45 }),
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs) });
-    if (!response.ok) throw creatorError(response.status === 429 ? '编导服务繁忙，请稍后再试。' : '编导服务暂时无法完成请求，请检查接口配置。', 502, 'DIRECTOR_PROVIDER_ERROR');
-    const payload = response.headers.get('content-type')?.includes('text/event-stream') ? await readCompletionStream(response.body) : await response.json();
-    const result = validateDirectorResult(parseStructuredOutput(payload), input);
-    return { ...result, usage: payload.usage };
+    let budget = maxOutputTokens, correction = '';
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+      const record = { attempt, startedAt: Date.now(), status: 'started', phase: 'request', model: config.imageTextModel || config.chatModel,
+        maxOutputTokens: budget, inputImageCount: images.length, historyMessageCount: input.history.slice(-10).length, finishReason: null };
+      const publish = async () => { if (onAttempt) await onAttempt(redactDirectorValue(record, [config.apiKey])); };
+      await publish();
+      onProgress?.(attempt === 1 ? '正在分析素材并编排分镜' : '正在重新生成完整脚本');
+      let payload, response;
+      try {
+        response = await fetchImpl(config.baseUrl + '/chat/completions', { method: 'POST', redirect: 'error',
+          headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: SYSTEM }, { role: 'user', content: correction ? [...content, { type: 'text', text: correction }] : content }],
+            stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: budget, temperature: .45 }), signal: callSignal });
+        record.phase = 'response'; record.httpStatus = response.status; record.contentType = response.headers.get('content-type') || '';
+        record.providerRequestId = response.headers.get('x-api-request-id') || response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || null;
+        await publish();
+        const received = await readDirectorResponse(response); Object.assign(record, received); payload = received.payload;
+        if (!response.ok) throw creatorError(response.status === 429 ? '编导服务繁忙，请稍后再试。' : '编导接口返回错误，请稍后重试。', 502, 'DIRECTOR_PROVIDER_ERROR');
+        record.phase = 'parse'; record.parsedResponse = payload; delete record.payload;
+        record.finishReason = payload?.choices?.[0]?.finish_reason || null; record.usage = payload?.usage;
+        record.responseContent = payload?.choices?.[0]?.message?.content ?? '';
+        const parsed = parseStructuredOutput(payload); record.phase = 'validate';
+        const result = validateDirectorResult(parsed, input);
+        record.status = 'completed'; record.phase = 'complete'; record.completedAt = Date.now(); await publish();
+        return { ...result, usage: payload.usage };
+      } catch (cause) {
+        payload ||= cause.providerPayload;
+        if (payload) {
+          record.parsedResponse = payload; record.finishReason = payload.choices?.[0]?.finish_reason || null;
+          record.usage = payload.usage; record.responseContent = payload.choices?.[0]?.message?.content ?? '';
+        }
+        for (const name of ['rawResponse', 'rawBytes', 'rawTruncated', 'streamComplete']) if (cause[name] !== undefined) record[name] = cause[name];
+        delete record.payload;
+        record.status = 'failed'; record.completedAt = Date.now(); record.error = directorFailure(cause, record.phase, callSignal);
+        await publish();
+        const retryable = record.streamComplete === true && (['truncated', 'empty', 'invalid_json', 'transport_json', 'invalid_schema', 'invalid_sse_json'].includes(record.error.issue)
+          || cause.code === 'DIRECTOR_INVALID_OUTPUT' || [429, 500, 502, 503, 504].includes(record.httpStatus) && cause.code === 'DIRECTOR_PROVIDER_ERROR');
+        if (attempt === 1 && retryable && !signal?.aborted) {
+          if (record.error.issue === 'truncated') budget = Math.min(65536, budget * 2);
+          correction = `上一轮响应未通过校验（${record.error.issue}）。请重新根据这次图片返回一个完整、合法、无省略的JSON对象，保留完整时间轴与有依据的素材引用。只返回globalDirection与shots等规定字段，不重复生成videoPrompt文本，不添加Markdown围栏。`;
+          continue;
+        }
+        throw Object.assign(creatorError(record.error.message, 502, record.error.code), { outputIssue: record.error.issue, phase: record.error.phase });
+      }
+    }
   } };
 }

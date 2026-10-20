@@ -13,6 +13,14 @@ function fragmented(text) {
   const bytes = Buffer.from(text);
   return new ReadableStream({ start(controller) { for (let i = 0; i < bytes.length; i += 3) controller.enqueue(bytes.subarray(i, i + 3)); controller.close(); } });
 }
+
+test('stream parser accepts text block deltas and full-message compatibility envelopes', async () => {
+  const first = await readCompletionStream(fragmented(event({ choices: [{ delta: { content: [{ type: 'text', text: '{"ok":' }] } }] })
+    + event({ choices: [{ delta: { content: [{ type: 'text', text: 'true}' }] }, finish_reason: 'stop' }] }) + 'data: [DONE]\n\n'));
+  assert.equal(first.choices[0].message.content, '{"ok":true}');
+  const second = await readCompletionStream(fragmented(event({ choices: [{ message: { content: [{ type: 'text', text: '{"ok":true}' }] }, finish_reason: 'stop' }] })));
+  assert.equal(second.choices[0].message.content, '{"ok":true}');
+});
 const config = { apiKey: 'stream-test', baseUrl: 'https://provider.invalid/v1', imageTextModel: 'claude-opus-5-5', limits: {} };
 function harness(fetchImpl) {
   const records = [], finishes = [], requests = [];

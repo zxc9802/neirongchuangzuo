@@ -18,11 +18,11 @@ export function parseStructuredOutput(payload) {
   if (fenced) source = fenced[1].trim();
   let result;
   try { result = JSON.parse(source); }
-  catch {
+  catch (initialError) {
     const first = source.indexOf('{'), last = source.lastIndexOf('}');
-    if (first < 0 || last <= first || source.slice(0, first).trim().endsWith('[') || source.slice(last + 1).trim().startsWith(']')) throw structuredOutputError('invalid_json');
+    if (first < 0 || last <= first || source.slice(0, first).trim().endsWith('[') || source.slice(last + 1).trim().startsWith(']')) throw Object.assign(structuredOutputError('invalid_json'), { parseError: initialError.message });
     try { result = JSON.parse(source.slice(first, last + 1)); }
-    catch { throw structuredOutputError('invalid_json'); }
+    catch (error) { throw Object.assign(structuredOutputError('invalid_json'), { parseError: error.message }); }
   }
   if (!result || typeof result !== 'object' || Array.isArray(result)) throw structuredOutputError('invalid_schema');
   return result;

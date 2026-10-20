@@ -1,19 +1,22 @@
 import { RestaurantError } from './rules.mjs';
 import { structuredOutputError } from './structured-output.mjs';
 
-export async function readCompletionStream(body, maximumBytes = 2 * 1024 * 1024) {
+export async function readCompletionStream(body, maximumBytes = 16 * 1024 * 1024) {
   const decoder = new TextDecoder();
-  let pending = '', data = [], size = 0, content = '', refusal = '', id, model, usage, finishReason, ended = false, invalid = false, providerError = false;
+  let pending = '', data = [], size = 0, content = '', refusal = '', id, model, usage, finishReason, ended = false, invalid = false, providerError;
   const event = () => {
     const raw = data.join('\n').trim(); data = [];
     if (!raw) return;
     if (raw === '[DONE]') { ended = true; return; }
     let value;
     try { value = JSON.parse(raw); } catch { invalid = true; return; }
-    if (value.error) { providerError = true; return; }
+    if (value.error) { providerError = value.error; return; }
     id = value.id || id; model = value.model || model; usage = value.usage || usage;
     const choice = value.choices?.find(item => item.index === 0) || value.choices?.[0];
-    if (typeof choice?.delta?.content === 'string') content += choice.delta.content;
+    const valueText = input => typeof input === 'string' ? input : Array.isArray(input)
+      ? input.filter(item => item?.type === 'text' && typeof item.text === 'string').map(item => item.text).join('') : '';
+    if (choice?.delta?.content !== undefined) content += valueText(choice.delta.content);
+    else if (choice?.message?.content !== undefined) content = valueText(choice.message.content);
     if (typeof choice?.delta?.refusal === 'string') refusal += choice.delta.refusal;
     if (choice?.finish_reason) finishReason = choice.finish_reason;
   };
@@ -32,8 +35,8 @@ export async function readCompletionStream(body, maximumBytes = 2 * 1024 * 1024)
   if (pending) line(pending.replace(/\r$/, ''));
   event();
   const payload = { id, model, usage, choices: [{ message: { content, ...(refusal ? { refusal } : {}) }, finish_reason: finishReason }] };
-  if (providerError) throw Object.assign(new RestaurantError('内容分析服务暂时不可用，请稍后重试。', 502, 'PROVIDER_ERROR'), { streamComplete: true, providerPayload: payload });
-  if (!ended && !finishReason) throw Object.assign(new Error('Incomplete model stream'), { code: 'MODEL_STREAM_INCOMPLETE' });
-  if (invalid) throw Object.assign(structuredOutputError('invalid_json'), { streamComplete: true, providerPayload: payload });
+  if (providerError) throw Object.assign(new RestaurantError('内容分析服务暂时不可用，请稍后重试。', 502, 'PROVIDER_ERROR'), { streamComplete: true, providerPayload: payload, validationIssue: JSON.stringify(providerError).slice(0, 1500) });
+  if (!ended && !finishReason) throw Object.assign(new Error('Incomplete model stream'), { code: 'MODEL_STREAM_INCOMPLETE', providerPayload: payload });
+  if (invalid) throw Object.assign(structuredOutputError('invalid_json'), { streamIssue: 'invalid_sse_json', streamComplete: true, providerPayload: payload });
   return payload;
 }

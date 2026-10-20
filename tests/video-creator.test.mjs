@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
+import { gunzipSync } from 'node:zlib';
 import { createVideoCreatorHandler, normalizeVideoSettings } from '../services/video-creator/server.mjs';
 import { createCreatorProvider, creatorConfig, creativeGenerationBody } from '../services/video-creator/provider.mjs';
 import { createDirectorModel, validateDirectorResult, directorPacing } from '../services/video-creator/model.mjs';
@@ -26,7 +27,7 @@ function script(input) {
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-creator-'));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode: true }); await wallet.ready;
-  const state = { generates: 0, materialCreates: 0, scripts: 0, review: 2, done: false, failed: false, downloads: 0 };
+  const state = { generates: 0, materialCreates: 0, scripts: 0, review: 2, done: false, failed: false, downloads: 0, diagnosticErrors: [] };
   const provider = { async createMaterial(url) { state.materialCreates++; state.source = url; if (options.createMaterial) return options.createMaterial(url); return { id: 'material-' + state.materialCreates, status: state.review }; },
     async queryMaterial() { return state.review; }, async generateCreative(input) { state.generates++; state.input = input;
       if (state.uncertain) throw new Error('Connection reset'); return { taskId: 'provider-task' }; },
@@ -34,7 +35,8 @@ async function fixture(t, options = {}) {
   let handler, app, base, clock = Date.now();
   async function open() {
     handler = createVideoCreatorHandler({ storageDir: join(root, 'creator'), config: CONFIG, provider, credits: wallet,
-      director: { enabled: true, async generate(input) { state.scripts++; if (options.director) return options.director(input); return script(input); } },
+      director: { enabled: true, async generate(input, hooks) { state.scripts++; if (options.director) return options.director(input, hooks); return script(input); } },
+      logger: { error: (...items) => state.diagnosticErrors.push(items) },
       aiConfig: {}, download: async (_url, path) => { state.downloads++; if (state.downloadFailed) throw new Error('Disk full'); await writeFile(path, MP4); },
       probe: async () => ({ duration: 4, width: 720, height: 1280, audio: true }), pollIntervalMs: 15, now: () => clock });
     await handler.ready;
@@ -239,4 +241,31 @@ test('material preparation runs at most three requests together and preserves im
   const resolve = item => item.resolve({ id: 'material-' + new URL(item.url).pathname.split('/').at(-1), status: 2 });
   resolve(pending[2]); await f.until(() => pending.length === 4); resolve(pending[3]); resolve(pending[1]); resolve(pending[0]);
   await f.until(() => f.state.generates === 1); assert.deepEqual(f.state.input.imageIds, images.map(id => 'material-' + id));
+});
+
+test('director diagnostics persist privately across restart and expire with media without losing summaries', async t => {
+  const f = await fixture(t, { director: async (input, hooks) => {
+    await hooks.onAttempt({ attempt: 1, status: 'failed', startedAt: 1, completedAt: 2, maxOutputTokens: 16384, finishReason: 'length',
+      rawResponse: 'private partial response', responseContent: 'private partial content', error: { code: 'DIRECTOR_OUTPUT_TRUNCATED', issue: 'truncated', phase: 'parse', message: '输出截断', detail: 'specific parser error' } });
+    await hooks.onAttempt({ attempt: 2, status: 'completed', startedAt: 3, completedAt: 4, maxOutputTokens: 32768, finishReason: 'stop',
+      rawResponse: 'private complete response', parsedResponse: { private: 'content' }, usage: { completion_tokens: 2500 } });
+    return script(input);
+  } });
+  const id = await f.init(); await f.upload(id); const op = randomUUID();
+  assert.equal((await f.call(`/conversations/${id}/script`, { body: { requestId: op, message: '新的编导', settings } })).status, 202);
+  await f.until(async () => (await f.current(id)).operations[0]?.status === 'completed');
+  const path = join(f.root, 'creator', id, `director-${op}.json.gz`);
+  const diagnostic = JSON.parse(gunzipSync(await readFile(path)).toString());
+  assert.equal(diagnostic.attempts.length, 2); assert.equal(diagnostic.attempts[0].rawResponse, 'private partial response');
+  assert.equal(diagnostic.attempts[1].finishReason, 'stop');
+  const current = await f.current(id); assert.equal(current.operations[0].diagnostics.attempts[0].error.issue, 'truncated');
+  assert.ok(current.operations[0].completedAt >= current.operations[0].startedAt);
+  assert.equal(current.operations[0].diagnostics.rawAvailable, true); assert.ok(!JSON.stringify(current).includes('private'));
+  assert.equal(f.state.diagnosticErrors.length, 1); assert.match(JSON.stringify(f.state.diagnosticErrors), /specific parser error/);
+  assert.equal((await f.call(`/conversations/${id}/assets/director-${op}.json.gz`)).status, 404);
+  await f.close(); await f.open(); assert.equal((await f.current(id)).operations[0].diagnostics.attempts.length, 2);
+  f.advance(3 * 86400000 + 1);
+  await f.until(async () => (await f.current(id)).operations[0].diagnostics.rawAvailable === false);
+  await assert.rejects(readFile(path), { code: 'ENOENT' });
+  assert.equal((await f.current(id)).operations[0].diagnostics.attempts[1].finishReason, 'stop');
 });

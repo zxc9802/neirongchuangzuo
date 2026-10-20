@@ -4,6 +4,7 @@ import sharp from 'sharp';
 import { VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS } from '../../design/video-catalog.js';
 import { createCreatorStore, UUID } from './store.mjs';
 import { createDirectorModel, creatorError } from './model.mjs';
+import { DIRECTOR_OUTPUT_TOKENS, directorAttemptSummary } from './director-response.mjs';
 import { createCreatorProvider, creatorConfig } from './provider.mjs';
 import { downloadVideo, probeVideo, serveMedia } from '../video/media.mjs';
 import { normalizeVoice } from '../video/speech.mjs';
@@ -42,10 +43,11 @@ async function body(req) {
 
 export function createVideoCreatorHandler({ storageDir, env = process.env, publicOrigin, credits, fetchImpl = fetch,
   config = creatorConfig(env, publicOrigin), aiConfig = loadAIConfig(env), provider, director, download = downloadVideo,
-  probe = probeVideo, voice = normalizeVoice, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  probe = probeVideo, voice = normalizeVoice, now = Date.now, pollIntervalMs = 5000, logger = console } = {}) {
   const store = createCreatorStore(storageDir), locks = new Map(), workers = new Map(), controllers = new Map(), streams = new Set();
   const meter = createApiCostMeter({ credits, config: aiConfig, fetchImpl });
-  director ||= createDirectorModel({ config: aiConfig, fetchImpl: meter.fetch });
+  director ||= createDirectorModel({ config: aiConfig, fetchImpl: meter.fetch,
+    maxOutputTokens: env.VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS ? Number(env.VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS) : DIRECTOR_OUTPUT_TOKENS });
   provider ||= createCreatorProvider(config, fetchImpl);
   const cnyPerSecond = Number(env.VIDEO_GENERATION_CNY_PER_SECOND ?? 1);
   if (!Number.isFinite(cnyPerSecond) || cnyPerSecond <= 0) throw creatorError('视频计费配置无效。', 503, 'CREATOR_PRICING_INVALID');
@@ -70,6 +72,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       prompt: task.prompt, resultUrl: task.status === 'completed' && paid && !expired ? `${PREFIX}/tasks/${task.id}/result` : null };
   }
   function operationView(op) { return { id: op.id, skill: op.skill, settings: op.settings, status: op.status, message: op.message, createdAt: op.createdAt,
+    startedAt: op.startedAt, completedAt: op.completedAt, diagnostics: op.diagnostics,
     progress: op.progress, result: op.status === 'completed' ? op.result : undefined, error: op.error, code: op.code, billing: op.billing }; }
   const sessionView = c => ({ id: c.id, version: c.version, skill: c.skill, settings: c.settings, mediaExpiresAt: c.mediaExpiresAt,
     assets: c.assets.map(a => ({ id: a.id, name: a.name, type: a.type, size: a.size, duration: a.duration,
@@ -91,19 +94,32 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   }
   async function runScript(c, op) {
     const scope = costScope(c, costId('director', op.id)), controller = new AbortController(); controllers.set(op.id, controller);
+    const attempts = [];
+    const onAttempt = async entry => {
+      attempts[entry.attempt - 1] = entry;
+      try { await store.saveDirectorDiagnostic(c.id, op.id, { conversationId: c.id, operationId: op.id, expiresAt: c.mediaExpiresAt, attempts }); }
+      catch { throw creatorError('编导诊断记录保存失败，请稍后重试。', 503, 'DIRECTOR_LOG_WRITE_FAILED'); }
+      op.diagnostics = { attempts: attempts.map(directorAttemptSummary), rawAvailable: true, rawExpiresAt: c.mediaExpiresAt };
+      if (entry.status === 'failed') logger.error('[video-director]', JSON.stringify({ conversationId: c.id, operationId: op.id,
+        attempt: entry.attempt, phase: entry.error?.phase, code: entry.error?.code, issue: entry.error?.issue,
+        detail: entry.error?.detail, finishReason: entry.finishReason, maxOutputTokens: entry.maxOutputTokens,
+        outputTokens: entry.usage?.completion_tokens, providerRequestId: entry.providerRequestId, httpStatus: entry.httpStatus }));
+      await save(c);
+    };
     try {
       if (meter.enabled) { const hold = await credits.reserveCost(scope); op.billing = { status: hold.status, exempt: hold.exempt, mode: 'api_cost' }; }
-      op.status = 'running'; op.progress = '正在分析素材并编排分镜'; op.dispatched = true; await save(c);
+      op.status = 'running'; op.startedAt = now(); op.progress = '正在分析素材并编排分镜'; op.dispatched = true; await save(c);
       const result = await meter.run(scope, () => director.generate({ skill: op.skill, settings: op.settings, message: op.message,
         assets: op.assetIds.map(id => ({ ...c.assets.find(a => a.id === id) })),
-        history: c.messages.slice(-10) }, { signal: controller.signal }));
+        history: c.messages.slice(-10) }, { signal: controller.signal, onAttempt,
+        onProgress: progress => { op.progress = progress; } }));
       delete result.usage; op.result = result; op.status = 'completed'; op.progress = '';
       c.messages.push({ role: 'user', content: op.message }, { role: 'assistant', content: JSON.stringify(result) });
       c.messages = c.messages.slice(-20);
     } catch (cause) {
       const issue = safe(cause); op.status = 'failed'; op.error = issue.error; op.code = issue.code; op.progress = '';
     } finally {
-      await settle(scope, op);
+      op.completedAt = now(); await settle(scope, op);
       if (op.status === 'completed' && op.billing?.status === 'pending') op.status = 'settling';
       await save(c); controllers.delete(op.id);
     }
@@ -209,6 +225,10 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         }
         if (!active(c) && now() >= c.mediaExpiresAt && !c.mediaCleaned) {
           for (const asset of c.assets) await rm(asset.path, { force: true });
+          for (const op of c.operations) if (op.diagnostics?.rawAvailable) {
+            await rm(await store.path(c.id, `director-${op.id}.json.gz`), { force: true });
+            op.diagnostics.rawAvailable = false;
+          }
           c.mediaCleaned = true; await save(c);
         }
         if (!active(c) && now() >= (c.recordExpiresAt || c.createdAt + 30 * DAY)) await store.remove(c.id);
