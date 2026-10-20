@@ -601,6 +601,120 @@ for (const provider of ["veed", "latentsync"]) test(`B9: new ${provider} split j
   } finally { globalThis.setTimeout = originalTimeout; s.close(); }
 });
 
+test("fal fallback storage accepts its signed upload host and every request has a deadline", async () => {
+  const s = sandbox(); const originalTimeout = globalThis.setTimeout;
+  try {
+    const { video, audio } = makeMedia(s.tmp, 1);
+    s.overrides.set("src/lib/config.ts", { getAppConfig: () => ({ falApiKey: "test-only" }) });
+    let uploads = 0, submits = 0;
+    const policy = s.load("src/lib/server/outbound-url-policy.ts");
+    const endpoint = "https://queue.fal.run/veed/lipsync";
+    s.overrides.set("src/lib/server/outbound-url-policy.ts", { ...policy,
+      validateOutboundUrl: async (url, allowed) => {
+        const parsed = new URL(url);
+        assert.ok(allowed.allowedHosts.some(host => parsed.hostname === host || parsed.hostname.endsWith("." + host)),
+          `Blocked legitimate storage host: ${parsed.hostname}`);
+        return parsed;
+      },
+      fetchWithOutboundUrlPolicy: async (url, init) => {
+        assert.ok(init.signal instanceof AbortSignal, "Requests must time out instead of hanging forever");
+        if (url.includes("/storage/upload/initiate")) return Response.json({
+          upload_url: "https://fal-uploads.s3.amazonaws.com/signed", file_url: "https://fal.media/source.mp4",
+        });
+        if (init.method === "PUT") { uploads++; return new Response(null, {status: 200}); }
+        if (url === endpoint) { submits++; return Response.json({request_id: "job-1"}); }
+        if (url.endsWith("/status")) return Response.json({status: "COMPLETED"});
+        return Response.json({video: {url: "https://fal.media/result.mp4"}});
+      },
+    });
+    s.overrides.set("src/lib/engine/download-file.ts", { downloadFileToDisk: async ({outputPath}) => {
+      fs.copyFileSync(video, outputPath); return {bytes: 100};
+    } });
+    globalThis.setTimeout = (fn, ms, ...args) => originalTimeout(fn, ms === 6000 || ms >= 2500 && ms <= 10000 ? 0 : ms, ...args);
+    const dir = path.join(s.tmp, "job"); fs.mkdirSync(dir);
+    const { FalVeedLipsyncAdapter } = s.load("src/lib/engine/fal-veed-lipsync.ts");
+    assert.equal((await FalVeedLipsyncAdapter.execute({videoPath: video, audioPath: audio}, dir)).status, "completed");
+    assert.equal(uploads, 2); assert.equal(submits, 1);
+  } finally { globalThis.setTimeout = originalTimeout; s.close(); }
+});
+
+test("a fal submission with no response is never replayed, including outside workspace billing", async () => {
+  const s = sandbox(); const originalTimeout = globalThis.setTimeout;
+  try {
+    const { video, audio } = makeMedia(s.tmp, 1); let submits = 0;
+    s.overrides.set("src/lib/config.ts", {getAppConfig: () => ({falApiKey: "test-only"})});
+    s.overrides.set("src/lib/server/outbound-url-policy.ts", {
+      providerUrlPolicy: () => ({}),
+      fetchWithOutboundUrlPolicy: async () => { submits++; throw new Error("connection reset after dispatch"); },
+    });
+    globalThis.setTimeout = (fn, ms, ...args) => originalTimeout(fn, ms >= 2500 && ms <= 10000 ? 0 : ms, ...args);
+    const { FalVeedLipsyncAdapter } = s.load("src/lib/engine/fal-veed-lipsync.ts");
+    await assert.rejects(FalVeedLipsyncAdapter.execute({videoPath: video, audioPath: audio,
+      videoUrl: "https://fal.media/source.mp4", audioUrl: "https://fal.media/audio.wav"}, s.tmp), /connection reset/);
+    assert.equal(submits, 1);
+  } finally { globalThis.setTimeout = originalTimeout; s.close(); }
+});
+
+test("an OpenLux submission with no response is never replayed outside workspace billing", async () => {
+  const s = sandbox(); const originalTimeout = globalThis.setTimeout;
+  try {
+    const { video, audio } = makeMedia(s.tmp, 1); let submits = 0;
+    s.overrides.set("src/lib/config.ts", {getAppConfig: () => ({
+      openluxApiKey: "test-only", openluxBaseUrl: "https://api.openlux.ai",
+    })});
+    globalThis.fetch = async url => {
+      if (url.endsWith("/media/upload")) return Response.json({ErrCode: 0, Resp: {media_id: 1}});
+      submits++; throw new Error("connection reset after dispatch");
+    };
+    globalThis.setTimeout = (fn, ms, ...args) => originalTimeout(fn, ms >= 2500 && ms <= 10000 ? 0 : ms, ...args);
+    const { OpenLuxLipsyncAdapter } = s.load("src/lib/engine/openlux-lipsync.ts");
+    await assert.rejects(OpenLuxLipsyncAdapter.execute({videoPath: video, audioPath: audio}, s.tmp), /connection reset/);
+    assert.equal(submits, 1);
+  } finally { globalThis.setTimeout = originalTimeout; s.close(); }
+});
+
+test("VEED v2 recovery uses the application queue URL and reports a terminal error", async () => {
+  const s = sandbox();
+  try {
+    s.overrides.set("src/lib/config.ts", {getAppConfig: () => ({falApiKey: "test-only", falVeedModel: "veed/lipsync/v2"})});
+    let failed = false; const calls = [];
+    const policy = s.load("src/lib/server/outbound-url-policy.ts");
+    s.overrides.set("src/lib/server/outbound-url-policy.ts", {...policy, fetchWithOutboundUrlPolicy: async url => {
+      calls.push(url);
+      assert.ok(url.startsWith("https://queue.fal.run/veed/lipsync/requests/existing"));
+      return Response.json(url.endsWith("/status") ? {status: "COMPLETED", ...(failed ? {error: "no face detected"} : {})}
+        : {video: {url: "https://fal.media/result.mp4"}});
+    }});
+    const { FalVeedLipsyncAdapter } = s.load("src/lib/engine/fal-veed-lipsync.ts");
+    assert.equal((await FalVeedLipsyncAdapter.fetchResult("existing")).status, "COMPLETED");
+    failed = true;
+    assert.deepEqual(await FalVeedLipsyncAdapter.fetchResult("existing"), {status: "FAILED"});
+    assert.equal(calls.length, 3);
+  } finally { s.close(); }
+});
+
+for (const stage of ["status", "result"]) test(`a definitive fal ${stage} failure stops polling immediately`, async () => {
+  const s = sandbox(); const originalTimeout = globalThis.setTimeout;
+  try {
+    const { video, audio } = makeMedia(s.tmp, 1); let polls = 0, submits = 0;
+    s.overrides.set("src/lib/config.ts", {getAppConfig: () => ({falApiKey: "test-only"})});
+    const policy = s.load("src/lib/server/outbound-url-policy.ts");
+    s.overrides.set("src/lib/server/outbound-url-policy.ts", {...policy, fetchWithOutboundUrlPolicy: async (url, init) => {
+      if (init.method === "POST") { submits++; return Response.json({request_id: "failed-job"}); }
+      if (url.endsWith("/status")) {
+        if (++polls > 1) return Response.json({status: "FAILED", error: "unexpected extra poll"});
+        return Response.json({status: "COMPLETED", ...(stage === "status" ? {error: "no face detected"} : {})});
+      }
+      return Response.json({detail: "no face detected"}, {status: 422});
+    }});
+    globalThis.setTimeout = (fn, ms, ...args) => originalTimeout(fn, ms === 6000 ? 0 : ms, ...args);
+    const { FalVeedLipsyncAdapter } = s.load("src/lib/engine/fal-veed-lipsync.ts");
+    await assert.rejects(FalVeedLipsyncAdapter.execute({videoPath: video, audioPath: audio,
+      videoUrl: "https://fal.media/source.mp4", audioUrl: "https://fal.media/audio.wav"}, s.tmp), {code: "LIPSYNC_GENERATION_FAILED"});
+    assert.equal(polls, 1); assert.equal(submits, 1);
+  } finally { globalThis.setTimeout = originalTimeout; s.close(); }
+});
+
 test("B11: voice fallback handles deleting the last item, another item and a failed delete", async () => {
   const previousConfirm = globalThis.confirm;
   for (const scenario of ["last", "other", "failed"]) {

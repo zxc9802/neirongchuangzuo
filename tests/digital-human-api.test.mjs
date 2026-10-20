@@ -157,6 +157,41 @@ test('a failed raw upload is not retried and cannot register a voice', async t =
   assert.equal(uploads, 1);
 });
 
+test('temporary multipart and confirmation failures retry the same upload, but never duplicate voice creation', async t => {
+  let parts = 0, confirms = 0, voices = 0; const progress = [];
+  t.mock.method(globalThis, 'fetch', async (url, options) => {
+    if (url.endsWith('/direct')) return json({direct: true, uploadKey: 'same-key',
+      parts: [{url: 'https://media.example.com/part1', size: 4}]});
+    if (url.endsWith('/complete')) {
+      assert.equal(JSON.parse(options.body).uploadKey, 'same-key');
+      return ++confirms === 1 ? json({error: '暂时不可用'}, 503) : json({success: true, uploadKey: 'same-key'});
+    }
+    voices++; return json({success: true, voice: {id: 'saved-voice'}});
+  });
+  installXhr(t, xhr => {
+    assert.equal(xhr.url, 'https://media.example.com/part1');
+    assert.equal(xhr.method, 'PUT');
+    xhr.upload.onprogress({lengthComputable: true, loaded: 4, total: 4});
+    if (++parts === 1) return xhr.onerror();
+    xhr.status = 200; xhr.onload();
+  });
+  assert.equal((await api.createVoice(new File(['data'], 'voice.wav', {type: 'audio/wav'}),
+    {onProgress: value => progress.push(value)})).id, 'saved-voice');
+  assert.equal(parts, 2); assert.equal(confirms, 2); assert.equal(voices, 1);
+  assert.ok(progress.slice(0, -1).every(value => value < 100));
+  assert.equal(progress.at(-1), 100);
+});
+
+test('a denied direct upload stops without retrying credentials or falling back through the application server', async t => {
+  let requests = 0, parts = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    requests++; return json({direct: true, uploadKey: 'same-key', parts: [{url: 'https://media.example.com/part1', size: 4}]});
+  });
+  installXhr(t, xhr => { parts++; xhr.status = 403; xhr.onload(); });
+  await assert.rejects(api.createVoice(new File(['data'], 'voice.wav', {type: 'audio/wav'})), {status: 403});
+  assert.equal(parts, 1); assert.equal(requests, 1);
+});
+
 test('invalid media is rejected before it contacts the server', async t => {
   let calls = 0;
   t.mock.method(globalThis, 'fetch', async () => { calls++; return json({}); });

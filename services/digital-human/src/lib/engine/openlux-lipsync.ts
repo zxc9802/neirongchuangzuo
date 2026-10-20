@@ -220,7 +220,7 @@ export class OpenLuxLipsyncAdapter {
           video_media_id: videoMediaId,
           audio_media_id: audioMediaId,
         }),
-      }, options.onProviderSubmitting ? 1 : 4);
+      }, 1);
       if (createResp.status >= 400 && createResp.status < 500) {
         throw Object.assign(new Error(`创建 PixVerse 对口型任务被拒绝 (${createResp.status})`), { code: "LIPSYNC_GENERATION_FAILED" });
       }

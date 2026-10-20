@@ -291,7 +291,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         }
         if(task.billing?.mode==='api_cost' && task.seedanceCostPrepared) await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,
           receiptId:'seedance',...(cause.code==='VIDEO_PROVIDER_REJECTED'||cause.code==='VIDEO_PROVIDER_IP_DENIED'?{costCny:0}:{uncertain:true})}).catch(()=>{});
-        await fail(task, cause instanceof VideoError && cause.code === 'VIDEO_PROVIDER_REJECTED' ? cause.message : '提交未获得确认，未自动重复生成。请核对模型服务记录后再创建任务，预留积分将退回。', cause.code === 'VIDEO_PROVIDER_REJECTED' ? cause.code : 'VIDEO_SUBMISSION_UNCERTAIN');
+        const rejected = cause instanceof VideoError && ['VIDEO_PROVIDER_REJECTED', 'VIDEO_PROVIDER_IP_DENIED'].includes(cause.code);
+        await fail(task, rejected ? cause.message : '提交未获得确认，未自动重复生成。请核对模型服务记录后再创建任务，预留积分将退回。', rejected ? cause.code : 'VIDEO_SUBMISSION_UNCERTAIN');
       }
     } else if (task.status === 'running') await acceptResult(task, await taskProvider.query(task.providerId, task));
     if (task.status === 'downloading') {
@@ -331,7 +332,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.lipsync.url = url; await save(task);
         }
         const mouth = join(folder(task), 'lipsync.mp4');
-        await download(task.lipsync.url, mouth);
+        try { await download(task.lipsync.url, mouth); }
+        catch { throw error('口型视频已生成，正在重试下载原结果，不会重新生成。', 502, 'VIDEO_LIPSYNC_PENDING'); }
         await narration.mux(mouth, join(folder(task), 'narration.wav'), aligned, task.actualDuration);
         task.audioCheck = { engine: 'indextts2', referenceApplied: true, emotionSource: task.narration.emotionSource, lipSync: 'processed' };
       } else if (!task.voice) await copyFile(generated, aligned);

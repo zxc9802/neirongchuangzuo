@@ -18,6 +18,21 @@ function falQueueUrl(value: string): string {
   }
   return url.href;
 }
+
+// Only reads of an accepted job may be retried; never repeat a paid POST.
+async function readFalJob(url: string, apiKey: string): Promise<any | null> {
+  let response: Response;
+  try {
+    response = await fetch(url, { redirect: "error", headers: { Authorization: `Key ${apiKey}` },
+      signal: AbortSignal.timeout(60_000) });
+  } catch { return null; }
+  if (response.status >= 500 || [408, 429].includes(response.status)) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!response.ok) throw new Error(`fal IndexTTS-2 任务查询失败 (${response.status})`);
+  try { return await response.json(); } catch { return null; }
+}
 let activeRequests = 0;
 const waitingRequests: (() => void)[] = [];
 
@@ -282,35 +297,14 @@ async function generatePrimaryIndexTTS(
       while (Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 2500));
         options.checkActive?.();
-        const pollResp = await fetch(statusUrl, {
-          redirect: "error",
-          headers: {
-            Authorization: `Key ${apiKey}`,
-          },
-          signal: AbortSignal.timeout(60_000),
-        });
-
-        if (!pollResp.ok) {
-          if (pollResp.status >= 400 && pollResp.status < 500) {
-            throw new Error(`fal IndexTTS-2 任务查询失败 (${pollResp.status}): ${await pollResp.text()}`);
-          }
-          continue;
-        }
-
-        const pollJson = await pollResp.json();
-        if (pollJson.error || ["FAILED", "CANCELLED"].includes(pollJson.status)) {
+        const pollJson = await readFalJob(statusUrl, apiKey);
+        if (!pollJson) { onLog("配音查询暂时不可用，正在重试原任务，不会重复提交。"); continue; }
+        if (pollJson.error || ["FAILED", "ERROR", "CANCELLED"].includes(pollJson.status)) {
           throw new Error(`fal IndexTTS-2 合成失败: ${JSON.stringify(pollJson)}`);
         }
         if (pollJson.status === "COMPLETED") {
-          const resultResp = await fetch(resultUrl, {
-            redirect: "error",
-            headers: { Authorization: `Key ${apiKey}` },
-            signal: AbortSignal.timeout(60_000),
-          });
-          if (!resultResp.ok) {
-            throw new Error(`fal IndexTTS-2 获取结果失败 (${resultResp.status}): ${await resultResp.text()}`);
-          }
-          const result = await resultResp.json();
+          const result = await readFalJob(resultUrl, apiKey);
+          if (!result) { onLog("配音结果暂时无法读取，正在取回原任务结果。"); continue; }
           if (result.error) throw new Error(`fal IndexTTS-2 合成失败: ${JSON.stringify(result.error)}`);
           audioUrl = typeof result.audio === "string" ? result.audio : result.audio?.url;
           break;

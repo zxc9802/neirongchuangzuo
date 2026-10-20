@@ -88,6 +88,10 @@ export function createVideoProvider(config, fetchImpl = fetch) {
       response = await fetchImpl(new URL(path, values.base), { method: 'POST', redirect: 'error',
         headers: { 'Content-Type': 'application/json', projectCode: values.project, 'X-Access-Key': values.access, 'X-Secret-Key': values.secret },
         body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
+      if (response.status >= 500 || [408, 429].includes(response.status)) {
+        await response.body?.cancel().catch(() => {});
+        throw new VideoError('模型服务暂时无法确认请求，请稍后查询原任务。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+      }
       const chunks = []; let length = 0;
       for await (const chunk of response.body) { length += chunk.length; if (length > 1024 * 1024) throw new Error(); chunks.push(chunk); }
       const data = JSON.parse(Buffer.concat(chunks).toString());

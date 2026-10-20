@@ -65,6 +65,10 @@ type FalQueueResult = {
   status?: string;
 };
 
+// Signed PUTs can target fal's storage providers; control-plane requests retain
+// the narrower fal policy and are the only requests carrying our API key.
+const storagePolicy = { name: "fal-upload", allowedHosts: ["fal.media", "amazonaws.com", "cloudflarestorage.com"] };
+
 function isPublicHttpUrl(url?: string): boolean {
   if (!url) return false;
   try {
@@ -139,20 +143,19 @@ export class FalVeedLipsyncAdapter {
       try {
         const resp = await fetchWithOutboundUrlPolicy(
           url,
-          init,
-          { ...providerUrlPolicy("fal"), sensitiveHeaders: Boolean(new Headers(init.headers).get("Authorization")) },
+          { ...init, signal: init.signal || AbortSignal.timeout(init.method === "PUT" ? 180_000 : 60_000) },
+          { ...(init.method === "PUT" ? storagePolicy : providerUrlPolicy("fal")),
+            sensitiveHeaders: Boolean(new Headers(init.headers).get("Authorization")) },
         );
         if (attempts === 1) return resp;
         if (resp.status >= 500 || resp.status === 429) {
           lastError = new Error(`HTTP ${resp.status}`);
-          await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
-          continue;
-        }
-        return resp;
+          await resp.body?.cancel().catch(() => {});
+        } else return resp;
       } catch (err: unknown) {
         lastError = err instanceof Error ? err : new Error(String(err));
-        await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
       }
+      if (i + 1 < attempts) await new Promise((r) => setTimeout(r, 2500 * (i + 1)));
     }
     throw lastError || new Error("fal 请求失败");
   }
@@ -201,7 +204,7 @@ export class FalVeedLipsyncAdapter {
           continue;
         }
 
-        await validateOutboundUrl(initiated.upload_url, providerUrlPolicy("fal"));
+        await validateOutboundUrl(initiated.upload_url, storagePolicy);
         await validateOutboundUrl(initiated.file_url, providerUrlPolicy("fal"));
 
         const buf = fs.readFileSync(filePath);
@@ -283,7 +286,7 @@ export class FalVeedLipsyncAdapter {
         video_url: videoUrl,
         audio_url: audioUrl,
       }),
-    }, options.onProviderSubmitting ? 1 : 4);
+    }, 1);
     if (submitResp.status >= 400 && submitResp.status < 500) {
       throw Object.assign(new Error(`创建 fal 对口型任务被拒绝 (${submitResp.status})`), { code: "LIPSYNC_GENERATION_FAILED" });
     }
@@ -300,9 +303,10 @@ export class FalVeedLipsyncAdapter {
     const lipsyncId = submitted.request_id;
     options.onProviderAccepted?.();
     options.onJobCreated?.({ lipsyncId });
+    const requestBase = this.queueBase(model.split("/").slice(0, 2).join("/"));
     const statusUrl =
-      submitted.status_url || `${queueBase}/requests/${lipsyncId}/status`;
-    const responseUrl = submitted.response_url || `${queueBase}/requests/${lipsyncId}`;
+      submitted.status_url || `${requestBase}/requests/${lipsyncId}/status`;
+    const responseUrl = submitted.response_url || `${requestBase}/requests/${lipsyncId}`;
     assertSameOrigin(statusUrl, queueBase);
     assertSameOrigin(responseUrl, queueBase);
     onLog(`[fal] 任务已建立 (ID: ${lipsyncId})，开始轮询进度...`);
@@ -323,6 +327,11 @@ export class FalVeedLipsyncAdapter {
         const polled = await this.parseJson<FalQueueStatus>(pollResp);
         const status = String(polled.status || "").toUpperCase();
 
+        if (polled.error || ["FAILED", "ERROR", "CANCELLED"].includes(status)) {
+          throw Object.assign(new Error(
+            `[fal] 对口型生成失败: ${formatFalError(polled.error || polled.detail, status)}`
+          ), { code: "LIPSYNC_GENERATION_FAILED" });
+        }
         if (status === "COMPLETED") {
           const fetched = await this.fetchCompletedVideo({
             apiKey,
@@ -336,18 +345,13 @@ export class FalVeedLipsyncAdapter {
           onLog("[fal] 对口型渲染完成，成片地址已保存，开始下载（失败可免费恢复，不会再扣费）...");
           break;
         }
-        if (status === "FAILED" || status === "ERROR" || status === "CANCELLED") {
-          throw Object.assign(new Error(
-            `[fal] 对口型生成失败: ${formatFalError(polled.error || polled.detail, status)}`
-          ), { code: "LIPSYNC_GENERATION_FAILED" });
-        }
         if (pollCount % 3 === 0) {
           const remainMin = Math.max(1, Math.round((pollDeadline - Date.now()) / 60000));
           onLog(`[fal] 正在渲染中 (轮询第 ${pollCount} 次，最长还等 ${remainMin} 分钟)...`);
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        if (message.includes("对口型生成失败")) {
+        if ((err as { code?: string })?.code === "LIPSYNC_GENERATION_FAILED") {
           throw err;
         }
         onLog(`[fal] 轮询暂时失败，将重试: ${message}`);
@@ -383,10 +387,13 @@ export class FalVeedLipsyncAdapter {
     });
     const payload = await this.parseJson<FalQueueResult>(resp);
     if (!resp.ok) {
-      throw new Error(
+      throw Object.assign(new Error(
         `读取 fal 成片失败: ${formatFalError(payload.detail || payload.error || payload, `HTTP ${resp.status}`)}`
-      );
+      ), resp.status >= 400 && resp.status < 500 && ![408, 429].includes(resp.status)
+        ? { code: "LIPSYNC_GENERATION_FAILED" } : {});
     }
+    if (payload.error) throw Object.assign(new Error(`对口型生成失败: ${formatFalError(payload.error, "unknown")}`),
+      { code: "LIPSYNC_GENERATION_FAILED" });
     const url = payload.video?.url || payload.video_url;
     if (!url) {
       throw new Error("fal 任务已完成但未返回成片地址");
@@ -405,12 +412,14 @@ export class FalVeedLipsyncAdapter {
       throw new Error("未配置 fal API Key，请先在系统设置中填写");
     }
 
-    const queueBase = this.queueBase(model);
+    const queueBase = this.queueBase(model.split("/").slice(0, 2).join("/"));
     const statusResp = await this.fetchWithRetry(
       `${queueBase}/requests/${requestId}/status`,
       { headers: this.headers(apiKey) }
     );
     const polled = await this.parseJson<FalQueueStatus>(statusResp);
+    if (!statusResp.ok) throw new Error(`读取 fal 任务状态失败 (${statusResp.status})`);
+    if (polled.error) return { status: "FAILED" };
     const status = String(polled.status || "").toUpperCase();
     if (status !== "COMPLETED") {
       return { status: status || "UNKNOWN" };

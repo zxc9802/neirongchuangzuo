@@ -148,6 +148,18 @@ function sendBlob(url, blob, { method, contentType, onProgress, signal, json = f
   });
 }
 
+async function retryUpload(operation, signal) {
+  for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) throw signal.reason;
+    try { return await operation(); }
+    catch (error) {
+      const status = error.status || 0;
+      if (signal?.aborted || attempt >= 2 || status > 0 && status < 500 && ![408, 429].includes(status)) throw error;
+      await new Promise(resolve => setTimeout(resolve, 500 * (attempt + 1)));
+    }
+  }
+}
+
 async function uploadMedia(file, fileName, folder, onProgress) {
   const descriptor = uploadDescriptor(file, fileName, folder);
   const grant = await request(`${API}/upload/direct`, { method: 'POST', body: descriptor });
@@ -192,15 +204,15 @@ async function uploadMedia(file, fileName, folder, onProgress) {
     try {
       while (!controller.signal.aborted && nextPart < parts.length) {
         const index = nextPart++;
-        await sendBlob(safeMediaUrl(parts[index].url), slices[index], {
+        await retryUpload(() => sendBlob(safeMediaUrl(parts[index].url), slices[index], {
           method: 'PUT', contentType: 'application/octet-stream', signal: controller.signal,
           onProgress: bytes => reportProgress(index, bytes),
-        });
+        }), controller.signal);
         reportProgress(index, parts[index].size);
       }
     } catch (error) { controller.abort(error); throw error; }
   }));
-  const result = await request(`${API}/upload/complete`, { method: 'POST', body: { uploadKey: grant.uploadKey } });
+  const result = await retryUpload(() => request(`${API}/upload/complete`, { method: 'POST', body: { uploadKey: grant.uploadKey } }));
   if (result.success !== true || result.uploadKey !== grant.uploadKey) throw new DigitalHumanApiError('素材上传未能确认，请稍后重试', 502);
   onProgress?.(100);
   return result;

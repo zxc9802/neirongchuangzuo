@@ -74,7 +74,7 @@ const DEFAULT_CONFIG: AppConfig = {
   openluxLipsyncModel: process.env.OPENLUX_LIPSYNC_MODEL || "pixverse-lipsync",
   pixverseIngestUrl: process.env.PIXVERSE_INGEST_URL || "",
   pixverseIngestToken: process.env.PIXVERSE_INGEST_TOKEN || "",
-  falApiKey: process.env.FAL_KEY || process.env.FAL_API_KEY || "",
+  falApiKey: process.env.FAL_KEY || process.env.FAL_API_KEY || process.env.VIDEO_FAL_KEY || "",
   falVeedModel: process.env.FAL_VEED_MODEL || "veed/lipsync",
   storageDir: path.join(process.cwd(), ".runtime", "jobs"),
   publicBaseUrl:

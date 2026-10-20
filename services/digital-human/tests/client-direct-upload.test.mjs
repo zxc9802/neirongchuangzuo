@@ -2,6 +2,35 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { uploadMediaFile } from "../src/lib/client-media-upload.ts";
 
+test("a stalled upload grant has a deadline instead of keeping the form busy forever", async t => {
+  const controller = new AbortController(); let requested = false;
+  t.mock.method(AbortSignal, "timeout", ms => { assert.equal(ms, 60_000); return controller.signal; });
+  t.mock.method(globalThis, "fetch", async (_url, init) => {
+    requested = true;
+    return new Promise((resolve, reject) => init.signal?.addEventListener("abort", () => reject(init.signal.reason)));
+  });
+  const running = uploadMediaFile(new Blob(["data"]), "video.mp4");
+  assert.equal(requested, true);
+  controller.abort(new DOMException("Timed out", "TimeoutError"));
+  await assert.rejects(running, {name: "TimeoutError"});
+});
+
+test("a stalled local upload times out without reporting success", async t => {
+  const originalXhr = globalThis.XMLHttpRequest;
+  t.mock.method(globalThis, "fetch", async () => Response.json({direct: false}));
+  globalThis.XMLHttpRequest = class {
+    upload = {};
+    open() {}
+    setRequestHeader() {}
+    send() {
+      assert.equal(this.timeout, 180_000);
+      queueMicrotask(() => this.ontimeout());
+    }
+  };
+  try { await assert.rejects(uploadMediaFile(new Blob(["data"]), "video.mp4"), /上传超时/); }
+  finally { globalThis.XMLHttpRequest = originalXhr; }
+});
+
 test("browser sends file slices to storage, retries a failed slice and confirms before reporting success", async () => {
   const originalFetch = globalThis.fetch;
   const originalXhr = globalThis.XMLHttpRequest;

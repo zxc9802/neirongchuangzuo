@@ -7,6 +7,31 @@ const finiteWallet = () => ({ available: 1000, held: 0, total: 1000, unlimited: 
 const STANDARD_MODEL = 'doubao-seedance-2-0-260128', PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
 const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
 
+for (const stage of ['create', 'upload']) test(`a stalled replica ${stage} request releases the busy UI without automatic resubmission`, async t => {
+  const controllers = new Map(); let task, posts = 0;
+  t.mock.method(AbortSignal, 'timeout', ms => {
+    const controller = new AbortController(); controllers.set(ms, controller); return controller.signal;
+  });
+  const page = await fixture(t, { apiFetch: (url, options) => {
+    if (!options?.method) return;
+    if (options.method === 'POST') {
+      posts++; task = { id: JSON.parse(options.body).requestId, status: 'draft', createdAt: Date.now() };
+      if (stage === 'upload') return Response.json({ task });
+    }
+    return new Promise((resolve, reject) => options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
+  } });
+  page.recover(); await page.poll();
+  for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({target: {files: [new File(['data'], kind + '.mp4')]}});
+  page.node('#replica-submit').onclick(); await page.settle();
+  const timeout = stage === 'upload' ? 180_000 : 60_000;
+  assert.ok(controllers.has(timeout), 'writes need a bounded deadline too');
+  controllers.get(timeout).abort(new DOMException('Timed out', 'TimeoutError'));
+  await page.settle();
+  assert.match(page.message(), /超时/);
+  assert.doesNotMatch(page.html(), /id="replica-submit"[^>]*disabled/);
+  assert.equal(posts, 1);
+});
+
 async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiFetch } = {}) {
   const keys = ['workspaceUser', 'document', 'fetch', 'setInterval', 'clearInterval'];
   const original = Object.fromEntries(keys.map(key => [key, globalThis[key]]));

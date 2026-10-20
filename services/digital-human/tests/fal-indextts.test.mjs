@@ -121,6 +121,7 @@ test('digital-human readiness uses the same fal key precedence as replica, never
       }
       const config = load('../src/lib/config.ts', {path, './lipsync-provider': {resolveLipsyncProvider: () => 'heygen'}});
       assert.equal(config.getAppConfig().indexttsFalApiKey, i < 3 ? `test-${i}` : '');
+      assert.equal(config.getAppConfig().falApiKey, i < 3 ? `test-${i}` : '');
       assert.equal(config.getAppConfig().indexttsApiKey, 'test-3');
       const route = load('../src/app/api/digital-human/status/route.ts', {
         'next/server': {NextResponse: Response}, '@/lib/config': config,
@@ -132,4 +133,34 @@ test('digital-human readiness uses the same fal key precedence as replica, never
   } finally {
     for (const name of names) {if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];}
   }
+});
+
+test('temporary polling and result failures reuse the accepted TTS job', async () => {
+  await harness(async h => {
+    let polls = 0, results = 0;
+    h.respond(url => {
+      if (url === endpoint) return Response.json(job);
+      if (url === job.status_url) {
+        if (++polls === 1) throw new TypeError('fetch failed');
+        if (polls === 2) return new Response('rate limited', {status: 429});
+        if (polls === 3) return new Response('gateway timeout', {status: 504});
+        return Response.json({status: 'COMPLETED'});
+      }
+      if (++results === 1) return new Response('unavailable', {status: 503});
+      if (results === 2) throw new TypeError('connection reset');
+      return Response.json({audio: {url: 'https://fal.media/audio.mp3'}});
+    });
+    assert.ok((await h.generate()).selectedDuration > 0);
+    assert.equal(h.calls.filter(c => c.init.method === 'POST').length, 1);
+    assert.equal(results, 3);
+  });
+});
+
+test('definitive TTS query rejection stops without replaying synthesis', async () => {
+  await harness(async h => {
+    h.respond(url => url === endpoint ? Response.json(job) : new Response('denied', {status: 403}));
+    await assert.rejects(h.generate(), /403/);
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.downloads.length, 0);
+  });
 });

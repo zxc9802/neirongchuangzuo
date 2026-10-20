@@ -25,7 +25,7 @@ function account() {
   if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, voiceEngine: DEFAULT_VOICE_ENGINE, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
 }
 async function request(path, options = {}) {
-  const signal = options.method ? undefined : AbortSignal.timeout(15_000);
+  const signal = AbortSignal.timeout(options.method === 'PUT' ? 180_000 : options.method ? 60_000 : 15_000);
   try {
     const response = await fetch(API + path, { credentials: 'same-origin', cache: 'no-store', signal, ...options });
     let data;
@@ -33,7 +33,7 @@ async function request(path, options = {}) {
     if (!response.ok) throw new Error(data.error || '请求失败，请稍后重试。');
     return data;
   } catch (cause) {
-    if (signal?.aborted) throw new Error('查询任务超时，正在自动重试；不会重新生成。');
+    if (signal.aborted) throw new Error(options.method ? '上传或提交超时，请刷新任务记录后重试；不会自动重新生成。' : '查询任务超时，正在自动重试；不会重新生成。');
     throw cause;
   }
 }

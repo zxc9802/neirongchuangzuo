@@ -110,7 +110,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
    databaseUrl: runtimeSettings.RESTAURANT_DATABASE_URL || process.env.AUTH_DATABASE_URL,
    packageDailyLimit: Number(runtimeSettings.RESTAURANT_PACKAGE_DAILY_LIMIT || 20),
    mediaEnv: runtimeSettings, providerLedger: handleAI.callLedger, credits, ...restaurantOptions });
- const initializeVideo = videoOptions?.initialize || process.env.NODE_ENV === 'production' && videoConfig(runtimeSettings, externalOrigin?.origin).enabled;
+ const replicaConfig = videoConfig(runtimeSettings, externalOrigin?.origin);
+ const initializeVideo = videoOptions?.initialize || process.env.NODE_ENV === 'production' && (replicaConfig.enabled || replicaConfig.falEnabled);
  const ready = Promise.all([Promise.resolve(handleAI.ready), creditsReady, ...(restaurantOptions?.initialize ? [restaurant().ready] : []), ...(initializeVideo ? [video().ready] : [])]);
  ready.catch(() => {});
  let closing = false;

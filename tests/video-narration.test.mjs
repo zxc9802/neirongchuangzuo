@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { createNarrationService, muxNarration } from '../services/video/narration.mjs';
+import { createNarrationService, muxNarration, assembleNarration } from '../services/video/narration.mjs';
 import { createLipsyncService } from '../services/video/lipsync.mjs';
 import { createProviderStorage } from '../services/video/provider-storage.mjs';
 import { loadWorkspaceSettings } from '../services/runtime-settings.mjs';
@@ -14,6 +14,23 @@ import { createCreditsLedger } from '../services/credits/store.mjs';
 const pcm = (input, start, duration) => execFileSync('ffmpeg', ['-v', 'error', '-ss', String(start), '-i', input,
   '-t', String(duration), '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1']);
 const rms = bytes => Math.sqrt(Array.from({ length: bytes.length / 4 }, (_, i) => bytes.readFloatLE(i * 4) ** 2).reduce((a, b) => a + b, 0) / (bytes.length / 4));
+
+test('a shorter generated video retains both narration segments and the final spoken sound', async t => {
+  const folder = await mkdtemp(join(tmpdir(), 'replica-short-narration-'));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  for (const [index, frequency] of [220, 880].entries()) execFileSync('ffmpeg', [
+    '-v', 'error', '-y', '-f', 'lavfi', '-i', `sine=frequency=${frequency}:duration=1`, join(folder, `${index}.wav`),
+  ]);
+  const segments = [{start: 0, end: 1, speechStart: 0, speechEnd: 1},
+    {start: 2.5, end: 3.5, speechStart: 0, speechEnd: 1}];
+  const original = structuredClone(segments), output = join(folder, 'narration.wav');
+  await assembleNarration(segments, folder, output, 2.5);
+  assert.deepEqual(segments, original, 'The reference timeline remains intact for retries');
+  assert.ok(rms(pcm(output, 0.2, 0.2)) > 0.03);
+  assert.ok(rms(pcm(output, 1, 0.2)) < 0.001);
+  assert.ok(rms(pcm(output, 2.2, 0.2)) > 0.03, 'The last segment must remain audible');
+  assert.ok(Math.abs(pcm(output, 0, 4).length / 4 / 16000 - 2.5) < 0.02);
+});
 const falJob = id => ({ request_id: id,
   status_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}/status`,
   response_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}` });
@@ -166,7 +183,20 @@ test('provider inputs are uploaded with expiry and storage credentials never rea
     if (options.method === 'PUT') puts++;
     return Response.json({ upload_url: 'https://attacker.example/upload', file_url: 'https://v3.fal.media/reference.wav' });
   });
-  await assert.rejects(invalid.upload(input, 'audio/wav'), { code: 'VIDEO_NARRATION_PENDING' }); assert.equal(puts, 0);
+  await assert.rejects(invalid.upload(input, 'audio/wav'), { code: 'VIDEO_NARRATION_FAILED' }); assert.equal(puts, 0);
+});
+
+for (const status of [401, 402, 403, 429, 503]) test(`storage HTTP ${status} distinguishes rejected credentials from temporary outages`, async () => {
+  let calls = 0;
+  const storage = createProviderStorage({ FAL_KEY: 'test-key' }, async () => {
+    calls++; return new Response('private provider detail', {status});
+  });
+  await assert.rejects(storage.upload('unused.wav', 'audio/wav'), cause => {
+    assert.equal(cause.code, status < 429 ? 'VIDEO_NARRATION_FAILED' : 'VIDEO_NARRATION_PENDING');
+    assert.ok(!cause.message.includes('private provider detail'));
+    return true;
+  });
+  assert.equal(calls, 1);
 });
 
 test('an input transfer failure is retriable and occurs before paid synthesis submission', async () => {

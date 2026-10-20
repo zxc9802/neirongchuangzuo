@@ -6,6 +6,26 @@ import { createPreviewServer } from '../preview.mjs';
 import { createVideoProvider, VideoError } from '../services/video/provider.mjs';
 import { collectGeneratedAssets } from '../design/generated-assets.js';
 
+test('fal-only production starts saved replica processing before the first page visit', async t => {
+  const names = ['NODE_ENV', 'FAL_KEY', 'TEMP_ASSET_SIGNING_SECRET', 'VIDEO_ACCESS_KEY', 'VIDEO_SECRET_KEY'];
+  const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
+  let app;
+  try {
+    process.env.NODE_ENV = 'production'; process.env.FAL_KEY = 'test-only';
+    process.env.TEMP_ASSET_SIGNING_SECRET = 'test-signing-secret';
+    process.env.VIDEO_ACCESS_KEY = ''; process.env.VIDEO_SECRET_KEY = '';
+    let starts = 0;
+    const stub = Object.assign(async () => false, { ready: Promise.resolve(), shutdown: async () => {} });
+    app = createPreviewServer({ publicOrigin: 'https://studio.example', createAI: () => stub,
+      createVideo: () => { starts++; return stub; } });
+    await app.ready;
+    assert.equal(starts, 1);
+  } finally {
+    await app?.shutdown();
+    for (const name of names) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+  }
+});
+
 test('video routes use verified workspace accounts and preserve the narrow signed source endpoint', async t => {
   const backend = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
@@ -39,6 +59,12 @@ test('supplier whitelist rejection is actionable without leaking provider respon
   const provider = createVideoProvider({ material: { base: 'https://supplier.example', project: 'project', access: 'access', secret: 'secret' } },
     async () => Response.json({ success: false, msg: '访问被拒绝：IP 不在项目的白名单中 sensitive-debug-value' }));
   await assert.rejects(provider.createMaterial('https://app.example/signed', 'photo'), cause => cause instanceof VideoError && cause.code === 'VIDEO_PROVIDER_IP_DENIED' && !cause.message.includes('sensitive-debug-value'));
+});
+
+test('a supplier gateway failure cannot be treated as proof that a paid submission was rejected', async () => {
+  const provider = createVideoProvider({ video: { base: 'https://supplier.example', project: 'project', access: 'access', secret: 'secret' } },
+    async () => Response.json({success: false, msg: 'upstream timeout'}, {status: 502}));
+  await assert.rejects(provider.generate({materials: {photo: {id: 'photo'}, video: {id: 'video'}}}), {code: 'VIDEO_PROVIDER_UNAVAILABLE'});
 });
 
 test('asset library includes only retained and settled person-replica results', () => {

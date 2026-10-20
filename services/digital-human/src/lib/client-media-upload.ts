@@ -22,6 +22,7 @@ async function retryUpload<T>(operation: () => Promise<T>, signal?: AbortSignal)
 async function postUploadControl(url: string, body: object) {
   const response = await fetch(url, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    signal: AbortSignal.timeout(60_000),
   });
   const data = await response.json().catch(() => null);
   if (!response.ok) throw new UploadError(data?.error || `上传请求失败 (${response.status})`, response.status);
@@ -104,6 +105,7 @@ export async function uploadMediaFile(
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `/api/upload?${query.toString()}`, true);
     xhr.setRequestHeader("Content-Type", file.type || "application/octet-stream");
+    xhr.timeout = 180_000;
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable && onProgress) {
@@ -135,6 +137,7 @@ export async function uploadMediaFile(
       }
     };
     xhr.onerror = () => reject(new Error("网络连接失败"));
+    xhr.ontimeout = () => reject(new Error("上传超时，请检查网络后重试"));
     xhr.send(file);
   });
 }

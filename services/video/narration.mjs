@@ -154,10 +154,14 @@ export function createNarrationService(env = {}, { fetchImpl = fetch, download =
 
 export async function assembleNarration(segments, folder, output, duration) {
   const track = Buffer.alloc(Math.ceil(duration * SAMPLE_RATE) * 4);
+  // Fit every spoken segment into a shorter generated video without dropping
+  // the last words or turning the removed output-duration gate into a TTS error.
+  const scale = duration / Math.max(duration, ...segments.map(segment => segment.end));
   for (const [index, segment] of segments.entries()) {
-    const target = segment.end - segment.start;
+    const start = segment.start * scale, end = Math.min(duration, segment.end * scale);
+    const target = end - start;
     let rate = (segment.speechEnd - segment.speechStart) / target;
-    if (!(target > 0 && rate > 0 && segment.start >= 0 && segment.end <= duration)) throw failure('配音时间范围无效。');
+    if (!(target > 0 && rate > 0 && start >= 0)) throw failure('配音时间范围无效。');
     const tempo = [];
     while (rate > 2) { tempo.push('atempo=2'); rate /= 2; }
     while (rate < 0.5) { tempo.push('atempo=0.5'); rate /= 0.5; }
@@ -165,7 +169,7 @@ export async function assembleNarration(segments, folder, output, duration) {
     const { stdout } = await run('ffmpeg', ['-v', 'error', '-i', join(folder, `${index}.wav`), '-vn',
       '-af', `atrim=start=${segment.speechStart}:end=${segment.speechEnd},asetpts=PTS-STARTPTS,${tempo.join(',')},apad,atrim=duration=${target}`,
       '-ar', String(SAMPLE_RATE), '-ac', '1', '-f', 'f32le', 'pipe:1'], { encoding: 'buffer', maxBuffer: 8 * 1024 * 1024 });
-    stdout.copy(track, Math.round(segment.start * SAMPLE_RATE) * 4, 0, Math.round(target * SAMPLE_RATE) * 4);
+    stdout.copy(track, Math.round(start * SAMPLE_RATE) * 4, 0, Math.round(target * SAMPLE_RATE) * 4);
   }
   const pcm = output + '.pcm', temporary = output + '.tmp.wav';
   try {

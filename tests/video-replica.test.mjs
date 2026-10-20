@@ -1372,6 +1372,40 @@ test('pending lip-sync survives service restart without submitting a second paid
   assert.equal(submits, 1); assert.equal(app.state.generations, 1);
 });
 
+test('a temporary lip-sync download failure retries the saved result without paying twice', async t => {
+  let submits = 0, downloads = 0, available = false;
+  const app = await fixture(t, { speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration(),
+    lipsync: fakeLipsync({ submit: async () => { submits++; return { id: 'saved-mouth' }; } }),
+    download: async (url, output) => {
+      if (url.endsWith('/mouth.mp4')) { downloads++; if (!available) throw new Error('connection reset'); }
+      await writeFile(output, VIDEO);
+    },
+  });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const pending = await app.until(id, task => task.code === 'VIDEO_QUERY_PENDING' || task.status === 'failed');
+  assert.equal(pending.status, 'verifying');
+  await app.close(); await app.open();
+  available = true;
+  await app.until(id, task => task.status === 'completed');
+  assert.ok(downloads >= 2); assert.equal(submits, 1); assert.equal(app.state.generations, 1);
+});
+
+test('IP whitelist rejection during generation retains the actionable reason', async t => {
+  const app = await fixture(t, { generate: async () => {
+    throw new VideoError('当前服务器 IP 未获模型服务授权，请管理员配置供应商 IP 白名单。', 502, 'VIDEO_PROVIDER_IP_DENIED');
+  } });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, {body: {}});
+  const task = await app.until(id, value => value.status === 'failed');
+  assert.equal(task.code, 'VIDEO_PROVIDER_IP_DENIED');
+  assert.match(task.error, /IP 白名单/);
+  assert.equal(app.state.generations, 1);
+});
+
 for (const duration of [3.22, 2.5]) test(`independent narration delivers a generated ${duration}s video`, async t => {
   const app = await fixture(t, { speech: fakeSpeech(),
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
