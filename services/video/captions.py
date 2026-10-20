@@ -47,6 +47,85 @@ def normalized(text):
     return re.sub(r'[^\w]', '', text)
 
 
+def frames(cap, fps, duration, step):
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+    frame_index = 0
+    for index in range(math.ceil(duration / step)):
+        at = index * step
+        target = round(at * fps)
+        if target < frame_index:
+            continue
+        while frame_index < target:
+            if not cap.grab():
+                break
+            frame_index += 1
+        ok, frame = cap.read()
+        if not ok:
+            break
+        frame_index += 1
+        yield round(at, 3), frame
+
+
+def caption_lines(ocr, frame, width, height):
+    results, _ = ocr(frame, use_cls=False)
+    lines = []
+    for points, text, confidence in results or []:
+        box = np.array(points)
+        x1, y1 = box.min(axis=0)
+        x2, y2 = box.max(axis=0)
+        if confidence < .85 or len(normalized(text)) < 2 or not .25 < (x1 + x2) / (2 * width) < .75:
+            continue
+        if y2 - y1 < height * .015 or y2 - y1 > height * .12 or abs(points[1][1] - points[0][1]) > (y2 - y1) * .25:
+            continue
+        lines.append({'text': text, 'box': [float(x1), float(y1), float(x2), float(y2)]})
+    return sorted(lines, key=lambda line: line['box'][1])
+
+
+def subtitle_band(cap, ocr, width, height, fps, duration):
+    # Confirm a screen-fixed dialogue track before extracting its transcript.
+    # Do not group nearby clothing/packaging text with a subtitle line.
+    tracks = []
+    for at, frame in frames(cap, fps, duration, .5):
+        for line in caption_lines(ocr, frame, width, height):
+            x1, y1, x2, y2 = line['box']
+            center = (y1 + y2) / 2
+            track = next((track for track in tracks if abs(track['y'] - center) < min(height * .012, (y2 - y1) * .35)), None)
+            if track is None:
+                track = {'y': center, 'samples': []}
+                tracks.append(track)
+            track['samples'].append({'at': at, **line})
+    candidates = []
+    for track in tracks:
+        samples = track['samples']
+        if len(samples) < 2:
+            continue
+        boxes = np.array([sample['box'] for sample in samples])
+        centers = (boxes[:, :2] + boxes[:, 2:]) / 2
+        if np.std(centers[:, 0]) > width * .015 or np.std(centers[:, 1]) > height * .006:
+            continue
+        texts = collections.Counter(normalized(item['text']) for item in samples)
+        stable = [text for text, count in texts.items() if count >= 2 and len(text) >= 4]
+        # OCR variations of one sign do not establish changing dialogue.
+        changing = any(difflib.SequenceMatcher(None, a, b).ratio() < .75
+                       for i, a in enumerate(stable) for b in stable[i + 1:])
+        single = len(stable) == 1 and track['y'] > height * .65 and (
+            samples[0]['at'] >= .5 or samples[-1]['at'] + .5 < duration - .2)
+        if changing or single:
+            candidates.append((track, np.median(boxes, axis=0)))
+    if not candidates:
+        return None
+    track, box = max(candidates, key=lambda item: len(item[0]['samples']))
+    top, bottom = box[1], box[3]
+    # Adjacent lines qualify independently before they can form a multiline subtitle.
+    for other, other_box in sorted(candidates, key=lambda item: abs(item[0]['y'] - track['y'])):
+        if other is track:
+            continue
+        if max(other_box[1] - bottom, top - other_box[3], 0) < height * .025:
+            top, bottom = min(top, other_box[1]), max(bottom, other_box[3])
+    padding = max(3, (box[3] - box[1]) * .15)
+    return max(0, int(top - padding)), min(height, math.ceil(bottom + padding))
+
+
 def extract(path):
     cap = cv2.VideoCapture(path)
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -60,34 +139,16 @@ def extract(path):
         return subtitles
     from rapidocr_onnxruntime import RapidOCR
     ocr = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
-    tracks = []
-    frame_index = 0
-    for index in range(math.ceil(duration / STEP)):
-        at = index * STEP
-        target = round(at * fps)
-        if target < frame_index:
-            continue
-        while frame_index < target:
-            if not cap.grab():
-                break
-            frame_index += 1
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frame_index += 1
-        results, _ = ocr(frame, use_cls=False)
-        lines = []
-        for points, text, confidence in results or []:
-            box = np.array(points)
-            x1, y1 = box.min(axis=0)
-            x2, y2 = box.max(axis=0)
-            # Dialogue is horizontal, centered and larger than incidental labels.
-            if confidence < .85 or len(normalized(text)) < 2 or not .25 < (x1 + x2) / (2 * width) < .75:
-                continue
-            if y2 - y1 < height * .015 or y2 - y1 > height * .12 or abs(points[1][1] - points[0][1]) > (y2 - y1) * .5:
-                continue
-            lines.append({'text': text, 'box': [float(x1), float(y1), float(x2), float(y2)]})
-        lines.sort(key=lambda line: line['box'][1])
+    band = subtitle_band(cap, ocr, width, height, fps, duration)
+    if band is None:
+        cap.release()
+        return None
+    samples = []
+    for at, frame in frames(cap, fps, duration, STEP):
+        # Keep the original scale while hiding all text outside the confirmed band.
+        frame[:band[0]] = 0
+        frame[band[1]:] = 0
+        lines = caption_lines(ocr, frame, width, height)
         grouped = []
         for line in lines:
             if grouped and 0 <= line['box'][1] - grouped[-1]['box'][3] < height * .025:
@@ -97,30 +158,13 @@ def extract(path):
                                    max(previous['box'][2], line['box'][2]), line['box'][3]]
             else:
                 grouped.append(line)
-        for line in grouped:
-            center = (line['box'][1] + line['box'][3]) / 2
-            track = next((track for track in tracks if abs(track['y'] - center) < height * .04), None)
-            if track is None:
-                track = {'y': center, 'samples': []}
-                tracks.append(track)
-            track['samples'].append({'at': round(at, 3), **line})
+        samples.extend({'at': at, **line} for line in grouped)
     cap.release()
-    # Repeated packaging/logo text is not a dialogue track. A single caption
-    # can still qualify if it occupies a normal subtitle band near the bottom.
-    candidates = []
-    for track in tracks:
-        texts = collections.Counter(normalized(item['text']) for item in track['samples'])
-        stable = [text for text, count in texts.items() if count >= 2]
-        if len(stable) >= 2 or len(stable) == 1 and len(stable[0]) >= 4 and track['y'] > height * .65:
-            candidates.append(track)
-    if not candidates:
-        return None
-    track = max(candidates, key=lambda track: len(track['samples']))
     cues = []
-    for sample in track['samples']:
+    for sample in samples:
         same = cues and (normalized(sample['text']) == normalized(cues[-1]['text'])
                          or difflib.SequenceMatcher(None, normalized(sample['text']), normalized(cues[-1]['text'])).ratio() >= .9)
-        if same and sample['at'] <= cues[-1]['end'] + STEP * 1.5:
+        if same and sample['at'] <= cues[-1]['end'] + .5:
             cue = cues[-1]
             cue['end'] = round(min(duration, sample['at'] + STEP), 3)
             cue['_votes'][sample['text']] += 1
@@ -148,7 +192,7 @@ def render(path, output, captions):
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
     fonts = ['/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', '/System/Library/Fonts/PingFang.ttc',
-             '/System/Library/Fonts/Supplemental/Arial Unicode.ttf']
+             '/System/Library/Fonts/Supplemental/Arial Unicode.ttf', 'C:/Windows/Fonts/msyh.ttc']
     font_path = next((font for font in fonts if os.path.isfile(font)), None)
     if not font_path:
         raise ValueError('Chinese caption font unavailable')

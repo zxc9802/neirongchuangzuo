@@ -182,7 +182,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       task.originalSpeech = structuredClone(task.speech);
     } else if (!task.speech && task.voice) {
       if (!task.video.audio) throw error('参考视频没有音轨，无法保留原台词。', 422, 'VIDEO_SPEECH_INVALID');
-      task.speech = await speech.analyze(file(task, 'video'), task.video.duration, { diagnosticsPath: join(folder(task), 'verification-source.json') });
+      task.speech = { ...await speech.analyze(file(task, 'video'), task.video.duration,
+        { diagnosticsPath: join(folder(task), 'verification-source.json') }), source: 'audio' };
       task.originalSpeech = structuredClone(task.speech);
     }
     await save(task);

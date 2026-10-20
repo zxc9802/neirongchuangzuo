@@ -1233,6 +1233,43 @@ function fakeNarration(overrides = {}) {
     },
     mux: async (_video, audio, output) => writeFile(output, await readFile(audio)), ...overrides };
 }
+
+for (const hasSubtitles of [true, false]) test(`IndexTTS uses ${hasSubtitles ? 'detected subtitles' : 'original audio when no subtitles exist'} for narration`, async t => {
+  let analyses = 0, narrationSpeech;
+  const app = await fixture(t, {
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async () => { analyses++; return structuredClone(SPEECH); } }),
+    captions: { extract: async () => hasSubtitles ? structuredClone(CAPTIONS) : null },
+    narration: fakeNarration({ prepare: async task => {
+      narrationSpeech = structuredClone(task.speech); return fakeNarration().prepare(task);
+    } }), lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/analyze`, { body: {} });
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.speech.source, hasSubtitles ? 'subtitles' : 'audio');
+  assert.equal(narrationSpeech.text, hasSubtitles ? CAPTIONS.cues.map(cue => cue.text).join('') : SPEECH.text);
+  assert.deepEqual(narrationSpeech, running.speech);
+  assert.equal(analyses, hasSubtitles ? 0 : 1, 'ASR must only run when subtitles are absent');
+  await app.close(); await app.open();
+  assert.deepEqual((await app.current(id)).speech, narrationSpeech);
+  assert.equal(analyses, hasSubtitles ? 0 : 1); assert.equal(app.state.generations, 1);
+});
+
+test('IndexTTS preserves explicitly confirmed dialogue instead of overwriting it with ASR', async t => {
+  const app = await fixture(t, {
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+    speech: fakeSpeech({ analyze: async () => assert.fail('Confirmed dialogue must be preserved') }),
+    captions: { extract: async () => structuredClone(CAPTIONS) },
+    narration: fakeNarration(), lipsync: fakeLipsync() });
+  const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/analyze`, { body: {} });
+  const response = await app.call(`/tasks/${id}/speech`, { body: { segments: [{ text: '原文已确认' }, { text: '只要8.8元' }] } });
+  assert.equal(response.status, 200);
+  const confirmed = (await response.json()).task.speech;
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } })).status, 202);
+  assert.deepEqual((await app.until(id, task => task.status === 'running')).speech, confirmed);
+});
 const fakeLipsync = overrides => ({ enabled: true,
   submit: async () => ({ id: 'mouth-job', statusUrl: 'https://queue.fal.run/veed/lipsync/requests/mouth-job/status' }),
   query: async () => 'https://cdn.example/mouth.mp4', ...overrides });

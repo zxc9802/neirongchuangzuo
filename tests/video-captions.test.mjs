@@ -81,7 +81,7 @@ test('embedded and burned captions preserve text, prices and cue times without c
   assert.equal(await service.extract(base), null);
 });
 
-test('stationary packaging or a logo is not used as dialogue', { skip: !available }, async t => {
+for (const top of [350, 580]) test(`stationary packaging or a logo at y=${top} is not used as dialogue`, { skip: !available }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'video-caption-logo-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const base = join(root, 'base.mp4'), logo = join(root, 'logo.mp4');
@@ -89,6 +89,25 @@ test('stationary packaging or a logo is not used as dialogue', { skip: !availabl
     '-c:v', 'libx264', '-threads', '2', '-pix_fmt', 'yuv420p', base]);
   const service = createCaptionService({ VIDEO_PYTHON_BIN: python });
   await service.render(base, logo, { kind: 'embedded', width: 512, height: 768,
-    cues: [{ start: 0, end: 2, text: '起芽品牌', box: [160, 350, 350, 390] }] });
+    cues: [{ start: 0, end: 2, text: '起芽品牌', box: [160, top, 350, top + 40] }] });
   assert.equal(await service.extract(logo), null);
+});
+
+test('confirmed subtitles exclude adjacent clothing text and bridge short OCR gaps once', { skip: !available }, async t => {
+  const root = await mkdtemp(join(tmpdir(), 'video-caption-clothing-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const base = join(root, 'base.mp4'), source = join(root, 'source.mp4');
+  await run('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=0x456789:s=512x768:r=25:d=4',
+    '-c:v', 'libx264', '-threads', '2', '-pix_fmt', 'yuv420p', base]);
+  const service = createCaptionService({ VIDEO_PYTHON_BIN: python });
+  await service.render(base, source, { kind: 'embedded', width: 512, height: 768, cues: [
+    { start: 0, end: 4, text: '碗碗香', box: [160, 528, 350, 558] },
+    { start: .1, end: .8, text: '我从来都不会说', box: [80, 565, 430, 601] },
+    { start: 1.2, end: 1.8, text: '我从来都不会说', box: [80, 565, 430, 601] },
+    { start: 2, end: 3.6, text: '我们家的麻辣烫', box: [80, 565, 430, 601] },
+  ] });
+  const extracted = await service.extract(source);
+  assert.deepEqual(extracted.cues.map(cue => cue.text), ['我从来都不会说', '我们家的麻辣烫']);
+  assert.ok(extracted.cues.every(cue => cue.box[1] > 550), 'Only the confirmed subtitle band is extracted');
+  assert.equal(captionSpeech(extracted).text, '我从来都不会说我们家的麻辣烫');
 });
