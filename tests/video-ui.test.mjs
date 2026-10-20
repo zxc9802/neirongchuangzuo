@@ -59,7 +59,7 @@ test('edition buttons show the requested descriptions and update the upload dura
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
 
-for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL]) test(`${model} choice is sent during task creation and start without changing the voice engine`, async t => {
+for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'fal-ai/pixverse/swap']) test(`${model} choice is sent during task creation and start without changing the voice engine`, async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;

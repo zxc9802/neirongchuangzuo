@@ -8,6 +8,8 @@ import { createNarrationService, muxNarration } from '../services/video/narratio
 import { createLipsyncService } from '../services/video/lipsync.mjs';
 import { createProviderStorage } from '../services/video/provider-storage.mjs';
 import { loadWorkspaceSettings } from '../services/runtime-settings.mjs';
+import { createApiCostMeter } from '../services/credits/meter.mjs';
+import { createCreditsLedger } from '../services/credits/store.mjs';
 
 const pcm = (input, start, duration) => execFileSync('ffmpeg', ['-v', 'error', '-ss', String(start), '-i', input,
   '-t', String(duration), '-vn', '-ac', '1', '-ar', '16000', '-f', 'f32le', 'pipe:1']);
@@ -16,34 +18,54 @@ const falJob = id => ({ request_id: id,
   status_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}/status`,
   response_url: `https://queue.fal.run/fal-ai/index-tts-2/requests/${id}` });
 
+test('billing rejection before a paid call is reported without claiming an uncertain TTS or lip-sync submission', async () => {
+  const fetchImpl = async () => { throw Object.assign(new Error('积分不足，未发送付费请求。'), { providerNotDispatched: true }); };
+  const narration = createNarrationService({ FAL_KEY: 'test' }, { fetchImpl, upload: async () => 'https://fal.media/voice.wav' });
+  const task = { video: { audio: false }, narration: { provider: 'fal', ready: false, segments: [{ start: 0, end: 1, text: '你好' }] } };
+  await assert.rejects(narration.advance(task, 'unused', () => '', async () => {}), { code: 'VIDEO_NARRATION_FAILED', message: '积分不足，未发送付费请求。' });
+  const lipsync = createLipsyncService({ FAL_KEY: 'test' }, fetchImpl);
+  await assert.rejects(lipsync.submit('https://fal.media/video.mp4', 'https://fal.media/voice.wav'), { code: 'VIDEO_LIPSYNC_FAILED', message: '积分不足，未发送付费请求。' });
+});
+
 test('IndexTTS uses uploaded timbre and per-segment source emotion, at most three jobs, with timed silence and exact final audio mapping', async t => {
-  const folder = await mkdtemp(join(tmpdir(), 'replica-narration-')); t.after(() => rm(folder, { recursive: true, force: true }));
+  const folder = await mkdtemp(join(tmpdir(), 'replica-narration-'));
+  t.after(async () => { await credits.close(); await rm(folder, { recursive: true, force: true }); });
   const source = join(folder, 'source.mp4'), wav = join(folder, 'fixture.wav');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=black:s=160x240:r=30:d=6',
     '-f', 'lavfi', '-i', 'sine=frequency=220:duration=6', '-c:v', 'libx264', '-c:a', 'aac', source]);
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=1', '-ar', '24000', wav]);
   const requests = [], events = [];
   const uploads = [];
-  const service = createNarrationService({ FAL_KEY: 'unit-test-key', INDEXTTS_302_API_KEY: 'legacy-key' }, {
-    upload: async input => { uploads.push(input); return `https://fal.media/${basename(input)}`; },
+  const credits = createCreditsLedger({ storageDir: join(folder, 'credits'), databaseUrl: null, costMode: true });
+  await credits.ready;
+  const scope = { userId: 'alice', taskId: 'pixverse-narration' }; await credits.reserveCost(scope);
+  const meter = createApiCostMeter({ credits, prices: { fal: async () => ({ unit_price: 0.001, fx: 1 }) },
     fetchImpl: async (url, options) => {
       assert.equal(options.headers.Authorization, 'Key unit-test-key');
       if (options.method === 'POST') {
         assert.equal(String(url), 'https://queue.fal.run/fal-ai/index-tts-2/text-to-speech');
         const body = JSON.parse(options.body); requests.push(body); return Response.json(falJob(`speech-${requests.length}`));
       }
-      events.push(String(url)); return Response.json(String(url).endsWith('/status') ? { status: 'COMPLETED' } : { audio: { url: 'https://v3.fal.media/unit.wav' } });
+      events.push(String(url)); return Response.json(String(url).endsWith('/status') ? { status: 'COMPLETED' } : { audio: { url: 'https://v3.fal.media/unit.wav' } },
+        { headers: { 'x-fal-billable-units': '10' } });
     },
+  });
+  const service = createNarrationService({ FAL_KEY: 'unit-test-key', INDEXTTS_302_API_KEY: 'legacy-key' }, {
+    upload: async input => { uploads.push(input); return `https://fal.media/${basename(input)}`; }, fetchImpl: meter.fetch,
     download: async (_url, output) => writeFile(output, await readFile(wav)), detect: async () => [{ start: 0.1, end: 0.9 }],
   });
   const task = { duration: 6, actualDuration: 6, video: { audio: true }, speech: { segments: Array.from({ length: 5 }, (_, i) => ({ start: i + 0.25, end: i + 0.75, text: `第${i}句` })) } };
   task.narration = await service.prepare(task, folder);
   assert.equal(task.narration.provider, 'fal');
-  const advance = () => service.advance(task, folder, kind => `https://workspace.example/${kind}`, async () => {});
+  const advance = () => meter.run(scope, () => service.advance(task, folder, kind => `https://workspace.example/${kind}`, async () => {}));
   await advance(); assert.equal(requests.length, 3); assert.equal(events.length, 0);
   await advance(); await advance(); assert.equal(requests.length, 5); assert.equal(task.narration.ready, false);
   await advance(); assert.equal(task.narration.ready, true);
   await advance(); assert.equal(requests.length, 5); assert.equal(events.length, 10);
+  const settled = await credits.settleCost(scope);
+  assert.equal(Object.keys(settled.costItems).length, 5);
+  assert.equal(settled.settledUnits, 50_000); assert.equal(settled.chargedPoints, 7);
+  assert.ok(Object.values(settled.costItems).every(item => item.metadata.model === 'fal-ai/index-tts-2/text-to-speech'));
   for (const [i, body] of requests.entries()) {
     assert.deepEqual(body, { audio_url: 'https://fal.media/reference.wav',
       emotional_audio_url: `https://fal.media/emotion-${i}.wav`, strength: 0.8, prompt: `第${i}句`, should_use_prompt_for_emotion: false });

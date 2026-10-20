@@ -7,6 +7,7 @@ const MODELS = [
   { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, description: '最多生成30秒视频，1.5元/秒' },
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, description: '最多生成15秒视频，0.8元/秒' },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, description: '最多生成15秒视频，0.5元/秒' },
+  { id: 'fal-ai/pixverse/swap', name: 'PixVerse Swap', maxDuration: 30, description: '最长30秒 · 720p · 按实际费用，配音口型另计' },
 ];
 const DEFAULT_VOICE_ENGINE = 'indextts2';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');

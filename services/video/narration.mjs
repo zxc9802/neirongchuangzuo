@@ -56,6 +56,7 @@ export function createNarrationService(env = {}, { fetchImpl = fetch, download =
       }
       return await response.json();
     } catch (cause) {
+      if (cause.providerNotDispatched) throw failure(cause.message);
       if (cause instanceof VideoError) throw cause;
       throw failure(body ? '配音提交未获得确认，未重复扣费提交，请核对原配音任务。' : '配音服务暂时不可用，正在查询原配音任务。',
         body ? 'VIDEO_NARRATION_UNCERTAIN' : 'VIDEO_NARRATION_PENDING');

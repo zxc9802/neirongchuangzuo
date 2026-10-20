@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
-import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError } from '../services/video/provider.mjs';
+import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL } from '../services/video/provider.mjs';
 import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
@@ -453,10 +453,11 @@ test('previously submitted H3 Max tasks can still finish without creating anothe
 });
 
 test('all four Seedance editions are offered and removed models cannot start or reserve points even with a fal key', async t => {
-  const app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
+  const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
-  assert.deepEqual(config.models.map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
-  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15]]);
+  assert.deepEqual(config.models.slice(0, 4).map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
+  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [true, 30]]);
+  assert.equal(config.models[4].id, PIXVERSE_MODEL);
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '最多生成15秒视频，1元/秒');
   assert.equal(config.models[1].description, '最多生成30秒视频，1.5元/秒');
@@ -470,10 +471,13 @@ test('all four Seedance editions are offered and removed models cannot start or 
   assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
-test('a fal key alone no longer enables new replica tasks', async t => {
-  const app = await fixture(t, { config: { ...CONFIG, enabled: false, falEnabled: true, falKey: 'private-fal-key' } });
-  assert.equal((await (await app.call('/config')).json()).enabled, false);
+test('a fal key enables only PixVerse without enabling Seedance or retired models', async t => {
+  const app = await fixture(t, { costMode: true, config: { ...CONFIG, enabled: false, falEnabled: true, falKey: 'private-fal-key' } });
+  const config = await (await app.call('/config')).json();
+  assert.equal(config.enabled, true);
+  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [PIXVERSE_MODEL]);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID() } })).status, 503);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: PIXVERSE_MODEL } })).status, 201);
 });
 
 test('an old H3 Max draft can replace its video before starting with the standard edition', async t => {
@@ -1404,4 +1408,134 @@ test('rejected replica materials release the aggregate hold before paid video ge
   const failed=await app.until(id,task=>task.status==='failed'&&task.billing.status==='settled');
   assert.equal(failed.billing.chargedPoints,0);assert.equal(app.state.generations,0);
   assert.equal((await app.wallet.snapshot('alice')).held,0);
+});
+
+test('PixVerse survives restart, uploads once, restores captions and meters swap and lip sync separately', async t => {
+  let done = false, rendered = 0;
+  const posts = [], uploads = [];
+  const job = (model, id) => ({ request_id: id, status_url: `https://queue.fal.run/${model}/requests/${id}/status`,
+    response_url: `https://queue.fal.run/${model}/requests/${id}` });
+  const app = await fixture(t, { costMode: true, env: { FAL_KEY: 'test-key' },
+    config: { ...CONFIG, falEnabled: true, falKey: 'test-key' }, speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    narration: fakeNarration(), lipsync: undefined,
+    captions: { extract: async () => CAPTIONS, render: async (input, output) => {
+      rendered++; await writeFile(output, await readFile(input)); return { rendered: true };
+    } },
+    providerStorage: { upload: async (input, type) => { uploads.push({ input, type }); return `https://fal.media/file-${uploads.length}`; } },
+    fetchImpl: async (url, options = {}) => {
+      const target = new URL(url);
+      if (target.hostname === 'api.fal.ai') {
+        const model = target.searchParams.get('endpoint_id');
+        return Response.json({ prices: [{ endpoint_id: model, currency: 'USD', unit_price: model === PIXVERSE_MODEL ? 0.05 : 0.1 }] });
+      }
+      if (target.hostname === 'www.openlux.ai') return Response.json({ data: target.pathname.endsWith('/status') ? { usd_exchange_rate: 5 } : [] });
+      assert.equal(target.hostname, 'queue.fal.run');
+      if (options.method === 'POST') {
+        posts.push({ url: String(url), body: JSON.parse(options.body) });
+        return Response.json(target.pathname.includes('pixverse') ? job('fal-ai/pixverse', 'swap-1') : job('veed/lipsync', 'mouth-1'));
+      }
+      if (target.pathname.endsWith('/status')) return Response.json({ status: done ? 'COMPLETED' : 'IN_PROGRESS' });
+      return Response.json({ video: { url: 'https://fal.media/result.mp4' } }, { headers: { 'x-fal-billable-units': '4' } });
+    },
+  });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL } });
+  await app.upload(id); await uploadVoice(app, id);
+  assert.equal((await app.current(id)).estimatedPoints, null);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.equal(posts.length, 1); assert.equal(uploads.length, 2); assert.equal(app.state.generations, 0);
+  assert.equal(app.state.creates.length, 0);
+  assert.equal(posts[0].body.image_url, 'https://fal.media/file-1');
+  assert.equal(posts[0].body.video_url, 'https://fal.media/file-2');
+  await app.close(); await app.open();
+  done = true;
+  const completed = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(completed.modelName, 'PixVerse Swap'); assert.equal(completed.audioCheck.referenceApplied, true);
+  assert.equal(completed.captionCheck.rendered, true); assert.equal(rendered, 1);
+  assert.equal(posts.length, 2); assert.equal(uploads.length, 4);
+  assert.equal(posts[1].url, 'https://queue.fal.run/veed/lipsync');
+  assert.equal(completed.billing.costCny, 3); assert.equal(completed.billing.chargedPoints, 375);
+  const items = Object.values((await app.wallet.reservation('alice', id)).costItems);
+  assert.deepEqual(items.map(item => item.metadata.model).sort(), [PIXVERSE_MODEL, 'veed/lipsync']);
+  assert.ok(items.every(item => item.provider === 'fal'));
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
+  await app.close(); await app.open(); await delay(50);
+  assert.equal(posts.length, 2);
+});
+
+test('PixVerse rejects incompatible dimensions and direct voice replacement before any paid request', async t => {
+  let meta = { ...META, height: 1921 };
+  const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true }, probe: async () => meta,
+    speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL, voiceEngine: 'seedance' } });
+  const invalid = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal(invalid.status, 400); assert.match((await invalid.json()).error, /1920/);
+  meta = META; await app.upload(id); await uploadVoice(app, id);
+  const response = await app.call(`/tasks/${id}/start`, { body: {} });
+  assert.equal(response.status, 400); assert.equal((await response.json()).code, 'VIDEO_VOICE_ENGINE_INVALID');
+  assert.equal((await app.current(id)).status, 'draft'); assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
+test('an uncertain PixVerse submission is not replayed or charged as Seedance after restart', async t => {
+  let posts = 0;
+  const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'test' },
+    fetchImpl: async (url, options = {}) => {
+      const target = new URL(url);
+      if (target.hostname === 'api.fal.ai') return Response.json({ prices: [{ endpoint_id: PIXVERSE_MODEL, currency: 'USD', unit_price: 0.05 }] });
+      if (target.hostname === 'www.openlux.ai') return Response.json({ data: { usd_exchange_rate: 5 } });
+      assert.equal(options.method, 'POST'); posts++; throw new Error('Lost receipt');
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL, voiceEngine: 'seedance' } });
+  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  assert.equal((await app.until(id, task => task.status === 'failed')).code, 'VIDEO_SUBMISSION_UNCERTAIN');
+  await app.close(); await app.open();
+  await app.call(`/tasks/${id}/start`, { body: {} }); await delay(50);
+  assert.equal(posts, 1); assert.equal(app.state.generations, 0);
+  assert.equal((await app.wallet.reservation('alice', id)).costItems.seedance, undefined);
+  assert.equal((await app.wallet.snapshot('alice')).held, 625, 'Unknown upstream cost must remain held for audit');
+});
+
+test('a missing PixVerse usage header is rechecked after restart without regenerating or guessing a charge', async t => {
+  let usageReady = false, posts = 0;
+  const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'test' },
+    fetchImpl: async (url, options = {}) => {
+      const target = new URL(url);
+      if (target.hostname === 'api.fal.ai') return Response.json({ prices: [{ endpoint_id: PIXVERSE_MODEL, currency: 'USD', unit_price: 0.05 }] });
+      if (target.hostname === 'www.openlux.ai') return Response.json({ data: { usd_exchange_rate: 5 } });
+      if (options.method === 'POST') {
+        posts++; return Response.json({ request_id: 'receipt-late',
+          status_url: 'https://queue.fal.run/fal-ai/pixverse/requests/receipt-late/status',
+          response_url: 'https://queue.fal.run/fal-ai/pixverse/requests/receipt-late' });
+      }
+      if (target.pathname.endsWith('/status')) return Response.json({ status: 'COMPLETED' });
+      return Response.json({ video: { url: 'https://fal.media/result.mp4' } }, { headers: usageReady ? { 'x-fal-billable-units': '4' } : {} });
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL, voiceEngine: 'seedance' } });
+  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  const pending = await app.until(id, task => task.status === 'settling');
+  assert.equal(pending.resultUrl, null); assert.equal(pending.billing.chargedPoints, 0);
+  await app.close(); usageReady = true; await app.open();
+  const done = await app.until(id, task => task.status === 'completed');
+  assert.equal(done.billing.chargedPoints, 125); assert.equal(done.billing.costCny, 1); assert.equal(posts, 1);
+});
+
+for (const duration of [2, 15, 30, 30.1]) test(`PixVerse applies its 30-second source limit to ${duration} seconds`, async t => {
+  const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true }, probe: async () => ({ ...META, duration }) });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, model: PIXVERSE_MODEL } });
+  const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal(response.status, duration <= 30 ? 200 : 400);
+  if (duration <= 30) assert.equal((await app.current(id)).duration, duration);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
+test('PixVerse cannot silently use legacy fixed pricing when actual-cost billing is disabled', async t => {
+  const app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'test' } });
+  const config = await (await app.call('/config')).json();
+  assert.equal(config.models.find(model => model.id === PIXVERSE_MODEL).enabled, false);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: PIXVERSE_MODEL } })).status, 503);
 });

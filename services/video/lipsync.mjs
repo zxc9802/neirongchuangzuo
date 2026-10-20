@@ -23,6 +23,7 @@ export function createLipsyncService(env = {}, fetchImpl = fetch) {
       }
       return await response.json();
     } catch (cause) {
+      if (cause.providerNotDispatched) throw failure(cause.message);
       if (cause instanceof VideoError) throw cause;
       throw failure(body ? '口型提交未获得确认，未自动重复生成，请核对原口型任务。' : '口型服务暂时不可用，正在查询原口型任务。',
         body ? 'VIDEO_LIPSYNC_UNCERTAIN' : 'VIDEO_LIPSYNC_PENDING');

@@ -6,10 +6,11 @@ import { calculateCredits } from '../credits/store.mjs';
 import { costPoints } from '../credits/costs.mjs';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
-import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT } from './provider.mjs';
+import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL } from './provider.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
+import { createPixverseProvider } from './pixverse.mjs';
 import { createCaptionService, captionSpeech } from './captions.mjs';
 import { createNarrationService } from './narration.mjs';
 import { createLipsyncService } from './lipsync.mjs';
@@ -41,14 +42,18 @@ async function readJSON(req) {
 }
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
-  config = videoConfig(env, publicOrigin), provider, falProvider, probe = probeVideo,
+  config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, fetchImpl = fetch, probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, speech = createSpeechService(env), captions = createCaptionService(env),
-  narration = createNarrationService(env), lipsync = createLipsyncService(env), providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  narration, lipsync, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
-  const costMeter=createApiCostMeter({credits,config:loadAIConfig(env)});
+  const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
+  if (narration === undefined) narration = createNarrationService(env, { fetchImpl: costMeter.fetch });
+  if (lipsync === undefined) lipsync = createLipsyncService(env, costMeter.fetch);
   provider ||= createVideoProvider(config,costMeter.fetch);
   falProvider ||= createFalVideoProvider(config,costMeter.fetch);
-  const models = MODELS.map(model => ({ ...model, enabled: Boolean(config.enabled) }));
+  pixverseProvider ||= createPixverseProvider(config,costMeter.fetch);
+  const models = MODELS.map(model => ({ ...model, enabled: Boolean(model.id === PIXVERSE_MODEL
+    ? config.falEnabled && (!credits || costMeter.enabled) : config.enabled) }));
   const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
     { id: 'indextts2', name: 'IndexTTS2', enabled: Boolean(narration?.enabled && lipsync?.enabled) }];
   const enabled = models.some(model => model.enabled);
@@ -71,6 +76,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (video.duration < 2 || video.duration > model.maxDuration || video.width < 300 || video.height < 300) {
       throw error(`参考视频需为 2–${model.maxDuration} 秒，宽高至少 300 像素。`);
     }
+    if (modelId === PIXVERSE_MODEL && Math.max(video.width, video.height) > 1920) throw error('PixVerse 参考视频的长边不能超过 1920 像素，请压缩后上传。');
     return model.durations.find(value => value >= Math.ceil(video.duration - 0.05)) || model.maxDuration;
   }
   // Share the existing durable single-writer lock implementation, in a separate directory.
@@ -115,7 +121,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       canRecheck: !expired && task.status === 'failed' && task.rawReady === true && Boolean(task.voice && task.speech)
         && (!credits || task.billing?.status === 'released'),
       downloadProgress: task.downloadProgress,
-      estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? costPricing ? costPoints(task.duration * cnyPerSecond(task)) : calculateCredits('video', task.duration) : null,
+      estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? costPricing
+        ? task.model === PIXVERSE_MODEL ? null : costPoints(task.duration * cnyPerSecond(task)) : calculateCredits('video', task.duration) : null,
       billing: task.billing && { source: 'workspace', status: task.billing.status, reservedPoints: task.billing.reservedPoints, chargedPoints: task.billing.chargedPoints, exempt: task.billing.exempt === true,
         ...(task.billing.mode==='api_cost'?{mode:'api_cost',costCny:task.billing.costCny}:{}) },
       resultUrl: !expired && task.status === 'completed' && settled ? `${PREFIX}/tasks/${task.id}/result` : null };
@@ -125,6 +132,18 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     try {
       const taskId = task.billingTaskId || task.id;
       let record = await credits.reservation(task.userId, taskId);
+      if (task.model === PIXVERSE_MODEL && record?.kind === 'api-cost' && record.status === 'reserved') {
+        // A playable result can arrive before its usage header. Re-read only saved receipts.
+        const urls = [task.falQueue?.result, task.lipsync?.resultUrl, ...(task.narration?.segments || []).map(segment => segment.falQueue?.result)];
+        await costMeter.run({ userId: task.userId, taskId }, () => Promise.allSettled(urls.filter(Boolean).map(async value => {
+          const url = new URL(value), id = /\/requests\/([^/]+)$/.exec(url.pathname)?.[1];
+          if (url.origin !== 'https://queue.fal.run' || url.username || url.password
+            || !Object.values(record.costItems || {}).some(item => item.providerRequestId === id && ['pending', 'uncertain'].includes(item.status))) return;
+          const response = await costMeter.fetch(url, { method: 'GET', redirect: 'error', headers: { Authorization: `Key ${config.falKey}` },
+            signal: AbortSignal.timeout(15_000) });
+          await response.body?.cancel();
+        })));
+      }
       if (record?.kind==='api-cost' && record.status==='reserved' && task.status !== 'completed'
         && !task.providerDispatched && !task.providerId && task.seedanceCostPrepared
         && record.costItems.seedance?.status==='pending') {
@@ -205,7 +224,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   async function processVideoTask(task) {
     if (closing || fatal) return;
     // Retain the provider only to finish tasks submitted before H3 Max was removed.
-    const taskProvider = task.model === FAL_MODEL ? falProvider : provider;
+    const taskProvider = task.model === PIXVERSE_MODEL ? pixverseProvider : task.model === FAL_MODEL ? falProvider : provider;
     if (isExpired(task)) {
       if (task.status !== 'expired') {
         task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; await save(task);
@@ -231,7 +250,12 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     if (task.status === 'reviewing') {
       for (const kind of ['photo', 'video', ...(task.voice && task.voiceEngine !== 'indextts2' ? ['voice'] : [])]) {
-        if (!task.materials[kind]) { task.materials[kind] = await taskProvider.createMaterial(sourceUrl(task, kind), kind); await save(task); }
+        if (!task.materials[kind]) {
+          task.materials[kind] = task.model === PIXVERSE_MODEL
+            ? { id: await providerStorage.upload(file(task, kind), mime(kind)), status: 2 }
+            : await taskProvider.createMaterial(sourceUrl(task, kind), kind);
+          await save(task);
+        }
         const material = task.materials[kind];
         if (material.status !== 2) {
           try { material.status = await taskProvider.queryMaterial(material.id); }
@@ -250,7 +274,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         await save(task);
       }
       if (Object.values(task.materials).some(value => value.status !== 2)) return;
-      if(task.billing?.mode==='api_cost' && !task.seedanceCostPrepared) {
+      if(task.billing?.mode==='api_cost' && task.model !== PIXVERSE_MODEL && !task.seedanceCostPrepared) {
         try { await credits.prepareCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',quoteCny:task.duration * cnyPerSecond(task),provider:'seedance',
           metadata:{model:task.model || MODEL,currency:'CNY',unitPrice:cnyPerSecond(task)}}); }
         catch(cause) {await fail(task,cause.message,cause.code||'CREDITS_UNAVAILABLE');return;}
@@ -261,6 +285,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       try { await acceptResult(task, await taskProvider.generate(task)); }
       catch (cause) {
         if (fatal) throw cause;
+        if (cause.providerNotDispatched) {
+          task.providerDispatched = false;
+          await fail(task, cause.message, cause.code || 'CREDITS_UNAVAILABLE'); return;
+        }
         if(task.billing?.mode==='api_cost' && task.seedanceCostPrepared) await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,
           receiptId:'seedance',...(cause.code==='VIDEO_PROVIDER_REJECTED'||cause.code==='VIDEO_PROVIDER_IP_DENIED'?{costCny:0}:{uncertain:true})}).catch(()=>{});
         await fail(task, cause instanceof VideoError && cause.code === 'VIDEO_PROVIDER_REJECTED' ? cause.message : '提交未获得确认，未自动重复生成。请核对模型服务记录后再创建任务，预留积分将退回。', cause.code === 'VIDEO_PROVIDER_REJECTED' ? cause.code : 'VIDEO_SUBMISSION_UNCERTAIN');
@@ -359,7 +387,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (processors.has(task.id)) continue;
       const processing = serialize(task.id, async () => {
       try { await costMeter.run({userId:task.userId,taskId:task.billingTaskId||task.id,
-        legacy:task.billing?.mode!=='api_cost',aggregate:task.billing?.mode==='api_cost'},()=>processTask(task)); }
+        legacy:task.billing?.mode!=='api_cost',aggregate:task.billing?.mode==='api_cost' && task.model !== PIXVERSE_MODEL},()=>processTask(task)); }
       catch (cause) {
         if (fatal) return;
         if (['VIDEO_NARRATION_FAILED', 'VIDEO_NARRATION_UNCERTAIN', 'VIDEO_LIPSYNC_FAILED', 'VIDEO_LIPSYNC_UNCERTAIN'].includes(cause.code)) {
@@ -555,6 +583,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             if (!narration?.enabled || !lipsync?.enabled) throw error('参考声音配音或口型服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
           }
           const model = selectedModel(body.model ?? (models.some(model => model.id === task.model) ? task.model : MODEL));
+          if (model === PIXVERSE_MODEL && task.voice && voiceEngine !== 'indextts2') throw error('PixVerse 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
           const duration = videoDuration(task.video, model);
           task.model = model;
           task.duration = duration;
@@ -563,16 +592,18 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           try {
             if (credits) {
-              if(costMeter.enabled) {
+              if(costMeter.enabled && model !== PIXVERSE_MODEL) {
                 const wallet=await credits.snapshot(userId);
                 if(wallet.unlimited!==true&&costPoints(task.duration * cnyPerSecond(task))>wallet.available) throw error('积分不足，请选择更短的视频。',402,'INSUFFICIENT_POINTS');
               }
               let record;
               if (costMeter.enabled) {
-                await credits.reserveCost({userId,taskId:task.id});
-                record = await credits.prepareCostCall({userId,taskId:task.id,receiptId:'seedance',quoteCny:task.duration * cnyPerSecond(task),
-                  provider:'video-replica',metadata:{model:task.model,currency:'CNY',unitPrice:cnyPerSecond(task)}});
-                task.seedanceCostPrepared = true;
+                record = await credits.reserveCost({userId,taskId:task.id});
+                if (model !== PIXVERSE_MODEL) {
+                  record = await credits.prepareCostCall({userId,taskId:task.id,receiptId:'seedance',quoteCny:task.duration * cnyPerSecond(task),
+                    provider:'video-replica',metadata:{model:task.model,currency:'CNY',unitPrice:cnyPerSecond(task)}});
+                  task.seedanceCostPrepared = true;
+                }
               } else record = await credits.reserve({ userId, taskId: task.id, kind: 'video', units: task.duration });
               task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true,...(costMeter.enabled?{mode:'api_cost'}:{}) };
             }
