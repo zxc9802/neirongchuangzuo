@@ -62,8 +62,13 @@ export function validateDirectorResult(value, input) {
   const globalDirection = text(s.globalDirection, 3000);
   const used = new Set(shots.flatMap(shot => shot.referenceIds));
   const referenceImages = images.filter(a => used.has(a.id));
+  const remap = value => value.replace(/@?图片\s*(\d+)/g, (label, number) => {
+    const source = images[Number(number) - 1]; if (!source) return label;
+    const index = referenceImages.findIndex(a => a.id === source.id);
+    return index < 0 ? '未选用的上传图' : `图片${index + 1}`;
+  });
   const compiledDirection = [globalDirection, offer && offerDirection(offer.facts)].filter(Boolean).join('\n\n');
-  const videoPrompt = globalDirection ? compileVideoPrompt(compiledDirection, shots, referenceImages, input.settings)
+  const videoPrompt = globalDirection ? compileVideoPrompt(remap(compiledDirection), shots.map(shot => ({ ...shot, visual: remap(shot.visual), camera: remap(shot.camera) })), referenceImages, input.settings)
     : [text(s.videoPrompt, 12000), offer && offerDirection(offer.facts)].filter(Boolean).join('\n\n');
   if (videoPrompt.length > 12000) throw invalidOutput('完整分镜内容过长，请精简后重新编导。', 'invalid_schema', { field: 'videoPrompt', actualLength: videoPrompt.length, maximumLength: 12000 });
   return { kind: 'script', text: text(value.text, 3000) || text(s.title, 80), assets, warnings, ...(offer ? { offerFacts: offer.facts } : {}),

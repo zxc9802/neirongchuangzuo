@@ -97,9 +97,13 @@ test('missing offer facts yield a clarification without format retries or a paid
 test('unused images are excluded and prompt numbering matches only the selected image order', () => {
   const input = { ...baseInput, skill: 'signature', assets: [{ id: 'unwanted-person', type: 'image' }, { id: 'food', type: 'image' },
     { id: 'unrelated-product', type: 'image' }, { id: 'space', type: 'image' }] };
-  const result = validateDirectorResult(output(), input).script;
+  const value = output(); value.script.globalDirection = '按图片4保持空间，图片1不采用。'; value.script.shots[0].visual = '按图片2呈现食品，与图片4环境相符';
+  const result = validateDirectorResult(value, input).script;
   assert.deepEqual(result.referenceImageIds, ['food', 'space']);
   assert.match(result.videoPrompt, /镜头1.*参考图片2/);
   assert.match(result.videoPrompt, /镜头2.*参考图片1/);
   assert.doesNotMatch(result.videoPrompt, /图片3|图片4|unwanted-person|unrelated-product/);
+  assert.match(result.videoPrompt, /按图片2保持空间，未选用的上传图不采用/);
+  assert.match(result.videoPrompt, /按图片1呈现食品，与图片2环境相符/);
+  assert.equal(result.globalDirection, value.script.globalDirection);
 });
