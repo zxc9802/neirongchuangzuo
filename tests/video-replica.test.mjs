@@ -20,6 +20,13 @@ const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom')
 const CONFIG = { enabled: true, publicOrigin: 'https://workspace.example', signingSecret: 'test-secret-not-for-production' };
 const META = { duration: 4, width: 512, height: 768, audio: true };
 const PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
+const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
+const REPLICA_PRICES = [
+  ['doubao-seedance-2-0-260128', 'qiya-2.0', 1],
+  [PREMIUM_MODEL, 'qiya-2.5', 1.5],
+  [FAST_MODEL, 'qiya-2.0-f1', 0.8],
+  [MINI_MODEL, 'qiya-20-m1', 0.5],
+];
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-replica-'));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode:options.costMode===true });
@@ -90,14 +97,14 @@ test('Seedance 2.0 connection matches reference project and never returns creden
   assert.equal(videoConfig({}).enabled, false);
 });
 
-test('Seedance 2.5 reuses the same endpoint, credentials and generation payload', async () => {
+for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL]) test(`${model} reuses the same endpoint, credentials and generation payload`, async () => {
   const requests = [];
   const provider = createVideoProvider({ video: { base: 'https://provider.example', project: 'project', access: 'access', secret: 'secret' } },
     async (url, options) => { requests.push({ url: String(url), headers: options.headers, body: JSON.parse(options.body) }); return Response.json({ data: { taskId: 'paid-id' } }); });
   const task = { duration: 30, ratio: '9:16', materials: { photo: { id: 'photo-id' }, video: { id: 'video-id' } } };
-  await provider.generate(task); await provider.generate({ ...task, model: PREMIUM_MODEL });
-  assert.equal(requests[1].body.modelId, PREMIUM_MODEL);
-  assert.deepEqual(requests[1], { ...requests[0], body: { ...requests[0].body, modelId: PREMIUM_MODEL } });
+  await provider.generate(task); await provider.generate({ ...task, model });
+  assert.equal(requests[1].body.modelId, model);
+  assert.deepEqual(requests[1], { ...requests[0], body: { ...requests[0].body, modelId: model } });
 });
 
 for (const [sourceDuration, generatedDuration] of [[15.1, 20], [20, 20], [20.1, 25], [25.1, 30], [30, 30]]) {
@@ -110,7 +117,7 @@ for (const [sourceDuration, generatedDuration] of [[15.1, 20], [20, 20], [20.1, 
     await app.close(); await app.open();
     assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
     const running = await app.until(id, task => task.status === 'running');
-    assert.equal(running.model, PREMIUM_MODEL); assert.equal(running.modelName, '至臻版');
+    assert.equal(running.model, PREMIUM_MODEL); assert.equal(running.modelName, 'qiya-2.5');
     assert.equal(app.state.body.modelId, PREMIUM_MODEL); assert.equal(app.state.body.payload.params.duration, -1);
     assert.equal(app.state.body.payload.params.scale, 'adaptive'); assert.equal(running.duration, generatedDuration);
     assert.equal(app.state.generations, 1);
@@ -119,7 +126,7 @@ for (const [sourceDuration, generatedDuration] of [[15.1, 20], [20, 20], [20.1, 
   });
 }
 
-for (const [model, duration, limit] of [['doubao-seedance-2-0-260128', 15.1, 15], [PREMIUM_MODEL, 30.1, 30]]) {
+for (const [model, duration, limit] of [['doubao-seedance-2-0-260128', 15.1, 15], [PREMIUM_MODEL, 30.1, 30], [FAST_MODEL, 15.1, 15], [MINI_MODEL, 15.1, 15]]) {
   test(`replica rejects a ${duration}-second video for its ${limit}-second edition before billing`, async t => {
     const app = await fixture(t, { probe: async () => ({ ...META, duration }) });
     const id = randomUUID();
@@ -153,16 +160,62 @@ test('draft edition switches persist, reject incompatible downgrades, and lock a
   assert.equal((await app.current(id)).model, PREMIUM_MODEL); assert.equal(app.state.generations, 1);
 });
 
-test('premium replica retains the existing actual-cost fee and records the selected model', async t => {
+for (const [model, name, price] of REPLICA_PRICES) test(`${name} quotes, reserves and settles its model price across restart exactly once`, async t => {
   const app = await fixture(t, { costMode: true }), id = randomUUID();
-  await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, voiceEngine: 'seedance' } }); await app.upload(id);
-  assert.equal((await app.current(id)).estimatedPoints, 500);
-  await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance' } })).status, 201); await app.upload(id);
+  assert.equal((await app.current(id)).estimatedPoints, 500 * price);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.modelName, name); assert.equal(app.state.body.modelId, model);
   const record = await app.wallet.reservation('alice', id);
-  assert.equal(record.costItems.seedance.metadata.model, PREMIUM_MODEL);
+  assert.equal(record.costItems.seedance.metadata.model, model);
+  assert.equal(record.costItems.seedance.metadata.unitPrice, price);
+  assert.equal(record.costItems.seedance.quoteMicros, 4 * price * 1e6);
+  assert.equal((await app.wallet.snapshot('alice')).held, 500 * price);
+  await app.close(); await app.open();
+  assert.equal((await app.current(id)).estimatedPoints, 500 * price);
+  app.state.done = true;
+  const done = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(done.billing.chargedPoints, 500 * price); assert.equal(done.billing.costCny, 4 * price);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 1000 - 500 * price);
+});
+
+test('switching a draft recalculates its quote for every replica model', async t => {
+  const app = await fixture(t, { costMode: true }), id = await app.init(); await app.upload(id);
+  for (const [model, name, price] of REPLICA_PRICES) {
+    const response = await app.call(`/tasks/${id}/model`, { body: { model } });
+    assert.equal(response.status, 200);
+    const { task } = await response.json();
+    assert.equal(task.modelName, name); assert.equal(task.estimatedPoints, 500 * price);
+    assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  }
+});
+
+test('an already submitted premium task without a price snapshot keeps its original 1 CNY rate', async t => {
+  const app = await fixture(t, { costMode: true }), id = await app.init(); await app.upload(id); await app.close();
+  const scope = { userId: 'alice', taskId: id };
+  await app.wallet.reserveCost(scope);
+  await app.wallet.prepareCostCall({ ...scope, receiptId: 'seedance', quoteCny: 4, provider: 'video-replica',
+    metadata: { model: PREMIUM_MODEL, currency: 'CNY', unitPrice: 1 } });
+  const path = join(app.root, 'video', id, 'task.json'), task = JSON.parse(await readFile(path, 'utf8'));
+  Object.assign(task, { model: PREMIUM_MODEL, status: 'running', startedAt: Date.now(), providerId: 'old-premium',
+    providerDispatched: true, seedanceCostPrepared: true, billing: { mode: 'api_cost', status: 'reserved', reservedPoints: 500 } });
+  await writeFile(path, JSON.stringify(task)); await app.open();
+  assert.equal((await app.current(id)).estimatedPoints, 500);
   app.state.done = true;
   const done = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
   assert.equal(done.billing.chargedPoints, 500); assert.equal(done.billing.costCny, 4);
+  assert.equal(app.state.generations, 0);
+});
+
+for (const [model, duration, status, points] of [[PREMIUM_MODEL, 8, 402, 0], [MINI_MODEL, 15, 202, 938]]) test(`${model} checks affordability at its own rate`, async t => {
+  const app = await fixture(t, { costMode: true, probe: async () => ({ ...META, duration }) }), id = await app.init(); await app.upload(id);
+  const response = await app.call(`/tasks/${id}/start`, { body: { model } });
+  assert.equal(response.status, status);
+  if (status === 202) await app.until(id, task => task.status === 'running');
+  assert.equal((await app.wallet.snapshot('alice')).held, points);
+  assert.equal(app.state.generations, status === 202 ? 1 : 0);
 });
 
 const SPEECH = { engine: 'silero-vad+whisper-1', start: 1.25, end: 3.5, text: '你好世界',
@@ -399,13 +452,14 @@ test('previously submitted H3 Max tasks can still finish without creating anothe
   assert.equal((await app.wallet.snapshot('alice')).available, 955);
 });
 
-test('both Seedance editions are offered and removed models cannot start or reserve points even with a fal key', async t => {
+test('all four Seedance editions are offered and removed models cannot start or reserve points even with a fal key', async t => {
   const app = await fixture(t, { config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
-  assert.deepEqual(config.models.map(model => [model.name, model.enabled, model.maxDuration]), [['标准版', true, 15], ['至臻版', true, 30]]);
+  assert.deepEqual(config.models.map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
+  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15]]);
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
-  assert.equal(config.models[0].description, '最多生成15秒视频，视频质量良好，积分消耗较少');
-  assert.equal(config.models[1].description, '最多生成30秒视频，视频质量优秀，积分消耗较多');
+  assert.equal(config.models[0].description, '最多生成15秒视频，1元/秒');
+  assert.equal(config.models[1].description, '最多生成30秒视频，1.5元/秒');
   assert.equal(config.model, 'doubao-seedance-2-0-260128');
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: FAL_MODEL } })).status, 400);

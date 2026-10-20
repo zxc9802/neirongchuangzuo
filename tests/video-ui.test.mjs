@@ -5,6 +5,7 @@ import { refreshWorkspaceCredits } from '../design/workspace-credits.js';
 const finiteWallet = () => ({ available: 1000, held: 0, total: 1000, unlimited: false,
   pricing: { imagePerUnit: 50, videoPoints: 333, videoSeconds: 30 } });
 const STANDARD_MODEL = 'doubao-seedance-2-0-260128', PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
+const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
 
 async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiFetch } = {}) {
   const keys = ['workspaceUser', 'document', 'fetch', 'setInterval', 'clearInterval'];
@@ -45,8 +46,10 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
 
 test('edition buttons show the requested descriptions and update the upload duration hint', async t => {
   const page = await fixture(t); page.recover(); await page.poll();
-  assert.match(page.html(), /最多生成15秒视频，视频质量良好，积分消耗较少/);
-  assert.match(page.html(), /最多生成30秒视频，视频质量优秀，积分消耗较多/);
+  for (const name of ['qiya-2.0', 'qiya-2.5', 'qiya-2.0-f1', 'qiya-20-m1']) assert.ok(page.html().includes(`<strong>${name}</strong>`));
+  for (const price of ['1', '0.8', '0.5']) assert.ok(page.html().includes(`最多生成15秒视频，${price}元/秒`));
+  assert.match(page.html(), /最多生成30秒视频，1.5元\/秒/);
+  assert.doesNotMatch(page.html(), /标准版|至臻版/);
   assert.match(page.html(), /data-replica-model="doubao-seedance-2-0-260128"[^>]*aria-pressed="true"/);
   page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: PREMIUM_MODEL } }) } });
   await page.settle();
@@ -56,7 +59,7 @@ test('edition buttons show the requested descriptions and update the upload dura
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
 
-test('premium choice is sent during task creation and start without changing the voice engine', async t => {
+for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL]) test(`${model} choice is sent during task creation and start without changing the voice engine`, async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
@@ -68,15 +71,15 @@ test('premium choice is sent during task creation and start without changing the
     return Response.json({ task });
   } });
   page.recover(); await page.poll();
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: PREMIUM_MODEL } }) } }); await page.settle();
+  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: model } }) } }); await page.settle();
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(calls[0].body.model, PREMIUM_MODEL); assert.equal(calls.at(-1).body.model, PREMIUM_MODEL);
+  assert.equal(calls[0].body.model, model); assert.equal(calls.at(-1).body.model, model);
   assert.equal(calls[0].body.voiceEngine, 'indextts2'); assert.equal(calls.at(-1).body.voiceEngine, 'indextts2');
   const count = calls.length;
   page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: STANDARD_MODEL } }) } }); await page.settle();
   assert.equal(calls.length, count);
-  assert.match(page.html(), /data-replica-model="doubao-seedance-2-5-260628"[^>]*aria-pressed="true"[^>]*disabled/);
+  assert.match(page.html(), new RegExp(`data-replica-model="${model}"[^>]*aria-pressed="true"[^>]*disabled`));
 });
 
 test('saved premium drafts keep their edition and a rejected downgrade retains the original quote', async t => {
@@ -257,7 +260,7 @@ test('edition picker keeps removed-model drafts compatible with the standard mod
   } });
   page.recover(); await page.poll(); page.select(task.id);
   assert.doesNotMatch(page.html(), /minimax\/h3-max/);
-  assert.match(page.html(), /1:1复刻 · 标准版/);
+  assert.match(page.html(), /1:1复刻 · qiya-2\.0/);
   assert.match(page.html(), /id="replica-models"/);
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls.find(call => call.path.endsWith('/tasks')).body.model, seedance);

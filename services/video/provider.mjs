@@ -1,8 +1,10 @@
 export const MODEL = 'doubao-seedance-2-0-260128';
 export const DURATIONS = [4, 5, 6, 8, 10, 12, 15];
 export const MODELS = [
-  { id: MODEL, name: '标准版', description: '最多生成15秒视频，视频质量良好，积分消耗较少', maxDuration: 15, durations: DURATIONS, resolution: '720p' },
-  { id: 'doubao-seedance-2-5-260628', name: '至臻版', description: '最多生成30秒视频，视频质量优秀，积分消耗较多', maxDuration: 30, durations: [...DURATIONS, 20, 25, 30], resolution: '720p' },
+  { id: MODEL, name: 'qiya-2.0', description: '最多生成15秒视频，1元/秒', cnyPerSecond: 1, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
+  { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', description: '最多生成30秒视频，1.5元/秒', cnyPerSecond: 1.5, maxDuration: 30, durations: [...DURATIONS, 20, 25, 30], resolution: '720p' },
+  { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', description: '最多生成15秒视频，0.8元/秒', cnyPerSecond: 0.8, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
+  { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', description: '最多生成15秒视频，0.5元/秒', cnyPerSecond: 0.5, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
 ];
 export const PROMPT = '编辑视频1。将视频1中的唯一人物完整替换为图片1中的人物。人物的外貌、发型和服装都采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样；保留字幕的原文、位置、排版和出现时间，不重画字幕。';
 export class VideoError extends Error {

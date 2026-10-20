@@ -58,9 +58,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   function selectedModel(id = MODEL) {
     const model = models.find(model => model.id === id);
-    if (!model) throw error('请选择标准版或至臻版，请刷新页面后重新提交。', 400, 'VIDEO_MODEL_INVALID');
+    if (!model) throw error('请选择有效的生成版本，请刷新页面后重新提交。', 400, 'VIDEO_MODEL_INVALID');
     if (!model.enabled) throw error(`${model.name}尚未配置，请联系管理员。`, 503, 'VIDEO_NOT_CONFIGURED');
     return model.id;
+  }
+  function cnyPerSecond(task) {
+    // Submitted tasks without a snapshot predate model pricing and retain 1 CNY/second.
+    return task.cnyPerSecond ?? (task.status === 'draft' ? models.find(model => model.id === (task.model || MODEL))?.cnyPerSecond ?? 1 : 1);
   }
   function videoDuration(video, modelId) {
     const model = models.find(model => model.id === modelId);
@@ -111,7 +115,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       canRecheck: !expired && task.status === 'failed' && task.rawReady === true && Boolean(task.voice && task.speech)
         && (!credits || task.billing?.status === 'released'),
       downloadProgress: task.downloadProgress,
-      estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? costPricing ? costPoints(task.duration) : calculateCredits('video', task.duration) : null,
+      estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? costPricing ? costPoints(task.duration * cnyPerSecond(task)) : calculateCredits('video', task.duration) : null,
       billing: task.billing && { source: 'workspace', status: task.billing.status, reservedPoints: task.billing.reservedPoints, chargedPoints: task.billing.chargedPoints, exempt: task.billing.exempt === true,
         ...(task.billing.mode==='api_cost'?{mode:'api_cost',costCny:task.billing.costCny}:{}) },
       resultUrl: !expired && task.status === 'completed' && settled ? `${PREFIX}/tasks/${task.id}/result` : null };
@@ -184,7 +188,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (result.failed) { await fail(task, '视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。', 'VIDEO_GENERATION_FAILED'); return; }
     if (result.taskId) task.providerId = result.taskId;
     if (task.billing?.mode==='api_cost' && task.seedanceCostPrepared && (result.completed || result.url)) {
-      await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',costCny:task.duration,
+      await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',costCny:task.duration * cnyPerSecond(task),
         ...(task.providerId?{providerRequestId:task.providerId}:{})});
     }
     if (result.falQueue) task.falQueue = result.falQueue;
@@ -247,8 +251,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       if (Object.values(task.materials).some(value => value.status !== 2)) return;
       if(task.billing?.mode==='api_cost' && !task.seedanceCostPrepared) {
-        try { await credits.prepareCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',quoteCny:task.duration,provider:'seedance',
-          metadata:{model:task.model || MODEL,currency:'CNY',unitPrice:1}}); }
+        try { await credits.prepareCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',quoteCny:task.duration * cnyPerSecond(task),provider:'seedance',
+          metadata:{model:task.model || MODEL,currency:'CNY',unitPrice:cnyPerSecond(task)}}); }
         catch(cause) {await fail(task,cause.message,cause.code||'CREDITS_UNAVAILABLE');return;}
         task.seedanceCostPrepared=true;await save(task);
       }
@@ -554,19 +558,20 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const duration = videoDuration(task.video, model);
           task.model = model;
           task.duration = duration;
+          task.cnyPerSecond = models.find(item => item.id === model).cnyPerSecond;
           task.voiceEngine = voiceEngine;
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           try {
             if (credits) {
               if(costMeter.enabled) {
                 const wallet=await credits.snapshot(userId);
-                if(wallet.unlimited!==true&&costPoints(task.duration)>wallet.available) throw error('积分不足，请选择更短的视频。',402,'INSUFFICIENT_POINTS');
+                if(wallet.unlimited!==true&&costPoints(task.duration * cnyPerSecond(task))>wallet.available) throw error('积分不足，请选择更短的视频。',402,'INSUFFICIENT_POINTS');
               }
               let record;
               if (costMeter.enabled) {
                 await credits.reserveCost({userId,taskId:task.id});
-                record = await credits.prepareCostCall({userId,taskId:task.id,receiptId:'seedance',quoteCny:task.duration,
-                  provider:'video-replica',metadata:{model:task.model,currency:'CNY',unitPrice:1}});
+                record = await credits.prepareCostCall({userId,taskId:task.id,receiptId:'seedance',quoteCny:task.duration * cnyPerSecond(task),
+                  provider:'video-replica',metadata:{model:task.model,currency:'CNY',unitPrice:cnyPerSecond(task)}});
                 task.seedanceCostPrepared = true;
               } else record = await credits.reserve({ userId, taskId: task.id, kind: 'video', units: task.duration });
               task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true,...(costMeter.enabled?{mode:'api_cost'}:{}) };

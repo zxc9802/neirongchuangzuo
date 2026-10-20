@@ -3,8 +3,10 @@ import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorksp
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
 const MODELS = [
-  { id: DEFAULT_MODEL, name: '标准版', maxDuration: 15, description: '最多生成15秒视频，视频质量良好，积分消耗较少' },
-  { id: 'doubao-seedance-2-5-260628', name: '至臻版', maxDuration: 30, description: '最多生成30秒视频，视频质量优秀，积分消耗较多' },
+  { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15, description: '最多生成15秒视频，1元/秒' },
+  { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, description: '最多生成30秒视频，1.5元/秒' },
+  { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, description: '最多生成15秒视频，0.8元/秒' },
+  { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, description: '最多生成15秒视频，0.5元/秒' },
 ];
 const DEFAULT_VOICE_ENGINE = 'indextts2';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');
