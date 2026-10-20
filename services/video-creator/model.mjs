@@ -79,6 +79,12 @@ const SYSTEM = `你是起芽内容创作的同城到店视频编导。先观察�
 返回前自行检查：时间轴是否完整覆盖settings.duration；连续镜头是否增加新信息；不同区域和景别是否有变化；最后一段是否有明确内容；每个画面和宣传信息是否有素材依据。存在重复空景或过长综合段时，在本次输出前自行重新编排。
 只输出一个JSON对象，无Markdown代码围栏。正常格式：{"kind":"script","text":"简要讲述素材选择和创作思路","assets":[{"id":"实际图片ID","description":"可见内容","role":"独立看点与用途"}],"warnings":[],"script":{"title":"脚本标题","summary":"主题与到店理由","globalDirection":"全片视觉风格、连续性、声音和字幕要求，不含分镜时间轴","shots":[{"start":0,"end":3,"visual":"本镜头的具体主体、空间、景别与动作","camera":"运镜和与下镜头的衔接","referenceIds":["实际图片ID"],"voiceover":"旁白，可空","caption":"字幕，可空"}]}}。shots时间从0开始连续覆盖完整时长；示例中的单个镜头只说明字段，不代表全片镜头数。需要补充信息时格式：{"kind":"clarification","text":"具体说明","questions":["需要商家补充的问题"],"warnings":[]}。不要用未知事实占位符冒充完成脚本。`;
 
+function directorSystem(skill) {
+  const common = skill === 'signature' ? SYSTEM.split('\n').filter(line => !line.startsWith('门店或环境介绍要主动梳理')).join('\n')
+    .replace('例如30秒素材充足的环境介绍通常需要8—10个有区别的镜头，', '招牌体验按产品看点和可见细节安排景别变化，') : SYSTEM;
+  return [common, skillDirection(skill)].filter(Boolean).join('\n\n');
+}
+
 export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300000, maxOutputTokens = DIRECTOR_OUTPUT_TOKENS } = {}) {
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 4096 || maxOutputTokens > 65536) throw creatorError('编导输出长度配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
   return { enabled: Boolean(config.apiKey), async generate(input, { signal, onProgress, onAttempt } = {}) {
@@ -103,7 +109,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
       try {
         response = await fetchImpl(config.baseUrl + '/chat/completions', { method: 'POST', redirect: 'error',
           headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: [SYSTEM, skillDirection(input.skill)].filter(Boolean).join('\n\n') }, { role: 'user', content: correction ? [...content, { type: 'text', text: correction }] : content }],
+          body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: directorSystem(input.skill) }, { role: 'user', content: correction ? [...content, { type: 'text', text: correction }] : content }],
             stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: budget, temperature: .45 }), signal: callSignal });
         record.phase = 'response'; record.httpStatus = response.status; record.contentType = response.headers.get('content-type') || '';
         record.providerRequestId = response.headers.get('x-api-request-id') || response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || null;

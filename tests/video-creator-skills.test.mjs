@@ -39,7 +39,10 @@ test('three modules send distinct directing briefs while retaining full canonica
   assert.equal(skillDirection('store-discovery'), '');
   assert.match(briefs.get('store-visit'), /一次到店体验如何发生/);
   assert.match(briefs.get('signature'), /门店环境只作体验背景/);
+  assert.doesNotMatch(briefs.get('signature'), /门店或环境介绍要主动梳理|例如30秒素材充足的环境介绍/);
+  assert.match(briefs.get('signature'), /让主推对象尽早进入画面/);
   assert.match(briefs.get('group-buy'), /offerFacts/);
+  assert.match(briefs.get('group-buy'), /不将原价列为必填问题/);
   assert.doesNotMatch(briefs.get('store-discovery'), /当前模块为/);
 });
 
