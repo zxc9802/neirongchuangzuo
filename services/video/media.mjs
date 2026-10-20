@@ -29,6 +29,16 @@ export async function probeVideo(path) {
       audio: data.streams.some(item => item.codec_type === 'audio') };
   } catch { throw new VideoError('无法读取视频，请上传可播放的 MP4 或 MOV 视频。', 400, 'VIDEO_MEDIA_INVALID'); }
 }
+export async function removeVideoAudio(input, output) {
+  try {
+    await run('ffmpeg', ['-v', 'error', '-nostdin', '-y', '-protocol_whitelist', 'file,pipe', '-i', input,
+      '-map', '0:v:0', '-c:v', 'copy', '-an', '-movflags', '+faststart', output], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+    if ((await probeVideo(output)).audio) throw new Error('Audio track remains');
+  } catch {
+    await rm(output, { force: true });
+    throw new VideoError('参考视频去除原声失败，尚未提交生成。请新建复刻重试，或选择原声参考模式。', 422, 'VIDEO_AUDIO_REMOVE_FAILED');
+  }
+}
 export async function normalizePhoto(bytes) {
   try {
     const input = sharp(bytes, { limitInputPixels: 40_000_000, animated: false });

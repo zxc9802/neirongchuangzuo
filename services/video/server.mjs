@@ -7,7 +7,7 @@ import { costPoints } from '../credits/costs.mjs';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL } from './provider.mjs';
-import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
+import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, removeVideoAudio, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createPixverseProvider } from './pixverse.mjs';
@@ -67,6 +67,12 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!model.enabled) throw error(`${model.name}尚未配置，请联系管理员。`, 503, 'VIDEO_NOT_CONFIGURED');
     return model.id;
   }
+  function selectedSourceAudioMode(mode = 'original', model = MODEL) {
+    if (!['original', 'silent'].includes(mode) || mode === 'silent' && !MODELS.some(item => item.id === model && item.id !== PIXVERSE_MODEL)) {
+      throw error('参考视频声音模式无效，无原声参考模式仅适用于 Seedance 生成版本。', 400, 'VIDEO_SOURCE_AUDIO_MODE_INVALID');
+    }
+    return mode;
+  }
   function cnyPerSecond(task) {
     // Submitted tasks without a snapshot predate model pricing and retain 1 CNY/second.
     return task.cnyPerSecond ?? (task.status === 'draft' ? models.find(model => model.id === (task.model || MODEL))?.cnyPerSecond ?? 1 : 1);
@@ -111,6 +117,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
       captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck, error: task.error || '', code: task.code,
+      sourceAudioMode: task.sourceAudioMode || 'original',
       voiceEngine: task.voiceEngine || (task.model === FAL_MODEL ? undefined : 'seedance'), narrationProgress: task.narration && { ready: task.narration.ready,
         completed: task.narration.segments.filter(segment => segment.status === 'ready').length, total: task.narration.segments.length },
       model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : models.find(model => model.id === (task.model || MODEL))?.name,
@@ -243,6 +250,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!ACTIVE.has(task.status)) return;
     if (task.status === 'preparing') {
       await analyzeSource(task);
+      if (task.sourceAudioMode === 'silent' && task.video.audio && !task.videoAudioRemoved) {
+        await removeVideoAudio(file(task, 'video'), join(folder(task), 'source-silent.mp4'));
+        task.videoAudioRemoved = true; await save(task);
+      }
       if (task.voiceEngine === 'indextts2' && !task.narration) {
         task.narration = await narration.prepare(task, folder(task)); await save(task);
       }
@@ -462,11 +473,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         await serialize('create', async () => {
           const existing = jobs.get(body.requestId);
           if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
-          const task = { id: body.requestId, userId, model: selectedModel(body.model), voiceEngine: selectedVoiceEngine(body.voiceEngine), status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
+          const model = selectedModel(body.model);
+          const task = { id: body.requestId, userId, model, voiceEngine: selectedVoiceEngine(body.voiceEngine),
+            sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode, model), status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
-      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|analyze|speech|recheck|start|result))?$/.exec(path);
+      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|source-audio|analyze|speech|recheck|start|result))?$/.exec(path);
       const task = match && jobs.get(match[1]);
       if (!task || task.userId !== userId) throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
       if (!match[2] && req.method === 'GET') { json(res, 200, { task: view(task) }); return; }
@@ -486,7 +499,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const model = selectedModel(body.model);
           const duration = task.video ? videoDuration(task.video, model) : undefined;
           task.model = model;
+          if (model === PIXVERSE_MODEL) task.sourceAudioMode = 'original';
           if (task.video) task.duration = duration;
+          await save(task); json(res, 200, { task: view(task) }); return;
+        }
+        if (match[2] === 'source-audio' && req.method === 'POST') {
+          const body = await readJSON(req);
+          if (task.status !== 'draft') throw error('任务已提交，不能切换参考视频声音模式。', 409);
+          task.sourceAudioMode = selectedSourceAudioMode(body.sourceAudioMode, task.model);
           await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (['video', 'photo', 'voice'].includes(match[2]) && req.method === 'PUT') {
@@ -581,12 +601,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             if (!narration?.enabled || !lipsync?.enabled) throw error('参考声音配音或口型服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
           }
           const model = selectedModel(body.model ?? (models.some(model => model.id === task.model) ? task.model : MODEL));
+          const sourceAudioMode = selectedSourceAudioMode(body.sourceAudioMode ?? task.sourceAudioMode, model);
+          if (sourceAudioMode === 'silent' && !task.voice) throw error('无原声参考模式请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
           if (model === PIXVERSE_MODEL && task.voice && voiceEngine !== 'indextts2') throw error('PixVerse 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
           const duration = videoDuration(task.video, model);
           task.model = model;
           task.duration = duration;
           task.cnyPerSecond = models.find(item => item.id === model).cnyPerSecond;
           task.voiceEngine = voiceEngine;
+          task.sourceAudioMode = sourceAudioMode;
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);
           try {
             if (credits) {

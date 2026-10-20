@@ -167,6 +167,61 @@ for (const model of [PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'fal-ai/pixverse/swa
   assert.match(page.html(), new RegExp(`data-replica-model="${model}"[^>]*aria-pressed="true"[^>]*disabled`));
 });
 
+for (const mode of ['original', 'silent']) test(`${mode} reference audio mode is submitted and locked without changing the default voice engine`, async t => {
+  let task; const calls = [];
+  const page = await fixture(t, { apiFetch: (path, options) => {
+    if (!options?.method) return;
+    const body = options.method === 'POST' ? JSON.parse(options.body) : options.body;
+    calls.push({ path, body });
+    if (path.endsWith('/tasks')) task = { id: body.requestId, model: body.model, voiceEngine: body.voiceEngine,
+      sourceAudioMode: body.sourceAudioMode, status: 'draft', createdAt: Date.now() };
+    for (const kind of ['video', 'photo', 'voice']) if (path.endsWith('/' + kind)) task = { ...task, [kind]: {} };
+    if (path.endsWith('/start')) task = { ...task, status: 'running' };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll();
+  assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
+  page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: mode } }) } }); await page.settle();
+  for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(calls[0].body.sourceAudioMode, mode); assert.equal(calls.at(-1).body.sourceAudioMode, mode);
+  assert.equal(calls[0].body.voiceEngine, 'indextts2'); assert.equal(calls.at(-1).body.voiceEngine, 'indextts2');
+  const count = calls.length;
+  page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: mode === 'silent' ? 'original' : 'silent' } }) } });
+  await page.settle(); assert.equal(calls.length, count);
+  assert.match(page.html(), new RegExp(`data-source-audio="${mode}"[^>]*aria-pressed="true"[^>]*disabled`));
+  page.node('#replica-new').onclick();
+  assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
+});
+
+test('saved silent drafts restore their mode and can persist a switch back to the original flow', async t => {
+  let task = { ...speechDraft(), model: STANDARD_MODEL, sourceAudioMode: 'silent' }; const calls = [];
+  const page = await fixture(t, { apiFetch: (path, options) => {
+    if (path.endsWith('/tasks')) return Response.json({ tasks: [task] });
+    if (path.endsWith('/source-audio')) {
+      calls.push(JSON.parse(options.body)); task = { ...task, ...calls.at(-1) }; return Response.json({ task });
+    }
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /data-source-audio="silent"[^>]*aria-pressed="true"/);
+  await page.poll();
+  page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: 'original' } }) } }); await page.settle();
+  assert.deepEqual(calls, [{ sourceAudioMode: 'original' }]);
+  page.select(task.id);
+  assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
+});
+
+test('switching to PixVerse removes the Seedance-only mode and restores original reference audio', async t => {
+  const page = await fixture(t);
+  page.recover(); await page.poll();
+  page.node('#replica-source-audio').onclick({ target: { closest: () => ({ dataset: { sourceAudio: 'silent' } }) } }); await page.settle();
+  assert.match(page.html(), /data-source-audio="silent"[^>]*aria-pressed="true"/);
+  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: 'fal-ai/pixverse/swap' } }) } }); await page.settle();
+  assert.doesNotMatch(page.html(), /id="replica-source-audio"/);
+  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: STANDARD_MODEL } }) } }); await page.settle();
+  assert.match(page.html(), /data-source-audio="original"[^>]*aria-pressed="true"/);
+});
+
 test('saved premium drafts keep their edition and a rejected downgrade retains the original quote', async t => {
   const task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 20, estimatedPoints: 2500 }, calls = [];
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
