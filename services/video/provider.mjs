@@ -8,7 +8,7 @@ export const MODELS = [
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', description: '最多生成15秒视频，0.5元/秒', cnyPerSecond: 0.5, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: PIXVERSE_MODEL, name: 'PixVerse Swap', description: '最长30秒 · 720p · 按实际费用，配音口型另计', maxDuration: 30, durations: Array.from({ length: 29 }, (_, i) => i + 2), resolution: '720p' },
 ];
-export const PROMPT = '编辑视频1。将视频1中的唯一人物完整替换为图片1中的人物。人物的外貌、发型和服装都采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样；保留字幕的原文、位置、排版和出现时间，不重画字幕。';
+export const PROMPT = '编辑视频1。将视频1中的唯一人物完整替换为图片1中的人物。图片1是人物外貌的唯一参考，头部、脸型、五官及其比例、眉眼、鼻子、嘴唇、耳朵、下颌轮廓、发际线和发型都必须采用图片1；不得保留视频1原人物的脸部特征，不得混合两个人的五官，不能只换衣服而保留原脸。人物的服装采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情变化、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样；保留字幕的原文、位置、排版和出现时间，不重画字幕。';
 export class VideoError extends Error {
   constructor(message, status = 400, code = 'VIDEO_INVALID_INPUT') { super(message); this.status = status; this.code = code; }
 }
