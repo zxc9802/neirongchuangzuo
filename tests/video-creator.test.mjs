@@ -5,7 +5,7 @@ import { once } from 'node:events';
 import { mkdtemp, realpath, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { gunzipSync } from 'node:zlib';
@@ -138,6 +138,9 @@ test('full workflow: upload, director, apply, single idempotent render, correct 
   assert.equal((await f.call(`/conversations/${id}/script`, { body: input })).status, 202); assert.equal(f.state.scripts, 1);
   assert.equal((await f.call(`/conversations/${id}/script`, { body: { ...input, settings: { ...settings, duration: 5 } } })).status, 409);
   const tid = randomUUID(); assert.equal((await f.generate(id, tid, { scriptId: opid })).status, 202);
+  const saved = JSON.parse(await readFile(join(f.root, 'creator', id, 'state.json'), 'utf8'));
+  const legacyFingerprint = createHash('sha256').update(JSON.stringify({ settings, prompt: '图片1展示真实门店', scriptId: opid, assetIds: [asset] })).digest('hex');
+  assert.equal(saved.tasks.find(t => t.id === tid).fingerprint, legacyFingerprint);
   await f.until(() => f.state.generates === 1); assert.equal((await f.wallet.snapshot('alice')).held, 500);
   assert.equal((await f.generate(id, tid, { scriptId: opid })).status, 202); assert.equal(f.state.generates, 1);
   assert.equal((await f.generate(id, tid, { prompt: 'different', scriptId: opid })).status, 409);

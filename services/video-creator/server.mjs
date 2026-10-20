@@ -384,7 +384,8 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         await lock(c.id, async () => {
           live(c); const settings = normalizeVideoSettings(input.settings);
           if (!UUID.test(input.requestId || '') || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 12000) throw creatorError('请填写完整的视频提示词。');
-          const fingerprint = hash({ settings, prompt: input.prompt.trim(), scriptId: input.scriptId || null, referenceImageIds: input.referenceImageIds ?? null, assetIds: c.assets.map(a => a.id) });
+          const fingerprint = hash({ settings, prompt: input.prompt.trim(), scriptId: input.scriptId || null, assetIds: c.assets.map(a => a.id),
+            ...(input.referenceImageIds ? { referenceImageIds: input.referenceImageIds } : {}) });
           task = c.tasks.find(t => t.id === input.requestId); if (task) { if (task.fingerprint !== fingerprint) throw creatorError('同一任务不能重复提交不同内容。', 409); return; }
           if ([...store.records.values()].some(x => x.userId === userId && x.tasks.some(t => t.id === input.requestId))) throw creatorError('该任务标识已用于其他创作，请重新发起。', 409, 'VIDEO_REQUEST_CONFLICT');
           if (!config.enabled) throw creatorError('视频生成接口尚未配置，请联系管理员。', 503, 'VIDEO_NOT_CONFIGURED');
