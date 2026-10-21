@@ -209,6 +209,7 @@ test("toPublicTask maps private providers to neutral engine codes and steps to n
       makeTask({ inputs: { ...makeTask().inputs, lipsyncProvider: provider }, results: {} })
     );
     assert.equal(fromInputs.inputs.engine, code, `inputs.lipsyncProvider=${provider}`);
+    assert.equal(fromInputs.results.engine, code);
 
     const fromResults = toPublicTask(
       makeTask({
@@ -217,6 +218,7 @@ test("toPublicTask maps private providers to neutral engine codes and steps to n
       })
     );
     assert.equal(fromResults.inputs.engine, code, `results.lipsyncProvider=${provider}`);
+    assert.equal(fromResults.results.engine, code);
   }
 
   const stepMap = {
@@ -236,6 +238,15 @@ test("toPublicTask maps private providers to neutral engine codes and steps to n
     assert.equal(task.failedStep, publicStep, `failedStep ${privateStep}`);
   }
   assert.equal(toPublicTask(makeTask({ failedStep: undefined })).failedStep, undefined);
+});
+
+test("result model provenance prefers the recorded result and does not guess for legacy tasks", () => {
+  const task = makeTask();
+  const changed = toPublicTask({ ...task, results: { lipsyncProvider: "veed-v2" } });
+  assert.equal(changed.inputs.engine, "c");
+  assert.equal(changed.results.engine, "e");
+  const legacy = toPublicTask({ ...task, inputs: { ...task.inputs, lipsyncProvider: undefined }, results: {} });
+  assert.equal(legacy.results.engine, null);
 });
 
 test("toPublicTask rewrites every media reference to an application-owned proxy URL", () => {

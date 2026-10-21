@@ -75,6 +75,7 @@ function toPublicStep(step?: TaskStep): PublicTaskStep {
 export function toPublicTask(task: TaskItem): PublicTaskItem {
   const resultBase = `/api/tasks/${encodeURIComponent(task.id)}/media`;
   const provider = task.inputs.lipsyncProvider || task.results.lipsyncProvider;
+  const resultProvider = task.results.lipsyncProvider || task.inputs.lipsyncProvider;
   const deliverable = isTaskOutputDeliverable(task);
   const recoverable = Boolean(
     !deliverable &&
@@ -131,6 +132,7 @@ export function toPublicTask(task: TaskItem): PublicTaskItem {
       engine: toPublicEngine(provider),
     },
     results: {
+      engine: resultProvider ? toPublicEngine(resultProvider) : null,
       deliveryMode: task.results.deliveryMode,
       downloadUrl: deliverable
         ? task.results.finalVideoUrl

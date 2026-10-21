@@ -205,6 +205,7 @@
 .dh-service-state,#dh-generate-hint,.dh-voice-hint,.dh-upload-note {font-size:11px;color:#788598;}
 .dh-library-heading p,.dh-card-copy>small,.dh-library-empty p {color:#78899d;}
 .dh-card-copy>strong {font-size:13px;color:#42566f;}
+.dh-model-label,.dh-card-copy>.dh-model-label {font-size:12px;line-height:1.6;color:#60758f;white-space:normal;}
 .dh-card-icon {font-size:11px;color:#73859e;}
 .dh-library-tabs button {font-size:13px;color:#697d96;}
 @media(min-width:1100px) {

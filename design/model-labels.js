@@ -4,6 +4,16 @@ export const MODEL_LABELS = Object.freeze({
   advanced: 'Max模型',
 });
 
+const DIGITAL_HUMAN_MODEL_LABELS = Object.freeze({
+  a: '模型 A（历史）', b: 'qy-标准', c: '模型 C（历史）', d: 'qy-旗舰', e: 'qy-至臻',
+});
+
+export function digitalHumanModelLabel(task) {
+  if (task?.results?.deliveryMode === 'narration_fallback') return '基础配音（未对口型）';
+  const engine = task?.results?.engine === undefined ? task?.inputs?.engine : task.results.engine;
+  return Object.hasOwn(DIGITAL_HUMAN_MODEL_LABELS, engine) ? DIGITAL_HUMAN_MODEL_LABELS[engine] : '未记录';
+}
+
 const LEGACY_MODEL_LABELS = Object.freeze({
   '起芽初级模型': MODEL_LABELS.basic,
   '起芽中级模型': MODEL_LABELS.standard,

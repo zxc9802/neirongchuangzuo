@@ -47,6 +47,11 @@ test('digital assets include only settled final video and generated voice, never
   assert.deepEqual(records.map(item => item.type), ['video', 'audio']);
   assert.equal(records[0].download, '/api/tasks/avatar-task/download/final.mp4');
   assert.equal(records[1].download, '/api/tasks/avatar-task/download/voice-track.mp3');
+  const labeled = collectGeneratedAssets([], [{ ...task, inputs: { ...task.inputs, engine: 'b' }, results: { ...task.results, engine: 'e' } }], now);
+  assert.equal(labeled[0].modelLabel, 'qy-至臻');
+  assert.equal(labeled[1].modelLabel, undefined, 'the lipsync model is not a voice model');
+  assert.equal(collectGeneratedAssets([], [{ ...task, inputs: { engine: 'b' }, results: { ...task.results, engine: null } }], now)[0].modelLabel, '未记录');
+  assert.equal(collectGeneratedAssets([], [{ ...task, results: { ...task.results, engine: 'e', deliveryMode: 'narration_fallback' } }], now)[0].modelLabel, '基础配音（未对口型）');
   for (const source of ['https://outside.example/result.mp4', '//outside.example/result.mp4', '/api/tasks/other/media/final']) {
     assert.equal(collectGeneratedAssets([], [{ ...task, results: { finalVideoUrl: source } }], now).length, 0);
   }

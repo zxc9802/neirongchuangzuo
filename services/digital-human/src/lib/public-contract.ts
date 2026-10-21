@@ -69,6 +69,7 @@ export interface PublicTaskItem {
     engine: PublicEngine;
   };
   results: {
+    engine?: PublicEngine | null;
     deliveryMode?: "narration_fallback";
     downloadUrl?: string;
     originalVideoUrl?: string;
