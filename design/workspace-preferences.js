@@ -1,4 +1,5 @@
 import { LANGUAGES, translate } from './workspace-locales.js';
+import { createInterfaceLocalizer } from './workspace-i18n.js';
 
 export { LANGUAGES };
 let language = 'zh-CN', explicitTheme = false;
@@ -11,8 +12,10 @@ try {
 } catch { /* Use defaults without blocking the workspace. */ }
 
 export const uiLanguage = () => language;
+export const uiLocale = () => language === 'ms' ? 'ms-MY' : language === 'en' ? 'en-MY' : 'zh-CN';
 export const uiTheme = () => theme;
 export const t = (text, values) => translate(text, language, values);
+let interfaceLocalizer;
 
 function persist(key, value) {
   try { globalThis.localStorage?.setItem(key, value); } catch { /* Session-only preference. */ }
@@ -48,6 +51,7 @@ export function setUiLanguage(value) {
   persist('qiya-ui-language', language);
   paint();
   globalThis.window?.dispatchEvent(new CustomEvent('workspace:languagechange', { detail: { language } }));
+  interfaceLocalizer?.localize();
   return true;
 }
 
@@ -72,6 +76,10 @@ export function initializePreferences() {
   if (toggle && !toggle.dataset.bound) {
     toggle.dataset.bound = 'true';
     toggle.addEventListener('click', () => setUiTheme(theme === 'dark' ? 'light' : 'dark'));
+  }
+  if (doc?.documentElement && !interfaceLocalizer) {
+    interfaceLocalizer = createInterfaceLocalizer({ document: doc, language: () => language });
+    interfaceLocalizer.start();
   }
 }
 

@@ -20,7 +20,7 @@ const files = new Map([
   ['/login', ['design/auth.html', 'text/html; charset=utf-8']],
   ['/register', ['design/auth.html', 'text/html; charset=utf-8']],
   ['/auth.css', ['design/auth.css', 'text/css; charset=utf-8']],
-  ...['auth', 'workspace-account', 'workspace-credits', 'account-storage', 'workspace-locales', 'workspace-preferences', 'workspace-preferences-init'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ...['auth', 'workspace-account', 'workspace-credits', 'account-storage', 'workspace-locales', 'workspace-locale-extra', 'workspace-i18n', 'workspace-preferences', 'workspace-preferences-init'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/app.js', ['design/app.js', 'text/javascript; charset=utf-8']],
   ['/markdown.js', ['design/markdown.js', 'text/javascript; charset=utf-8']],
   ['/markdown.css', ['design/markdown.css', 'text/css; charset=utf-8']],

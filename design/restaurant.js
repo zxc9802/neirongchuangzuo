@@ -1,3 +1,4 @@
+import { uiLocale } from './workspace-preferences.js';
 import { markdownText } from './markdown.js';
 import { accountStorageKey } from './account-storage.js';
 import { brandModelText } from './model-labels.js';
@@ -24,7 +25,7 @@ const txt = value => typeof value === 'string' ? value : value?.message || value
 const message = value => brandModelText(String(txt(value) || '服务暂时不可用，请稍后刷新。').replace(/sk-[\w.-]+/gi, '[已隐藏]')).slice(0, 300);
 const icon = name => state.ctx?.icon?.(name) || '';
 const button = (action, label, cls = 'restaurant-secondary', extra = '') => `<button type="button" class="${cls}" data-action="rest-${action}" ${extra}>${label}</button>`;
-const dateLabel = value => { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); };
+const dateLabel = value => { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }); };
 
 export function validateRestaurantProfile(profile = {}, { required = true } = {}) {
   const missing = required ? REQUIRED.filter(([field]) => typeof profile[field] !== 'string' || !profile[field].trim()) : [];
@@ -291,7 +292,7 @@ function renderDraftPreview(task) {
   return `<section class="restaurant-draft-preview" aria-label="待确认草稿预览"><header><h3>待确认预览</h3><p>照片为原图参考，确认后生成成品。</p></header><div class="restaurant-draft-images">${sources.map((source, index) => {
     const url = source.expired || timestamp(source.expiresAt) <= Date.now() ? '' : safeRestaurantFileUrl(source.url);
     return `<figure>${url ? `<img src="${escape(url)}" alt="${index === 0 ? '封面原图参考' : '配图原图参考'} ${index + 1}" loading="lazy">` : '<div class="restaurant-file-placeholder">原图已过期</div>'}<figcaption>${String(index + 1).padStart(2, '0')} · ${index === 0 ? '封面原图参考' : '配图原图参考'}</figcaption></figure>`;
-  }).join('') || '<p class="restaurant-draft-no-source">原图参考暂时无法显示，请核对下方文字和发布提示。</p>'}</div><div class="restaurant-draft-copy"><section><h4>三个标题</h4><ol>${(task.copy?.titles || []).map(title => `<li>${escape(title)}</li>`).join('')}</ol></section><section><h4>封面文字</h4><p>${escape(task.copy?.coverText || '')}</p></section><section><h4>正文</h4><div class="restaurant-body-copy">${markdownText(task.copy?.body || '')}</div></section><section><h4>话题</h4><p class="restaurant-tag-copy">${escape(restaurantCopyText(task, 'tags'))}</p></section></div></section>`;
+  }).join('') || '<p class="restaurant-draft-no-source">原图参考暂时无法显示，请核对下方文字和发布提示。</p>'}</div><div class="restaurant-draft-copy"><section><h4>三个标题</h4><ol>${(task.copy?.titles || []).map(title => `<li data-no-i18n>${escape(title)}</li>`).join('')}</ol></section><section><h4>封面文字</h4><p data-no-i18n>${escape(task.copy?.coverText || '')}</p></section><section><h4>正文</h4><div class="restaurant-body-copy">${markdownText(task.copy?.body || '')}</div></section><section><h4>话题</h4><p class="restaurant-tag-copy">${escape(restaurantCopyText(task, 'tags'))}</p></section></div></section>`;
 }
 function renderReview(task) {
   const list = [...warnings(task), ...(task.review?.errors || []).map(txt).filter(Boolean)];

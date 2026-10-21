@@ -1,3 +1,4 @@
+import { uiLocale } from './workspace-preferences.js';
 import { accountStorageKey } from './account-storage.js';
 import { displayModelName, brandModelText } from './model-labels.js';
 import { validatePhotoSelection, preparePhotoBatches } from './image-upload.js';
@@ -54,7 +55,7 @@ export function safeImageResultUrl(value, origin = globalThis.location?.origin) 
   try { const url = new URL(value, origin); return url.origin === origin && /^\/api\/ai\/media\/[\da-f-]+\/[\w.-]+$/i.test(url.pathname) && !url.search && !url.hash ? url.pathname : ''; } catch { return ''; }
 }
 function shortError(value) { return brandModelText(String(value || '暂时无法获取任务状态，请稍后刷新。').replace(/sk-[a-z\d_-]+/ig, '[已隐藏]')).slice(0, 240); }
-function dateLabel(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+function dateLabel(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
 function visibleTasks() { return state.tasks.filter(task => task.status !== 'expired' && (!task.expiresAt || Date.parse(task.expiresAt) > Date.now())); }
 function taskCounts(task) {
   const count = Number(task.outputCount);

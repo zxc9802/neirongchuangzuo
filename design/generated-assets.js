@@ -1,3 +1,4 @@
+import { uiLocale, t } from './workspace-preferences.js';
 import { imageTaskTitle } from './image-presets.js';
 import { digitalHumanModelLabel } from './model-labels.js';
 const RETENTION_MS = 72 * 60 * 60 * 1000;
@@ -117,7 +118,7 @@ export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = 
 }
 
 function dateLabel(value) {
-  return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  return new Date(value).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
 }
 function remainingLabel(expires) {
   const hours = Math.max(1, Math.ceil((expires - Date.now()) / 3600000));
@@ -161,10 +162,10 @@ function scheduleExpiry() {
 }
 async function fetchTaskPage(path, signal, source) {
   const response = await fetch(path, { cache: 'no-store', credentials: 'same-origin', signal });
-  if (response.status === 401 || response.status === 403) throw new Error(`${source}作品需登录后查看。`);
-  if (!response.ok) throw new Error(`${source}作品暂时无法加载，请稍后刷新。`);
+  if (response.status === 401 || response.status === 403) throw new Error(`${t(source)}作品需登录后查看。`);
+  if (!response.ok) throw new Error(`${t(source)}作品暂时无法加载，请稍后刷新。`);
   const body = await response.json();
-  if (!Array.isArray(body.tasks)) throw new Error(`${source}作品列表暂时无法读取。`);
+  if (!Array.isArray(body.tasks)) throw new Error(`${t(source)}作品列表暂时无法读取。`);
   return body;
 }
 async function fetchTasks(path, signal, source) { return (await fetchTaskPage(path, signal, source)).tasks; }
@@ -199,7 +200,7 @@ async function load() {
   const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', controller.signal, sources[0]), fetchTasks('/api/tasks?completed=true', controller.signal, sources[1]), fetchRestaurantTasks(controller.signal), fetchTasks('/api/video-replica/tasks?completed=true', controller.signal, sources[3]), fetchTasks('/api/video-creator/tasks?completed=true', controller.signal, sources[4]), fetchMaterials(controller.signal)]);
   clearTimeout(timer);
   if (revision !== state.revision || !active()) return;
-  state.errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${sources[index]}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${sources[index]}作品暂时无法读取。`] : []);
+  state.errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${t(sources[index])}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${t(sources[index])}作品暂时无法读取。`] : []);
   const [images, avatars, restaurant, videos, creativeVideos, materials] = results.map(result => result.status === 'fulfilled' ? result.value : []);
   state.materials = materials;
   state.records = collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos, creativeVideos);

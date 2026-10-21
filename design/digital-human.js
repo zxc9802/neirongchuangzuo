@@ -1,3 +1,4 @@
+import { uiLocale } from './workspace-preferences.js';
 import { markdownText } from './markdown.js';
 import { digitalHumanApi as api } from './digital-human-api.js';
 import { accountStorageKey } from './account-storage.js';
@@ -41,7 +42,7 @@ const hasRunningTask = () => state.tasks.some(running);
 const safeUrl = value => api.safeMediaUrl(value || '');
 const shortDate = value => {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  return Number.isNaN(date.getTime()) ? '' : date.toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 };
 const duration = value => {
   const seconds = Math.round(Number(value));
@@ -631,7 +632,7 @@ function showTaskDetails(id, ctx) {
   const completed = task.status === 'completed';
   const video = completed && safeUrl(task.results?.finalVideoUrl);
   const audio = completed && safeUrl(task.results?.exactAudioUrl);
-  ctx.openModal('口播任务详情', `${shortDate(task.createdAt)} · ${taskLabel(task)}`, `<div class="dh-task-detail">${fallbackNotice(task)}${billingPointsText(task) ? `<p class="credit-estimate">${ctx.esc(billingPointsText(task))}</p>` : ''}${audio ? `<h3>口播配音</h3><audio controls preload="none" src="${ctx.esc(audio)}" aria-label="试听生成的口播配音"></audio>` : ''}<h3>口播文案</h3>${markdownText(task.inputs?.scriptText || '')}${task.error ? `<div class="dh-inline-error">${ctx.esc(task.error)}</div>` : ''}<h3>处理记录</h3><ol>${(task.logs || []).slice(-12).map(log => `<li><time>${new Date(log.timestamp).toLocaleTimeString('zh-CN')}</time><span>${ctx.esc(log.message)}</span></li>`).join('') || '<li>任务已登记，暂时没有处理记录。</li>'}</ol></div><footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${audio ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'audio'))}" download>下载配音</a>` : ''}${video ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'video'))}" download>下载视频</a>` : ''}${task.status === 'failed' && task.recoverable ? ctx.button('dh-recover-task', '继续获取成片', 'secondary', `data-id="${ctx.esc(id)}" ${state.busy.has(id) ? 'disabled' : ''}`) : ''}${ctx.button('dh-reuse-task', '复用这份文案', 'primary', `data-id="${ctx.esc(id)}"`)}</footer>`, true);
+  ctx.openModal('口播任务详情', `${shortDate(task.createdAt)} · ${taskLabel(task)}`, `<div class="dh-task-detail">${fallbackNotice(task)}${billingPointsText(task) ? `<p class="credit-estimate">${ctx.esc(billingPointsText(task))}</p>` : ''}${audio ? `<h3>口播配音</h3><audio controls preload="none" src="${ctx.esc(audio)}" aria-label="试听生成的口播配音"></audio>` : ''}<h3>口播文案</h3>${markdownText(task.inputs?.scriptText || '')}${task.error ? `<div class="dh-inline-error">${ctx.esc(task.error)}</div>` : ''}<h3>处理记录</h3><ol>${(task.logs || []).slice(-12).map(log => `<li><time>${new Date(log.timestamp).toLocaleTimeString(uiLocale())}</time><span>${ctx.esc(log.message)}</span></li>`).join('') || '<li>任务已登记，暂时没有处理记录。</li>'}</ol></div><footer class="modal-actions">${ctx.button('cancel', '关闭', 'secondary')}${audio ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'audio'))}" download>下载配音</a>` : ''}${video ? `<a class="secondary dh-modal-download" href="${ctx.esc(api.downloadUrl(task, 'video'))}" download>下载视频</a>` : ''}${task.status === 'failed' && task.recoverable ? ctx.button('dh-recover-task', '继续获取成片', 'secondary', `data-id="${ctx.esc(id)}" ${state.busy.has(id) ? 'disabled' : ''}`) : ''}${ctx.button('dh-reuse-task', '复用这份文案', 'primary', `data-id="${ctx.esc(id)}"`)}</footer>`, true);
   const dialog = document.querySelector('dialog[open]'), player = dialog?.querySelector('audio');
   dialog?.addEventListener('close', () => { if (player) { player.pause(); player.removeAttribute('src'); player.load(); } }, { once: true });
 }

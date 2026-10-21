@@ -1,3 +1,5 @@
+import { EXTRA_UI_COPY } from './workspace-locale-extra.js';
+
 export const LANGUAGES = [
   { id: 'zh-CN', label: '简体中文' },
   { id: 'ms', label: 'Bahasa Melayu' },
@@ -7,6 +9,24 @@ export const LANGUAGES = [
 // Only interface copy is translated. Prompts, uploads and generated content keep their original language.
 const entries = [
   ['语言', 'Language', 'Bahasa'],
+  ['描述画面、镜头、氛围和声音…', 'Describe the visuals, camera shots, atmosphere and audio…', 'Huraikan visual, sudut kamera, suasana dan audio…'],
+  ['退出编导', 'Exit Director', 'Keluar Pengarah'],
+  ['直击产品核心痛点', 'Address the key pain point', 'Fokus masalah utama'],
+  ['利用新奇场景开场', 'Open in an unexpected setting', 'Mulakan dengan suasana unik'],
+  ['制造强烈情绪反转', 'Create an emotional twist', 'Cipta kejutan emosi'],
+  ['用反常识观点开场', 'Open with a surprising take', 'Buka dengan idea luar jangka'],
+  ['真实痛点引出需求', 'Show a real need', 'Tunjukkan masalah sebenar'],
+  ['强烈对比突出差异', 'Highlight differences with contrast', 'Serlahkan perbezaan melalui kontras'],
+  ['好生意，', 'Great businesses', 'Perniagaan hebat'],
+  ['值得被看见。', 'deserve to be seen.', 'wajar dikenali.'],
+  ['上传', 'Upload', 'Muat naik'], ['更换音色', 'Change voice', 'Tukar suara'],
+  ['从资产选择形象', 'Choose a photo from My Assets', 'Pilih foto daripada Aset Saya'],
+  ['从资产选择声音', 'Choose a voice from My Assets', 'Pilih suara daripada Aset Saya'],
+  ['数字人服务暂时无法连接，请稍后重试。', 'The avatar service is temporarily unavailable. Please try again later.', 'Perkhidmatan avatar tidak tersedia buat sementara waktu. Sila cuba lagi kemudian.'],
+  ['混剪服务启动失败，请管理员检查 Python 依赖与服务器配置。', 'The editing service could not start. Ask your administrator to check the Python dependencies and server configuration.', 'Perkhidmatan suntingan gagal dimulakan. Minta pentadbir menyemak kebergantungan Python dan konfigurasi pelayan.'],
+  ['用户名或密码错误', 'Incorrect username or password', 'Nama pengguna atau kata laluan salah'],
+  ['账号或密码错误', 'Incorrect account or password', 'Akaun atau kata laluan salah'],
+  ['邀请码无效或已被使用。', 'The invitation code is invalid or has already been used.', 'Kod jemputan tidak sah atau telah digunakan.'],
   ['切换到深色模式', 'Switch to dark mode', 'Tukar kepada mod gelap'],
   ['切换到浅色模式', 'Switch to light mode', 'Tukar kepada mod cerah'],
   ['显示设置', 'Display settings', 'Tetapan paparan'],
@@ -154,7 +174,7 @@ const materialTags = [
   ['用餐空间', 'Dining space', 'Ruang makan'], ['人物形象', 'Avatar portrait', 'Potret avatar'],
 ];
 
-export const UI_COPY = Object.fromEntries([...entries, ...materialTitles, ...materialTags].map(([zh, en, ms]) => [zh, { en, ms }]));
+export const UI_COPY = { ...EXTRA_UI_COPY, ...Object.fromEntries([...entries, ...materialTitles, ...materialTags].map(([zh, en, ms]) => [zh, { en, ms }])) };
 
 export function translate(text, language = 'zh-CN', values = {}) {
   const source = String(text ?? '');
