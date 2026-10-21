@@ -115,9 +115,12 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   function videoDuration(video, modelId) {
     const model = models.find(model => model.id === modelId);
-    if (video.duration < 2 || video.duration > model.maxDuration
-      || !modelId.startsWith('doubao-seedance-') && (video.width < 300 || video.height < 300)) {
-      throw error(`参考视频需为 2–${model.maxDuration} 秒，宽高至少 300 像素。`);
+    if (video.duration < 2 || video.duration > model.maxDuration) {
+      const guidance = video.duration > model.maxDuration ? `请截取不超过 ${model.maxDuration} 秒的片段后上传。` : '请上传至少 2 秒的视频。';
+      throw error(`参考视频实际为 ${Number(video.duration.toFixed(2))} 秒，所选 ${model.name} 支持 2–${model.maxDuration} 秒。${guidance}`, 400, 'VIDEO_DURATION_INVALID');
+    }
+    if (!modelId.startsWith('doubao-seedance-') && (video.width < 300 || video.height < 300)) {
+      throw error(`参考视频为 ${video.width}×${video.height} 像素，宽高至少需要 300 像素。`, 400, 'VIDEO_DIMENSIONS_INVALID');
     }
     if (modelId === PIXVERSE_MODEL && Math.max(video.width, video.height) > 1920) throw error('PixVerse 参考视频的长边不能超过 1920 像素，请压缩后上传。');
     if (modelId === WAN3_MODEL) return Math.round(video.duration * 1000) / 1000;

@@ -173,6 +173,47 @@ test('draft edition switches persist, reject incompatible downgrades, and lock a
   assert.equal((await app.current(id)).model, PREMIUM_MODEL); assert.equal(app.state.generations, 1);
 });
 
+for (const model of [REPLICA_PRICES[0][0], PREMIUM_MODEL, WAN3_MODEL]) {
+  test(`${model} reports a 39-second reference as a duration error, not a pixel error`, async t => {
+    const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true },
+      probe: async () => ({ ...META, duration: 39.266016, width: 576, height: 1024 }) });
+    const id = randomUUID();
+    await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance' } });
+    const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+    assert.equal(response.status, 400);
+    const body = await response.json();
+    assert.equal(body.code, 'VIDEO_DURATION_INVALID');
+    assert.match(body.error, /39\.27 秒/);
+    assert.match(body.error, new RegExp('2–' + (model === PREMIUM_MODEL ? 30 : 15) + ' 秒'));
+    assert.match(body.error, /截取/);
+    assert.doesNotMatch(body.error, /像素|宽高/);
+    assert.equal((await app.current(id)).video, undefined);
+    assert.equal(await app.wallet.reservation('alice', id), null);
+    assert.equal(app.state.generations, 0);
+  });
+}
+
+test('a short reference requests more duration without suggesting it should be trimmed', async t => {
+  const app = await fixture(t, { probe: async () => ({ ...META, duration: 1.5 }) }), id = await app.init();
+  const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.code, 'VIDEO_DURATION_INVALID');
+  assert.match(body.error, /1\.5 秒/); assert.match(body.error, /至少 2 秒/);
+  assert.doesNotMatch(body.error, /截取|像素|宽高/);
+});
+
+test('a Wan dimension rejection does not suggest a valid duration is wrong', async t => {
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true },
+    probe: async () => ({ ...META, width: 200, height: 400 }) }), id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } });
+  const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.code, 'VIDEO_DIMENSIONS_INVALID');
+  assert.match(body.error, /200×400 像素/); assert.doesNotMatch(body.error, /秒|截取/);
+});
+
 for (const [model] of REPLICA_PRICES) test(`${model} normalizes uploaded reference pixels before registering the video`, async t => {
   const app = await fixture(t, { probe: probeVideo });
   const source = join(app.root, 'small.mp4');
