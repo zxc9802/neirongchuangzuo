@@ -135,9 +135,9 @@ test('edition dropdown stays below voice reference and updates its description a
   assert.match(page.html(), /<select id="replica-models"/);
   assert.ok(page.html().indexOf('id="replica-voice"') < page.html().indexOf('<select id="replica-models"'));
   assert.doesNotMatch(page.html(), /Wan 2\.2|wan\/v2\.2-14b|PixVerse Swap|fal-ai\/pixverse\/swap/);
-  for (const [model, price] of [[FAST_MODEL, '0.8'], [MINI_MODEL, '0.5'], [STANDARD_MODEL, '1']]) {
+  for (const [model, price, points] of [[FAST_MODEL, '1.8', 369], [MINI_MODEL, '1', 205], [STANDARD_MODEL, '2', 410]]) {
     page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
-    assert.ok(page.html().includes(`最多生成15秒视频，${price}元/秒`));
+    assert.ok(page.html().includes(`最多生成15秒视频，RM ${price}/秒（约 ${points} 积分/秒）`));
   }
   assert.doesNotMatch(page.html(), /标准版|至臻版/);
   assert.match(page.html(), /option value="doubao-seedance-2-0-260128"[^>]* selected/);
@@ -145,7 +145,7 @@ test('edition dropdown stays below voice reference and updates its description a
   await page.settle();
   assert.match(page.html(), /option value="doubao-seedance-2-5-260628"[^>]* selected/);
   assert.match(page.html(), /单个人物 · 2–30 秒/);
-  assert.match(page.html(), /最多生成30秒视频，1.5元\/秒/);
+  assert.match(page.html(), /最多生成30秒视频，RM 3\/秒（约 615 积分\/秒）/);
   page.node('#replica-new').onclick();
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
@@ -165,17 +165,37 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan
   } });
   page.recover(); await page.poll();
   page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
-  if (model === 'wan3.0-video') assert.match(page.html(), /输入＋输出 0.42元\/秒，换声另计/);
+  const estimate = `生成时间约为 ${model === 'wan3.0-video' ? '13–17' : '5–10'} 分钟`;
+  assert.ok(page.html().includes(estimate), 'the empty preview follows the selected model');
+  if (model === 'wan3.0-video') {
+    assert.match(page.html(), /最多生成15秒视频，RM 2.4\/秒（约 492 积分\/秒）/);
+    assert.doesNotMatch(page.html(), /0.42元\/秒/);
+  }
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls[0].body.model, model); assert.equal(calls.at(-1).body.model, model);
   assert.equal(calls[0].body.voiceEngine, 'chatterbox'); assert.equal(calls.at(-1).body.voiceEngine, 'chatterbox');
   assert.equal(calls[0].body.sourceAudioMode, 'original'); assert.equal(calls.at(-1).body.sourceAudioMode, 'original');
+  assert.ok(page.html().includes(estimate), 'the running preview retains the model estimate');
   const count = calls.length;
   page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.equal(calls.length, count);
   assert.match(page.html(), new RegExp(`option value="${model}"[^>]* selected`));
   assert.match(page.html(), /<select id="replica-models"[^>]*disabled/);
+});
+
+test('generation estimate follows the viewed draft and resets with a new replica', async t => {
+  const task = { id: 'wan-estimate', model: 'wan3.0-video', status: 'draft', createdAt: Date.now() };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll(); page.select(task.id); await page.settle();
+  assert.match(page.html(), /生成时间约为 13–17 分钟/);
+  Object.assign(task, { status: 'completed', resultUrl: '/result.mp4' });
+  await page.poll();
+  assert.doesNotMatch(page.html(), /生成时间约为/);
+  assert.match(page.html(), /src="\/result.mp4"/);
+  page.node('#replica-new').onclick();
+  assert.match(page.html(), /生成时间约为 5–10 分钟/);
+  assert.doesNotMatch(page.html(), /生成时间约为 13–17 分钟/);
 });
 
 test('voice conversion stays hidden and remains the default after starting and creating another task', async t => {
@@ -633,7 +653,7 @@ test('an exempt task with zero estimated points does not fall back to paid-task 
   assert.match(page.html(), /id="replica-submit"[^>]*disabled[^>]*>正在替换人物/);
 });
 
-test('pending tasks show elapsed time, last model reply and a task ID instead of a fixed wait estimate', async t => {
+test('pending tasks retain live progress alongside the approximate generation time', async t => {
   const now = Date.now();
   const task = { id: 'waiting-task', status: 'running', createdAt: now - 700_000, startedAt: now - 650_000, lastCheckedAt: now - 30_000 };
   const page = await fixture(t, { tasks: [task] });

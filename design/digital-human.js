@@ -2,10 +2,16 @@ import { markdownText } from './markdown.js';
 import { digitalHumanApi as api } from './digital-human-api.js';
 import { accountStorageKey } from './account-storage.js';
 import { digitalHumanModelLabel } from './model-labels.js';
+import { MALAYSIAN_PRICE_NOTE, referenceMyrPoints } from './malaysian-prices.js';
 
-import { videoPoints, estimatedSpeechSeconds, videoCreditEstimateText, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask, billingPointsText } from './workspace-credits.js';
+import { videoPoints, estimatedSpeechSeconds, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask, billingPointsText } from './workspace-credits.js';
 let unsubscribeCredits = null;
 const speechEstimate = () => estimatedSpeechSeconds(state.script, state.toneProfile === 'high' ? 1.2 : 1);
+function generationPriceText() {
+  const rate = { b: 0.1, d: 0.12, e: 1 }[state.engine], seconds = speechEstimate();
+  return seconds ? `约 ${seconds} 秒 · 预计 ${Math.ceil(referenceMyrPoints(rate * seconds))} 积分（RM ${Number((rate * seconds).toFixed(2))}）`
+    : `RM ${rate}/秒 · 约 ${referenceMyrPoints(rate)} 积分/秒`;
+}
 const STORAGE_KEY = accountStorageKey('store-studio:digital-human:v1');
 const state = {
   hydrated: false, loaded: false, loading: false, status: null, session: null,
@@ -185,7 +191,7 @@ export function renderDigitalHuman(ctx) {
     <section class="dh-generator" id="dh-generator" aria-labelledby="dh-generator-title">
       <div class="dh-generator-heading"><div><h2 id="dh-generator-title">制作口播视频</h2></div><span class="dh-generator-type">${icon('avatar')}视频数字人</span></div>
       <div class="dh-composer"><div class="dh-avatar-setting" id="dh-materials">${materialsMarkup(ctx)}</div><div class="dh-composer-main">${ctx.renderBusinessEntry?.('avatar') || ''}<div class="dh-field-heading"><label for="dh-script">口播文案</label></div><div class="dh-script-box"><textarea id="dh-script" maxlength="5000" placeholder="填写口播文案">${esc(state.script)}</textarea><div><span id="dh-script-duration">${state.script.trim() ? `约 ${Math.max(1, Math.round(state.script.replace(/\s/g, '').length / 4))} 秒口播` : ''}</span><small id="dh-script-count">${state.script.length} / 5000</small></div></div><div class="dh-script-ideas"><span>宣传方案</span>${button('dh-template', '使用方案口播稿', '', 'data-template="brief"')}${button('business-open', '重新整理宣传信息', '', 'data-mode="avatar"')}</div><section id="dh-voice" class="dh-voice-section" aria-label="口播声音">${voiceMarkup(ctx)}</section></div></div>
-      <div class="dh-generation-controls"><div class="dh-engine-section"><label for="dh-engine-select">对口型模型</label><div id="dh-engine" class="dh-engine-picker">${engineMarkup(ctx)}</div></div><div class="dh-generate-footer"><div class="dh-generation-note"><div id="dh-service-status">${statusMarkup(ctx)}</div><p id="dh-credit-estimate" class="credit-estimate">${esc(videoCreditEstimateText(speechEstimate()))}</p><p id="dh-generate-hint">${esc(hint || '')}</p></div>${button('dh-generate', icon('star') + '<span>立即生成</span>', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}</div></div>
+      <div class="dh-generation-controls"><div class="dh-engine-section"><label for="dh-engine-select">对口型模型</label><div id="dh-engine" class="dh-engine-picker">${engineMarkup(ctx)}</div></div><div class="dh-generate-footer"><div class="dh-generation-note"><div id="dh-service-status">${statusMarkup(ctx)}</div><p id="dh-credit-estimate" class="credit-estimate" title="${esc(MALAYSIAN_PRICE_NOTE)}">${esc(generationPriceText())}</p><p id="dh-generate-hint">${esc(hint || '')}</p></div>${button('dh-generate', icon('star') + '<span>立即生成</span>', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}</div></div>
       <details class="dh-advanced"><summary>${icon('settings')}高级设置${icon('chevron')}</summary><div class="dh-advanced-body"><label class="studio-field">语速<select data-dh-option="toneProfile"><option value="low" ${state.toneProfile === 'low' ? 'selected' : ''}>自然（1.0×）</option><option value="high" ${state.toneProfile === 'high' ? 'selected' : ''}>提速（1.2×）</option></select></label><label class="studio-field">视频适配<select data-dh-option="videoFit"><option value="smart" ${state.videoFit === 'smart' ? 'selected' : ''}>智能适配</option><option value="preserve" ${state.videoFit === 'preserve' ? 'selected' : ''}>保留原视频</option></select></label><div class="dh-emotion-field"><label class="dh-emotion-label" for="dh-emotion">表达强度<output id="dh-emotion-value">${Math.round(state.emotionIntensity * 100)}%</output></label><input id="dh-emotion" data-dh-option="emotionIntensity" type="range" min="0.1" max="0.85" step="0.05" value="${state.emotionIntensity}" aria-label="表达强度"><div class="dh-range-labels"><span>平稳</span><span>鲜明</span></div></div></div></details>
       <div id="dh-task-status">${taskMarkup(ctx)}</div>
     </section>
@@ -209,7 +215,7 @@ function patchGenerate() {
   const note = root.querySelector('#dh-generate-hint');
   if (note) note.textContent = hint || '';
   const estimate = root.querySelector('#dh-credit-estimate');
-  if (estimate) estimate.textContent = videoCreditEstimateText(speechEstimate());
+  if (estimate) estimate.textContent = generationPriceText();
   setRegion('dh-service-status', statusMarkup(context));
 }
 

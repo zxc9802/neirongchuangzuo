@@ -1,13 +1,14 @@
 import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
+import { MALAYSIAN_PRICE_NOTE, referenceMyrPoints } from './malaysian-prices.js';
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
 const MODELS = [
-  { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15, description: '最多生成15秒视频，1元/秒' },
-  { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, description: '最多生成30秒视频，1.5元/秒' },
-  { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, description: '最多生成15秒视频，0.8元/秒' },
-  { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, description: '最多生成15秒视频，0.5元/秒' },
-  { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, description: '参考视频最多15秒 · 720P · 输入与输出均计费，换声另计' },
+  { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15, rmPerSecond: 2 },
+  { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, rmPerSecond: 3 },
+  { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, rmPerSecond: 1.8 },
+  { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, rmPerSecond: 1 },
+  { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, rmPerSecond: 2.4 },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务').replace(/Wan\s*3\.0/gi, 'qiya-3.0');
@@ -78,12 +79,12 @@ function selectedModel() {
 function modelName(task) { return (task.model === 'fal-ai/pixverse/swap' ? 'PixVerse Swap' : MODELS.find(model => model.id === (task.model || DEFAULT_MODEL))?.name) || ''; }
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
-  const description = state.config?.models?.find(model => model.id === selected.id)?.description || selected.description;
+  const description = selected.rmPerSecond ? `最多生成${selected.maxDuration}秒视频，RM ${selected.rmPerSecond}/秒（约 ${referenceMyrPoints(selected.rmPerSecond)} 积分/秒）` : '历史版本，仅供查看已有成片';
   return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.map(model => {
     const configured = state.config?.models?.find(item => item.id === model.id);
     const unavailable = !state.config?.enabled || configured?.enabled === false || model.id === 'wan3.0-video' && !configured?.enabled;
     return `<option value="${model.id}" ${selected.id === model.id ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
-  }).join('')}</select><p id="replica-model-description" class="replica-model-description">${ctx.esc(description || '历史版本，仅供查看已有成片')}</p></div>`;
+  }).join('')}</select><p id="replica-model-description" class="replica-model-description" title="${ctx.esc(MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p></div>`;
 }
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind];
@@ -102,12 +103,17 @@ function slot(kind, ctx) {
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}">
     <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${selected || saved ? '更换' : '选择'}${title}</label></section>`;
 }
+function generationEstimate() {
+  const model = selectedModel();
+  if (!MODELS.some(item => item.id === model.id)) return '';
+  return `<p class="replica-time-estimate">生成时间约为 ${model.id === 'wan3.0-video' ? '13–17' : '5–10'} 分钟</p>`;
+}
 function result(ctx) {
   const task = state.current;
-  if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p><span>成片在这里预览</span></div>`;
+  if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p>${generationEstimate()}<span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
   const message = task.recovery?.message || (task.status === 'failed' ? failureMessage(task) : displayMessage(task.error));
-  return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${taskLabel(task)}</h3><p>${ctx.esc(message || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击一键生成。' : '请重新上传素材创建任务。'))}</p></div>`;
+  return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${taskLabel(task)}</h3><p>${ctx.esc(message || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击一键生成。' : '请重新上传素材创建任务。'))}</p>${pending(task) || task.status === 'draft' ? generationEstimate() : ''}</div>`;
 }
 function progress(ctx) {
   const task = state.current;

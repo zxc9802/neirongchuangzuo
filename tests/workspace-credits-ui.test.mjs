@@ -166,7 +166,7 @@ test('generic image controls quote one, six or fifteen outputs from the authenti
   ctx.configs.image.generationMode = 'single'; assert.match(renderImageGenerationOptions(ctx), /预计 50 积分/);
 });
 
-test('unlimited image and video estimates show no charge while unavailable services remain disabled', async t => {
+test('unlimited accounts retain image exemptions and see digital-human reference prices while unavailable services remain disabled', async t => {
   workspace(t, async () => Response.json({ ...balance(0), unlimited: true }));
   const saved = globalThis.localStorage;
   globalThis.localStorage = { getItem: () => null, setItem() {} };
@@ -176,8 +176,8 @@ test('unlimited image and video estimates show no charge while unavailable servi
   assert.match(image, /无限积分/);
   assert.doesNotMatch(image, /预计 \d+ 积分/);
   const video = renderDigitalHuman({ esc, button, icon: () => '', storeInfo: {}, configs: { avatar: { prompt: '真'.repeat(120) } } });
-  assert.match(video, /约 30 秒 · 无限积分/);
-  assert.doesNotMatch(video, /预计 \d+ 积分|按实际时长/);
+  assert.match(video, /约 30 秒 · 预计 615 积分（RM 3）/);
+  assert.doesNotMatch(video, /已使用|已冻结/);
   assert.match(video, /data-action="dh-generate"[^>]*disabled/);
   assert.equal(credits.videoCreditEstimateText(null), '无限积分');
 });
@@ -210,16 +210,15 @@ test('account balance and pricing labels follow the server unlimited flag and pr
   assert.match(nodes['#account-credit-rules'].textContent, /图片 50 积分\/张/);
 });
 
-test('digital-human estimates quote a 30-second script and show actual-duration settlement without claiming an unavailable service is ready', async t => {
+test('digital-human estimates quote Malaysian reference prices without claiming an unavailable service is ready', async t => {
   workspace(t, async () => Response.json(balance()));
   const saved = globalThis.localStorage;
   globalThis.localStorage = { getItem: () => null, setItem() {} };
   t.after(() => { if (saved === undefined) delete globalThis.localStorage; else globalThis.localStorage = saved; });
   await credits.refreshWorkspaceCredits();
   const html = renderDigitalHuman({ esc, button, icon: () => '', storeInfo: {}, configs: { avatar: { prompt: '真'.repeat(120) } } });
-  assert.match(html, /约 30 秒 · 预计 333 积分 · 按实际时长/);
+  assert.match(html, /约 30 秒 · 预计 615 积分（RM 3）/);
   assert.match(html, /data-action="dh-generate"[^>]*disabled/);
-  assert.doesNotMatch(html, /20.*积分.*秒/);
 });
 
 test('speech previews use the selected playback speed and leave an empty script unpriced', () => {

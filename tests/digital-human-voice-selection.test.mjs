@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 const defaultVoice = { id: 'default_speaker_1', name: '默认推荐音色', isDefault: true, audioUrl: '/api/voices/default_speaker_1/audio' };
 const uploadedVoice = { id: 'uploaded', name: '新上传声音', audioUrl: '/api/voices/uploaded/audio' };
 
-async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {}, selectEngine } = {}) {
+async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {}, selectEngine, inspect } = {}) {
   const originals = Object.fromEntries(['document', 'window', 'localStorage', 'fetch'].map(key => [key, globalThis[key]]));
   const storage = new Map([['store-studio:digital-human:v1', JSON.stringify(saved)]]);
   const regions = new Map();
@@ -39,6 +39,7 @@ async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {}, se
     const engineSelect = markup.match(/<select id="dh-engine-select"[\s\S]*?<\/select>/)?.[0];
     assert.ok(engineSelect, 'model choices use a dropdown');
     assert.equal((engineSelect.match(/<option /g) || []).length, 3);
+    inspect?.({ regions, listeners, ctx, render: () => mod.renderDigitalHuman(ctx) });
     return JSON.parse(storage.get('store-studio:digital-human:v1'));
   } finally {
     mod.disposeDigitalHuman();
@@ -48,6 +49,25 @@ async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {}, se
 
 test('first load selects the default voice even when uploaded voices precede it', async () => {
   assert.equal((await loadPage()).voiceId, defaultVoice.id);
+});
+
+test('Malaysian generation prices follow engine, script duration and speaking speed', async () => {
+  await loadPage({ inspect: ({ regions, listeners, ctx, render }) => {
+    ctx.configs.avatar.prompt = '字'.repeat(344);
+    assert.match(render(), /约 86 秒 · 预计 1763 积分（RM 8.6）/);
+    for (const [engine, text] of [
+      ['d', '约 86 秒 · 预计 2116 积分（RM 10.32）'],
+      ['e', '约 86 秒 · 预计 17630 积分（RM 86）'],
+      ['b', '约 86 秒 · 预计 1763 积分（RM 8.6）'],
+    ]) {
+      listeners.change({ target: { dataset: { dhOption: 'engine' }, value: engine } });
+      assert.equal(regions.get('#dh-credit-estimate').textContent, text);
+    }
+    listeners.change({ target: { dataset: { dhOption: 'toneProfile' }, value: 'high' } });
+    assert.equal(regions.get('#dh-credit-estimate').textContent, '约 72 秒 · 预计 1476 积分（RM 7.2）');
+    ctx.configs.avatar.prompt = '';
+    assert.match(render(), /id="dh-credit-estimate"[^>]*>RM 0.1\/秒 · 约 20.5 积分\/秒<\/p>/);
+  } });
 });
 
 test('new drafts use the upstream emotion intensity while saved choices are retained', async () => {
