@@ -81,6 +81,39 @@ export async function removeVideoAudio(input, output) {
     throw new VideoError('参考视频去除原声失败，尚未提交生成。请重试或更换参考视频。', 422, 'VIDEO_AUDIO_REMOVE_FAILED');
   }
 }
+export async function restoreVideoBorders(source, result, metadata) {
+  const temporary = result + '.borders.mp4';
+  try {
+    metadata ??= await probeVideo(source);
+    // Accumulate the visible area across every frame, so a dark opening or a
+    // changing composition cannot turn real picture content into a border.
+    const { stderr } = await run('ffmpeg', ['-hide_banner', '-nostdin', '-protocol_whitelist', 'file,pipe', '-i', source,
+      '-an', '-vf', `scale=${metadata.width}:${metadata.height},setsar=1,cropdetect=limit=20:round=2:skip=0`, '-f', 'null', '-'],
+    { timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
+    const areas = [...stderr.matchAll(/x1:(\d+) x2:(\d+) y1:(\d+) y2:(\d+)/g)]
+      .map(match => match.slice(1).map(Number)).filter(([x1, x2, y1, y2]) => x2 >= x1 && y2 >= y1);
+    if (!areas.length) return { restored: false };
+    const { width, height } = metadata;
+    const left = Math.min(...areas.map(area => area[0])), right = width - 1 - Math.max(...areas.map(area => area[1]));
+    const top = Math.min(...areas.map(area => area[2])), bottom = height - 1 - Math.max(...areas.map(area => area[3]));
+    const borders = { left: left / width, right: right / width, top: top / height, bottom: bottom / height };
+    const filters = [];
+    if (left >= 2) filters.push(`drawbox=x=0:y=0:w=iw*${borders.left}:h=ih:color=black:t=fill`);
+    if (right >= 2) filters.push(`drawbox=x=iw*(1-${borders.right}):y=0:w=iw:h=ih:color=black:t=fill`);
+    if (top >= 2) filters.push(`drawbox=x=0:y=0:w=iw:h=ih*${borders.top}:color=black:t=fill`);
+    if (bottom >= 2) filters.push(`drawbox=x=0:y=ih*(1-${borders.bottom}):w=iw:h=ih:color=black:t=fill`);
+    if (!filters.length) return { restored: false };
+    await run('ffmpeg', ['-v', 'error', '-nostdin', '-y', '-protocol_whitelist', 'file,pipe', '-i', result,
+      '-map', '0:v:0', '-map', '0:a:0?', '-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'fast', '-crf', '18',
+      '-pix_fmt', 'yuv420p', '-fps_mode', 'passthrough', '-c:a', 'copy', '-movflags', '+faststart', temporary],
+    { timeout: 120_000, maxBuffer: 1024 * 1024 });
+    await rename(temporary, result);
+    return { restored: true, ...borders };
+  } catch {
+    // A cosmetic repair must never block delivery or submit another paid job.
+    return { restored: false, warning: '原视频黑边暂未还原，已保留成片，请预览核对画面边缘。' };
+  } finally { await rm(temporary, { force: true }).catch(() => {}); }
+}
 export async function normalizePhoto(bytes) {
   try {
     const input = sharp(bytes, { limitInputPixels: 40_000_000, animated: false });

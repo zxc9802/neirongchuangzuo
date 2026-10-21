@@ -13,7 +13,8 @@ export function wan3GenerationBody(task) {
   }
   const replica = generationBody(task);
   const media = [{ type: 'reference_image', url: task.materials.photo.id }, { type: 'reference_video', url: task.materials.video.id }];
-  return { model: WAN3_MODEL, input: { prompt: replica.prompt, media },
+  const prompt = replica.prompt + '\n保留视频1的完整画布、原始构图和四周黑边。黑边必须保持纯黑，不能扩图、填充背景或在黑边内添加任何内容；人物替换仅在原视频有效画面内进行。';
+  return { model: WAN3_MODEL, input: { prompt, media },
     parameters: { resolution: '720P', ratio: 'adaptive', duration: -1,
       audio: replica.payload.params.generateAudio, prompt_extend: false, watermark: false } };
 }

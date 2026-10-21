@@ -15,7 +15,8 @@ test('official Wan reuses the replica prompt and preserves original timing with 
   for (const input of [task, { ...task, voice: { duration: 5 }, voiceEngine: 'chatterbox' }]) {
     const body = wan3GenerationBody(input);
     assert.equal(body.model, WAN3_MODEL);
-    assert.equal(body.input.prompt, generationBody(input).prompt);
+    assert.ok(body.input.prompt.startsWith(generationBody(input).prompt));
+    assert.match(body.input.prompt, /黑边必须保持纯黑，不能扩图、填充背景/);
     assert.deepEqual(body.input.media, [{ type: 'reference_image', url: task.materials.photo.id }, { type: 'reference_video', url: task.materials.video.id }]);
     assert.deepEqual(body.parameters, { resolution: '720P', ratio: 'adaptive', duration: -1, audio: !input.voice, prompt_extend: false, watermark: false });
   }

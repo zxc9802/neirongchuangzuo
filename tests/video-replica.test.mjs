@@ -53,6 +53,7 @@ async function fixture(t, options = {}) {
     handler = createVideoHandler({ storageDir: join(root, 'video'), config: CONFIG, provider, credits: wallet,
       photo: async () => Buffer.from('photo'), probe: async input => ({ ...META, duration: options.narration && input.endsWith('upload.tmp') ? 6 : META.duration }),
       download: async (_url, path) => writeFile(path, VIDEO),
+      restoreBorders: async () => ({ restored: false }),
       captions: { extract: async () => null },
       narration: null, lipsync: null, voiceConversion: null,
       providerStorage: { upload: async input => `https://fal.media/${input.split('/').at(-1)}` },
@@ -2202,6 +2203,36 @@ for (const outcome of ['completed', 'failed', 'uncertain']) test(`Wan ${outcome}
   }
   await app.call(`/tasks/${id}/start`, { body: {} });
   assert.equal(submissions, 1); assert.equal(uploads, 2); assert.equal(app.state.generations, 0);
+});
+
+for (const voice of [false, true]) test(`Wan restores borders on the delivered file after audio processing (voice=${voice})`, async t => {
+  let repairs = 0, conversions = 0, submissions = 0;
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true },
+    wan3Provider: {
+      upload: async () => ({ id: 'oss://test/material', status: 2 }),
+      generate: async () => { submissions++; return { taskId: 'wan-job' }; },
+      query: async () => ({ completed: true, url: 'https://result.example/wan.mp4' }),
+    },
+    voiceConversion: { enabled: true,
+      advance: async task => { task.voiceConversion = { ready: true }; return true; },
+      mux: async (_video, _voice, output) => { conversions++; await writeFile(output, 'muxed'); },
+    },
+    restoreBorders: async (source, result, metadata) => {
+      repairs++;
+      assert.ok(source.endsWith('source.mp4')); assert.ok(result.endsWith('result.mp4'));
+      assert.equal(metadata.width, META.width);
+      assert.equal((await readFile(result)).toString(), voice ? 'muxed' : VIDEO.toString());
+      return { restored: false, warning: '原视频黑边暂未还原，已保留成片，请预览核对画面边缘。' };
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: voice ? 'chatterbox' : 'seedance' } });
+  await app.upload(id);
+  if (voice) assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/voice`, { method: 'PUT', body: await readFile(new URL('./fixtures/replica-speech.wav', import.meta.url)) })).status, 200);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const done = await app.until(id, task => task.status === 'completed');
+  assert.equal(repairs, 1); assert.equal(conversions, Number(voice)); assert.equal(submissions, 1);
+  assert.match(done.frameBorders.warning, /已保留成片/);
+  assert.ok(done.resultUrl, 'A cosmetic repair warning does not withhold the video');
 });
 
 test('Seedance uses the agreed 410 points per second and settles only once',async t=>{

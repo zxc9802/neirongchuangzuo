@@ -8,7 +8,7 @@ import { generationPrice, generationPoints } from '../../design/malaysian-prices
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL } from './provider.mjs';
-import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
+import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, restoreVideoBorders, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createPixverseProvider } from './pixverse.mjs';
@@ -50,7 +50,7 @@ async function readJSON(req) {
 }
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
-  config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo,
+  config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo, restoreBorders = restoreVideoBorders,
   photo = normalizePhoto, voice = normalizeVoice, speech, captions = createCaptionService(env),
   narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
@@ -155,7 +155,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
-      captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck,
+      captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck, frameBorders: task.frameBorders,
       error: task.recoveryPolicy ? '' : task.error || '', code: task.recoveryPolicy ? undefined : task.code,
       recovery: task.recovery && { state: task.recovery.state, message: task.recovery.message, nextAttemptAt: task.recovery.nextAttemptAt },
       canResume: !expired && task.status === 'waiting' && task.recovery?.resumeStatus !== 'submitting' && !task.lipsync?.submitting
@@ -369,7 +369,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await reconcile(task);
       if (!task.cleaned) {
         await archiveTaskMaterials(task);
-        for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
+        for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result.mp4.borders.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         await rm(join(folder(task), 'narration'), { recursive: true, force: true });
         await rm(join(folder(task), 'localization'), { recursive: true, force: true });
         for (const name of ['localized-voice.wav', 'localized-voice.wav.asr.json', 'localized-voice.wav.asr.json.tmp',
@@ -582,6 +582,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (rejected) throw rejected.reason;
   }
   async function complete(task) {
+      if (task.model === WAN3_MODEL) task.frameBorders = await restoreBorders(file(task, 'video'), file(task, 'result'), task.video);
       task.status = 'completed'; task.error = ''; delete task.code;
       delete task.recovery;
       task.completedAt = now();
