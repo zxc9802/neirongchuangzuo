@@ -129,18 +129,23 @@ test('polling still replaces expired reference sources and adds recovery control
   assert.doesNotMatch(page.html(), /src="\/source.mp4"|src="\/voice.wav"|src="\/photo.jpg"/);
 });
 
-test('edition buttons show the requested descriptions and update the upload duration hint', async t => {
+test('edition dropdown stays below voice reference and updates its description and upload duration', async t => {
   const page = await fixture(t); page.recover(); await page.poll();
-  for (const name of ['qiya-2.0', 'qiya-2.5', 'qiya-2.0-f1', 'qiya-20-m1']) assert.ok(page.html().includes(`<strong>${name}</strong>`));
+  for (const name of ['qiya-2.0', 'qiya-2.5', 'qiya-2.0-f1', 'qiya-20-m1']) assert.ok(page.html().includes(`>${name}</option>`));
+  assert.match(page.html(), /<select id="replica-models"/);
+  assert.ok(page.html().indexOf('id="replica-voice"') < page.html().indexOf('<select id="replica-models"'));
   assert.doesNotMatch(page.html(), /Wan 2\.2|wan\/v2\.2-14b|PixVerse Swap|fal-ai\/pixverse\/swap/);
-  for (const price of ['1', '0.8', '0.5']) assert.ok(page.html().includes(`最多生成15秒视频，${price}元/秒`));
-  assert.match(page.html(), /最多生成30秒视频，1.5元\/秒/);
+  for (const [model, price] of [[FAST_MODEL, '0.8'], [MINI_MODEL, '0.5'], [STANDARD_MODEL, '1']]) {
+    page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
+    assert.ok(page.html().includes(`最多生成15秒视频，${price}元/秒`));
+  }
   assert.doesNotMatch(page.html(), /标准版|至臻版/);
-  assert.match(page.html(), /data-replica-model="doubao-seedance-2-0-260128"[^>]*aria-pressed="true"/);
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: PREMIUM_MODEL } }) } });
+  assert.match(page.html(), /option value="doubao-seedance-2-0-260128"[^>]* selected/);
+  page.node('#replica-models').onchange({ target: { value: PREMIUM_MODEL } });
   await page.settle();
-  assert.match(page.html(), /data-replica-model="doubao-seedance-2-5-260628"[^>]*aria-pressed="true"/);
+  assert.match(page.html(), /option value="doubao-seedance-2-5-260628"[^>]* selected/);
   assert.match(page.html(), /单个人物 · 2–30 秒/);
+  assert.match(page.html(), /最多生成30秒视频，1.5元\/秒/);
   page.node('#replica-new').onclick();
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
@@ -157,16 +162,17 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL]) tes
     return Response.json({ task });
   } });
   page.recover(); await page.poll();
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: model } }) } }); await page.settle();
+  page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls[0].body.model, model); assert.equal(calls.at(-1).body.model, model);
   assert.equal(calls[0].body.voiceEngine, 'seedance'); assert.equal(calls.at(-1).body.voiceEngine, 'seedance');
   assert.equal(calls[0].body.sourceAudioMode, 'silent'); assert.equal(calls.at(-1).body.sourceAudioMode, 'silent');
   const count = calls.length;
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: STANDARD_MODEL } }) } }); await page.settle();
+  page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.equal(calls.length, count);
-  assert.match(page.html(), new RegExp(`data-replica-model="${model}"[^>]*aria-pressed="true"[^>]*disabled`));
+  assert.match(page.html(), new RegExp(`option value="${model}"[^>]* selected`));
+  assert.match(page.html(), /<select id="replica-models"[^>]*disabled/);
 });
 
 test('direct voice stays hidden and remains the default after starting and creating another task', async t => {
@@ -210,9 +216,9 @@ test('PixVerse can no longer be selected for a new task but its historical resul
   const task = { ...speechDraft(), model: 'fal-ai/pixverse/swap', status: 'completed', voiceEngine: 'indextts2', resultUrl: '/old-result.mp4' };
   const page = await fixture(t, { tasks: [task] });
   page.recover(); await page.poll();
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: task.model } }) } }); await page.settle();
-  assert.match(page.html(), /data-replica-model="doubao-seedance-2-0-260128"[^>]*aria-pressed="true"/);
-  assert.doesNotMatch(page.html(), /data-replica-model="fal-ai\/pixverse\/swap"/);
+  page.node('#replica-models').onchange({ target: { value: task.model } }); await page.settle();
+  assert.match(page.html(), /option value="doubao-seedance-2-0-260128"[^>]* selected/);
+  assert.doesNotMatch(page.html(), /option value="fal-ai\/pixverse\/swap"/);
   page.select(task.id);
   assert.match(page.html(), /PixVerse Swap/); assert.match(page.html(), /src="\/old-result.mp4"/);
   assert.doesNotMatch(page.html(), /无原声直配（试用）|data-source-audio/);
@@ -225,7 +231,7 @@ test('saved premium drafts keep their edition and a rejected downgrade retains t
   } });
   page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /单个人物 · 2–30 秒/);
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: STANDARD_MODEL } }) } }); await page.settle();
+  page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/model']);
   assert.match(page.message(), /2–15 秒/); assert.match(page.html(), /单个人物 · 2–30 秒/);
   assert.match(page.cost(), /2500/);
@@ -243,7 +249,7 @@ test('a shorter local replacement is saved before downgrading a premium draft an
   } });
   page.recover(); await page.poll(); page.select(task.id);
   page.node('#replica-video').onchange({ target: { files: [new File(['shorter'], 'short.mp4')] } });
-  page.node('#replica-models').onclick({ target: { closest: () => ({ dataset: { replicaModel: STANDARD_MODEL } }) } }); await page.settle();
+  page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/video', '/api/video-replica/tasks/editable-task/model']);
   assert.match(page.html(), /单个人物 · 2–15 秒/); assert.match(page.cost(), /1250/);
   page.node('#replica-submit').onclick(); await page.settle();

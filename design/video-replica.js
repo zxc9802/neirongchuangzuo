@@ -75,10 +75,11 @@ function selectedModel() {
 function modelName(task) { return (task.model === 'fal-ai/pixverse/swap' ? 'PixVerse Swap' : MODELS.find(model => model.id === (task.model || DEFAULT_MODEL))?.name) || ''; }
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
-  return `<div class="replica-model-setting"><h2>生成版本</h2><div id="replica-models" class="replica-models" role="group" aria-label="选择生成版本">${MODELS.map(model => {
+  const description = state.config?.models?.find(model => model.id === selected.id)?.description || selected.description;
+  return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.map(model => {
     const unavailable = !state.config?.enabled || state.config.models?.find(item => item.id === model.id)?.enabled === false;
-    return `<button type="button" class="replica-model-button ${selected.id === model.id ? 'selected' : ''}" data-replica-model="${model.id}" aria-pressed="${selected.id === model.id}" ${locked || unavailable ? 'disabled' : ''}><strong>${ctx.esc(model.name)}</strong><span>${ctx.esc(model.description)}</span></button>`;
-  }).join('')}</div></div>`;
+    return `<option value="${model.id}" ${selected.id === model.id ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
+  }).join('')}</select><p id="replica-model-description" class="replica-model-description">${ctx.esc(description || '历史版本，仅供查看已有成片')}</p></div>`;
 }
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind];
@@ -272,9 +273,7 @@ async function poll() {
 export function bindVideoReplica(ctx) {
   context = ctx;
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
-  document.querySelector('#replica-models').onclick = event => {
-    const button = event.target.closest('[data-replica-model]'); if (button) void selectModel(button.dataset.replicaModel);
-  };
+  document.querySelector('#replica-models').onchange = event => { void selectModel(event.target.value); };
   for (const kind of ['video', 'photo', 'voice']) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
   const resume = document.querySelector('#replica-resume'); if (resume) resume.onclick = () => { void recoverTask('resume'); };
