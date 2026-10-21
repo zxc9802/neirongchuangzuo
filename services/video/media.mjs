@@ -4,7 +4,7 @@ import { lookup, resolveCname } from 'node:dns/promises';
 import { request } from 'node:https';
 import { request as httpRequest } from 'node:http';
 import { createReadStream } from 'node:fs';
-import { stat, readFile, writeFile, rm, open } from 'node:fs/promises';
+import { stat, readFile, writeFile, rm, open, rename } from 'node:fs/promises';
 import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import sharp from 'sharp';
@@ -26,8 +26,50 @@ export async function probeVideo(path) {
     const rotation = Number(video.side_data_list?.find(item => item.rotation !== undefined)?.rotation ?? video.tags?.rotate ?? 0);
     const portraitRotation = Math.abs(Math.round(rotation)) % 180 === 90;
     return { duration, width: portraitRotation ? height : width, height: portraitRotation ? width : height,
+      codedWidth: video.width, codedHeight: video.height,
       audio: data.streams.some(item => item.codec_type === 'audio') };
   } catch { throw new VideoError('无法读取视频，请上传可播放的 MP4 或 MOV 视频。', 400, 'VIDEO_MEDIA_INVALID'); }
+}
+// https://docs.volcengine.com/docs/ark/create-video-generation-task-api?lang=zh
+const SEEDANCE_MIN_PIXELS = 407696, SEEDANCE_MAX_PIXELS = 8295044;
+function seedancePixelsValid(width, height) {
+  return width >= 300 && height >= 300 && width <= 6000 && height <= 6000
+    && width / height >= 0.4 && width / height <= 2.5
+    && width * height >= SEEDANCE_MIN_PIXELS && width * height <= SEEDANCE_MAX_PIXELS;
+}
+export async function normalizeSeedanceVideo(path, metadata) {
+  metadata ??= await probeVideo(path);
+  if (seedancePixelsValid(metadata.width, metadata.height)
+    && seedancePixelsValid(metadata.codedWidth ?? metadata.width, metadata.codedHeight ?? metadata.height)) return metadata;
+  const temporary = path + '.normalized.mp4';
+  try {
+    if (!(metadata.width > 0 && metadata.height > 0)) throw new Error('Invalid video dimensions');
+    const even = value => Math.ceil(value / 2) * 2;
+    // Pad extreme aspect ratios before scaling; keep all of the original picture.
+    let width = Math.max(metadata.width, metadata.height * 0.4), height = Math.max(metadata.height, metadata.width / 2.5);
+    const scale = Math.max(Math.sqrt(SEEDANCE_MIN_PIXELS / (width * height)),
+      Math.min(1, Math.sqrt(SEEDANCE_MAX_PIXELS / (width * height))));
+    width = even(width * scale); height = even(height * scale);
+    width = Math.max(width, even(height * 0.4)); height = Math.max(height, even(width / 2.5));
+    // Even-pixel rounding must not put an oversized source above the area limit.
+    while (width * height > SEEDANCE_MAX_PIXELS) { if (width >= height) width -= 2; else height -= 2; }
+    const fit = Math.min(width / metadata.width, height / metadata.height);
+    const pictureWidth = Math.max(2, Math.min(width, Math.round(metadata.width * fit / 2) * 2));
+    const pictureHeight = Math.max(2, Math.min(height, Math.round(metadata.height * fit / 2) * 2));
+    await run('ffmpeg', ['-v', 'error', '-nostdin', '-y', '-protocol_whitelist', 'file,pipe', '-i', path,
+      '-map', '0:v:0', '-map', '0:a:0?', '-vf', `scale=${pictureWidth}:${pictureHeight}:flags=lanczos,setsar=1,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:black`,
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-fps_mode', 'passthrough',
+      '-c:a', 'aac', '-b:a', '128k', '-t', String(metadata.duration), '-movflags', '+faststart', temporary],
+    { timeout: 120_000, maxBuffer: 1024 * 1024 });
+    const normalized = await probeVideo(temporary);
+    if (!seedancePixelsValid(normalized.width, normalized.height)
+      || !seedancePixelsValid(normalized.codedWidth, normalized.codedHeight) || normalized.audio !== metadata.audio
+      || Math.abs(normalized.duration - metadata.duration) > 0.1) throw new Error('Invalid normalized video');
+    await rename(temporary, path);
+    return normalized;
+  } catch {
+    throw new VideoError('参考视频尺寸自动调整失败，请重试或更换视频。', 422, 'VIDEO_NORMALIZE_FAILED');
+  } finally { await rm(temporary, { force: true }); }
 }
 export async function removeVideoAudio(input, output) {
   try {

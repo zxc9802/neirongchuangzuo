@@ -20,7 +20,7 @@ import { generationPrice } from '../design/malaysian-prices.js';
 
 const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(100)]);
 const CONFIG = { enabled: true, publicOrigin: 'https://workspace.example', signingSecret: 'test-secret-not-for-production' };
-const META = { duration: 4, width: 512, height: 768, audio: true };
+const META = { duration: 4, width: 512, height: 800, audio: true };
 const PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
 const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
 const TEST_BALANCE = 100_000;
@@ -170,6 +170,99 @@ test('draft edition switches persist, reject incompatible downgrades, and lock a
   await app.until(id, task => task.status === 'running');
   assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: 'doubao-seedance-2-0-260128' } })).status, 409);
   assert.equal((await app.current(id)).model, PREMIUM_MODEL); assert.equal(app.state.generations, 1);
+});
+
+for (const [model] of REPLICA_PRICES) test(`${model} normalizes uploaded reference pixels before registering the video`, async t => {
+  const app = await fixture(t, { probe: probeVideo });
+  const source = join(app.root, 'small.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=350x350:r=30:d=2',
+    '-c:v', 'libx264', '-threads', '1', source]);
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance', sourceAudioMode: 'original' } });
+  const uploaded = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: await readFile(source) });
+  assert.equal(uploaded.status, 200, await uploaded.text());
+  const draft = await app.current(id);
+  assert.ok(draft.video.width * draft.video.height >= 407696, JSON.stringify(draft.video));
+  assert.equal(draft.video.width, draft.video.height);
+  const normalized = await readFile(join(app.root, 'video', id, 'source.mp4'));
+  await fetch(app.base + `/api/video-replica/tasks/${id}/photo`, { method: 'PUT', body: VIDEO });
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  const reference = new URL(app.state.creates.find(item => item.kind === 'video').url);
+  const served = await fetch(app.base + reference.pathname + reference.search);
+  assert.equal(served.status, 200);
+  assert.deepEqual(Buffer.from(await served.arrayBuffer()), await readFile(join(app.root, 'video', id, 'source.mp4')));
+  assert.deepEqual(await readFile(join(app.root, 'video', id, 'source.mp4')), normalized);
+  assert.ok((await probeVideo(join(app.root, 'video', id, 'source.mp4'))).width >= 640);
+});
+
+test('Seedance also accepts a reference with a side below 300 pixels', async t => {
+  const app = await fixture(t, { probe: probeVideo }), id = await app.init();
+  const source = join(app.root, 'small.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=30:d=2',
+    '-c:v', 'libx264', '-threads', '1', source]);
+  const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: await readFile(source) });
+  assert.equal(response.status, 200, await response.text());
+  const { video } = await app.current(id);
+  assert.ok(video.width >= 300 && video.height >= 300 && video.width * video.height >= 407696);
+});
+
+test('switching a Wan draft to Seedance normalizes before billing and preserves confirmed speech', async t => {
+  const app = await fixture(t, { probe: probeVideo, config: { ...CONFIG, wan3Enabled: true } });
+  const source = join(app.root, 'small.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=350x350:r=30:d=2',
+    '-c:v', 'libx264', '-threads', '1', source]);
+  const bytes = await readFile(source), id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } });
+  assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: bytes })).status, 200);
+  assert.deepEqual(await readFile(join(app.root, 'video', id, 'source.mp4')), bytes, 'Wan uploads keep their own pixel policy');
+  await fetch(app.base + `/api/video-replica/tasks/${id}/photo`, { method: 'PUT', body: VIDEO });
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path));
+  saved.speech = { source: 'subtitles', text: '用户确认的台词', segments: [] }; saved.speechConfirmedAt = 123;
+  saved.captionsChecked = true; saved.captions = { width: 350, height: 350, cues: [] };
+  await writeFile(path, JSON.stringify(saved)); await app.open();
+  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: PREMIUM_MODEL } })).status, 200);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.video.width, 640); assert.equal(running.video.height, 640);
+  assert.equal(running.speech.text, '用户确认的台词');
+  assert.equal(JSON.parse(await readFile(path)).speechConfirmedAt, 123);
+  assert.equal(app.state.generations, 1);
+});
+
+test('an old Seedance draft with invalid pixels is repaired after restart', async t => {
+  const app = await fixture(t), id = await app.init(); await app.upload(id);
+  await app.close();
+  const source = join(app.root, 'video', id, 'source.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=30:d=2',
+    '-c:v', 'libx264', '-threads', '1', source]);
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path));
+  saved.video = await probeVideo(source); await writeFile(path, JSON.stringify(saved)); await app.open();
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.ok(running.video.width * running.video.height >= 407696);
+  assert.deepEqual(running.video, await probeVideo(source));
+});
+
+test('failed pixel normalization leaves the previous source intact and never bills or dispatches', async t => {
+  let metadata = META;
+  const app = await fixture(t, { probe: async () => metadata }), id = await app.init(); await app.upload(id);
+  const source = join(app.root, 'video', id, 'source.mp4'), original = await readFile(source);
+  metadata = { ...META, width: 350, height: 350 };
+  const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal(response.status, 422); assert.equal((await response.json()).code, 'VIDEO_NORMALIZE_FAILED');
+  assert.deepEqual((await app.current(id)).video, META);
+  assert.deepEqual(await readFile(source), original);
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path));
+  saved.video = metadata; await writeFile(path, JSON.stringify(saved)); await app.open();
+  const started = await app.call(`/tasks/${id}/start`, { body: {} });
+  assert.equal(started.status, 422); assert.equal((await started.json()).code, 'VIDEO_NORMALIZE_FAILED');
+  assert.equal((await app.current(id)).status, 'draft');
+  assert.equal(await app.wallet.reservation('alice', id), null);
+  assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
+  assert.deepEqual(await readFile(source), original);
 });
 
 for (const [model, name] of REPLICA_PRICES) test(`${name} quotes, reserves and settles its model price across restart exactly once`, async t => {
@@ -443,11 +536,11 @@ test('uploaded voice uses caption words and preserves the original emotional aud
   assert.equal(alignmentReference.text, '生腌真好吃只要9.9元'); assert.equal(completed.captionCheck.rendered, true);
 });
 
-test('direct voice replacement gives the model the complete unmodified original emotional audio track', async t => {
+test('direct voice replacement gives the model a compliant source with its unmodified emotional audio track', async t => {
   const app = await fixture(t, { probe: probeVideo,
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
   const source = join(app.root, 'emotional-source.mp4');
-  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x480:r=25:d=4',
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=640x960:r=25:d=4',
     '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4', '-af', 'volume=0.3:enable=between(t\\,1\\,2)',
     '-c:v', 'libx264', '-threads', '2', '-c:a', 'aac', source]);
   const input = await readFile(source), id = await app.init();
@@ -1529,7 +1622,7 @@ for (const [model, voiceEngine] of [[REPLICA_PRICES[0][0], 'seedance'], [PREMIUM
       } }), lipsync: fakeLipsync(),
     });
     const original = join(app.root, 'original.mp4');
-    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=320x480:r=24:d=6',
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc2=s=640x960:r=24:d=6',
       '-f', 'lavfi', '-i', 'sine=frequency=220:duration=6', '-f', 'lavfi', '-i', 'sine=frequency=880:duration=6',
       '-map', '0:v', '-map', '1:a', '-map', '2:a', '-c:v', 'libx264', '-c:a', 'aac', original]);
     const bytes = await readFile(original), id = randomUUID();

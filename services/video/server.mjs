@@ -8,7 +8,7 @@ import { generationPrice, generationPoints } from '../../design/malaysian-prices
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL } from './provider.mjs';
-import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, removeVideoAudio, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
+import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createPixverseProvider } from './pixverse.mjs';
@@ -115,7 +115,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   function videoDuration(video, modelId) {
     const model = models.find(model => model.id === modelId);
-    if (video.duration < 2 || video.duration > model.maxDuration || video.width < 300 || video.height < 300) {
+    if (video.duration < 2 || video.duration > model.maxDuration
+      || !modelId.startsWith('doubao-seedance-') && (video.width < 300 || video.height < 300)) {
       throw error(`参考视频需为 2–${model.maxDuration} 秒，宽高至少 300 像素。`);
     }
     if (modelId === PIXVERSE_MODEL && Math.max(video.width, video.height) > 1920) throw error('PixVerse 参考视频的长边不能超过 1920 像素，请压缩后上传。');
@@ -818,8 +819,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           } else {
             if (bytes.length < 12 || bytes.toString('ascii', 4, 8) !== 'ftyp') throw error('请上传 MP4 或 MOV 视频。');
             await writeFile(temporary, bytes, { mode: 0o600 });
-            const metadata = await probe(temporary);
+            let metadata = await probe(temporary);
             const model = selectedModel(models.some(model => model.id === task.model) ? task.model : MODEL);
+            videoDuration(metadata, model);
+            if (model.startsWith('doubao-seedance-')) metadata = await normalizeSeedanceVideo(temporary, metadata);
             const duration = videoDuration(metadata, model);
             task.model = model;
             task.video = metadata;
@@ -905,6 +908,16 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (voiceEngine === 'chatterbox' && sourceAudioMode !== 'original') throw error('音色转换需要保留原视频声音。', 400, 'VIDEO_SOURCE_AUDIO_MODE_INVALID');
           if (sourceAudioMode === 'silent' && !task.voice) throw error('请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
           if (isFalReplacement(model) && task.voice && !['indextts2', 'chatterbox'].includes(voiceEngine)) throw error(`${models.find(item => item.id === model).name} 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
+          videoDuration(task.video, model);
+          if (model.startsWith('doubao-seedance-')) {
+            const metadata = await normalizeSeedanceVideo(file(task, 'video'), task.video);
+            if (metadata !== task.video) {
+              task.video = metadata;
+              delete task.videoAudioRemoved; delete task.videoCaptionsRemoved;
+              delete task.captions; delete task.captionsChecked; delete task.captionCheck;
+              delete task.materials.video;
+            }
+          }
           const duration = videoDuration(task.video, model);
           task.model = model;
           task.duration = duration;
