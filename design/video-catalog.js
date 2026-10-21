@@ -9,9 +9,9 @@ export const videoAssetPurpose = asset => asset.type === 'audio' ? 'voice' : ass
 export const VIDEO_IMAGE_MAX_BYTES = 50 * 1024 * 1024;
 export const VIDEO_AUDIO_MAX_BYTES = 15 * 1024 * 1024;
 export const VIDEO_PROVIDER_MODELS = [
-  { id: 'doubao-seedance-2-0-fast-260128', name: 'Plus模型', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p'], maxImages: 9 },
-  { id: 'doubao-seedance-2-0-260128', name: 'Pro模型', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p', '1080p'], maxImages: 9 },
-  { id: 'doubao-seedance-2-5-260628', name: 'Max模型', durations: [4, 5, 6, 8, 10, 12, 15, 20, 25, 30], resolutions: ['480p', '720p', '1080p'], maxImages: 30 },
+  { id: 'doubao-seedance-2-0-fast-260128', name: 'video-plus', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p'], maxImages: 9 },
+  { id: 'doubao-seedance-2-0-260128', name: 'video-pro', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p', '1080p'], maxImages: 9 },
+  { id: 'doubao-seedance-2-5-260628', name: 'video-max', durations: [4, 5, 6, 8, 10, 12, 15, 20, 25, 30], resolutions: ['480p', '720p', '1080p'], maxImages: 30 },
 ];
 export const VIDEO_MODELS = VIDEO_PROVIDER_MODELS.map(model => ({ ...model, resolutions: ['720p'] }));
 export const VIDEO_RATIOS = ['9:16', '16:9', '3:4', '4:3', '1:1', '21:9'];

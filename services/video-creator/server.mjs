@@ -409,7 +409,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
             }
           }
           const model = VIDEO_MODELS.find(m => m.id === settings.model);
-          if (referenceImageIds.length > model.maxImages) throw creatorError(`所选模型最多支持${model.maxImages}张图片，请选择Max模型或新建创作。`, 400, 'CREATOR_MODEL_LIMIT');
+          if (referenceImageIds.length > model.maxImages) throw creatorError(`所选模型最多支持${model.maxImages}张图片，请选择video-max或新建创作。`, 400, 'CREATOR_MODEL_LIMIT');
           if (settings.model === 'doubao-seedance-2-5-260628' && config.dedicated25 && !Object.values(config.dedicated25).every(Boolean)) throw creatorError('所选模型的独立接口配置不完整。', 503, 'CREATOR_MODEL_NOT_CONFIGURED');
           if ([...store.records.values()].filter(x => x.userId === userId).flatMap(x => x.tasks).filter(pending).length >= 2) throw creatorError('已有两条视频处理中，请稍后再试。', 429);
           if (c.tasks.length >= 20) throw creatorError('本次创作视频较多，请新建创作。');

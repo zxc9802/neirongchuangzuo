@@ -207,7 +207,7 @@ test('lost director response retries identical operation and original expected r
   f.action('vc-send'); await delay(20);
   assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]); assert.equal(calls[1].expectedScriptId, null);
   f.action('vc-apply', { id: calls[0].requestId });
-  assert.match(f.html(), /视频提示词/); assert.match(f.html(), /真实素材/); assert.match(f.html(), /Max模型/);
+  assert.match(f.html(), /视频提示词/); assert.match(f.html(), /真实素材/); assert.match(f.html(), /video-max/);
   assert.equal(f.action('vc-send', {}, { ...f.ctx, mode: 'replica' }), false);
 });
 
