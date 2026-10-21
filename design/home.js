@@ -1,4 +1,5 @@
 import { accountStorageKey } from './account-storage.js';
+import { t } from './workspace-preferences.js';
 // Sources: photography and original AI style examples; see media/SOURCES.md.
 // Visual thesis: a calm, spacious creation surface with blue actions and warm, real shop photography.
 // Content: business brief → shortcut tools → useful scenarios → browsable inspiration.
@@ -47,12 +48,12 @@ function initializeSelection(ctx) {
 }
 
 function renderPurposeOptions(ctx) {
-  return getPurposes(selectedIndustry).map(item => `<option value="${ctx.esc(item.id)}" ${item.id === selectedPurpose ? 'selected' : ''}>${ctx.esc(item.label)}</option>`).join('');
+  return getPurposes(selectedIndustry).map(item => `<option value="${ctx.esc(item.id)}" ${item.id === selectedPurpose ? 'selected' : ''}>${ctx.esc(t(item.label))}</option>`).join('');
 }
 
 function renderIndustryOptions(ctx) {
   const groups = [...new Set(INDUSTRIES.map(item => item.group))];
-  return groups.map(group => `<optgroup label="${ctx.esc(group)}">${INDUSTRIES.filter(item => item.group === group).map(item => `<option value="${ctx.esc(item.id)}" ${item.id === selectedIndustry ? 'selected' : ''}>${ctx.esc(item.label)}</option>`).join('')}</optgroup>`).join('');
+  return groups.map(group => `<optgroup label="${ctx.esc(t(group))}">${INDUSTRIES.filter(item => item.group === group).map(item => `<option value="${ctx.esc(item.id)}" ${item.id === selectedIndustry ? 'selected' : ''}>${ctx.esc(t(item.label))}</option>`).join('')}</optgroup>`).join('');
 }
 
 function syncFavorites() {
@@ -87,15 +88,15 @@ function purposeLabel(item) {
 }
 
 function renderMaterialContext(ctx) {
-  return category === 'all' ? '' : ctx.button('home-reset-filter', '查看全部行业 ' + ctx.icon('arrow'), 'home-view-all');
+  return category === 'all' ? '' : ctx.button('home-reset-filter', t('查看全部行业') + ' ' + ctx.icon('arrow'), 'home-view-all');
 }
 
 function renderGallery(ctx) {
   syncFavorites();
   const { esc, button, icon } = ctx;
   const items = filteredItems();
-  if (!items.length) return `<div class="home-gallery-empty">${icon(showFavorites ? 'star' : 'image')}<strong>${showFavorites ? '这个行业还没有收藏' : '这个行业暂时没有参考'}</strong>${button('home-reset-filter', '浏览全部素材方向', 'home-empty-action')}</div>`;
-  return items.slice(0, visibleMaterialCount).map(item => `<article class="home-inspiration-card home-height-${item.height}">${button('home-case', `<div class="home-case-photo"><img src="${esc(item.image)}" alt="${esc(item.description)}" loading="lazy"><span class="home-case-type">${mediaIcon(item.kind, ctx)}${esc(item.kind)}方向</span><span class="home-material-tag">${esc(item.materialTag || item.category)}</span><span class="home-case-open">查看素材方向 ${icon('arrow')}</span></div><div class="home-case-caption"><strong>${esc(item.title)}</strong><span>${esc(materialIndustryLabel(item))}<i>·</i>${esc(item.sourceLabel || '摄影参考')}</span></div>`, 'home-case-button', `data-id="${esc(item.id)}"`)}${button('home-favorite', icon('star'), `home-favorite ${favorites.has(item.id) ? 'is-saved' : ''}`, `data-id="${esc(item.id)}" title="${favorites.has(item.id) ? '取消收藏' : '收藏素材方向'}" aria-label="${favorites.has(item.id) ? '取消收藏' : '收藏'}：${esc(item.title)}" aria-pressed="${favorites.has(item.id)}"`)}</article>`).join('');
+  if (!items.length) return `<div class="home-gallery-empty">${icon(showFavorites ? 'star' : 'image')}<strong>${t(showFavorites ? '这个行业还没有收藏' : '这个行业暂时没有参考')}</strong>${button('home-reset-filter', t('浏览全部素材方向'), 'home-empty-action')}</div>`;
+  return items.slice(0, visibleMaterialCount).map(item => `<article class="home-inspiration-card home-height-${item.height}">${button('home-case', `<div class="home-case-photo"><img src="${esc(item.image)}" alt="${esc(t(item.title))}" loading="lazy"><span class="home-case-type">${mediaIcon(item.kind, ctx)}${esc(t('{kind}方向', { kind: t(item.kind) }))}</span><span class="home-material-tag">${esc(t(item.materialTag || item.category))}</span><span class="home-case-open">${t('查看素材方向')} ${icon('arrow')}</span></div><div class="home-case-caption"><strong>${esc(t(item.title))}</strong><span>${esc(t(materialIndustryLabel(item)))}<i>·</i>${esc(t(item.sourceLabel || '摄影参考'))}</span></div>`, 'home-case-button', `data-id="${esc(item.id)}"`)}${button('home-favorite', icon('star'), `home-favorite ${favorites.has(item.id) ? 'is-saved' : ''}`, `data-id="${esc(item.id)}" title="${t(favorites.has(item.id) ? '取消收藏' : '收藏')}" aria-label="${t(favorites.has(item.id) ? '取消收藏' : '收藏')}：${esc(t(item.title))}" aria-pressed="${favorites.has(item.id)}"`)}</article>`).join('');
 }
 
 function sceneEntries() {
@@ -131,7 +132,7 @@ function sceneEntries() {
 
 function renderScenes(ctx) {
   const { esc, button, icon } = ctx;
-  return sceneEntries().map(scene => button('home-scene', `<img src="${esc(scene.image)}" alt="${esc(scene.title)} · ${esc(scene.sourceLabel)}" loading="lazy"><span class="home-scene-shade"></span><span class="home-scene-source">${esc(scene.sourceLabel)}</span><span class="home-scene-copy"><small>${scene.eyebrow}</small><strong>${scene.title}</strong><span>${scene.sub}</span></span><i>${icon('arrow')}</i>`, 'home-scene-card', `data-mode="${scene.mode}" data-skill="${esc(scene.skill)}" data-purpose="${scene.purpose}" data-industry="${scene.industry}"`)).join('');
+  return sceneEntries().map(scene => button('home-scene', `<img src="${esc(scene.image)}" alt="${esc(t(scene.title))} · ${esc(t(scene.sourceLabel))}" loading="lazy"><span class="home-scene-shade"></span><span class="home-scene-source">${esc(t(scene.sourceLabel))}</span><span class="home-scene-copy"><small>${t(scene.eyebrow)}</small><strong>${t(scene.title)}</strong><span>${t(scene.sub)}</span></span><i>${icon('arrow')}</i>`, 'home-scene-card', `data-mode="${scene.mode}" data-skill="${esc(scene.skill)}" data-purpose="${scene.purpose}" data-industry="${scene.industry}"`)).join('');
 }
 
 function sceneCount() {
@@ -142,7 +143,7 @@ function renderGalleryPagination(ctx) {
   const count = filteredItems().length;
   if (!count) return '';
   const remaining = Math.max(0, count - visibleMaterialCount);
-  return `<span class="home-gallery-count" tabindex="-1">已展示 ${Math.min(visibleMaterialCount, count)} / ${count} 个素材方向</span>${remaining ? ctx.button('home-load-more', `加载更多 ${Math.min(GALLERY_BATCH_SIZE, remaining)} 个 ${ctx.icon('chevron')}`, 'home-load-more', 'aria-controls="home-inspiration-grid"') : '<span class="home-gallery-complete">已经到底了，换个行业继续找灵感</span>'}`;
+  return `<span class="home-gallery-count" tabindex="-1">${t('已展示 {shown} / {total} 个素材方向', { shown: Math.min(visibleMaterialCount, count), total: count })}</span>${remaining ? ctx.button('home-load-more', t('加载更多 {count} 个', { count: Math.min(GALLERY_BATCH_SIZE, remaining) }) + ' ' + ctx.icon('chevron'), 'home-load-more', 'aria-controls="home-inspiration-grid"') : `<span class="home-gallery-complete">${t('已经到底了，换个行业继续找灵感')}</span>`}`;
 }
 
 function renderAssetSelection(ctx) {
@@ -150,7 +151,7 @@ function renderAssetSelection(ctx) {
   const media = ctx.assets.filter(asset => asset.type === type);
   if (!media.length) return '';
   const { esc, icon, button } = ctx;
-  return `<div class="home-attached-assets"><span>我的${type === 'video' ? '视频' : '图片'}</span>${media.map(asset => button('home-asset', `${type === 'image' ? `<img src="${esc(asset.url)}" alt="${esc(asset.name)}">` : icon('video')}${selectedAssetIds.has(asset.id) ? `<i>${icon('check')}</i>` : ''}`, `home-asset-thumb ${selectedAssetIds.has(asset.id) ? 'selected' : ''}`, `data-id="${esc(asset.id)}" title="${esc(asset.name)}" aria-label="选择素材 ${esc(asset.name)}" aria-pressed="${selectedAssetIds.has(asset.id)}"`)).join('')}<small>点击选入本次创作</small></div>`;
+  return `<div class="home-attached-assets"><span>${t(type === 'video' ? '我的视频' : '我的图片')}</span>${media.map(asset => button('home-asset', `${type === 'image' ? `<img src="${esc(asset.url)}" alt="${esc(asset.name)}">` : icon('video')}${selectedAssetIds.has(asset.id) ? `<i>${icon('check')}</i>` : ''}`, `home-asset-thumb ${selectedAssetIds.has(asset.id) ? 'selected' : ''}`, `data-id="${esc(asset.id)}" title="${esc(asset.name)}" aria-label="${t('选择素材')} ${esc(asset.name)}" aria-pressed="${selectedAssetIds.has(asset.id)}"`)).join('')}<small>${t('点击选入本次创作')}</small></div>`;
 }
 
 export function renderHomeView(ctx) {
@@ -162,36 +163,36 @@ export function renderHomeView(ctx) {
     ['avatar', '数字人口播', 'avatar', ''], ['image', '图片精修', 'settings', '图片精修'], ['image', '朋友圈九宫格', 'list', '朋友圈九宫格'],
   ];
   return `<div class="home-content">
-    <section class="home-hero" aria-label="开始生意宣传创作">
-      <div class="home-intro"><h1>让你的<span>生意</span>，被更多人看见</h1></div>
+    <section class="home-hero" aria-label="${t('开始生意宣传创作')}">
+      <div class="home-intro"><h1>${t('让你的')}<span>${t('生意')}</span>${t('，被更多人看见')}</h1></div>
       <div class="home-idea-box">
-        <div class="home-brief-selectors" aria-label="宣传方向">
-          <label for="home-industry"><span><i>01</i> 你做什么生意</span><select id="home-industry">${renderIndustryOptions(ctx)}</select></label>
-          <label for="home-purpose"><span><i>02</i> 这次想宣传什么</span><select id="home-purpose">${renderPurposeOptions(ctx)}</select></label>
-          <label for="home-platform"><span><i>03</i> 准备发到哪里</span><select id="home-platform">${PLATFORMS.map(item => `<option value="${esc(item.id)}" ${item.id === selectedPlatform ? 'selected' : ''}>${esc(item.label)}</option>`).join('')}</select></label>
+        <div class="home-brief-selectors" aria-label="${t('宣传方向')}">
+          <label for="home-industry"><span><i>01</i> ${t('你做什么生意')}</span><select id="home-industry">${renderIndustryOptions(ctx)}</select></label>
+          <label for="home-purpose"><span><i>02</i> ${t('这次想宣传什么')}</span><select id="home-purpose">${renderPurposeOptions(ctx)}</select></label>
+          <label for="home-platform"><span><i>03</i> ${t('准备发到哪里')}</span><select id="home-platform">${PLATFORMS.map(item => `<option value="${esc(item.id)}" ${item.id === selectedPlatform ? 'selected' : ''}>${esc(t(item.label))}</option>`).join('')}</select></label>
         </div>
-        <label class="home-prompt-label" for="home-idea">补充你的想法 <span>选填，不会写也可以开始</span></label>
-        <textarea id="home-idea" maxlength="${HOMEMAX}" placeholder="比如：介绍我们的招牌产品，让顾客知道怎么选、怎么联系……">${esc(prompt)}</textarea>
+        <label class="home-prompt-label" for="home-idea">${t('补充你的想法')} <span>${t('选填，不会写也可以开始')}</span></label>
+        <textarea id="home-idea" maxlength="${HOMEMAX}" placeholder="${t('比如：介绍我们的招牌产品，让顾客知道怎么选、怎么联系……')}">${esc(prompt)}</textarea>
         <div id="home-selected-assets">${renderAssetSelection(ctx)}</div>
         <div class="home-composer-toolbar">
-          ${button('home-upload', `${icon('plus')}<span>添加${modules[currentMode].type === 'video' ? '视频' : '原图'}</span>`, 'home-add-image')}
+          ${button('home-upload', `${icon('plus')}<span>${t(modules[currentMode].type === 'video' ? '添加视频' : '添加原图')}</span>`, 'home-add-image')}
           <span class="home-composer-divider"></span>
-          <div class="home-mode-select">${icon(currentMode)}<select id="home-creation-mode" aria-label="选择创作类型">${Object.entries(modules).map(([key, value]) => `<option value="${key}" ${currentMode === key ? 'selected' : ''}>${esc(value.title)}</option>`).join('')}</select>${icon('chevron')}</div>
+          <div class="home-mode-select">${icon(currentMode)}<select id="home-creation-mode" aria-label="${t('选择创作类型')}">${Object.entries(modules).map(([key, value]) => `<option value="${key}" ${currentMode === key ? 'selected' : ''}>${esc(t(value.title))}</option>`).join('')}</select>${icon('chevron')}</div>
           <span class="home-composer-spacer"></span><small id="home-input-count" class="home-input-count">${prompt.length} / ${HOMEMAX}</small>
-          ${button('home-create', `补充信息并创作 ${icon('arrow')}`, 'home-send', 'aria-label="补充信息并创作"')}
+          ${button('home-create', `${t('补充信息并创作')} ${icon('arrow')}`, 'home-send', `aria-label="${t('补充信息并创作')}"`)}
         </div>
       </div>
 
-      <div class="home-quick-tools" aria-label="快捷工具">${tools.map(([target, title, symbol, skill]) => button('home-tool', `<span class="home-quick-icon">${icon(symbol)}</span><span>${title}</span>`, 'home-quick-tool', `data-mode="${target}" data-skill="${skill}"`)).join('')}</div>
+      <div class="home-quick-tools" aria-label="${t('快捷工具')}">${tools.map(([target, title, symbol, skill]) => button('home-tool', `<span class="home-quick-icon">${icon(symbol)}</span><span>${t(title)}</span>`, 'home-quick-tool', `data-mode="${target}" data-skill="${skill}"`)).join('')}</div>
     </section>
-    <section class="home-scene-section" aria-label="常用宣传场景">
-      <div class="home-section-title"><h2>常用场景</h2></div>
+    <section class="home-scene-section" aria-label="${t('常用宣传场景')}">
+      <div class="home-section-title"><h2>${t('常用场景')}</h2></div>
       <div id="home-scene-grid" class="home-scene-grid" style="--scene-columns:${sceneCount()}">${renderScenes(ctx)}</div>
     </section>
-    <section class="home-discover" aria-label="发现宣传灵感">
-      <div class="home-discover-heading"><h2>创作灵感</h2></div>
-      <div class="home-discover-header"><div class="home-discover-tabs" role="tablist" aria-label="素材方向列表">${button('home-gallery-tab', '素材灵感', showFavorites ? '' : 'active', `data-tab="discover" role="tab" aria-selected="${!showFavorites}"`)}${button('home-gallery-tab', '我的收藏', showFavorites ? 'active' : '', `data-tab="favorites" role="tab" aria-selected="${showFavorites}"`)}</div><span class="home-inspiration-note">摄影参考与 AI 风格示例</span></div>
-      <div class="home-category-filters" aria-label="按行业筛选">${MATERIAL_FILTERS.map(item => button('home-category', esc(item.label), category === item.id ? 'active' : '', `data-category="${esc(item.id)}" aria-pressed="${category === item.id}"`)).join('')}</div>
+    <section class="home-discover" aria-label="${t('发现宣传灵感')}">
+      <div class="home-discover-heading"><h2>${t('创作灵感')}</h2></div>
+      <div class="home-discover-header"><div class="home-discover-tabs" role="tablist" aria-label="${t('素材方向列表')}">${button('home-gallery-tab', t('素材灵感'), showFavorites ? '' : 'active', `data-tab="discover" role="tab" aria-selected="${!showFavorites}"`)}${button('home-gallery-tab', t('我的收藏'), showFavorites ? 'active' : '', `data-tab="favorites" role="tab" aria-selected="${showFavorites}"`)}</div><span class="home-inspiration-note">${t('摄影参考与 AI 风格示例')}</span></div>
+      <div class="home-category-filters" aria-label="${t('按行业筛选')}">${MATERIAL_FILTERS.map(item => button('home-category', esc(t(item.label)), category === item.id ? 'active' : '', `data-category="${esc(item.id)}" aria-pressed="${category === item.id}"`)).join('')}</div>
       <div id="home-material-context" class="home-material-context" aria-live="polite">${renderMaterialContext(ctx)}</div>
       <div id="home-inspiration-grid" class="home-inspiration-grid">${renderGallery(ctx)}</div>
       <div id="home-gallery-pagination" class="home-gallery-pagination" aria-live="polite">${renderGalleryPagination(ctx)}</div>
@@ -248,7 +249,7 @@ export function bindHomeView(ctx) {
     const oldIcon = event.target.parentElement.querySelector('.icon');
     if (oldIcon) oldIcon.outerHTML = ctx.icon(currentMode);
     const uploadLabel = document.querySelector('[data-action="home-upload"] > span');
-    if (uploadLabel) uploadLabel.textContent = ctx.modules[currentMode].type === 'video' ? '添加视频' : '添加原图';
+    if (uploadLabel) uploadLabel.textContent = t(ctx.modules[currentMode].type === 'video' ? '添加视频' : '添加原图');
     const assetsContainer = document.getElementById('home-selected-assets');
     if (assetsContainer) assetsContainer.innerHTML = renderAssetSelection(ctx);
     updateComposerStatus(ctx);
@@ -398,7 +399,7 @@ export function handleHomeAction(action, element, ctx) {
       try { localStorage.setItem(accountStorageKey('store-ai-inspiration-favorites'), JSON.stringify([...favorites])); } catch { ctx.toast('收藏未保存，请检查浏览器存储设置。'); }
       updateGallery(ctx);
       document.querySelectorAll('.home-detail-favorite').forEach(btn => {
-        btn.innerHTML = icon('star') + (favorites.has(id) ? '已收藏' : '收藏灵感');
+        btn.innerHTML = icon('star') + t(favorites.has(id) ? '已收藏' : '收藏灵感');
         btn.setAttribute('aria-pressed', String(favorites.has(id)));
       });
       break;
@@ -406,7 +407,7 @@ export function handleHomeAction(action, element, ctx) {
     case 'home-case': {
       const item = inspirationItems.find(candidate => candidate.id === element.dataset.id);
       if (!item) break;
-      ctx.openModal(item.title, `${materialIndustryLabel(item)} · ${item.kind}创作方向`, `<div class="home-case-detail"><div class="home-detail-image"><img src="${esc(item.image)}" alt="${esc(item.description)}"><span>${esc(item.sourceLabel || '摄影参考')}</span></div><div class="home-detail-content"><div class="home-detail-tags"><span>${esc(materialIndustryLabel(item))}</span><span>${esc(purposeLabel(item))}</span></div><span class="home-detail-type">${mediaIcon(item.kind, ctx)}${esc(item.materialTag || item.skill)}</span><p>${esc(item.description)}</p><label>创作要求</label><div class="home-detail-brief">${esc(item.prompt)}</div><small>仅供风格参考，创作请使用自己的素材。</small></div></div><footer class="modal-actions home-detail-actions">${button('home-favorite', icon('star') + (favorites.has(item.id) ? '已收藏' : '收藏灵感'), 'home-detail-favorite', `data-id="${esc(item.id)}" aria-pressed="${favorites.has(item.id)}"`)}${button('home-use-case', '用我的素材创作 ' + icon('arrow'), 'primary', `data-id="${esc(item.id)}"`)}</footer>`, true);
+      ctx.openModal(t(item.title), `${t(materialIndustryLabel(item))} · ${t('{kind}创作方向', {kind:t(item.kind)})}`, `<div class="home-case-detail"><div class="home-detail-image"><img src="${esc(item.image)}" alt="${esc(item.description)}"><span>${esc(t(item.sourceLabel || '摄影参考'))}</span></div><div class="home-detail-content"><div class="home-detail-tags"><span>${esc(t(materialIndustryLabel(item)))}</span><span>${esc(t(purposeLabel(item)))}</span></div><span class="home-detail-type">${mediaIcon(item.kind, ctx)}${esc(t(item.materialTag || item.skill))}</span><p>${esc(item.description)}</p><label>${t('创作要求')}</label><div class="home-detail-brief">${esc(item.prompt)}</div><small>${t('仅供风格参考，创作请使用自己的素材。')}</small></div></div><footer class="modal-actions home-detail-actions">${button('home-favorite', icon('star') + t(favorites.has(item.id) ? '已收藏' : '收藏灵感'), 'home-detail-favorite', `data-id="${esc(item.id)}" aria-pressed="${favorites.has(item.id)}"`)}${button('home-use-case', t('用我的素材创作') + ' ' + icon('arrow'), 'primary', `data-id="${esc(item.id)}"`)}</footer>`, true);
       break;
     }
     case 'home-use-case': {

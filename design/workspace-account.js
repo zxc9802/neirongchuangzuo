@@ -1,17 +1,21 @@
 import { refreshWorkspaceCredits, subscribeWorkspaceCredits } from './workspace-credits.js';
+import { t } from './workspace-preferences.js';
+let latestCreditState;
+globalThis.window?.addEventListener?.('workspace:languagechange', () => { if (latestCreditState) paintCredits(latestCreditState); });
 function login() { location.replace('/login?next=' + encodeURIComponent(location.pathname + location.search + location.hash)); }
 export function paintCredits(current) {
+  latestCreditState = current;
   const button = document.querySelector('#workspace-credits');
   if (!button) return;
   button.hidden = false;
   const unlimited = current.snapshot?.unlimited === true;
   button.querySelector('strong').textContent = unlimited ? '∞' : current.snapshot ? String(current.snapshot.available) : '—';
-  button.querySelector('small').textContent = current.stale ? '积分待刷新' : unlimited ? '无限积分' : '可用积分';
-  button.title = current.stale ? current.error || '正在读取积分' : unlimited ? '无限积分' : `可用 ${current.snapshot.available} 积分，冻结 ${current.snapshot.held} 积分`;
+  button.querySelector('small').textContent = t(current.stale ? '积分待刷新' : unlimited ? '无限积分' : '可用积分');
+  button.title = current.stale ? current.error || t('正在读取积分') : unlimited ? t('无限积分') : t('可用 {available} 积分，冻结 {held} 积分', { available: current.snapshot.available, held: current.snapshot.held });
   const summary = document.querySelector('#account-credit-summary');
-  summary.textContent = unlimited ? `无限积分${current.stale ? '（待刷新）' : ''}` : current.snapshot ? `可用 ${current.snapshot.available} 积分 · 冻结 ${current.snapshot.held} 积分${current.stale ? '（上次余额，待刷新）' : ''}` : current.error || '正在读取积分…';
+  summary.textContent = unlimited ? t('无限积分') + (current.stale ? t('（待刷新）') : '') : current.snapshot ? t('可用 {available} 积分 · 冻结 {held} 积分', { available: current.snapshot.available, held: current.snapshot.held }) + (current.stale ? t('（上次余额，待刷新）') : '') : current.error || t('正在读取积分') + '…';
   const pricing = current.snapshot?.pricing;
-  document.querySelector('#account-credit-rules').textContent = unlimited ? '' : pricing?.mode==='api_cost' ? '1000积分≈8元算力' : pricing ? `图片 ${pricing.imagePerUnit} 积分/张；视频 ${pricing.videoPoints} 积分/${pricing.videoSeconds} 秒，按实际时长。` : '积分规则暂时无法读取。';
+  document.querySelector('#account-credit-rules').textContent = unlimited ? '' : pricing?.mode==='api_cost' ? t('1000积分≈8元算力') : pricing ? t('图片 {points} 积分/张；视频 {video} 积分/{seconds} 秒，按实际时长。', { points: pricing.imagePerUnit, video: pricing.videoPoints, seconds: pricing.videoSeconds }) : t('积分规则暂时无法读取。');
   document.querySelector('#account-credit-error').textContent = current.error;
 }
 try {
@@ -23,15 +27,19 @@ try {
     globalThis.workspaceUser = user;
     globalThis.workspaceCreditOwner = localCredits ? 'local-dev' : null;
     if (user || localCredits) {
-      const name = user?.nickname || user?.account || '本地预览';
+      const accountName = () => user?.nickname || user?.account || t('本地预览');
       const account = document.querySelector('#workspace-account');
       account.hidden = false;
-      account.querySelector('span').textContent = name;
-      account.title = user?.account || name;
+      account.querySelector('span').textContent = accountName();
+      window.addEventListener('workspace:languagechange', () => {
+        account.querySelector('span').textContent = accountName();
+        account.title = user?.account || accountName();
+      });
+      account.title = user?.account || accountName();
       const showAccount = () => {
-        document.querySelector('#account-name').textContent = name;
+        document.querySelector('#account-name').textContent = accountName();
         document.querySelector('#account-email').textContent = user?.account || '';
-        document.querySelector('#account-source').textContent = !user ? '本地预览' : user.authSource === 'internal' ? '内部账号 · 密码请在原系统修改' : '本站注册账号';
+        document.querySelector('#account-source').textContent = t(!user ? '本地预览' : user.authSource === 'internal' ? '内部账号 · 密码请在原系统修改' : '本站注册账号');
         document.querySelector('#account-dialog').showModal();
         void refreshWorkspaceCredits();
       };

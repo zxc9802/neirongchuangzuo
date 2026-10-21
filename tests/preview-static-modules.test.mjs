@@ -12,6 +12,12 @@ test('every literal JavaScript import reachable from the workspace is served as 
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
+  const html = await (await fetch(origin)).text();
+  for (const match of html.matchAll(/(?:src|href)="(\/(?:workspace-[^"/]+\.(?:js|css)))"/g)) {
+    const response = await fetch(origin + match[1]);
+    assert.equal(response.status, 200, `missing preference asset: ${match[1]}`);
+    assert.match(response.headers.get('content-type') || '', match[1].endsWith('.css') ? /css/ : /javascript/);
+  }
   const pending = ['/app.js'], visited = new Set();
   while (pending.length) {
     const path = pending.shift();
@@ -29,5 +35,7 @@ test('every literal JavaScript import reachable from the workspace is served as 
   }
   assert.ok(visited.has('/malaysian-prices.js'), 'shared pricing import must be checked');
   assert.ok(visited.has('/video-creator-ui.js'), 'video UI import must be checked');
+  assert.ok(visited.has('/workspace-preferences.js'), 'language and theme preferences must be served');
+  assert.ok(visited.has('/workspace-locales.js'), 'interface dictionaries must be served');
   assert.ok(visited.size > 20, 'exercise the full workspace module graph');
 });

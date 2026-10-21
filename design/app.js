@@ -2,6 +2,7 @@ import {renderVideoReplica,bindVideoReplica,disposeVideoReplica} from './video-r
 import {renderVideoCreator,bindVideoCreator,disposeVideoCreator,handleVideoCreatorAction} from './video-creator.js';
 import {renderHomeView,bindHomeView,handleHomeAction} from './home.js';
 import {accountStorageKey} from './account-storage.js';
+import {t} from './workspace-preferences.js';
 import {validatePhotoSelection} from './image-upload.js';
 import {renderGeneratedAssets,bindGeneratedAssets,disposeGeneratedAssets,handleGeneratedAssetsAction} from './generated-assets.js';
 import {renderStudio,bindStudio,handleStudioAction} from './studios.js';
@@ -90,6 +91,16 @@ function importBusinessAssets(files,target,selectedCount=0){
 function beginCreation(next){if(next==='image')imageMode='generic';if(mode===next)selectedDraft=null;selectedDrafts[next]=null;navigate(next);}
 function navigate(next){if(!validPage(next))return;modal.close();pickerContext=null;if(modules[mode])selectedDrafts[mode]=selectedDraft;mode=next;selectedDraft=selectedDrafts[next]||null;previewTab=configs[next]?.contentPlan?'宣传方案':'参考示例';location.hash=next;render();}
 window.addEventListener('hashchange',()=>{const next=location.hash.slice(1);if(validPage(next)&&next!==mode)navigate(next);});
+function renderChrome(){
+ $('#nav').innerHTML=[['home','首页'],['agent','Agent 对话'],...Object.entries(modules).flatMap(([k,v])=>k==='video'?[[k,v.title],['replica',pageTitles.replica]]:[[k,v.title]])].map(([k,title])=>`<a href="#${k}" class="navitem ${mode===k?'active':''}" ${mode===k?'aria-current="page"':''}>${icon(k)}<small>${esc(t(title))}</small></a>`).join('')+`<a href="#assets" class="navitem ${mode==='assets'?'active':''}" ${mode==='assets'?'aria-current="page"':''}>${icon('folder')}<small>${t('资产')}</small></a>`+button('store',icon('store')+`<small>${t('商家资料')}</small>`,'navitem');
+ $('#workbar').innerHTML=`<div class="workbar-breadcrumb"><span>${t('创作工作台')}</span>${icon('chevron')}<strong>${esc(t(modules[mode]?.title||pageTitles[mode]))}</strong></div>${mode==='image'?`<div class="image-mode-switch" role="tablist" aria-label="${t('选择创作类型')}">${['restaurant','generic'].map(value=>button('image-mode',t(value==='restaurant'?'餐饮小红书':'通用图片'),imageMode===value?'active':'',`data-value="${value}" role="tab" aria-selected="${imageMode===value}"`)).join('')}</div>`:''}<div>${mode==='replica'||mode==='video'||mode==='image'&&imageMode==='restaurant'?'':button('prompts',icon('list')+t('我的草稿'),'textbutton')}${button('store',icon('store')+(mode==='image'&&imageMode==='restaurant'?t('门店资料'):esc(storeInfo.name||t('我的商家'))),'textbutton')}</div>`;
+}
+window.addEventListener('workspace:languagechange',()=>{
+ renderChrome();
+ if(mode==='home'){
+  const ctx=context();$('#main').innerHTML=renderHomeView(ctx);bindHomeView(ctx);
+ }
+});
 function render(){
  if(mode!=='replica')disposeVideoReplica();
  if(mode!=='video')disposeVideoCreator();
@@ -98,9 +109,8 @@ function render(){
  if(mode!=='image'||imageMode==='restaurant')disposeImageGeneration();
  if(mode!=='assets')disposeGeneratedAssets();
  document.body.dataset.page=mode;
- $('#nav').innerHTML=[['home','首页'],['agent','Agent 对话'],...Object.entries(modules).flatMap(([k,v])=>k==='video'?[[k,v.title],['replica',pageTitles.replica]]:[[k,v.title]])].map(([k,title])=>`<a href="#${k}" class="navitem ${mode===k?'active':''}" ${mode===k?'aria-current="page"':''}>${icon(k)}<small>${title}</small></a>`).join('')+`<a href="#assets" class="navitem ${mode==='assets'?'active':''}" ${mode==='assets'?'aria-current="page"':''}>${icon('folder')}<small>资产</small></a>`+button('store',icon('store')+'<small>商家资料</small>','navitem');
+ renderChrome();
  const ctx=context(),main=$('#main');
- $('#workbar').innerHTML=`<div class="workbar-breadcrumb"><span>创作工作台</span>${icon('chevron')}<strong>${modules[mode]?.title||pageTitles[mode]}</strong></div>${mode==='image'?`<div class="image-mode-switch" role="tablist" aria-label="图片创作模式">${['restaurant','generic'].map(value=>button('image-mode',value==='restaurant'?'餐饮小红书':'通用图片',imageMode===value?'active':'',`data-value="${value}" role="tab" aria-selected="${imageMode===value}"`)).join('')}</div>`:''}<div>${mode==='replica'||mode==='video'||mode==='image'&&imageMode==='restaurant'?'':button('prompts',icon('list')+'我的草稿','textbutton')}${button('store',icon('store')+(mode==='image'&&imageMode==='restaurant'?'门店资料':esc(storeInfo.name||'我的商家')),'textbutton')}</div>`;
  if(mode==='assets'){main.className='generated-assets-workspace';main.innerHTML=renderGeneratedAssets(ctx);bindGeneratedAssets(ctx);return;}
  if(mode==='home'){main.className='home';main.innerHTML=renderHomeView(ctx);bindHomeView(ctx);return;}
  if(mode==='agent'){main.className='agent-workspace';main.innerHTML=renderAgentChat(ctx);bindAgentChat(ctx);return;}
