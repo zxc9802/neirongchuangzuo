@@ -7,10 +7,10 @@ const MODELS = [
   { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, description: '最多生成30秒视频，1.5元/秒' },
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, description: '最多生成15秒视频，0.8元/秒' },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, description: '最多生成15秒视频，0.5元/秒' },
-  { id: 'wan3.0-video', name: 'Wan 3.0', maxDuration: 15, description: '参考视频最多15秒 · 720P · 输入与输出均计费，换声另计' },
+  { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, description: '参考视频最多15秒 · 720P · 输入与输出均计费，换声另计' },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
-const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');
+const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务').replace(/Wan\s*3\.0/gi, 'qiya-3.0');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '进度已保存', waiting: '等待继续处理', cancelled: '已停止处理', expired: '已过期' };
 const taskLabel = task => task.voiceEngine === 'chatterbox' && task.status === 'preparing'
   ? '正在保留原声节奏并转换音色' : task.voiceEngine === 'chatterbox' && task.status === 'verifying'
