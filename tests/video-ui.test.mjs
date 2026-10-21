@@ -7,7 +7,7 @@ const finiteWallet = () => ({ available: 1000, held: 0, total: 1000, unlimited: 
 const STANDARD_MODEL = 'doubao-seedance-2-0-260128', PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
 const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
 
-for (const language of ['zh', 'en', 'ms']) test(`language selector submits ${language} at creation and start`, async t => {
+test('replica keeps the source language without a selector or target in requests', async t => {
   let task; const posts = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
@@ -17,19 +17,22 @@ for (const language of ['zh', 'en', 'ms']) test(`language selector submits ${lan
     return Response.json({ task });
   } });
   page.recover(); await page.poll();
-  for (const name of ['中文', '英语', '马来语']) assert.ok(page.html().includes(`>${name}</option>`));
-  page.node('#replica-language').onchange({ target: { value: language } }); await page.settle();
-  assert.match(page.html(), new RegExp(`option value="${language}" selected`));
+  assert.doesNotMatch(page.html(), /replica-language|生成语言/);
+  assert.match(page.html(), /保留原视频语言/);
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
-  for (const suffix of ['/tasks', '/start']) assert.equal(posts.find(item => item.path.endsWith(suffix)).body.targetLanguage, language);
+  for (const suffix of ['/tasks', '/start']) {
+    const body = posts.find(item => item.path.endsWith(suffix)).body;
+    assert.equal(Object.hasOwn(body, 'targetLanguage'), false);
+    assert.equal(body.voiceEngine, 'chatterbox'); assert.equal(body.sourceAudioMode, 'original');
+  }
 });
 
-test('language detection and routing appear in progress without replacing reference players', async t => {
+test('legacy translation progress remains visible without restoring a language selector', async t => {
   const task = { id: 'language-preview', status: 'preparing', voiceEngine: 'chatterbox', targetLanguage: 'ms', createdAt: Date.now() };
   const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id);
   assert.match(page.html(), /正在识别原视频语言/);
-  assert.match(page.html(), /id="replica-language"[^>]*disabled/);
+  assert.doesNotMatch(page.html(), /id="replica-language"/);
   const renders = page.renders();
   task.languageRouting = { source: 'ms', target: 'ms', translate: false, reason: 'same-language' };
   await page.poll();

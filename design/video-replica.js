@@ -26,13 +26,13 @@ const taskLabel = task => task.status === 'preparing' && ['en', 'ms'].includes(t
   : task.voiceEngine === 'indextts2' && task.status === 'running' && !task.narrationProgress?.ready
     ? '正在替换人物并生成参考配音' : labels[task.status] || '正在处理';
 const pending = task => task && !['draft', 'completed', 'failed', 'expired', 'waiting', 'cancelled'].includes(task.status);
-let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, targetLanguage: 'zh', files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
+let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
 let context, timer, polling = false, unsubscribeCredits;
 let selectedMaterials = {};
 function resetFiles() { for (const url of Object.values(state.urls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; selectedMaterials = {}; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
-  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, targetLanguage: 'zh', files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
+  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
 }
 async function request(path, options = {}) {
   const signal = AbortSignal.timeout(options.method === 'PUT' ? 180_000 : options.method ? 60_000 : 15_000);
@@ -51,7 +51,6 @@ function jsonPost(body = {}) { return { method: 'POST', headers: { 'Content-Type
 function remember(task) {
   state.current = task;
   state.model = task.model || state.model;
-  state.targetLanguage = task.targetLanguage || 'zh';
   state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt);
   observeCreditTask(task);
 }
@@ -76,8 +75,8 @@ function actionMessage() {
 }
 function voiceHint() {
   const task = state.current && state.current.status !== 'draft' ? state.current : DEFAULT_VOICE;
-  if (['en', 'ms'].includes(state.current?.targetLanguage || state.targetLanguage)) return '<p class="replica-voice-hint">先识别原视频语言。同语言保留原台词并转换音色；语言不同时翻译台词，用参考音色配音并同步口型。</p>';
-  return `<p class="replica-voice-hint">${task.voiceEngine === 'chatterbox' ? '将原视频人声转换为上传的音色，尽量保留原台词、语速、停顿和情绪，不逐句变速。原片需有清晰单人声音；音色与口型效果请试听核对。' : task.voiceEngine === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频，原片需包含至少 5 秒清晰原声。' : task.sourceAudioMode === 'silent' ? '由视频模型按原片台词和时间线直接配音，音色只参考上传的声音，无需额外口型处理。情绪参考画面和台词，音色效果需试听。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
+  if (['en', 'ms'].includes(task.targetLanguage)) return '<p class="replica-voice-hint">此历史任务沿用提交时的声音处理流程；新建复刻保留原视频语言。</p>';
+  return `<p class="replica-voice-hint">${task.voiceEngine === 'chatterbox' ? '保留原视频语言，将原视频人声转换为上传的音色，尽量保留原台词、语速、停顿和情绪，不逐句变速。原片需有清晰单人声音；音色与口型效果请试听核对。' : task.voiceEngine === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频，原片需包含至少 5 秒清晰原声。' : task.sourceAudioMode === 'silent' ? '由视频模型按原片台词和时间线直接配音，音色只参考上传的声音，无需额外口型处理。情绪参考画面和台词，音色效果需试听。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
 }
 function selectedModel() {
   return MODELS.find(model => model.id === (state.current?.model || state.model))
@@ -85,11 +84,6 @@ function selectedModel() {
       ? { id: state.current.model, name: 'PixVerse Swap', maxDuration: 30 } : MODELS[0]);
 }
 function modelName(task) { return (task.model === 'fal-ai/pixverse/swap' ? 'PixVerse Swap' : MODELS.find(model => model.id === (task.model || DEFAULT_MODEL))?.name) || ''; }
-function languagePicker(ctx) {
-  const selected = state.current?.targetLanguage || state.targetLanguage || 'zh';
-  const locked = state.busy || state.current && state.current.status !== 'draft';
-  return `<div class="replica-model-setting"><label for="replica-language">生成语言</label><select id="replica-language" class="replica-models" ${locked ? 'disabled' : ''}>${LANGUAGES.map(item => `<option value="${item.id}" ${selected === item.id ? 'selected' : ''}>${ctx.esc(item.name)}</option>`).join('')}</select><p class="replica-model-description">自动识别原视频语言；语言一致时保留原方案。英语和马来语仅在语言不同时翻译配音并同步口型；中文沿用原方案。</p></div>`;
-}
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
   const price = generationPrice('video', selected.id);
@@ -186,7 +180,7 @@ export function renderVideoReplica(ctx) {
   const task = state.current;
   return `<div class="replica-heading"><div><span class="replica-eyebrow">1:1复刻 · ${ctx.esc(selectedModel().name)}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-toolbar"><button type="button" id="replica-new" class="secondary" ${state.busy ? 'disabled' : ''}>新建复刻</button></div>
-    <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${modelPicker(ctx)}${languagePicker(ctx)}
+    <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${modelPicker(ctx)}
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
       <div id="replica-submit-area" class="replica-submit-area">${submitArea(ctx)}</div></section>
       <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
@@ -207,14 +201,6 @@ async function selectModel(id) {
     }
     remember((await request(`/tasks/${state.current.id}/model`, jsonPost({ model: id }))).task);
   }
-  catch (cause) { state.error = cause.message; }
-  finally { state.busy = false; refresh(); }
-}
-async function selectLanguage(value) {
-  if (state.busy || state.current && state.current.status !== 'draft' || !LANGUAGES.some(item => item.id === value)) return;
-  if (!state.current) { state.targetLanguage = value; refresh(); return; }
-  state.busy = true; state.error = ''; refresh();
-  try { remember((await request(`/tasks/${state.current.id}/language`, jsonPost({ targetLanguage: value }))).task); }
   catch (cause) { state.error = cause.message; }
   finally { state.busy = false; refresh(); }
 }
@@ -241,10 +227,10 @@ async function submit() {
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
-    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DEFAULT_VOICE, targetLanguage = state.current?.targetLanguage || state.targetLanguage || 'zh';
+    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DEFAULT_VOICE;
     // Keep the request ID before networking so an uncertain response can be retried safely.
     if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now() };
-    remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode, targetLanguage }))).task);
+    remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode }))).task);
     if (state.current.status === 'draft') {
       for (const kind of ['video', 'photo', 'voice']) {
         if (selectedMaterials[kind]) {
@@ -255,7 +241,7 @@ async function submit() {
         remember((await request(`/tasks/${id}/${kind}`, { method: 'PUT', headers: { 'Content-Type': state.files[kind].type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(state.files[kind].name) }, body: state.files[kind] })).task);
       }
       resetFiles();
-      remember((await request(`/tasks/${id}/start`, jsonPost({ model, voiceEngine, sourceAudioMode, targetLanguage }))).task);
+      remember((await request(`/tasks/${id}/start`, jsonPost({ model, voiceEngine, sourceAudioMode }))).task);
     }
     void refreshWorkspaceCredits();
   } catch (cause) { state.error = cause.message; }
@@ -331,13 +317,12 @@ export function bindVideoReplica(ctx) {
   context = ctx;
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
   document.querySelector('#replica-models').onchange = event => { void selectModel(event.target.value); };
-  document.querySelector('#replica-language').onchange = event => { void selectLanguage(event.target.value); };
   for (const kind of ['video', 'photo', 'voice']) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
   const resume = document.querySelector('#replica-resume'); if (resume) resume.onclick = () => { void recoverTask('resume'); };
   const cancel = document.querySelector('#replica-cancel'); if (cancel) cancel.onclick = () => { void recoverTask('cancel'); };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
-  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; state.targetLanguage = 'zh'; state.error = ''; refresh(); };
+  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };
   document.querySelector('#replica-history').onclick = event => {
     const button = event.target.closest('[data-replica-task]'); if (!button || state.busy) return;

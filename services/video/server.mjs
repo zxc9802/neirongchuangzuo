@@ -19,7 +19,7 @@ import { createNarrationService } from './narration.mjs';
 import { createVoiceConversionService } from './voice-conversion.mjs';
 import { createLipsyncService } from './lipsync.mjs';
 import { createProviderStorage } from './provider-storage.mjs';
-import { VIDEO_LANGUAGES, targetLanguage, languageRoute, normalizeLanguage } from './languages.mjs';
+import { languageRoute, normalizeLanguage } from './languages.mjs';
 import { createLocalizationService } from './localization.mjs';
 import { createHeygenLipsyncService } from './heygen.mjs';
 
@@ -166,7 +166,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       canReplaceSource: !expired && task.status === 'waiting' && task.recovery?.action === 'input' && !task.billing && !task.providerDispatched,
       canCancel: !expired && (ACTIVE.has(task.status) || task.status === 'waiting'),
       sourceAudioMode: task.sourceAudioMode || 'original',
-      targetLanguage: task.targetLanguage || 'zh', languageRouting: task.languageRouting,
+      targetLanguage: task.targetLanguage, languageRouting: task.languageRouting,
       localizationProgress: task.localization && { ready: task.localization.ready, text: task.localization.text,
         completed: task.localization.segments?.filter(segment => segment.status === 'ready').length || 0,
         total: task.localization.segments?.length || 0 },
@@ -388,6 +388,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!ACTIVE.has(task.status)) return;
     if (task.status === 'preparing') {
       await analyzeSource(task);
+      // Only already-started legacy tasks retain translation and paid-job recovery.
       if (task.targetLanguage && task.voiceEngine === 'chatterbox') {
         await localization?.detectLanguage?.(task, () => save(task));
         task.languageRouting = languageRoute(task.speech, task.targetLanguage); await save(task);
@@ -701,7 +702,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         json(res, 200, { enabled: availableModels.some(model => model.enabled), models: availableModels,
           voiceEnabled: Boolean(speech.enabled && voiceConversion?.enabled), voiceEngines: voiceEngines.filter(engine => engine.id === 'chatterbox'),
           voiceEngine: 'chatterbox', sourceAudioMode: 'original', model: availableModels.find(model => model.enabled)?.id || MODEL,
-          languages: VIDEO_LANGUAGES, localizationEnabled: Boolean(localization?.enabled && heygen?.enabled),
           prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return;
       }
       if (path === `${PREFIX}/tasks` && req.method === 'GET') {
@@ -718,7 +718,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const model = selectedModel(body.model);
           // Keep explicit legacy parameters compatible; new clients convert the source voice.
           const task = { id: body.requestId, userId, model, voiceEngine: selectedVoiceEngine(body.voiceEngine ?? 'chatterbox'),
-            targetLanguage: targetLanguage(body.targetLanguage),
             sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model),
             status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
@@ -773,11 +772,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'language' && req.method === 'POST') {
-          const body = await readJSON(req);
-          if (task.status !== 'draft') throw error('任务已提交，不能更改生成语言。', 409);
-          task.targetLanguage = targetLanguage(body.targetLanguage);
-          delete task.languageRouting;
-          await save(task); json(res, 200, { task: view(task) }); return;
+          await readJSON(req);
+          throw error('复刻已改为保留原视频语言，请刷新页面后继续。', 410, 'VIDEO_LANGUAGE_SELECTION_REMOVED');
         }
         if (match[2] === 'source-audio' && req.method === 'POST') {
           const body = await readJSON(req);
@@ -895,8 +891,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
           const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
-          const language = targetLanguage(body.targetLanguage ?? task.targetLanguage);
-          if (language !== 'zh' && voiceEngine !== 'chatterbox') throw error('英语和马来语请选择当前的参考音色方案。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
           if (voiceEngine === 'chatterbox') {
             if (!task.voice) throw error('请先上传目标声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
             if (!voiceConversion?.enabled || !speech.enabled) throw error('音色转换服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
@@ -917,7 +911,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.pricingKey = generationPrice('video', model)?.key;
           task.cnyPerSecond = model === WAN3_MODEL ? wan3Price(now()) : models.find(item => item.id === model).cnyPerSecond;
           task.voiceEngine = voiceEngine;
-          task.targetLanguage = language;
+          // Ignore cached clients and clear draft choices from before language selection was removed.
+          delete task.targetLanguage; delete task.languageRouting; delete task.languageDetection; delete task.localization;
           task.recoveryPolicy = ['indextts2', 'chatterbox'].includes(voiceEngine) || sourceAudioMode === 'silent' ? 1 : undefined;
           if (task.recoveryPolicy) task.recoveryDeadline = now() + 30 * 60_000;
           task.sourceAudioMode = sourceAudioMode;

@@ -265,46 +265,51 @@ async function localizedReplica(t, { source = 'zh', target = 'en', confidence = 
   return { ...app, id, counts };
 }
 
+async function restoreStartedTranslation(app, targetLanguage) {
+  await app.close();
+  const path = join(app.root, 'video', app.id, 'task.json'), task = JSON.parse(await readFile(path, 'utf8'));
+  const pricingKey = generationPrice('video', task.model).key;
+  const record = await app.wallet.reserve({ userId: 'alice', taskId: app.id, kind: 'video', units: task.duration, pricingKey });
+  Object.assign(task, { targetLanguage, status: 'preparing', startedAt: Date.now(), recoveryPolicy: 1,
+    recoveryDeadline: Date.now() + 30 * 60_000, pricingKey,
+    billing: { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, mode: 'model_price', pricingKey } });
+  await writeFile(path, JSON.stringify(task)); await app.open();
+}
+
 for (const source of ['zh', 'en', 'ms']) for (const target of ['zh', 'en', 'ms']) {
-  test(`language routing ${source} -> ${target} preserves the required pipeline through restart`, async t => {
-    const translate = target !== 'zh' && source !== target;
-    const app = await localizedReplica(t, { source, target, disconnected: !translate });
+  test(`source ${source} keeps original conversion despite cached target ${target}, including restart`, async t => {
+    const app = await localizedReplica(t, { source, target });
     await app.close(); await app.open();
-    assert.equal((await app.current(app.id)).targetLanguage, target);
-    assert.equal((await app.call(`/tasks/${app.id}/start`, { body: {} })).status, 202);
+    assert.equal((await app.current(app.id)).targetLanguage, undefined);
+    assert.equal((await app.call(`/tasks/${app.id}/start`, { body: { targetLanguage: target } })).status, 202);
     const running = await app.until(app.id, task => task.status === 'running');
-    assert.equal(running.languageRouting.translate, translate);
-    assert.equal(app.counts.conversions, translate ? 0 : 1);
-    assert.equal(app.counts.translations, translate ? 1 : 0);
-    assert.equal((await app.call(`/tasks/${app.id}/language`, { body: { targetLanguage: 'ms' } })).status, 409);
+    assert.equal(running.languageRouting, undefined); assert.equal(running.targetLanguage, undefined);
+    assert.equal(running.speech.language, source);
+    assert.equal(app.counts.conversions, 1); assert.equal(app.counts.translations, 0);
+    await app.close(); await app.open();
     app.state.done = true;
-    if (translate) {
-      await app.until(app.id, task => task.status === 'verifying' && app.counts.lipQueries > 0);
-      await app.close(); await app.open();
-    }
-    app.state.lipDone = true;
     const completed = await app.until(app.id, task => task.status === 'completed');
-    assert.equal(completed.audioCheck.lipSync, translate ? 'heygen-precision' : 'needs_preview');
-    assert.equal(app.counts.lipSubmits, translate ? 1 : 0);
-    assert.equal(Buffer.from(await (await app.call(`/tasks/${app.id}/result`)).arrayBuffer()).toString(), translate ? 'TRANSLATED' : 'ORIGINAL');
+    assert.equal(completed.audioCheck.lipSync, 'needs_preview');
+    assert.equal(app.counts.lipSubmits, 0); assert.equal(app.counts.conversions, 1);
+    assert.equal(app.state.generations, 1);
+    assert.equal(Buffer.from(await (await app.call(`/tasks/${app.id}/result`)).arrayBuffer()).toString(), 'ORIGINAL');
   });
 }
 
-for (const overrides of [{ source: undefined }, { source: 'und' }, { confidence: .3 }, { outputLanguage: 'id' }]) {
-  test(`unreliable source or wrong translated language pauses before visual/lipsync generation: ${JSON.stringify(overrides)}`, async t => {
-    const app = await localizedReplica(t, { ...overrides, source: Object.hasOwn(overrides, 'source') ? overrides.source || 'und' : 'zh' });
+for (const overrides of [{ source: 'und' }, { source: 'ind', confidence: .3 }]) {
+  test(`source language uncertainty does not block original conversion: ${JSON.stringify(overrides)}`, async t => {
+    const app = await localizedReplica(t, { ...overrides, disconnected: true });
+    app.state.done = true;
     await app.call(`/tasks/${app.id}/start`, { body: {} });
-    const waiting = await app.until(app.id, task => task.status === 'waiting');
-    assert.equal(waiting.canResume, false); assert.equal(app.state.generations, 0); assert.equal(app.counts.lipSubmits, 0);
-    assert.equal(app.counts.translations, overrides.outputLanguage ? 1 : 0);
-    assert.match(waiting.recovery.message, /语言|核对/);
+    assert.equal((await app.until(app.id, task => task.status === 'completed')).audioCheck.engine, 'chatterbox');
+    assert.equal(app.counts.conversions, 1); assert.equal(app.counts.translations, 0); assert.equal(app.counts.lipSubmits, 0);
   });
 }
 
-test('uncertain HeyGen submission stays held after restart without a second paid call', async t => {
+test('an already-started legacy HeyGen submission stays held after restart without a second paid call', async t => {
   const app = await localizedReplica(t, { uncertain: true });
   app.state.done = true;
-  await app.call(`/tasks/${app.id}/start`, { body: {} });
+  await restoreStartedTranslation(app, 'en');
   assert.equal((await app.until(app.id, task => task.status === 'waiting')).canResume, false);
   await app.close(); await app.open();
   await app.call(`/tasks/${app.id}/resume`, { body: {} });
@@ -312,23 +317,31 @@ test('uncertain HeyGen submission stays held after restart without a second paid
   assert.equal(app.counts.lipSubmits, 1); assert.equal(app.state.generations, 1);
 });
 
-test('a matching Malay TTS transcript tolerates the known Indonesian ASR label', async t => {
+test('an already-started Malay translation finishes with its original audio and paid-job state', async t => {
   const app = await localizedReplica(t, { source: 'zh', target: 'ms', outputLanguage: 'ind' });
   app.state.done = true; app.state.lipDone = true;
-  await app.call(`/tasks/${app.id}/start`, { body: {} });
+  await restoreStartedTranslation(app, 'ms');
   assert.equal((await app.until(app.id, task => task.status === 'completed')).audioCheck.language, 'ms');
   assert.equal(app.counts.lipSubmits, 1);
 });
 
-test('language validation and draft edits are persisted and reject invalid target values', async t => {
+test('old draft language choices are cleared at start and the retired language endpoint cannot re-enable translation', async t => {
   const app = await localizedReplica(t);
-  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), targetLanguage: 'id' } })).status, 400);
-  assert.equal((await app.call(`/tasks/${app.id}/language`, { body: { targetLanguage: 'fr' } })).status, 400);
-  assert.equal((await app.call(`/tasks/${app.id}/language`, { body: { targetLanguage: 'ms' } })).status, 200);
-  await app.close(); await app.open();
+  const config = await (await app.call('/config')).json();
+  assert.equal(config.languages, undefined); assert.equal(config.localizationEnabled, undefined);
+  assert.equal((await app.call(`/tasks/${app.id}/language`, { body: { targetLanguage: 'ms' } })).status, 410);
+  await app.close();
+  const path = join(app.root, 'video', app.id, 'task.json'), task = JSON.parse(await readFile(path, 'utf8'));
+  Object.assign(task, { targetLanguage: 'ms', languageRouting: { source: 'zh', target: 'ms', translate: true },
+    languageDetection: { pending: true }, localization: { failed: true } });
+  await writeFile(path, JSON.stringify(task)); await app.open();
   assert.equal((await app.current(app.id)).targetLanguage, 'ms');
-  assert.equal((await app.call(`/tasks/${app.id}/start`, { body: { targetLanguage: 'xx' } })).status, 400);
-  assert.equal(await app.wallet.reservation('alice', app.id), null);
+  assert.equal((await app.call(`/tasks/${app.id}/start`, { body: { targetLanguage: 'xx' } })).status, 202);
+  const running = await app.until(app.id, task => task.status === 'running');
+  assert.equal(running.targetLanguage, undefined); assert.equal(running.localizationProgress, undefined);
+  assert.equal(app.counts.conversions, 1); assert.equal(app.counts.translations, 0);
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  for (const key of ['targetLanguage', 'languageRouting', 'languageDetection', 'localization']) assert.equal(saved[key], undefined);
 });
 
 const CAPTIONS = { engine: 'rapidocr', kind: 'burned', width: 512, height: 768, cues: [
