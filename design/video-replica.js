@@ -23,7 +23,8 @@ const taskLabel = task => task.voiceEngine === 'chatterbox' && task.status === '
 const pending = task => task && !['draft', 'completed', 'failed', 'expired', 'waiting', 'cancelled'].includes(task.status);
 let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
 let context, timer, polling = false, unsubscribeCredits;
-function resetFiles() { for (const url of Object.values(state.urls)) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; }
+let selectedMaterials = {};
+function resetFiles() { for (const url of Object.values(state.urls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; selectedMaterials = {}; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
   if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
@@ -88,7 +89,7 @@ function modelPicker(ctx) {
   }).join('')}</select><p id="replica-model-description" class="replica-model-description" title="${ctx.esc(MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p></div>`;
 }
 function slot(kind, ctx) {
-  const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind];
+  const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind] || selectedMaterials[kind];
   const saved = state.current?.[kind];
   const voiceRequired = voice && (!state.current || state.current.status === 'draft' || ['indextts2', 'chatterbox'].includes(state.current.voiceEngine) || state.current.sourceAudioMode === 'silent');
   const disabled = state.busy || pending(state.current) || state.current && state.current.status !== 'draft' && !(video && state.current.canReplaceSource) || voice && !state.config?.voiceEnabled;
@@ -99,10 +100,10 @@ function slot(kind, ctx) {
       : `<img src="${ctx.esc(source)}" alt="目标人物照片预览">` : `<div class="replica-upload-symbol">${ctx.icon(video ? 'video' : voice ? 'audio' : 'image')}</div>`;
   return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title"><span>${video ? '01' : voice ? '03' : '02'}</span><h3>${title}${voice ? `<small>${voiceRequired ? '必填' : '选填'} · 更换音色</small>` : ''}</h3></div>
     ${voice ? voiceHint() : ''}<div class="replica-input-preview">${preview}</div>
-    <strong class="replica-file-name">${ctx.esc(selected?.name || (saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : '上传你想替换成的人物'))}</strong>
+    <strong class="replica-file-name">${ctx.esc(selected?.name || (saved?.assetId ? '已存入资产，长期保留' : saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : '上传你想替换成的人物'))}</strong>
     <p>${video ? `单个人物 · 2–${selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '声音分析服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}">
-    <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${selected || saved ? '更换' : '选择'}${title}</label></section>`;
+    <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${selected || saved ? '更换' : '选择'}${title}</label>${!video ? `<a href="#assets" class="replica-asset-link">从资产选择${voice ? '声音' : '形象'}</a>` : ''}</section>`;
 }
 function generationEstimate() {
   const model = selectedModel();
@@ -199,6 +200,7 @@ async function selectFile(kind, file) {
   const limit = kind === 'video' ? 50 : kind === 'voice' ? 15 : 10;
   if (file.size > limit * 1024 * 1024) { state.error = `文件过大，${kind === 'video' ? '视频' : kind === 'voice' ? '声音参考' : '照片'}不能超过 ${limit} MB。`; refresh(); return; }
   if (state.urls[kind]) URL.revokeObjectURL(state.urls[kind]);
+  delete selectedMaterials[kind];
   state.files[kind] = file; state.urls[kind] = URL.createObjectURL(file); state.error = ''; refresh();
   if (kind === 'video' && state.current?.canReplaceSource) {
     state.busy = true; refresh();
@@ -211,8 +213,8 @@ async function selectFile(kind, file) {
 }
 async function submit() {
   if (state.busy || pending(state.current) || state.current && state.current.status !== 'draft') return;
-  if ((!state.files.video && !state.current?.video) || (!state.files.photo && !state.current?.photo)) { state.error = '请先上传一段参考视频和一张人物照片。'; refresh(); return; }
-  if (!state.files.voice && !state.current?.voice) { state.error = '请先上传声音参考。'; refresh(); return; }
+  if ((!state.files.video && !state.current?.video) || (!state.files.photo && !selectedMaterials.photo && !state.current?.photo)) { state.error = '请先上传一段参考视频和一张人物照片。'; refresh(); return; }
+  if (!state.files.voice && !selectedMaterials.voice && !state.current?.voice) { state.error = '请先上传声音参考。'; refresh(); return; }
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
@@ -222,8 +224,12 @@ async function submit() {
     remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode }))).task);
     if (state.current.status === 'draft') {
       for (const kind of ['video', 'photo', 'voice']) {
+        if (selectedMaterials[kind]) {
+          remember((await request(`/tasks/${id}/${kind}`, jsonPost({ assetId: selectedMaterials[kind].id }))).task);
+          continue;
+        }
         if (!state.files[kind]) continue;
-        remember((await request(`/tasks/${id}/${kind}`, { method: 'PUT', headers: { 'Content-Type': state.files[kind].type || 'application/octet-stream' }, body: state.files[kind] })).task);
+        remember((await request(`/tasks/${id}/${kind}`, { method: 'PUT', headers: { 'Content-Type': state.files[kind].type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(state.files[kind].name) }, body: state.files[kind] })).task);
       }
       resetFiles();
       remember((await request(`/tasks/${id}/start`, jsonPost({ model, voiceEngine, sourceAudioMode }))).task);
@@ -287,6 +293,16 @@ async function poll() {
     const message = document.querySelector('#replica-error'); if (message) message.textContent = actionMessage();
     const details = document.querySelector('#replica-progress'); if (details && context) details.innerHTML = progress(context);
   } finally { polling = false; }
+}
+export function useReplicaMaterial(material) {
+  account();
+  if (state.busy) throw new Error('素材正在提交，请完成后再选择。');
+  if (!['photo', 'voice'].includes(material.kind) || !/^(photo|voice)-[a-f0-9]{64}$/.test(material.id)) throw new Error('素材无效。');
+  if (state.current && state.current.status !== 'draft') { resetFiles(); state.current = null; }
+  const kind = material.kind;
+  if (state.urls[kind]?.startsWith('blob:')) URL.revokeObjectURL(state.urls[kind]);
+  delete state.files[kind]; selectedMaterials[kind] = material;
+  state.urls[kind] = `/api/assets/materials/${material.id}/media`; state.error = ''; refresh();
 }
 export function bindVideoReplica(ctx) {
   context = ctx;

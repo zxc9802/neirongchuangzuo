@@ -32,7 +32,7 @@ async function fixture(t, api) {
   ctx.refresh(); module.bindVideoCreator(ctx);
   t.after(() => { module.disposeVideoCreator(); for (const key of names) { if (old[key] === undefined) delete globalThis[key]; else globalThis[key] = old[key]; } });
   await delay(15);
-  return { node, ctx, html: () => html, modal: () => modal, popover:()=>node('.vc-popover').innerHTML, action: (name, data = {}, actionContext = ctx) => module.handleVideoCreatorAction(name, { dataset: data, getBoundingClientRect(){return {left:10,top:600,bottom:630};},setAttribute(){} }, actionContext), async poll() { await poll(); await delay(5); } };
+  return { node, ctx, useMaterial: module.useVideoMaterial, html: () => html, modal: () => modal, popover:()=>node('.vc-popover').innerHTML, action: (name, data = {}, actionContext = ctx) => module.handleVideoCreatorAction(name, { dataset: data, getBoundingClientRect(){return {left:10,top:600,bottom:630};},setAttribute(){} }, actionContext), async poll() { await poll(); await delay(5); } };
 }
 
 function composerApi() {
@@ -67,6 +67,14 @@ test('a full history and favorites do not preload completed video streams', asyn
   assert.equal((f.html().match(/decoding="async"/g) || []).length, 60);
   assert.doesNotMatch(f.html(), /<video|#t=0\.1/);
   assert.match(f.html(), new RegExp(data.tasks[0].conversationId + '/assets/' + data.tasks[0].referenceImageIds[0]));
+});
+
+test('saved photos and voices enter the AI video character and voice inputs without generating', async t => {
+  const data = composerApi(), f = await fixture(t, data.api);
+  await f.useMaterial(new File(['photo'], '形象.jpg', { type: 'image/jpeg' }), 'photo');
+  await f.useMaterial(new File(['voice'], '声音.wav', { type: 'audio/wav' }), 'voice');
+  assert.deepEqual(data.uploads.map(item => item.headers['X-Asset-Purpose']), ['character', 'voice']);
+  assert.equal(data.scriptCalls, 0); assert.equal(data.tasks.length, 0);
 });
 
 test('resolution chooser only exposes 720p for every model and legacy scripts require a matching new plan', async t => {

@@ -14,6 +14,7 @@ import { createCreditsLedger } from './services/credits/store.mjs';
 import { createVideoHandler, isVideoSourcePath } from './services/video/server.mjs';
 import { videoConfig } from './services/video/provider.mjs';
 import { createVideoCreatorHandler, isCreatorSourcePath } from './services/video-creator/server.mjs';
+import { createMaterialLibrary, createMaterialHandler } from './services/assets/library.mjs';
 const files = new Map([
   ['/', ['design/index.html', 'text/html; charset=utf-8']],
   ['/login', ['design/auth.html', 'text/html; charset=utf-8']],
@@ -82,11 +83,12 @@ function safeError(res, status, code, message, close = false) {
   res.end(JSON.stringify({ error: message, code }));
 }
 
-export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, localUnlimitedCredits = false, aiOptions, restaurantOptions, mixOptions, videoOptions, creatorOptions, credits: injectedCredits, creditsOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, createVideo = createVideoHandler, createVideoCreator = createVideoCreatorHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
+export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publicOrigin, authRequired = false, localUnlimitedCredits = false, aiOptions, restaurantOptions, mixOptions, videoOptions, creatorOptions, materialLibrary: injectedMaterials, credits: injectedCredits, creditsOptions, createAI = createAIHandler, createRestaurant = createRestaurantHandler, createMix = createMixHandler, createVideo = createVideoHandler, createVideoCreator = createVideoCreatorHandler, logger = code => console.error(`[preview] ${code}`) } = {}) {
  const backend = new URL(backendUrl);
  const externalOrigin = publicOrigin ? new URL(publicOrigin) : undefined;
  if (backend.protocol !== 'http:' || !['127.0.0.1', 'localhost'].includes(backend.hostname)) throw new Error('The development backend must use loopback HTTP.');
  const runtimeSettings = loadWorkspaceSettings();
+ const materialLibrary = injectedMaterials || createMaterialLibrary({ env: runtimeSettings });
  const dataRoot = workspaceDataRoot(runtimeSettings);
  const unlimitedLocal = localUnlimitedCredits === true && !authRequired && process.env.NODE_ENV !== 'production';
  const credits = injectedCredits ?? (authRequired || creditsOptions || unlimitedLocal ? createCreditsLedger({
@@ -103,7 +105,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
  const creator = () => handleVideoCreator ||= createVideoCreator({ storageDir: join(dataRoot, 'video-creator'), env: runtimeSettings,
    publicOrigin: externalOrigin?.origin, credits, ...creatorOptions });
  const video = () => handleVideo ||= createVideo({ storageDir: join(dataRoot, 'video'), env: runtimeSettings,
-   publicOrigin: externalOrigin?.origin, credits, ...videoOptions });
+   publicOrigin: externalOrigin?.origin, credits, materialLibrary, ...videoOptions });
+ const handleMaterials = createMaterialHandler({ library: materialLibrary, archiveExisting: userId => video().archiveMaterials?.(userId) });
  const mix = () => handleMix ||= createMix({ dataDir: join(dataRoot, 'mix'), publicOrigin: externalOrigin?.origin,
    requireOrigin: authRequired, credits, env: { ...runtimeSettings, OPENLUX_API_KEY: loadAIConfig(runtimeSettings).apiKey }, ...mixOptions });
  const restaurant = () => handleRestaurant ||= createRestaurant({ dataDir: join(dataRoot, 'restaurant'),
@@ -131,7 +134,8 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
   }
   const restaurantPath = path === '/api/restaurant' || path.startsWith('/api/restaurant/');
   const creatorPath = path === '/api/video-creator' || path.startsWith('/api/video-creator/');
-  const videoPath = creatorPath || path === '/api/video-replica' || path.startsWith('/api/video-replica/');
+  const assetPath = path === '/api/assets/materials' || path.startsWith('/api/assets/materials/');
+  const videoPath = assetPath || creatorPath || path === '/api/video-replica' || path.startsWith('/api/video-replica/');
   const videoSource = isVideoSourcePath(path) || isCreatorSourcePath(path);
   const mixPath = path === '/api/mix' || path.startsWith('/api/mix/') || path === '/api/browser-materials' || path.startsWith('/api/browser-materials/');
   if (path === '/api/workspace/session' || path === '/api/workspace/credits' || authRequired && (path === '/' || path === '/api/ai' || path.startsWith('/api/ai/') || restaurantPath || mixPath || videoPath && !videoSource)) {
@@ -174,7 +178,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       req.authenticatedUserId = 'local-dev';
     }
     if (closing) { safeError(res, 503, 'SERVICE_STOPPING', '服务正在重启，请稍后重试。'); return; }
-    await (creatorPath ? creator() : video())(req, res); return;
+    await (assetPath ? handleMaterials : creatorPath ? creator() : video())(req, res); return;
   }
   if (mixPath) {
     if (!authRequired) {

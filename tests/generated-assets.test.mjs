@@ -1,10 +1,51 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets, bindGeneratedAssets, disposeGeneratedAssets } from '../design/generated-assets.js';
+import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets, bindGeneratedAssets, disposeGeneratedAssets, collectMaterialAssets, materialDestinations, handleGeneratedAssetsAction } from '../design/generated-assets.js';
 
 const now = Date.parse('2026-09-30T06:00:00Z');
 const hour = 3600000;
 const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+const material = kind => ({ id: `${kind}-${'a'.repeat(64)}`, kind, type: kind === 'photo' ? 'image' : 'audio', name: '我的素材',
+  filename: kind === 'photo' ? '我的素材.jpg' : '我的素材.wav', permanent: true, createdAt: now - 365 * 24 * hour, url: `/api/assets/materials/${kind}-${'a'.repeat(64)}/media` });
+
+test('permanent assets survive the generated-output window and offer only compatible destinations', () => {
+  assert.equal(collectMaterialAssets([material('photo'), material('voice')]).length, 2);
+  assert.deepEqual(collectMaterialAssets([{ ...material('photo'), url: 'https://other.example/photo.jpg' }, { ...material('voice'), id: '../private' }]), []);
+  assert.deepEqual(materialDestinations('photo').map(([target]) => target), ['replica', 'image', 'video']);
+  assert.deepEqual(materialDestinations('voice').map(([target]) => target), ['replica', 'avatar', 'video']);
+});
+
+test('assets preview routes a stored photo into AI image references without submitting generation', async t => {
+  const previous = { document: globalThis.document, fetch: globalThis.fetch }, nodes = new Map(), item = material('photo');
+  const node = selector => { if (!nodes.has(selector)) nodes.set(selector, { innerHTML: '' }); return nodes.get(selector); };
+  globalThis.document = { body: { dataset: { page: 'assets' } }, querySelector: node };
+  const calls = [];
+  globalThis.fetch = async (path, options) => {
+    calls.push([path, options]);
+    if (path === item.url) return new Response('image', { headers: { 'Content-Type': 'image/jpeg' } });
+    return Response.json(path === '/api/assets/materials' ? { configured: true, materials: [item, material('voice')] } : { tasks: [] });
+  };
+  t.after(() => { disposeGeneratedAssets(); Object.assign(globalThis, previous); });
+  let modal, imported, destination;
+  const ctx = { mode: 'assets', configs: { image: { files: ['existing'] } }, esc: value => String(value ?? ''), icon: () => '',
+    button: (action, text, cls, attributes) => `<button data-action="${action}" ${attributes || ''}>${text}</button>`,
+    openModal: (_title, _description, content) => { modal = content; }, toast: message => assert.fail(message),
+    importBusinessAssets(files, target, selected) { imported = { files, target, selected }; return ['new-image']; },
+    setImageMode: value => assert.equal(value, 'generic'), navigate: target => { destination = target; document.body.dataset.page = target; },
+  };
+  bindGeneratedAssets(ctx);
+  for (let n = 0; n < 50 && !node('#material-assets-results').innerHTML.includes('使用到'); n++) await new Promise(resolve => setImmediate(resolve));
+  assert.match(node('#material-assets-results').innerHTML, /长期保留/);
+  handleGeneratedAssetsAction('material-preview', { dataset: { id: item.id } }, ctx);
+  assert.match(modal, /AI 图片 · 参考图片/); assert.doesNotMatch(modal, /数字人/);
+  const button = { dataset: { id: item.id, target: 'image' }, disabled: false };
+  handleGeneratedAssetsAction('material-use', button, ctx);
+  for (let n = 0; n < 50 && !destination; n++) await new Promise(resolve => setImmediate(resolve));
+  assert.equal(destination, 'image'); assert.equal(imported.target, 'image'); assert.equal(imported.selected, 1);
+  assert.equal(imported.files[0].name, item.filename); assert.equal(imported.files[0].type, 'image/jpeg');
+  assert.deepEqual(ctx.configs.image.files, ['existing', 'new-image']);
+  assert.ok(calls.every(([, options]) => !options.method || options.method === 'GET'));
+});
 const image = (overrides = {}) => ({ id, status: 'completed', createdAt: new Date(now - 74 * hour).toISOString(), completedAt: new Date(now - hour).toISOString(), images: [{ url: `/api/ai/media/${id}/result-1.png`, filename: 'result-1.png' }], prompt: '设计宣传海报\n主标题：真实工艺，看细节\n要点：打样流程', ...overrides });
 const restaurant = (overrides = {}) => ({ id, status: 'completed', completedAt: now - hour, copy: { titles: ['附近午餐来吃一碗面'] }, files: [{ role: 'image', filename: '01.jpg', url: `/api/restaurant/tasks/${id}/files/01.jpg`, expiresAt: now + 2 * hour }, { role: 'zip', filename: 'package.zip', url: `/api/restaurant/tasks/${id}/files/package.zip`, expiresAt: now + 2 * hour }], sourceImages: [{ filename: 'original-1.jpg', url: `/api/restaurant/tasks/${id}/files/original-1.jpg` }], ...overrides });
 

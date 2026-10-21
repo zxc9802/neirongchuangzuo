@@ -37,15 +37,22 @@ test('video routes use verified workspace accounts and preserve the narrow signe
   const stub = async (req, res) => { res.end(JSON.stringify({ userId: req.authenticatedUserId || null })); return true; };
   stub.shutdown = async () => { shutdown = true; };
   const app = createPreviewServer({ backendUrl: `http://127.0.0.1:${backend.address().port}`, authRequired: true,
-    createAI: () => stub, createVideo: () => stub, createVideoCreator: () => stub, credits: { ready: Promise.resolve() } });
+    createAI: () => stub, createVideo: () => stub, createVideoCreator: () => stub, credits: { ready: Promise.resolve() },
+    materialLibrary: { configured: true, list: async userId => [{ owner: userId }] } });
   app.listen(0, '127.0.0.1'); await once(app, 'listening');
   t.after(async () => { await app.shutdown(); backend.closeAllConnections(); await new Promise(resolve => backend.close(resolve)); });
   const base = `http://127.0.0.1:${app.address().port}`;
-  for (const path of ['/api/video-replica/tasks', '/api/video-replica/config', '/api/video-replica/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/result', '/api/video-creator/config', '/api/video-creator/conversations', '/api/video-creator/tasks']) {
+  for (const path of ['/api/video-replica/tasks', '/api/video-replica/config', '/api/video-replica/tasks/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/result', '/api/video-creator/config', '/api/video-creator/conversations', '/api/video-creator/tasks', '/api/assets/materials', `/api/assets/materials/photo-${'a'.repeat(64)}/media`]) {
     assert.equal((await fetch(base + path, { headers: { 'x-user-id': 'forged' } })).status, 401);
   }
   const response = await fetch(base + '/api/video-replica/tasks', { headers: { cookie: 'digital_human_session=valid', 'x-user-id': 'forged' } });
   assert.deepEqual(await response.json(), { userId: 'verified-alice' });
+  const materials = await fetch(base + '/api/assets/materials', { headers: { cookie: 'digital_human_session=valid', 'x-user-id': 'forged' } });
+  assert.deepEqual(await materials.json(), { materials: [{ owner: 'verified-alice' }], configured: true });
+  const pricingModule = await fetch(base + '/malaysian-prices.js');
+  assert.equal(pricingModule.status, 200);
+  assert.match(pricingModule.headers.get('content-type'), /javascript/);
+  assert.match(await pricingModule.text(), /export const GENERATION_PRICES/);
   assert.deepEqual(await (await fetch(base + '/api/video-creator/tasks', { headers: { cookie: 'digital_human_session=valid', 'x-user-id': 'forged' } })).json(), { userId: 'verified-alice' });
   const source = await fetch(base + '/api/video-replica/source/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/video');
   assert.deepEqual(await source.json(), { userId: null }); // Only the video handler can verify this signature.

@@ -8,7 +8,7 @@ import { refreshWorkspaceCredits, workspaceCreditsState } from './workspace-cred
 const API = '/api/video-creator';
 const labels = { reserving: '预留积分', preparing: '准备素材', reviewing: '素材审核', submitting: '提交生成', running: '生成中', downloading: '保存成片', completed: '已完成', failed: '未完成', uncertain: '结果待核对', settling: '费用待核对', expired: '已过期' };
 const busyTask = task => ['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'settling'].includes(task.status);
-let context, timer, stream, voiceSession, loading = false, quoteVersion = 0;
+let context, timer, stream, voiceSession, loading = false, loadPromise, quoteVersion = 0;
 let state;
 function owner() { return globalThis.workspaceUser?.id || 'local-dev'; }
 const editableSettings = settings => ({ ...DEFAULT_VIDEO_SETTINGS, ...settings, resolution: DEFAULT_VIDEO_SETTINGS.resolution });
@@ -145,7 +145,14 @@ async function quote() {
     state.quote = data; state.quoteError = ''; refresh();
   } catch (cause) { if (revision === quoteVersion && account === state.owner) { state.quote = null; state.quoteError = cause.message; refresh(); } }
 }
-async function load() {
+function load() {
+  if (!loadPromise) {
+    const pending = loadOnce().finally(() => { if (loadPromise === pending) loadPromise = null; });
+    loadPromise = pending;
+  }
+  return loadPromise;
+}
+async function loadOnce() {
   if (loading || !context) return; loading = true; const account = state.owner;
   try {
     const [config, tasks, conversations] = await Promise.all([state.config ? Promise.resolve(state.config) : request('/config'), request('/tasks'), request('/conversations')]);
@@ -506,6 +513,13 @@ function stopRecording(cancelled = false) { const session = state?.recording; if
 export function renderVideoCreator(ctx) {
   if (!state || state.owner !== owner()) reset(); context = ctx;
   return `<div class="vc-shell ${state.sidebar ? '' : 'vc-sidebar-hidden'}">${navigation(ctx)}<div class="vc-layout ${state.queue ? '' : 'vc-queue-hidden'}">${editor(ctx)}${preview(ctx)}${queue(ctx)}</div></div>`;
+}
+export async function useVideoMaterial(file, kind) {
+  const account = state.owner;
+  await load();
+  if (owner() !== account || document.body.dataset.page !== 'video') throw new Error('页面已切换，请重新选择素材。');
+  if (locked()) throw new Error('当前正在处理，请完成后再选择素材。');
+  await upload([file], kind === 'voice' ? 'voice' : 'character');
 }
 export function bindVideoCreator(ctx) {
   context = ctx;

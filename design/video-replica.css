@@ -17,3 +17,4 @@
 .replica-voice-slot .replica-voice-hint{min-height:0;margin:8px 0 14px}
 .replica-player[style]{width:min(100%,var(--replica-max-width));min-height:0;aspect-ratio:var(--replica-aspect);margin-inline:auto}
 .replica-model-setting{margin-top:22px;max-width:360px}.replica-model-setting>label{display:block;font-size:12px;font-weight:500;margin-bottom:8px;color:#718079}.replica-models{width:100%;min-height:46px;border:1px solid #cde5da;border-radius:10px;padding:10px 14px;background:#f4faf6;color:#365d4b;font:inherit;font-size:14px;font-weight:600;cursor:pointer}.replica-models:focus-visible{outline:2px solid #278462;outline-offset:3px}.replica-models:disabled{cursor:default;opacity:.65}.replica-model-description{margin:8px 0 0;font-size:11px;line-height:1.8;color:#718079}
+.replica-asset-link{display:block;text-align:center;margin-top:10px;color:#20594b;font-size:13px;text-decoration:underline;text-underline-offset:3px}

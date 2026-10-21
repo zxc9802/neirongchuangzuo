@@ -49,7 +49,7 @@ async function readJSON(req) {
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, speech, captions = createCaptionService(env),
-  narration, lipsync, voiceConversion, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  narration, lipsync, voiceConversion, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
   if (speech === undefined) speech = createSpeechService(env, costMeter.fetch);
@@ -348,6 +348,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       await reconcile(task);
       if (!task.cleaned) {
+        await archiveTaskMaterials(task);
         for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         await rm(join(folder(task), 'narration'), { recursive: true, force: true });
         for (const name of ['source.mp4', 'generated.mp4', 'result.tmp']) {
@@ -713,24 +714,33 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.voiceEngine = voiceEngine;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
-        if (['video', 'photo', 'voice'].includes(match[2]) && req.method === 'PUT') {
+        if (['video', 'photo', 'voice'].includes(match[2]) && (req.method === 'PUT' || req.method === 'POST' && match[2] !== 'video')) {
           const replacingSource = match[2] === 'video' && view(task).canReplaceSource;
           if (task.status !== 'draft' && !replacingSource) throw error('任务已提交，不能替换素材。', 409);
-          const kind = match[2], bytes = await readBody(req, kind === 'video' ? VIDEO_LIMIT : kind === 'voice' ? VOICE_LIMIT : PHOTO_LIMIT);
+          const kind = match[2];
+          const imported = req.method === 'POST' && materialLibrary ? await materialLibrary.get(userId, (await readJSON(req)).assetId) : null;
+          if (req.method === 'POST' && (!imported || imported.kind !== kind)) throw error('请选择相应类型的本人素材。', 400);
+          const bytes = imported ? imported.bytes : await readBody(req, kind === 'video' ? VIDEO_LIMIT : kind === 'voice' ? VOICE_LIMIT : PHOTO_LIMIT);
+          let name = imported?.name;
+          if (!name && req.headers['x-file-name']) { try { name = decodeURIComponent(req.headers['x-file-name']); } catch {} }
           const temporary = join(folder(task), 'upload.tmp');
           if (kind === 'photo') {
-            const normalized = await photo(bytes); await writeFile(temporary, normalized, { mode: 0o600 });
-            task.photo = { ready: true };
+            const normalized = imported ? bytes : await photo(bytes); await writeFile(temporary, normalized, { mode: 0o600 });
+            const asset = materialLibrary && (imported || await materialLibrary.save(userId, { kind, path: temporary, name }));
+            task.photo = { ready: true, ...(asset ? { assetId: asset.id } : {}) };
           } else if (kind === 'voice') {
             if (!speech.enabled) throw error('声音参考的语音识别服务尚未配置。', 503, 'VIDEO_SPEECH_NOT_CONFIGURED');
             await writeFile(temporary, bytes, { mode: 0o600 });
             const normalized = join(folder(task), 'voice.tmp.wav');
-            const metadata = await voice(temporary, normalized);
-            const intervals = await speech.detect(normalized).catch(cause => {
+            const metadata = imported ? imported.metadata : await voice(temporary, normalized);
+            if (imported) await writeFile(normalized, bytes, { mode: 0o600 });
+            const intervals = imported ? [] : await speech.detect(normalized).catch(cause => {
               if (cause.code !== 'VIDEO_SPEECH_INVALID') throw cause;
               return [];
             });
-            await rename(normalized, file(task, 'voice')); task.voice = { ...metadata, speechStart: intervals[0]?.start ?? null }; delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt;
+            const voiceMetadata = { ...metadata, speechStart: imported ? metadata.speechStart : intervals[0]?.start ?? null };
+            const asset = materialLibrary && (imported || await materialLibrary.save(userId, { kind, path: normalized, name, metadata: voiceMetadata }));
+            await rename(normalized, file(task, 'voice')); task.voice = { ...voiceMetadata, ...(asset ? { assetId: asset.id } : {}) }; delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt;
             await save(task); json(res, 200, { task: view(task) }); return;
           } else {
             if (bytes.length < 12 || bytes.toString('ascii', 4, 8) !== 'ftyp') throw error('请上传 MP4 或 MOV 视频。');
@@ -874,11 +884,26 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       });
     } catch (cause) {
       if (res.headersSent) { res.destroy(); return; }
-      const safe = cause instanceof VideoError || ['INSUFFICIENT_POINTS', 'CREDITS_STORAGE_UNAVAILABLE'].includes(cause.code);
+      const safe = cause instanceof VideoError || ['INSUFFICIENT_POINTS', 'CREDITS_STORAGE_UNAVAILABLE', 'ASSET_STORAGE_ERROR'].includes(cause.code);
       json(res, safe ? cause.status || 503 : 503, { error: safe ? cause.message : '视频服务暂时不可用，请稍后查询原任务。', code: safe ? cause.code : 'VIDEO_UNAVAILABLE' });
     }
   };
   handler.ready = ready;
+  async function archiveTaskMaterials(task) {
+    if (!materialLibrary) return;
+    for (const kind of ['photo', 'voice']) {
+      if (!task[kind] || task[kind].assetId || !(await stat(file(task, kind)).catch(() => null))?.isFile()) continue;
+      const asset = await materialLibrary.save(task.userId, { kind, path: file(task, kind), metadata: task[kind] });
+      task[kind].assetId = asset.id; await save(task);
+    }
+  }
+  handler.archiveMaterials = async userId => {
+    await ready;
+    for (const task of jobs.values()) {
+      if (task.userId !== userId || task.cleaned) continue;
+      await serialize(task.id, () => archiveTaskMaterials(task));
+    }
+  };
   handler.shutdown = () => shutdownPromise ||= (async () => {
     closing = true; clearInterval(timer); await ready.catch(() => {}); clearInterval(timer);
     await Promise.allSettled([...processors.values()]); await Promise.allSettled([...locks.values()]); await instance.close();

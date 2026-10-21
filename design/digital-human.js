@@ -25,6 +25,7 @@ let root = null;
 let context = null;
 let pollTimer = null;
 let polling = false;
+let dataLoading;
 let binding = null;
 let libraryObserver = null;
 let viewVersion = 0;
@@ -340,7 +341,14 @@ function observeLibrary() {
   libraryObserver.observe(sentinel);
 }
 
-async function loadData() {
+function loadData() {
+  if (!dataLoading) {
+    const pending = loadDataOnce().finally(() => { if (dataLoading === pending) dataLoading = null; });
+    dataLoading = pending;
+  }
+  return dataLoading;
+}
+async function loadDataOnce() {
   if (state.loading) return;
   const version = viewVersion;
   state.loading = true; state.errors = {};
@@ -454,6 +462,13 @@ async function uploadFile(kind, file, ctx) {
   }
 }
 
+export async function useDigitalHumanVoice(file, ctx) {
+  const version = viewVersion;
+  await loadData();
+  if (!isCurrentView(version)) throw new Error('页面已切换，请重新选择声音。');
+  if (state.upload) throw new Error('正在上传素材，请稍后再试。');
+  await uploadFile('voice', file, ctx);
+}
 export function bindDigitalHuman(ctx) {
   binding?.abort();
   binding = new AbortController();
@@ -490,6 +505,7 @@ export function bindDigitalHuman(ctx) {
 }
 
 export function disposeDigitalHuman() {
+  dataLoading = null;
   unsubscribeCredits?.(); unsubscribeCredits = null;
   viewVersion += 1; libraryVersion += 1;
   libraryObserver?.disconnect(); libraryObserver = null;

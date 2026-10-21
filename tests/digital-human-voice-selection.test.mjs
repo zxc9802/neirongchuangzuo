@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { digitalHumanApi } from '../design/digital-human-api.js';
 
 const defaultVoice = { id: 'default_speaker_1', name: '默认推荐音色', isDefault: true, audioUrl: '/api/voices/default_speaker_1/audio' };
 const uploadedVoice = { id: 'uploaded', name: '新上传声音', audioUrl: '/api/voices/uploaded/audio' };
@@ -39,13 +40,25 @@ async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {}, se
     const engineSelect = markup.match(/<select id="dh-engine-select"[\s\S]*?<\/select>/)?.[0];
     assert.ok(engineSelect, 'model choices use a dropdown');
     assert.equal((engineSelect.match(/<option /g) || []).length, 3);
-    inspect?.({ regions, listeners, ctx, render: () => mod.renderDigitalHuman(ctx) });
+    await inspect?.({ regions, listeners, ctx, module: mod, render: () => mod.renderDigitalHuman(ctx) });
     return JSON.parse(storage.get('store-studio:digital-human:v1'));
   } finally {
     mod.disposeDigitalHuman();
     Object.assign(globalThis, originals);
   }
 }
+
+test('a library voice is saved and selected while retaining the current script', async t => {
+  const imported = { id: 'asset-voice', name: '资产中的声音', audioUrl: '/api/voices/asset-voice/audio' };
+  let uploads = 0;
+  t.mock.method(digitalHumanApi, 'createVoice', async file => { uploads++; assert.equal(file.type, 'audio/wav'); return imported; });
+  const saved = await loadPage({ inspect: async ({ ctx, module, render }) => {
+    ctx.toast = () => {};
+    await module.useDigitalHumanVoice(new File(['voice'], '资产中的声音.wav', { type: 'audio/wav' }), ctx);
+    assert.match(render(), /value="asset-voice"[^>]*selected/);
+  } });
+  assert.equal(saved.voiceId, imported.id); assert.equal(saved.script, '口播测试'); assert.equal(uploads, 1);
+});
 
 test('first load selects the default voice even when uploaded voices precede it', async () => {
   assert.equal((await loadPage()).voiceId, defaultVoice.id);

@@ -63,12 +63,31 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
   });
   const settle = async () => { for (let i = 0; i < 5; i++) await new Promise(resolve => setImmediate(resolve)); };
   await settle();
-  return { node, ctx, recover: () => { failing = false; }, fail: () => { failing = true; },
+  return { node, ctx, useMaterial: module.useReplicaMaterial, recover: () => { failing = false; }, fail: () => { failing = true; },
     poll: async () => { poll(); await settle(); }, message: () => node('#replica-error').textContent,
     html: () => html, cost: () => node('#replica-cost').textContent, renders: () => renders, settle,
     select: id => node('#replica-history').onclick({ target: { closest: () => ({ dataset: { replicaTask: id } }) } }),
     wallet: async value => { wallet = value; await refreshWorkspaceCredits(); } };
 }
+
+test('stored replica materials prefill independent inputs and submit owned asset IDs without downloading or reuploading', async t => {
+  const requests = []; let task;
+  const page = await fixture(t, { apiFetch: (path, options) => {
+    if (!options?.method) return;
+    const body = options.method === 'POST' ? JSON.parse(options.body) : null;
+    requests.push({ path, method: options.method, body });
+    if (path.endsWith('/tasks')) task = { id: body.requestId, status: 'draft', createdAt: Date.now() };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll();
+  page.node('#replica-video').onchange({ target: { files: [new File(['video'], 'reference.mp4')] } });
+  for (const kind of ['photo', 'voice']) page.useMaterial({ kind, id: `${kind}-${'a'.repeat(64)}`, name: kind === 'photo' ? '保存的形象' : '保存的声音' });
+  assert.match(page.html(), /保存的形象/); assert.match(page.html(), /保存的声音/);
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(requests.filter(item => item.method === 'PUT').length, 1);
+  for (const kind of ['photo', 'voice']) assert.deepEqual(requests.find(item => item.path.endsWith('/' + kind)).body, { assetId: `${kind}-${'a'.repeat(64)}` });
+  assert.ok(requests.some(item => item.path.endsWith('/start')));
+});
 
 test('generation polling and credit updates preserve reference players while updating each task stage', async t => {
   const task = { id: 'stable-preview', status: 'running', createdAt: Date.now(), voiceEngine: 'indextts2',
