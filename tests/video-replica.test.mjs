@@ -16,12 +16,14 @@ import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/med
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
 import { createFalVideoProvider, FAL_MODEL } from '../services/video/fal.mjs';
+import { generationPrice } from '../design/malaysian-prices.js';
 
 const VIDEO = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(100)]);
 const CONFIG = { enabled: true, publicOrigin: 'https://workspace.example', signingSecret: 'test-secret-not-for-production' };
 const META = { duration: 4, width: 512, height: 768, audio: true };
 const PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
 const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
+const TEST_BALANCE = 100_000;
 const REPLICA_PRICES = [
   ['doubao-seedance-2-0-260128', 'qiya-2.0', 1],
   [PREMIUM_MODEL, 'qiya-2.5', 1.5],
@@ -30,6 +32,13 @@ const REPLICA_PRICES = [
 ];
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-replica-'));
+  const balance = options.balance ?? TEST_BALANCE, at = Date.now();
+  await mkdir(join(root, 'credits'));
+  await writeFile(join(root, 'credits', 'wallets.json'), JSON.stringify({ version: 1, users: { alice: {
+    wallet: { available: balance, held: 0, createdAt: at, updatedAt: at }, reservations: {},
+    ledger: [{ userId: 'alice', eventKey: 'welcome', kind: 'welcome', availableDelta: 1000, heldDelta: 0, availableAfter: 1000, heldAfter: 0 },
+      ...(balance === 1000 ? [] : [{ userId: 'alice', eventKey: 'test-funding', kind: 'test-funding', availableDelta: balance - 1000, heldDelta: 0, availableAfter: balance, heldAfter: 0 }])],
+  } } }));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode:options.costMode===true });
   await wallet.ready;
   const state = { creates: [], queries: 0, generations: 0, done: false, failed: false, review: 2, source: null };
@@ -163,34 +172,34 @@ test('draft edition switches persist, reject incompatible downgrades, and lock a
   assert.equal((await app.current(id)).model, PREMIUM_MODEL); assert.equal(app.state.generations, 1);
 });
 
-for (const [model, name, price] of REPLICA_PRICES) test(`${name} quotes, reserves and settles its model price across restart exactly once`, async t => {
+for (const [model, name] of REPLICA_PRICES) test(`${name} quotes, reserves and settles its model price across restart exactly once`, async t => {
+  const pricing = generationPrice('video', model), points = pricing.pointsPerSecond * 4;
   const app = await fixture(t, { costMode: true }), id = randomUUID();
   assert.equal((await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance', sourceAudioMode: 'original' } })).status, 201); await app.upload(id);
-  assert.equal((await app.current(id)).estimatedPoints, 500 * price);
+  assert.equal((await app.current(id)).estimatedPoints, points);
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   const running = await app.until(id, task => task.status === 'running');
   assert.equal(running.modelName, name); assert.equal(app.state.body.modelId, model);
   const record = await app.wallet.reservation('alice', id);
-  assert.equal(record.costItems.seedance.metadata.model, model);
-  assert.equal(record.costItems.seedance.metadata.unitPrice, price);
-  assert.equal(record.costItems.seedance.quoteMicros, 4 * price * 1e6);
-  assert.equal((await app.wallet.snapshot('alice')).held, 500 * price);
+  assert.equal(record.pricingKey, pricing.key);
+  assert.equal(record.reservedUnits, 4);
+  assert.equal((await app.wallet.snapshot('alice')).held, points);
   await app.close(); await app.open();
-  assert.equal((await app.current(id)).estimatedPoints, 500 * price);
+  assert.equal((await app.current(id)).estimatedPoints, points);
   app.state.done = true;
   const done = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
-  assert.equal(done.billing.chargedPoints, 500 * price); assert.equal(done.billing.costCny, 4 * price);
+  assert.equal(done.billing.chargedPoints, points); assert.equal(done.billing.mode, 'model_price');
   await app.call(`/tasks/${id}/start`, { body: {} });
-  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 1000 - 500 * price);
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - points);
 });
 
 test('switching a draft recalculates its quote for every replica model', async t => {
   const app = await fixture(t, { costMode: true }), id = await app.init(); await app.upload(id);
-  for (const [model, name, price] of REPLICA_PRICES) {
+  for (const [model, name] of REPLICA_PRICES) {
     const response = await app.call(`/tasks/${id}/model`, { body: { model } });
     assert.equal(response.status, 200);
     const { task } = await response.json();
-    assert.equal(task.modelName, name); assert.equal(task.estimatedPoints, 500 * price);
+    assert.equal(task.modelName, name); assert.equal(task.estimatedPoints, generationPrice('video', model).pointsPerSecond * 4);
     assert.equal((await app.wallet.snapshot('alice')).held, 0);
   }
 });
@@ -212,8 +221,8 @@ test('an already submitted premium task without a price snapshot keeps its origi
   assert.equal(app.state.generations, 0);
 });
 
-for (const [model, duration, status, points] of [[PREMIUM_MODEL, 8, 402, 0], [MINI_MODEL, 15, 202, 938]]) test(`${model} checks affordability at its own rate`, async t => {
-  const app = await fixture(t, { costMode: true, probe: async () => ({ ...META, duration }) }), id = await app.init(); await app.upload(id);
+for (const [model, duration, status, points] of [[PREMIUM_MODEL, 8, 402, 0], [MINI_MODEL, 4, 202, 820]]) test(`${model} checks affordability at its own rate`, async t => {
+  const app = await fixture(t, { costMode: true, balance: 1000, probe: async () => ({ ...META, duration }) }), id = await app.init(); await app.upload(id);
   const response = await app.call(`/tasks/${id}/start`, { body: { model } });
   assert.equal(response.status, status);
   if (status === 202) await app.until(id, task => task.status === 'running');
@@ -418,7 +427,7 @@ test('a restart resumes automatic preparation and retains one reservation and on
   assert.equal((await app.wallet.snapshot('alice')).held, 45);
   assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
   app.state.done = true; await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
-  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 45);
 });
 
 test('failed automatic voice preparation releases the hold without a model dispatch', async t => {
@@ -428,7 +437,7 @@ test('failed automatic voice preparation releases the hold without a model dispa
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
   assert.equal(failed.code, 'VIDEO_SPEECH_FAILED'); assert.equal(app.state.generations, 0);
-  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE);
 });
 
 test('previously submitted H3 Max tasks can still finish without creating another generation', async t => {
@@ -452,7 +461,7 @@ test('previously submitted H3 Max tasks can still finish without creating anothe
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
   assert.ok(requests.length >= 2); assert.ok(requests.every(request => request.method === 'GET'));
   assert.equal(app.state.generations, 0); assert.equal(app.state.creates.length, 0);
-  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 45);
 });
 
 test('previously submitted Wan tasks still download and settle actual costs without another generation', async t => {
@@ -544,7 +553,7 @@ test('a replacement video invalidates voice analysis and a broken audio processo
   assert.equal(running.speech.start, 1.25); app.state.done = true;
   const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
   assert.equal(failed.code, 'VIDEO_SPEECH_FAILED'); assert.equal(failed.resultUrl, null);
-  assert.equal((await app.wallet.snapshot('alice')).available, 1000); assert.equal(app.state.generations, 1);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE); assert.equal(app.state.generations, 1);
 });
 
 test('transcript differences never block delivery and preserve generated audio when alignment is unsafe', async t => {
@@ -577,10 +586,10 @@ test('transcript differences never block delivery and preserve generated audio w
     assert.equal(completed.audioCheck.afterOffsetMs, null);
     assert.match(completed.audioCheck.warning, /保留.*生成.*声音/);
     assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
-    assert.equal(completed.billing.chargedPoints, 45);
+    assert.equal(completed.billing.chargedPoints, 1640);
     await app.close(); await app.open();
     assert.equal((await app.current(id)).status, 'completed');
-    assert.equal((await app.wallet.snapshot('alice')).available, 955);
+    assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
     assert.equal(app.state.generations, 1);
   });
 });
@@ -635,10 +644,10 @@ test('minor ASR differences deliver a real result and settle once without concea
     assert.equal(completed.audioCheck.transcriptDifferences, 5);
     assert.equal(completed.audioCheck.afterOffsetMs, 0);
     assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
-    assert.equal(completed.billing.chargedPoints, 45);
+    assert.equal(completed.billing.chargedPoints, 1640);
     await app.close(); await app.open();
     assert.equal((await app.current(id)).status, 'completed');
-    assert.equal((await app.wallet.snapshot('alice')).available, 955);
+    assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
     assert.equal(app.state.generations, 1);
   });
 });
@@ -762,7 +771,7 @@ test('a failed voice check can recheck the existing media after restart and sett
   await app.call(`/tasks/${id}/start`, { body: { speechConfirmed: true } }); app.state.done = true;
   const failed = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
   assert.equal(failed.canRecheck, true); assert.equal(failed.resultUrl, null);
-  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE);
   await app.close(); await app.open();
   assert.equal((await app.current(id)).canRecheck, true);
   assert.equal((await app.call(`/tasks/${id}/recheck`, { owner: 'bob', body: {} })).status, 404);
@@ -770,11 +779,11 @@ test('a failed voice check can recheck the existing media after restart and sett
   const responses = await Promise.all([app.call(`/tasks/${id}/recheck`, { body: {} }), app.call(`/tasks/${id}/recheck`, { body: {} })]);
   assert.deepEqual(responses.map(response => response.status).sort(), [200, 202]);
   const completed = await app.until(id, task => task.status === 'completed');
-  assert.equal(completed.billing.chargedPoints, 45);
-  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal(completed.billing.chargedPoints, 1640);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
   assert.equal(app.state.generations, 1); assert.equal(app.state.creates.length, 3);
   for (let i = 0; i < 3; i++) await app.call(`/tasks/${id}/recheck`, { body: {} });
-  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
   const disk = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
   assert.equal((await app.wallet.reservation('alice', id)).status, 'released');
   assert.equal((await app.wallet.reservation('alice', disk.billingTaskId)).status, 'settled');
@@ -789,7 +798,7 @@ test('failed rechecks release each recovery hold without another video generatio
   for (let i = 0; i < 2; i++) {
     assert.equal((await app.call(`/tasks/${id}/recheck`, { body: {} })).status, 202);
     await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
-    assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+    assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE);
     assert.equal((await app.call(`/tasks/${id}/result`)).status, 409);
   }
   assert.equal(app.state.generations, 1);
@@ -856,7 +865,7 @@ test('restart refunds a committed recovery hold from its persisted reserve-pendi
   assert.equal(failed.billing.status, 'released'); assert.equal(failed.canRecheck, true); assert.equal(failed.resultUrl, null);
   assert.equal((await app.wallet.reservation('alice', recoveryId)).status, 'released');
   assert.deepEqual(await app.wallet.reservation('alice', id), originalReservation);
-  const wallet = await app.wallet.snapshot('alice'); assert.equal(wallet.held, 0); assert.equal(wallet.available, 1000);
+  const wallet = await app.wallet.snapshot('alice'); assert.equal(wallet.held, 0); assert.equal(wallet.available, TEST_BALANCE);
   const recovered = JSON.parse(await readFile(taskPath, 'utf8'));
   assert.equal(recovered.billingTaskId, recoveryId); assert.equal(recovered.recheckAttempt, 1);
   assert.deepEqual(recovered.speech, journal.speech);
@@ -873,7 +882,7 @@ test('two materials, signed source access, playable range response and exactly-o
   const id = await app.init(); await app.upload(id);
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   await app.until(id, task => task.status === 'running');
-  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  assert.equal((await app.wallet.snapshot('alice')).held, 1640);
   assert.equal(app.state.creates.length, 2); assert.equal(app.state.generations, 1);
   const source = new URL(app.state.creates.find(item => item.kind === 'video').url);
   const downloaded = await fetch(app.base + source.pathname + source.search);
@@ -891,13 +900,13 @@ test('two materials, signed source access, playable range response and exactly-o
   assert.equal(JSON.stringify(current).includes('provider-1'), false); assert.equal(JSON.stringify(current).includes('sign'), false);
   app.state.done = true;
   const task = await app.until(id, value => value.status === 'completed');
-  assert.equal(task.billing.chargedPoints, 45); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal(task.billing.chargedPoints, 1640); assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
   const range = await app.call(`/tasks/${id}/result`, { headers: { Range: 'bytes=0-11' } });
   assert.equal(range.status, 206); assert.equal(range.headers.get('content-type'), 'video/mp4');
   assert.equal((await range.arrayBuffer()).byteLength, 12);
   assert.equal((await app.call(`/tasks/${id}/result`, { owner: 'bob' })).status, 404);
   for (let i = 0; i < 3; i++) assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
-  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
 });
 
 test('the same account can keep more than five unsubmitted replica drafts', async t => {
@@ -919,12 +928,12 @@ test('the same account can generate separate replicas concurrently without dupli
   assert.deepEqual(responses.map(response => response.status), [202, 202]);
   for (const id of ids) await app.until(id, task => task.status === 'running');
   assert.equal(app.state.generations, 2);
-  assert.equal((await app.wallet.snapshot('alice')).held, 90);
+  assert.equal((await app.wallet.snapshot('alice')).held, 3280);
   for (const id of ids) assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 200);
   app.state.done = true;
   for (const id of ids) await app.until(id, task => task.status === 'completed');
   assert.equal(app.state.generations, 2);
-  assert.equal((await app.wallet.snapshot('alice')).available, 910);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 3280);
   assert.equal((await app.wallet.snapshot('alice')).held, 0);
 });
 
@@ -947,8 +956,8 @@ test('an existing replica can be rechecked while another task runs for the same 
   await app.until(id, task => task.status === 'completed');
   assert.equal((await app.current(other)).status, 'running');
   assert.equal(app.state.generations, 2);
-  assert.equal((await app.wallet.snapshot('alice')).held, 45);
-  assert.equal((await app.wallet.snapshot('alice')).available, 910);
+  assert.equal((await app.wallet.snapshot('alice')).held, 1640);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 3280);
 });
 
 test('material queries recover on the fifth retry without recreating assets or replaying generation', async t => {
@@ -967,7 +976,7 @@ test('material queries recover on the fifth retry without recreating assets or r
   assert.deepEqual(app.state.creates.map(material => material.kind), ['photo', 'video']);
   assert.equal(app.state.generations, 1);
   app.state.done = true; await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
-  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
 });
 
 test('material queries stop after five retries and release the hold without starting generation', async t => {
@@ -982,7 +991,7 @@ test('material queries stop after five retries and release the hold without star
   assert.equal(queries, 6); assert.equal(failed.code, 'VIDEO_MATERIAL_QUERY_FAILED');
   assert.match(failed.error, /重试 5 次/);
   assert.equal(app.state.creates.length, 1); assert.equal(app.state.generations, 0);
-  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE);
   await delay(60); assert.equal(queries, 6);
 });
 
@@ -1010,7 +1019,7 @@ test('an explicit rejected material review fails immediately without query retri
   await app.call(`/tasks/${id}/start`, { body: {} });
   const failed = await app.until(id, task => task.status === 'failed' && task.billing.status === 'released');
   assert.equal(queries, 1); assert.equal(failed.code, 'VIDEO_REVIEW_REJECTED');
-  assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  assert.equal(app.state.generations, 0); assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE);
 });
 
 test('material review keeps waiting beyond three minutes and the active asset retention window', async t => {
@@ -1023,7 +1032,7 @@ test('material review keeps waiting beyond three minutes and the active asset re
   for (const advance of [181_000, 4 * 86400_000]) {
     time += advance; await delay(60);
     assert.equal((await app.current(id)).status, 'reviewing');
-    assert.equal((await app.wallet.snapshot('alice')).held, 45);
+    assert.equal((await app.wallet.snapshot('alice')).held, 1640);
     assert.equal((await app.call(`/tasks/${id}/video`)).status, 200);
     for (const material of app.state.creates) {
       const source = new URL(material.url);
@@ -1045,7 +1054,7 @@ test('running replicas survive a day-long wait and restart after the active asse
   time += 3 * 86400_000;
   await app.close(); await app.open(); await delay(60);
   assert.equal((await app.current(id)).status, 'running');
-  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  assert.equal((await app.wallet.snapshot('alice')).held, 1640);
   assert.equal((await app.call(`/tasks/${id}/video`)).status, 200);
   const source = new URL(app.state.creates.find(item => item.kind === 'video').url);
   assert.equal((await fetch(app.base + source.pathname + source.search)).status, 200);
@@ -1056,7 +1065,7 @@ test('running replicas survive a day-long wait and restart after the active asse
   assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
   assert.equal((await fetch(app.base + source.pathname + source.search)).status, 403);
   assert.equal(app.state.generations, 1);
-  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
 });
 
 test('provider completion accepts message URLs without a video extension', async () => {
@@ -1085,18 +1094,18 @@ test('completed replies without media are visible and recover on the original ta
   assert.ok(waiting.startedAt >= waiting.createdAt);
   assert.ok(waiting.lastCheckedAt >= waiting.startedAt);
   assert.equal(waiting.resultUrl, null);
-  assert.equal((await app.wallet.snapshot('alice')).held, 45);
+  assert.equal((await app.wallet.snapshot('alice')).held, 1640);
   await app.close();
   reply = { status: 2, message: 'https://cdn.example/download/result?token=test' };
   await app.open();
   const completed = await app.until(id, task => task.status === 'completed');
   assert.equal(completed.error, ''); assert.equal(completed.code, undefined);
-  assert.equal(completed.billing.chargedPoints, 45);
+  assert.equal(completed.billing.chargedPoints, 1640);
   assert.equal(app.state.generations, 1);
 });
 
 test('unlimited zero-balance account completes a person replica without charges and still waits for settlement', async t => {
-  const app = await fixture(t);
+  const app = await fixture(t, { balance: 1000 });
   await app.wallet.reserve({ userId: 'alice', taskId: 'spent_initial', kind: 'image', units: 20 });
   await app.wallet.settle({ userId: 'alice', taskId: 'spent_initial', units: 20 });
   await app.wallet.setUnlimited('alice', true);
@@ -1131,11 +1140,11 @@ test('failed material review returns reserved credits without a video generation
   const id = await app.init(); await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
   const task = await app.until(id, value => value.status === 'failed' && value.billing?.status === 'released');
   assert.equal(task.code, 'VIDEO_REVIEW_REJECTED'); assert.equal(app.state.generations, 0);
-  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE);
 });
 
 test('insufficient balance prevents material and model calls', async t => {
-  const app = await fixture(t);
+  const app = await fixture(t, { balance: 1000 });
   await app.wallet.reserve({ userId: 'alice', taskId: 'other', kind: 'image', units: 20 });
   const id = await app.init(); await app.upload(id);
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 402);
@@ -1147,14 +1156,14 @@ test('confirmed provider failure releases the hold, while downloads retry withou
   const first = await app.init(); await app.upload(first); app.state.failed = true;
   await app.call(`/tasks/${first}/start`, { body: {} });
   await app.until(first, task => task.status === 'failed' && task.billing?.status === 'released');
-  assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE);
   app.state.failed = false; app.state.done = true; let attempts = 0;
   await app.close();
   await app.open({ download: async (_url, path) => { if (++attempts === 1) throw new Error('Download interrupted'); await writeFile(path, VIDEO); } });
   const second = await app.init(); await app.upload(second); await app.call(`/tasks/${second}/start`, { body: {} });
   await app.until(second, task => task.status === 'completed');
   assert.equal(attempts, 2); assert.equal(app.state.generations, 2);
-  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
 });
 
 test('restart resumes provider polling without a second paid submission', async t => {
@@ -1163,7 +1172,7 @@ test('restart resumes provider polling without a second paid submission', async 
   await app.until(id, task => task.status === 'running');
   await app.close(); app.state.done = true; await app.open();
   await app.until(id, task => task.status === 'completed');
-  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
 });
 
 test('uncertain paid submission is never replayed and its hold is returned', async t => {
@@ -1172,7 +1181,7 @@ test('uncertain paid submission is never replayed and its hold is returned', asy
   const task = await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
   assert.equal(task.code, 'VIDEO_SUBMISSION_UNCERTAIN');
   await app.close(); await app.open(); await app.call(`/tasks/${id}/start`, { body: {} });
-  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, 1000);
+  assert.equal(app.state.generations, 1); assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE);
 });
 
 test('settlement retries keep the output private and never charge twice after a lost acknowledgement', async t => {
@@ -1184,7 +1193,7 @@ test('settlement retries keep the output private and never charge twice after a 
   assert.equal((await app.call(`/tasks/${id}/result`)).status, 409);
   blocked = false;
   await app.until(id, task => task.status === 'completed');
-  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
 });
 
 test('three-day expiry removes media while keeping deduplication and billing records', async t => {
@@ -1197,7 +1206,7 @@ test('three-day expiry removes media while keeping deduplication and billing rec
   while (!JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8')).cleaned && performance.now() < cleanupDeadline) await delay(50);
   await assert.rejects(readFile(join(app.root, 'video', id, 'result.mp4')), { code: 'ENOENT' });
   assert.equal((await app.current(id)).status, 'expired');
-  assert.equal((await app.wallet.snapshot('alice')).available, 955);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
   assert.equal(app.state.generations, 1);
 });
 
@@ -1245,7 +1254,7 @@ test('three-day expiry erases private voice, ASR, VAD and download artifacts whi
   const current = await app.current(id);
   assert.equal(current.sourcePhotoUrl, null); assert.equal(current.sourceVideoUrl, null); assert.equal(current.sourceVoiceUrl, null);
   assert.equal(current.resultUrl, null); assert.equal(current.canRecheck, false);
-  assert.equal((await app.wallet.snapshot('alice')).available, 955); assert.equal(app.state.generations, 1);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640); assert.equal(app.state.generations, 1);
 });
 
 test('photo validation rejects small or non-image files and strips metadata into JPEG', async () => {
@@ -1275,7 +1284,7 @@ function fakeNarration(overrides = {}) {
     mux: async (_video, audio, output) => writeFile(output, await readFile(audio)), ...overrides };
 }
 
-for (const model of ['doubao-seedance-2-0-260128', WAN3_MODEL]) test(`Chatterbox receipts survive restart and are metered separately from ${model}`, async t => {
+for (const model of ['doubao-seedance-2-0-260128', WAN3_MODEL]) test(`Chatterbox survives restart and is included in the ${model} price`, async t => {
   let done = false, submissions = 0, wanSubmissions = 0, input, audio;
   const endpoint = 'fal-ai/chatterbox/speech-to-speech';
   const app = await fixture(t, { costMode: true, now: () => Date.parse('2026-10-21T12:00:00+08:00'),
@@ -1319,10 +1328,9 @@ for (const model of ['doubao-seedance-2-0-260128', WAN3_MODEL]) test(`Chatterbox
   assert.equal(submissions, 1); assert.equal(app.state.generations, model === WAN3_MODEL ? 0 : 1);
   assert.equal(wanSubmissions, model === WAN3_MODEL ? 1 : 0);
   const bill = await app.wallet.reservation('alice', id);
-  const items = Object.values(bill.costItems);
-  assert.equal(items.length, 2);
-  assert.equal(items.find(item => item.provider === 'fal').metadata.model, endpoint);
-  assert.equal(bill.settledUnits, model === WAN3_MODEL ? 3_375_000 : 4_015_000);
+  assert.equal(bill.pricingKey, generationPrice('video', model).key);
+  assert.equal(bill.chargedPoints, generationPrice('video', model).pointsPerSecond * 4);
+  assert.equal(bill.costItems, undefined);
 });
 
 test('Chatterbox requires configured conversion and an original audio track before paid processing', async t => {
@@ -1906,22 +1914,21 @@ test('Wan is enabled with its own credentials and validates its 15-second refere
   assert.equal((await upload()).status, 400); assert.equal(await app.wallet.reservation('alice', id), null);
   duration = 4.582; assert.equal((await upload()).status, 200);
   const draft = await app.current(id);
-  assert.equal(draft.duration, 4.582); assert.equal(draft.estimatedPoints, Math.ceil(4.582 * 2 * .42 * 125));
+  assert.equal(draft.duration, 4.582); assert.equal(draft.estimatedPoints, 2254);
   await app.close(); await app.open({ config: { wan3Enabled: false } });
   assert.equal((await (await app.call('/config')).json()).enabled, false);
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: WAN3_MODEL } })).status, 503);
 });
 
-for (const outcome of ['completed', 'failed', 'uncertain']) test(`Wan ${outcome} keeps one paid dispatch and reconciles actual input plus output after restart`, async t => {
-  let submissions = 0, uploads = 0, ready = false, usageReady = false;
-  const usage = { duration: 9.15, input_video_duration: 4.57, output_video_duration: 4.58, SR: 720 };
+for (const outcome of ['completed', 'failed', 'uncertain']) test(`Wan ${outcome} keeps one dispatch and the model price after restart`, async t => {
+  let submissions = 0, uploads = 0, ready = false;
   const app = await fixture(t, { costMode: true, config: { wan3Enabled: true },
     now: () => Date.parse('2026-10-21T12:00:00+08:00'), probe: async () => ({ ...META, duration: 4.582 }),
     wan3Provider: {
       upload: async () => ({ id: `oss://test/material-${++uploads}`, status: 2 }),
       generate: async () => { submissions++; if (outcome === 'uncertain') throw new VideoError('Lost response', 502, 'VIDEO_PROVIDER_UNAVAILABLE'); return { taskId: 'wan-one-job' }; },
       query: async id => { assert.equal(id, 'wan-one-job'); return !ready ? {} : outcome === 'failed' ? { failed: true }
-        : { completed: true, url: 'https://result.example/wan.mp4', ...(usageReady ? { usage } : {}) }; },
+        : { completed: true, url: 'https://result.example/wan.mp4' }; },
     } });
   const id = randomUUID();
   await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } });
@@ -1930,49 +1937,43 @@ for (const outcome of ['completed', 'failed', 'uncertain']) test(`Wan ${outcome}
   await app.until(id, task => task.status === (outcome === 'uncertain' ? 'failed' : 'running'));
   await app.close(); ready = true; await app.open();
   if (outcome === 'completed') {
-    const settling = await app.until(id, task => task.status === 'settling');
-    assert.equal(settling.resultUrl, null);
-    assert.equal((await app.wallet.reservation('alice', id)).costItems.wan3.status, 'uncertain');
-    await app.close(); usageReady = true; await app.open();
     const done = await app.until(id, task => task.status === 'completed');
-    assert.equal(done.billing.costCny, 3.843);
+    assert.equal(done.billing.chargedPoints, 2254);
     const bill = await app.wallet.reservation('alice', id);
-    assert.equal(bill.settledUnits, 3_843_000); assert.equal(Object.keys(bill.costItems).length, 1);
-  } else if (outcome === 'failed') {
-    await app.until(id, task => task.status === 'failed' && task.billing?.status === 'settled');
-    assert.equal((await app.wallet.reservation('alice', id)).settledUnits, 0);
+    assert.equal(bill.settledUnits, 4.582); assert.equal(bill.pricingKey, generationPrice('video', WAN3_MODEL).key);
   } else {
-    await app.until(id, task => task.status === 'failed' && task.billing?.status === 'release_pending');
-    assert.equal((await app.wallet.reservation('alice', id)).costItems.wan3.status, 'uncertain');
-    assert.ok((await app.wallet.snapshot('alice')).held > 0);
+    await app.until(id, task => task.status === 'failed' && task.billing?.status === 'released');
+    assert.equal((await app.wallet.reservation('alice', id)).chargedPoints, 0);
+    assert.equal((await app.wallet.snapshot('alice')).held, 0);
   }
   await app.call(`/tasks/${id}/start`, { body: {} });
   assert.equal(submissions, 1); assert.equal(uploads, 2); assert.equal(app.state.generations, 0);
 });
 
-test('actual-cost Seedance uses the confirmed 1 CNY per second contract and settles only once',async t=>{
+test('Seedance uses the agreed 410 points per second and settles only once',async t=>{
   const app=await fixture(t,{costMode:true}),id=await app.init();await app.upload(id);
-  assert.equal((await app.current(id)).estimatedPoints,500,'upload quote uses the new rule before starting');
+  assert.equal((await app.current(id)).estimatedPoints,1640,'upload quote uses the new rule before starting');
   assert.equal((await app.call(`/tasks/${id}/start`,{body:{}})).status,202);
-  await app.until(id,task=>task.status==='running');assert.equal((await app.wallet.snapshot('alice')).held,500);
+  await app.until(id,task=>task.status==='running');assert.equal((await app.wallet.snapshot('alice')).held,1640);
   app.state.done=true;const done=await app.until(id,task=>task.status==='completed'&&task.billing.status==='settled');
-  assert.equal(done.billing.mode,'api_cost');assert.equal(done.billing.chargedPoints,500);assert.equal(done.billing.costCny,4);
-  await app.call(`/tasks/${id}/start`,{body:{}});assert.equal(app.state.generations,1);assert.equal((await app.wallet.snapshot('alice')).available,500);
+  assert.equal(done.billing.mode,'model_price');assert.equal(done.billing.chargedPoints,1640);
+  await app.call(`/tasks/${id}/start`,{body:{}});assert.equal(app.state.generations,1);assert.equal((await app.wallet.snapshot('alice')).available,TEST_BALANCE-1640);
 });
 
 test('actual-cost Seedance stops an unaffordable video before any paid generation',async t=>{
-  const app=await fixture(t,{costMode:true,probe:async()=>({...META,duration:12})}),id=await app.init();await app.upload(id);
+  const app=await fixture(t,{costMode:true,balance:1000,probe:async()=>({...META,duration:12})}),id=await app.init();await app.upload(id);
   const response=await app.call(`/tasks/${id}/start`,{body:{}});assert.equal(response.status,402);
   assert.equal(app.state.generations,0);assert.equal((await app.wallet.snapshot('alice')).available,1000);
 });
 
-test('unknown Seedance submission cannot turn its frozen cost into a free retry',async t=>{
+test('unknown Seedance submission refunds the customer without dispatching a duplicate',async t=>{
   const app=await fixture(t,{costMode:true,uncertain:true}),id=await app.init();await app.upload(id);
   assert.equal((await app.call(`/tasks/${id}/start`,{body:{}})).status,202);
-  const failed=await app.until(id,task=>task.status==='failed'&&task.billing?.status==='release_pending');assert.equal(failed.billing.status,'release_pending');
-  assert.equal((await app.wallet.snapshot('alice')).held,500);assert.equal(app.state.generations,1);
+  const failed=await app.until(id,task=>task.status==='failed'&&task.billing?.status==='released');assert.equal(failed.billing.chargedPoints,0);
+  await app.call(`/tasks/${id}/start`,{body:{}});
+  assert.equal((await app.wallet.snapshot('alice')).held,0);assert.equal(app.state.generations,1);
 });
-test('replica includes IndexTTS and lip-sync in its 1 CNY per second cost, without a second fee',async t=>{
+test('replica includes IndexTTS and lip-sync in the model price, without a second fee',async t=>{
   let mouths=0;
   const app=await fixture(t,{costMode:true,speech:fakeSpeech(),voice:async(_input,output)=>{await writeFile(output,VIDEO);return{duration:5};},
     narration:fakeNarration(),lipsync:fakeLipsync({submit:async()=>{mouths++;return{id:'aggregate-mouth'};}})});
@@ -1980,13 +1981,13 @@ test('replica includes IndexTTS and lip-sync in its 1 CNY per second cost, witho
   assert.equal((await app.call(`/tasks/${id}/start`,{body:{voiceEngine:'indextts2'}})).status,202);
   await app.until(id,task=>task.status==='running');app.state.done=true;
   const done=await app.until(id,task=>task.status==='completed'&&task.billing.status==='settled');
-  assert.equal(done.billing.chargedPoints,750);assert.equal(done.billing.costCny,6);assert.equal(mouths,1);
-  assert.equal(Object.keys((await app.wallet.reservation('alice',id)).costItems).length,1);
+  assert.equal(done.billing.chargedPoints,1640);assert.equal(mouths,1);
+  assert.equal((await app.wallet.reservation('alice',id)).pricingKey,generationPrice('video','doubao-seedance-2-0-260128').key);
 });
 test('rejected replica materials release the aggregate hold before paid video generation',async t=>{
   const app=await fixture(t,{costMode:true}),id=await app.init();await app.upload(id);app.state.review=3;
   await app.call(`/tasks/${id}/start`,{body:{}});
-  const failed=await app.until(id,task=>task.status==='failed'&&task.billing.status==='settled');
+  const failed=await app.until(id,task=>task.status==='failed'&&task.billing.status==='released');
   assert.equal(failed.billing.chargedPoints,0);assert.equal(app.state.generations,0);
   assert.equal((await app.wallet.snapshot('alice')).held,0);
 });

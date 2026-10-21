@@ -137,7 +137,7 @@ test('edition dropdown stays below voice reference and updates its description a
   assert.doesNotMatch(page.html(), /Wan 2\.2|wan\/v2\.2-14b|PixVerse Swap|fal-ai\/pixverse\/swap/);
   for (const [model, price, points] of [[FAST_MODEL, '1.8', 369], [MINI_MODEL, '1', 205], [STANDARD_MODEL, '2', 410]]) {
     page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
-    assert.ok(page.html().includes(`最多生成15秒视频，RM ${price}/秒（约 ${points} 积分/秒）`));
+    assert.ok(page.html().includes(`最多生成15秒视频，RM ${price}/秒（${points} 积分/秒）`));
   }
   assert.doesNotMatch(page.html(), /标准版|至臻版/);
   assert.match(page.html(), /option value="doubao-seedance-2-0-260128"[^>]* selected/);
@@ -145,7 +145,7 @@ test('edition dropdown stays below voice reference and updates its description a
   await page.settle();
   assert.match(page.html(), /option value="doubao-seedance-2-5-260628"[^>]* selected/);
   assert.match(page.html(), /单个人物 · 2–30 秒/);
-  assert.match(page.html(), /最多生成30秒视频，RM 3\/秒（约 615 积分\/秒）/);
+  assert.match(page.html(), /最多生成30秒视频，RM 3\/秒（615 积分\/秒）/);
   page.node('#replica-new').onclick();
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
@@ -168,7 +168,7 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan
   const estimate = `生成时间约为 ${model === 'wan3.0-video' ? '13–17' : '5–10'} 分钟`;
   assert.ok(page.html().includes(estimate), 'the empty preview follows the selected model');
   if (model === 'wan3.0-video') {
-    assert.match(page.html(), /最多生成15秒视频，RM 2.4\/秒（约 492 积分\/秒）/);
+    assert.match(page.html(), /最多生成15秒视频，RM 2.4\/秒（492 积分\/秒）/);
     assert.doesNotMatch(page.html(), /0.42元\/秒/);
   }
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
@@ -248,7 +248,7 @@ test('PixVerse can no longer be selected for a new task but its historical resul
 });
 
 test('saved premium drafts keep their edition and a rejected downgrade retains the original quote', async t => {
-  const task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 20, estimatedPoints: 2500 }, calls = [];
+  const task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 20, estimatedPoints: 12300 }, calls = [];
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
     if (options?.method === 'POST') { calls.push(path); return Response.json({ error: '参考视频需为 2–15 秒，宽高至少 300 像素。' }, { status: 400 }); }
   } });
@@ -257,15 +257,15 @@ test('saved premium drafts keep their edition and a rejected downgrade retains t
   page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/model']);
   assert.match(page.message(), /2–15 秒/); assert.match(page.html(), /单个人物 · 2–30 秒/);
-  assert.match(page.cost(), /2500/);
+  assert.match(page.cost(), /12300/);
 });
 
 test('a shorter local replacement is saved before downgrading a premium draft and is not uploaded twice', async t => {
-  let task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 20, estimatedPoints: 2500 }; const calls = [];
+  let task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 20, estimatedPoints: 12300 }; const calls = [];
   const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
     if (!options?.method) return;
     calls.push(path);
-    if (path.endsWith('/video')) task = { ...task, duration: 10, estimatedPoints: 1250 };
+    if (path.endsWith('/video')) task = { ...task, duration: 10, estimatedPoints: 6150 };
     if (path.endsWith('/model')) task = { ...task, model: JSON.parse(options.body).model };
     if (path.endsWith('/start')) task = { ...task, status: 'running' };
     return Response.json({ task });
@@ -274,7 +274,7 @@ test('a shorter local replacement is saved before downgrading a premium draft an
   page.node('#replica-video').onchange({ target: { files: [new File(['shorter'], 'short.mp4')] } });
   page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/video', '/api/video-replica/tasks/editable-task/model']);
-  assert.match(page.html(), /单个人物 · 2–15 秒/); assert.match(page.cost(), /1250/);
+  assert.match(page.html(), /单个人物 · 2–15 秒/); assert.match(page.cost(), /4100/);
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls.filter(path => path.endsWith('/video')).length, 1);
 });
@@ -635,10 +635,10 @@ test('finite credits retain the normal freeze quote and refund message regardles
   globalThis.workspaceUser.account = 'zxc9911';
   globalThis.workspaceUser.unlimited = true;
   await page.wallet(finiteWallet());
-  assert.equal(page.cost(), '按视频时长预留积分；失败退回预留积分。');
+  assert.equal(page.cost(), '410 积分/秒；上传后按时长预留积分，失败退回。');
   assert.match(page.html(), /id="replica-submit"[^>]*>一键生成/);
   page.recover(); await page.poll(); page.select(task.id);
-  assert.equal(page.cost(), '预计冻结 112 积分 · 10 秒 · 成功后按成片时长结算，不超过预估');
+  assert.equal(page.cost(), '预计 4100 积分 · 10 秒 · 按成片时长结算，积分四舍五入；失败退回预留积分。');
   assert.doesNotMatch(page.cost(), /无限积分/);
 });
 

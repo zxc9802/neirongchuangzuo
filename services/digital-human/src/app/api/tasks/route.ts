@@ -139,9 +139,10 @@ export async function POST(req: NextRequest) {
       billing: {
         source: reservation.source,
         mode: reservation.mode,
+        pricingKey: reservation.pricingKey,
         exempt: reservation.exempt === true,
         isExternalUser: reservation.chargeRequired,
-        ratePerSecond: reservation.source === "workspace" ? reservation.mode === "api_cost" ? 12.5 : 333 / 30 : POINTS_PER_SECOND,
+        ratePerSecond: reservation.ratePerSecond ?? (reservation.source === "workspace" ? reservation.mode === "api_cost" ? 12.5 : 333 / 30 : POINTS_PER_SECOND),
         costCnyPerSecond: reservation.source === "workspace" ? reservation.mode === "api_cost" ? 0.1 : 0 : CNY_PER_SECOND,
         requestId: reservation.requestId,
         estimatedDuration,
@@ -168,7 +169,7 @@ export async function POST(req: NextRequest) {
       results: {},
     });
     const reservation = await reserveMainAppCredits({
-      user, sessionToken: session?.token, estimatedDuration,
+      user, sessionToken: session?.token, estimatedDuration, engine: engine || "b",
       minimumDuration: estimateScriptDuration(scriptText),
       beforeReserve: pending => {
         workspaceTask = createTask(pending, true);

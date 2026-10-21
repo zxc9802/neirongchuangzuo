@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path';
 import { PGlite } from '@electric-sql/pglite';
 import { createCreditsLedger, calculateCredits, INITIAL_POINTS, IMAGE_POINTS, VIDEO_POINTS, VIDEO_SECONDS, CreditsError } from '../services/credits/store.mjs';
 import { parseAccountCreditsArguments, manageAccountCredits } from '../scripts/account-credits.mjs';
+import { GENERATION_PRICES, generationPrice, generationPoints } from '../design/malaysian-prices.js';
 
 const failure = (code, status) => error => error instanceof CreditsError && error.code === code && error.status === status && error.statusCode === status;
 const task = (taskId, units, kind = 'image', userId = 'account_alice') => ({ userId, taskId, units, kind });
@@ -46,6 +47,49 @@ test('invalid, nonfinite, unbounded or fractional image units are rejected', () 
     ['image', NaN], ['video', -1], ['video', 1_000_001], ['chat', 1], ['video', undefined], ['video', Number.MAX_VALUE]]) {
     assert.throws(() => calculateCredits(kind, units), failure('CREDITS_INVALID_ARGUMENT', 400));
   }
+});
+
+test('model reservations round agreed prices, preserve the rate across restart and leave legacy rates unchanged', async t => {
+  const { ledger, open } = await local(t);
+  assert.deepEqual(GENERATION_PRICES.map(price => price.pointsPerSecond), [410, 615, 369, 205, 492, 21, 25, 205]);
+  for (const [index, price] of GENERATION_PRICES.entries()) {
+    const input = { userId: `model-${index}`, taskId: 'priced', kind: price.kind, units: 1, pricingKey: price.key };
+    assert.equal((await ledger.reserve(input)).reservedPoints, price.pointsPerSecond);
+    assert.equal((await ledger.extendReservation({ ...input, units: 1.25 })).reservedPoints, Math.round(price.pointsPerSecond * 1.25));
+    const settled = await ledger.settle({ ...input, units: 0.5 });
+    assert.equal(settled.chargedPoints, Math.round(price.pointsPerSecond / 2));
+    assert.equal((await ledger.settle({ ...input, units: 0.5 })).chargedPoints, settled.chargedPoints);
+    assert.equal((await ledger.snapshot(input.userId)).held, 0);
+    await assert.rejects(ledger.reserve({ ...input, pricingKey: undefined }), failure('CREDITS_REQUEST_CONFLICT', 409));
+  }
+  const price = generationPrice('video', 'doubao-seedance-2-0-260128');
+  await ledger.reserve({ userId: 'restart', taskId: 'priced', kind: 'video', units: 2, pricingKey: price.key });
+  await ledger.close(); const reopened = open(); await reopened.ready;
+  assert.equal((await reopened.reservation('restart', 'priced')).pricingKey, price.key);
+  assert.equal((await reopened.settle({ userId: 'restart', taskId: 'priced', units: 1.2345 })).chargedPoints, 506);
+  assert.equal(calculateCredits('digital-human', 30), 333);
+  assert.equal(calculateCredits('mix', 30), 333);
+  assert.equal(calculateCredits('image', 1), 50);
+  assert.throws(() => calculateCredits('image', 1, price.key));
+  assert.throws(() => generationPoints(-1, price.key));
+});
+
+test('SQL stores model price keys, enforces affordability and refunds priced failures once', async t => {
+  const pg = new PGlite(); await pg.waitReady;
+  const pool = pglitePool(pg); let ledger = createCreditsLedger({ pool }); await ledger.ready;
+  t.after(async () => { await ledger.close(); await pg.close(); });
+  const price = generationPrice('video', 'doubao-seedance-2-5-260628');
+  const input = { userId: 'priced-sql', taskId: 'job', kind: 'video', units: 1, pricingKey: price.key };
+  await assert.rejects(ledger.reserve({ ...input, units: 2 }), failure('INSUFFICIENT_POINTS', 402));
+  await ledger.reserve(input); await ledger.close();
+  ledger = createCreditsLedger({ pool }); await ledger.ready;
+  assert.equal((await ledger.reservation(input.userId, input.taskId)).pricingKey, price.key);
+  await ledger.release(input); await ledger.release(input);
+  assert.equal((await ledger.snapshot(input.userId)).available, 1000);
+  await ledger.setUnlimited(input.userId, true);
+  await ledger.reserve({ ...input, taskId: 'free', units: 15 });
+  assert.equal((await ledger.settle({ ...input, taskId: 'free', units: 14.5 })).chargedPoints, 0);
+  assert.equal((await ledger.snapshot(input.userId)).available, 1000);
 });
 
 test('new and existing accounts each receive the welcome grant exactly once', async t => {

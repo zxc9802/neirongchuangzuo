@@ -268,7 +268,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         if (!currentTaskData.billing.requestId || !currentTaskData.userId) {
           throw new Error("外部用户任务缺少主站积分结算标识");
         }
-        chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
+        chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode, currentTaskData.billing.pricingKey);
         costCny = calculateCostCny(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
         // Save the actual MP3 before settlement so recovery never needs another paid TTS call.
         TaskStore.update(taskId, { results: { exactAudioUrl: mp3Path, audioFormat: "mp3", audioDuration: actualDuration,
@@ -640,7 +640,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         throw new Error("外部用户任务缺少主站积分结算标识");
       }
       const actualDuration = finalProbe.durationSeconds;
-      chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
+      chargedPoints = calculateRequiredPoints(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode, currentTaskData.billing.pricingKey);
       costCny = calculateCostCny(actualDuration, currentTaskData.billing.source, currentTaskData.billing.mode);
       log(
         currentTaskData.billing.source === "workspace"

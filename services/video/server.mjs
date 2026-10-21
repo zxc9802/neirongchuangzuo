@@ -4,6 +4,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createRequestLedger } from '../ai/request-ledger.mjs';
 import { calculateCredits } from '../credits/store.mjs';
 import { costPoints } from '../credits/costs.mjs';
+import { generationPrice, generationPoints } from '../../design/malaysian-prices.js';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL } from './provider.mjs';
@@ -62,7 +63,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   wan3Provider ||= createWan3Provider(config,costMeter.fetch);
   const models = MODELS.map(model => ({ ...model, enabled: Boolean(isFalReplacement(model.id)
     ? config.falEnabled && (!credits || costMeter.enabled) : model.id === WAN3_MODEL
-      ? config.wan3Enabled && (!credits || costMeter.enabled) : config.enabled) }));
+      ? config.wan3Enabled : config.enabled) }));
   const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
     { id: 'indextts2', name: 'IndexTTS2', enabled: Boolean(narration?.enabled && lipsync?.enabled) },
     { id: 'chatterbox', name: 'Chatterbox 音色转换', enabled: Boolean(voiceConversion?.enabled && speech.enabled) }];
@@ -142,6 +143,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const settled = !credits || task.billing?.status === 'settled';
     const expired = isExpired(task);
     const costPricing = task.billing?.mode === 'api_cost' || (!task.billing && costMeter.enabled);
+    const pricingKey = task.billing?.pricingKey || task.pricingKey || (!task.billing && task.status === 'draft' ? generationPrice('video', task.model || MODEL)?.key : undefined);
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
@@ -166,9 +168,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       canRecheck: !expired && task.status === 'failed' && task.rawReady === true && Boolean(task.voice && task.speech)
         && (!credits || task.billing?.status === 'released'),
       downloadProgress: task.downloadProgress,
-      estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? costPricing
+      estimatedPoints: task.billing?.exempt === true ? 0 : task.duration ? pricingKey ? generationPoints(task.duration, pricingKey) : costPricing
         ? isFalReplacement(task.model) ? null : costPoints(generationQuote(task)) : calculateCredits('video', task.duration) : null,
       billing: task.billing && { source: 'workspace', status: task.billing.status, reservedPoints: task.billing.reservedPoints, chargedPoints: task.billing.chargedPoints, exempt: task.billing.exempt === true,
+        ...(task.billing.pricingKey ? { mode: 'model_price', pricingKey: task.billing.pricingKey } : {}),
         ...(task.billing.mode==='api_cost'?{mode:'api_cost',costCny:task.billing.costCny}:{}) },
       resultUrl: !expired && task.status === 'completed' && settled ? `${PREFIX}/tasks/${task.id}/result` : null };
   }
@@ -207,6 +210,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         ? await credits.settle({ userId: task.userId, taskId, units: Math.min(task.duration, task.actualDuration) })
         : await credits.release({ userId: task.userId, taskId });
       task.billing = record ? { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true,
+        ...(record.pricingKey ? { mode: 'model_price', pricingKey: record.pricingKey } : {}),
         ...(record.kind==='api-cost'?{mode:'api_cost',costCny:(record.settledUnits||0)/1e6}:{}) }
         : { status: 'released', reservedPoints: 0, chargedPoints: 0 };
     } catch { task.billing = { ...task.billing, status: task.status === 'completed' ? 'settle_pending' : 'release_pending' }; }
@@ -786,8 +790,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.status = 'reserving'; task.error = ''; delete task.code; await save(task);
           try {
             if (credits) {
-              const record = costMeter.enabled ? await credits.reserveCost({userId,taskId:task.billingTaskId}) : await credits.reserve({ userId, taskId: task.billingTaskId, kind: 'video', units: task.duration });
-              task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true,...(costMeter.enabled?{mode:'api_cost'}:{}) };
+              const record = task.pricingKey ? await credits.reserve({ userId, taskId: task.billingTaskId, kind: 'video', units: task.duration, pricingKey: task.pricingKey })
+                : costMeter.enabled ? await credits.reserveCost({userId,taskId:task.billingTaskId}) : await credits.reserve({ userId, taskId: task.billingTaskId, kind: 'video', units: task.duration });
+              task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true,
+                ...(record.pricingKey ? { mode: 'model_price', pricingKey: record.pricingKey } : record.kind === 'api-cost' ? { mode: 'api_cost' } : {}) };
             }
             task.status = 'verifying'; await save(task);
           } catch (cause) {
@@ -818,6 +824,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const duration = videoDuration(task.video, model);
           task.model = model;
           task.duration = duration;
+          task.pricingKey = generationPrice('video', model)?.key;
           task.cnyPerSecond = model === WAN3_MODEL ? wan3Price(now()) : models.find(item => item.id === model).cnyPerSecond;
           task.voiceEngine = voiceEngine;
           task.recoveryPolicy = ['indextts2', 'chatterbox'].includes(voiceEngine) || sourceAudioMode === 'silent' ? 1 : undefined;
@@ -838,18 +845,21 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           }
           try {
             if (credits) {
-              if(costMeter.enabled && !isFalReplacement(model)) {
+              if(costMeter.enabled && !task.pricingKey && !isFalReplacement(model)) {
                 const wallet=await credits.snapshot(userId);
                 if(wallet.unlimited!==true&&costPoints(generationQuote(task))>wallet.available) throw error('积分不足，请选择更短的视频。',402,'INSUFFICIENT_POINTS');
               }
               let record;
-              if (costMeter.enabled) {
+              if (task.pricingKey) {
+                record = await credits.reserve({ userId, taskId: task.id, kind: 'video', units: task.duration, pricingKey: task.pricingKey });
+              } else if (costMeter.enabled) {
                 record = await credits.reserveCost({userId,taskId:task.id});
                 if (!isFalReplacement(model)) {
                   record = await prepareGenerationCost(task);
                 }
               } else record = await credits.reserve({ userId, taskId: task.id, kind: 'video', units: task.duration });
-              task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true,...(costMeter.enabled?{mode:'api_cost'}:{}) };
+              task.billing = { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, exempt: record.exempt === true,
+                ...(record.pricingKey ? { mode: 'model_price', pricingKey: record.pricingKey } : record.kind === 'api-cost' ? { mode: 'api_cost' } : {}) };
             }
             task.status = 'preparing'; await save(task);
           } catch (cause) {

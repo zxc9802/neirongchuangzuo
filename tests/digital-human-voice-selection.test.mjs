@@ -54,19 +54,19 @@ test('first load selects the default voice even when uploaded voices precede it'
 test('Malaysian generation prices follow engine, script duration and speaking speed', async () => {
   await loadPage({ inspect: ({ regions, listeners, ctx, render }) => {
     ctx.configs.avatar.prompt = '字'.repeat(344);
-    assert.match(render(), /约 86 秒 · 预计 1763 积分（RM 8.6）/);
+    assert.match(render(), /约 86 秒 · 预计 1806 积分 · 21 积分\/秒/);
     for (const [engine, text] of [
-      ['d', '约 86 秒 · 预计 2116 积分（RM 10.32）'],
-      ['e', '约 86 秒 · 预计 17630 积分（RM 86）'],
-      ['b', '约 86 秒 · 预计 1763 积分（RM 8.6）'],
+      ['d', '约 86 秒 · 预计 2150 积分 · 25 积分/秒'],
+      ['e', '约 86 秒 · 预计 17630 积分 · 205 积分/秒'],
+      ['b', '约 86 秒 · 预计 1806 积分 · 21 积分/秒'],
     ]) {
       listeners.change({ target: { dataset: { dhOption: 'engine' }, value: engine } });
       assert.equal(regions.get('#dh-credit-estimate').textContent, text);
     }
     listeners.change({ target: { dataset: { dhOption: 'toneProfile' }, value: 'high' } });
-    assert.equal(regions.get('#dh-credit-estimate').textContent, '约 72 秒 · 预计 1476 积分（RM 7.2）');
+    assert.equal(regions.get('#dh-credit-estimate').textContent, '约 72 秒 · 预计 1512 积分 · 21 积分/秒');
     ctx.configs.avatar.prompt = '';
-    assert.match(render(), /id="dh-credit-estimate"[^>]*>RM 0.1\/秒 · 约 20.5 积分\/秒<\/p>/);
+    assert.match(render(), /id="dh-credit-estimate"[^>]*>RM 0.1\/秒 · 21 积分\/秒<\/p>/);
   } });
 });
 

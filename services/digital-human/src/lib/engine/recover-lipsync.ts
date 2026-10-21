@@ -108,7 +108,7 @@ async function markCompleted(
   let chargedPoints =
     (task.billing?.source === "workspace" ? undefined : results.chargedPoints) ??
     (task.billing?.isExternalUser
-      ? calculateRequiredPoints(duration, task.billing.source, task.billing.mode)
+      ? calculateRequiredPoints(duration, task.billing.source, task.billing.mode, task.billing.pricingKey)
       : undefined);
   let costCny =
     results.costCny ??

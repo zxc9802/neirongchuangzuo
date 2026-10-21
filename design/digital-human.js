@@ -2,15 +2,15 @@ import { markdownText } from './markdown.js';
 import { digitalHumanApi as api } from './digital-human-api.js';
 import { accountStorageKey } from './account-storage.js';
 import { digitalHumanModelLabel } from './model-labels.js';
-import { MALAYSIAN_PRICE_NOTE, referenceMyrPoints } from './malaysian-prices.js';
+import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malaysian-prices.js';
 
-import { videoPoints, estimatedSpeechSeconds, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask, billingPointsText } from './workspace-credits.js';
+import { estimatedSpeechSeconds, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask, billingPointsText } from './workspace-credits.js';
 let unsubscribeCredits = null;
 const speechEstimate = () => estimatedSpeechSeconds(state.script, state.toneProfile === 'high' ? 1.2 : 1);
 function generationPriceText() {
-  const rate = { b: 0.1, d: 0.12, e: 1 }[state.engine], seconds = speechEstimate();
-  return seconds ? `约 ${seconds} 秒 · 预计 ${Math.ceil(referenceMyrPoints(rate * seconds))} 积分（RM ${Number((rate * seconds).toFixed(2))}）`
-    : `RM ${rate}/秒 · 约 ${referenceMyrPoints(rate)} 积分/秒`;
+  const price = generationPrice('digital-human', state.engine), seconds = speechEstimate();
+  return seconds ? `约 ${seconds} 秒 · 预计 ${generationPoints(seconds, price.key)} 积分 · ${price.pointsPerSecond} 积分/秒`
+    : `RM ${price.rmPerSecond}/秒 · ${price.pointsPerSecond} 积分/秒`;
 }
 const STORAGE_KEY = accountStorageKey('store-studio:digital-human:v1');
 const state = {
@@ -178,7 +178,7 @@ function generateHint() {
   if (!state.script.trim()) return '请填写口播文案';
   if (state.script.length > 5000) return '口播稿请控制在 5000 字以内';
   if (!state.status.engines?.some(item => item.id === state.engine && item.available)) return '请选择可用的对口型模型';
-  return creditInsufficiency(videoPoints(speechEstimate()));
+  return creditInsufficiency(speechEstimate() ? generationPoints(speechEstimate(), generationPrice('digital-human', state.engine).key) : null);
 }
 
 

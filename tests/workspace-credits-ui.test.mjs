@@ -176,7 +176,7 @@ test('unlimited accounts retain image exemptions and see digital-human reference
   assert.match(image, /无限积分/);
   assert.doesNotMatch(image, /预计 \d+ 积分/);
   const video = renderDigitalHuman({ esc, button, icon: () => '', storeInfo: {}, configs: { avatar: { prompt: '真'.repeat(120) } } });
-  assert.match(video, /约 30 秒 · 预计 615 积分（RM 3）/);
+  assert.match(video, /约 30 秒 · 预计 630 积分 · 21 积分\/秒/);
   assert.doesNotMatch(video, /已使用|已冻结/);
   assert.match(video, /data-action="dh-generate"[^>]*disabled/);
   assert.equal(credits.videoCreditEstimateText(null), '无限积分');
@@ -217,7 +217,7 @@ test('digital-human estimates quote Malaysian reference prices without claiming 
   t.after(() => { if (saved === undefined) delete globalThis.localStorage; else globalThis.localStorage = saved; });
   await credits.refreshWorkspaceCredits();
   const html = renderDigitalHuman({ esc, button, icon: () => '', storeInfo: {}, configs: { avatar: { prompt: '真'.repeat(120) } } });
-  assert.match(html, /约 30 秒 · 预计 615 积分（RM 3）/);
+  assert.match(html, /约 30 秒 · 预计 630 积分 · 21 积分\/秒/);
   assert.match(html, /data-action="dh-generate"[^>]*disabled/);
 });
 

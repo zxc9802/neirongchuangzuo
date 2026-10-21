@@ -21,6 +21,34 @@ test.after(async()=>{
   assert.ok(path.resolve(root).startsWith(path.resolve(os.tmpdir())));fs.rmSync(root,{recursive:true,force:true});
 });
 const user=id=>({id,role:'member',billingAudience:'standalone'});
+for (const [engine, rate, charged] of [['b', 21, 96], ['d', 25, 115], ['e', 205, 939]]) {
+  test(`new ${engine} tasks reserve and settle their rounded Malaysian model rate`, async () => {
+    const id = 'model-price-' + engine;
+    const reservation = await billing.reserveMainAppCredits({ user: user(id), taskId: id, engine, estimatedDuration: 3 });
+    assert.equal(reservation.mode, 'model_price');
+    assert.equal(reservation.reservedPoints, rate * 3);
+    const info = { ...reservation, isExternalUser: true, status: 'reserved' };
+    const expanded = await billing.extendTaskCreditCoverage({ userId: id, billing: info, durationSeconds: 4.6 });
+    assert.equal(expanded, Math.round(rate * 4.6));
+    billing.assertTaskCreditCoverage({ ...info, reservedPoints: expanded }, 4.6);
+    const result = await billing.settleMainAppCredits({ userId: id, requestId: id, source: 'workspace', actualDuration: 4.582, chargedPoints: 1 });
+    assert.equal(result.chargedPoints, charged);
+    assert.equal((await billing.settleMainAppCredits({ userId: id, requestId: id, source: 'workspace', actualDuration: 4.582 })).chargedPoints, charged);
+    assert.equal((await ledger.snapshot(id)).available, 1000 - charged);
+    assert.equal((await ledger.reservation(id, id)).pricingKey, reservation.pricingKey);
+  });
+}
+test('priced digital-human failures refund, insufficient credits block and unlimited accounts stay exempt', async () => {
+  const id = 'model-refund';
+  await billing.reserveMainAppCredits({ user: user(id), taskId: id, engine: 'e', estimatedDuration: 4 });
+  await billing.releaseMainAppCredits({ userId: id, requestId: id, source: 'workspace' });
+  assert.equal((await ledger.snapshot(id)).available, 1000);
+  await assert.rejects(billing.reserveMainAppCredits({ user: user(id), engine: 'e', estimatedDuration: 6 }), { code: 'INSUFFICIENT_POINTS' });
+  await ledger.setUnlimited(id, true);
+  const free = await billing.reserveMainAppCredits({ user: user(id), taskId: 'priced-free', engine: 'e', estimatedDuration: 30 });
+  assert.equal(free.reservedPoints, 0);
+  assert.equal((await billing.settleMainAppCredits({ userId: id, requestId: free.requestId, source: 'workspace', actualDuration: 30 })).chargedPoints, 0);
+});
 const reserve=(id,seconds=30)=>billing.reserveMainAppCredits({user:user(id),taskId:id+'-task',estimatedDuration:seconds});
 const settle=(id,seconds)=>billing.settleMainAppCredits({userId:id,requestId:id+'-task',actualDuration:seconds,source:'workspace',chargedPoints:1});
 function loadSource(relative,deps){
@@ -62,10 +90,11 @@ test('actual audio extends its budget before lip-sync and cancellation restores 
   await assert.rejects(reserve('too-long',81),error=>error.status===402);
   assert.equal((await ledger.snapshot('too-long')).held,0);
 });
-test('MP3 and complete digital-human pipelines settle their single aggregate receipt using measured duration',async()=>{
+test('MP3 and complete digital-human pipelines settle their recorded price using measured duration',async()=>{
   const savedCwd=process.cwd();process.chdir(root);
-  try{for(const outputType of ['audio','video']){
-    const id='pipeline-'+outputType,reservation=await reserve(id,6);
+  try{for(const outputType of ['audio','video']){for(const priced of [false,true]){
+    const id='pipeline-'+outputType+'-'+priced,points=priced?630:375;
+    const reservation=priced?await billing.reserveMainAppCredits({user:user(id),taskId:id+'-task',engine:'b',estimatedDuration:6}):await reserve(id,6);
     const source=path.join(root,id+'.mp4'),speaker=path.join(root,id+'.wav');fs.writeFileSync(source,'fixture');fs.writeFileSync(speaker,'fixture');
     let task={id:reservation.requestId,userId:id,status:'pending',createdAt:Date.now(),updatedAt:Date.now(),progress:0,logs:[],
       billing:{...reservation,isExternalUser:true,status:'reserved'},
@@ -83,7 +112,7 @@ test('MP3 and complete digital-human pipelines settle their single aggregate rec
       './ffmpeg':{probeMedia:async()=>probe,sha256File:async()=> 'fixture-hash',encodeMp3:async(_input,output)=>fs.writeFileSync(output,'fixture'),
         prepareSourceVideo:async(_input,_seconds,output)=>{fs.writeFileSync(output,'fixture');return{duration:30,width:160,height:120};}},
       '../mcp/heygen-adapter':{HeyGenMcpAdapter:{}},'./openlux-lipsync':{OpenLuxLipsyncAdapter:{}},
-      './fal-veed-lipsync':{FalVeedLipsyncAdapter:{execute:async options=>{mouths++;assert.equal((await ledger.reservation(id,reservation.requestId)).reservedPoints,375);
+      './fal-veed-lipsync':{FalVeedLipsyncAdapter:{execute:async options=>{mouths++;assert.equal((await ledger.reservation(id,reservation.requestId)).reservedPoints,points);
         await options.onProviderSubmitting?.();options.onProviderAccepted();options.onJobCreated({lipsyncId:'fixture-mouth'});return{lipsyncId:'fixture-mouth',status:'completed'};}}},
       '../cos':{CosService:{isConfigured:()=>false}},'../lipsync-provider':{resolveLipsyncProvider:()=> 'veed'},
       '../media-path-policy':{resolveAllowedLocalMediaPath:value=>value},'../server/media-response':{getTrustedExternalMediaUrl:async()=>{throw new Error('local fixture');}},
@@ -91,10 +120,12 @@ test('MP3 and complete digital-human pipelines settle their single aggregate rec
     };
     await loadSource('../src/lib/engine/pipeline.ts',deps).runDigitalHumanPipeline(task.id);
     assert.equal(task.status,'completed',JSON.stringify(task));assert.equal(task.billing.status,'settled');
-    assert.equal(task.billing.costCny,3);assert.equal(task.results.chargedPoints,375);assert.equal(ttsCalls,1);assert.equal(mouths,outputType==='audio'?0:1);
-    assert.equal(Object.keys((await ledger.reservation(id,reservation.requestId)).costItems).length,1);
-    assert.equal((await ledger.snapshot(id)).available,625);assert.equal(publicData.isTaskOutputDeliverable(task),true);
-  }}finally{process.chdir(savedCwd);}
+    assert.equal(task.billing.costCny,priced?0:3);assert.equal(task.results.chargedPoints,points);assert.equal(ttsCalls,1);assert.equal(mouths,outputType==='audio'?0:1);
+    const record=await ledger.reservation(id,reservation.requestId);
+    if(priced) assert.equal(record.pricingKey,reservation.pricingKey);
+    else assert.equal(Object.keys(record.costItems).length,1);
+    assert.equal((await ledger.snapshot(id)).available,1000-points);assert.equal(publicData.isTaskOutputDeliverable(task),true);
+  }}}finally{process.chdir(savedCwd);}
 });
 test('recovering an existing MP3 records its real monetary cost without another synthesis or a second charge',async()=>{
   const id='recover-cost',reservation=await reserve(id,6),jobDir=path.join(root,'jobs',reservation.requestId);

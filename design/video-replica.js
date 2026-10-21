@@ -1,14 +1,14 @@
 import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
-import { MALAYSIAN_PRICE_NOTE, referenceMyrPoints } from './malaysian-prices.js';
+import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malaysian-prices.js';
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
 const MODELS = [
-  { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15, rmPerSecond: 2 },
-  { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, rmPerSecond: 3 },
-  { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, rmPerSecond: 1.8 },
-  { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, rmPerSecond: 1 },
-  { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, rmPerSecond: 2.4 },
+  { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15 },
+  { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30 },
+  { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15 },
+  { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15 },
+  { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15 },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务').replace(/Wan\s*3\.0/gi, 'qiya-3.0');
@@ -79,7 +79,8 @@ function selectedModel() {
 function modelName(task) { return (task.model === 'fal-ai/pixverse/swap' ? 'PixVerse Swap' : MODELS.find(model => model.id === (task.model || DEFAULT_MODEL))?.name) || ''; }
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
-  const description = selected.rmPerSecond ? `最多生成${selected.maxDuration}秒视频，RM ${selected.rmPerSecond}/秒（约 ${referenceMyrPoints(selected.rmPerSecond)} 积分/秒）` : '历史版本，仅供查看已有成片';
+  const price = generationPrice('video', selected.id);
+  const description = price ? `最多生成${selected.maxDuration}秒视频，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
   return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.map(model => {
     const configured = state.config?.models?.find(item => item.id === model.id);
     const unavailable = !state.config?.enabled || configured?.enabled === false || model.id === 'wan3.0-video' && !configured?.enabled;
@@ -146,6 +147,11 @@ function costText() {
   const unlimited = workspaceCreditsState().snapshot?.unlimited === true, exempt = task?.billing?.exempt === true;
   const actualCost=workspaceCreditsState().snapshot?.pricing?.mode==='api_cost';
   const conversionCost = !task || task.status === 'draft' || task.voiceEngine === 'chatterbox' ? '；音色转换另按实际用量结算' : '';
+  const price = generationPrice('video', selectedModel().id);
+  if (!unlimited && !exempt && price && (!task || task.status === 'draft' || task.billing?.mode === 'model_price')) {
+    return task?.duration ? `预计 ${generationPoints(task.duration, task.billing?.pricingKey || price.key)} 积分 · ${task.duration} 秒 · 按成片时长结算，积分四舍五入；失败退回预留积分。`
+      : `${price.pointsPerSecond} 积分/秒；上传后按时长预留积分，失败退回。`;
+  }
   return unlimited ? `${creditEstimateText(task?.estimatedPoints)}${task?.duration ? ` · ${task.duration} 秒` : ''}`
     : exempt ? task?.duration ? `${task.duration} 秒` : '上传后自动识别时长。'
       : actualCost ? task?.estimatedPoints ? `生成费用预计 ${task.estimatedPoints} 积分 · ${task.duration} 秒${conversionCost}` : `按实际算力计费${conversionCost}`

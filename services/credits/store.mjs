@@ -3,6 +3,7 @@ import { dirname, join, parse, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
 import { cnyMicros, costPointsFromMicros, costTotals, POINTS_PER_CNY, COST_PRICING_VERSION } from './costs.mjs';
+import { generationPriceForKey, generationPoints } from '../../design/malaysian-prices.js';
 export { POINTS_PER_CNY, costPoints } from './costs.mjs';
 
 export const INITIAL_POINTS = 1000;
@@ -35,7 +36,11 @@ function identifier(value, label) {
   return value;
 }
 
-export function calculateCredits(kind, units) {
+export function calculateCredits(kind, units, pricingKey) {
+  if (pricingKey !== undefined) {
+    if (generationPriceForKey(pricingKey)?.kind !== kind) throw new CreditsError('模型计费价格无效。');
+    try { return generationPoints(units, pricingKey); } catch { throw new CreditsError('模型计费单位无效。'); }
+  }
   if (kind === 'api-cost') {
     try { return costPointsFromMicros(units); } catch { throw new CreditsError('API计费单位无效。'); }
   }
@@ -103,9 +108,9 @@ function validateRecord(record, userId, taskId) {
         || record.status !== 'settled' && record.chargedPoints !== 0) throw unavailable();
       return;
     }
-    calculateCredits(record.kind, record.units);
-    const reservedCost = calculateCredits(record.kind, record.reservedUnits);
-    const settledCost = record.status === 'settled' ? calculateCredits(record.kind, record.settledUnits) : 0;
+    calculateCredits(record.kind, record.units, record.pricingKey);
+    const reservedCost = calculateCredits(record.kind, record.reservedUnits, record.pricingKey);
+    const settledCost = record.status === 'settled' ? calculateCredits(record.kind, record.settledUnits, record.pricingKey) : 0;
     if (record.units <= 0 || (record.exempt === true ? 0 : reservedCost) !== record.reservedPoints
       || record.reservedUnits < record.units
       || (record.status === 'settled' && (record.exempt === true ? 0 : settledCost) !== record.chargedPoints)
@@ -154,6 +159,7 @@ const SCHEMA = `
   ALTER TABLE workspace_credits.wallets ADD COLUMN IF NOT EXISTS unlimited BOOLEAN NOT NULL DEFAULT FALSE;
   ALTER TABLE workspace_credits.wallets ADD COLUMN IF NOT EXISTS cost_micros_total BIGINT NOT NULL DEFAULT 0;
   ALTER TABLE workspace_credits.reservations ADD COLUMN IF NOT EXISTS exempt BOOLEAN NOT NULL DEFAULT FALSE;
+  ALTER TABLE workspace_credits.reservations ADD COLUMN IF NOT EXISTS pricing_key TEXT;
   ALTER TABLE workspace_credits.reservations ADD COLUMN IF NOT EXISTS cost_items JSONB;
   ALTER TABLE workspace_credits.reservations ADD COLUMN IF NOT EXISTS shortfall_points BIGINT NOT NULL DEFAULT 0;
   ALTER TABLE workspace_credits.reservations ADD COLUMN IF NOT EXISTS cost_total_before BIGINT;
@@ -169,6 +175,7 @@ function rowRecord(row) {
     reservedUnits: Number(row.reserved_units), reservedPoints: Number(row.reserved_points), chargedPoints: Number(row.charged_points),
     settledUnits: row.settled_units == null ? null : Number(row.settled_units), status: row.status,
     exempt: row.exempt === true,
+    ...(row.pricing_key == null ? {} : { pricingKey: row.pricing_key }),
     ...(row.kind === 'api-cost' ? { costItems: row.cost_items, shortfallPoints: Number(row.shortfall_points || 0),
       ...(row.cost_total_before == null ? {} : { costTotalBeforeMicros: Number(row.cost_total_before), costTotalAfterMicros: Number(row.cost_total_after) }) } : {}),
     createdAt: Number(row.created_at), updatedAt: Number(row.updated_at) };
@@ -341,13 +348,13 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
       if (JSON.stringify(state.record) !== beforeRecord) {
         const r = state.record;
         await client.query(`INSERT INTO workspace_credits.reservations
-          (user_id,task_id,kind,units,reserved_units,reserved_points,charged_points,settled_units,status,created_at,updated_at,exempt,cost_items,shortfall_points,cost_total_before,cost_total_after)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+          (user_id,task_id,kind,units,reserved_units,reserved_points,charged_points,settled_units,status,created_at,updated_at,exempt,cost_items,shortfall_points,cost_total_before,cost_total_after,pricing_key)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
           ON CONFLICT (user_id,task_id) DO UPDATE SET reserved_units=EXCLUDED.reserved_units,reserved_points=EXCLUDED.reserved_points,
           charged_points=EXCLUDED.charged_points,settled_units=EXCLUDED.settled_units,status=EXCLUDED.status,updated_at=EXCLUDED.updated_at,
           cost_items=EXCLUDED.cost_items,shortfall_points=EXCLUDED.shortfall_points,cost_total_before=EXCLUDED.cost_total_before,cost_total_after=EXCLUDED.cost_total_after`,
         [r.userId, r.taskId, r.kind, r.units, r.reservedUnits, r.reservedPoints, r.chargedPoints, r.settledUnits, r.status, r.createdAt, r.updatedAt, r.exempt === true,
-          r.costItems ? JSON.stringify(r.costItems) : null, r.shortfallPoints || 0, r.costTotalBeforeMicros ?? null, r.costTotalAfterMicros ?? null]);
+          r.costItems ? JSON.stringify(r.costItems) : null, r.shortfallPoints || 0, r.costTotalBeforeMicros ?? null, r.costTotalAfterMicros ?? null, r.pricingKey ?? null]);
       }
       for (const item of state.events) await writeEvent(client, item);
       await client.query('COMMIT'); return clone(result);
@@ -492,21 +499,21 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
       });
     },
     settleCost({ userId, taskId } = {}) { return run(userId, taskId, state => closeCostRecord(state, userId, taskId)); },
-    reserve({ userId, taskId, kind, units } = {}) {
+    reserve({ userId, taskId, kind, units, pricingKey } = {}) {
       identifier(taskId, '任务');
       if(kind==='api-cost') throw new CreditsError('请使用费用预留接口。');
-      const points = calculateCredits(kind, units);
+      const points = calculateCredits(kind, units, pricingKey);
       if (units <= 0) throw new CreditsError('积分预留单位必须大于零。');
       return run(userId, taskId, state => {
         if (state.record) {
-          if (state.record.kind !== kind || state.record.units !== units) throw conflict('同一任务不能重复提交不同的计费参数。');
+          if (state.record.kind !== kind || state.record.units !== units || state.record.pricingKey !== pricingKey) throw conflict('同一任务不能重复提交不同的计费参数。');
           return publicReservation(state.record, state.wallet);
         }
         const exempt = state.wallet.unlimited === true;
         const reservedPoints = exempt ? 0 : points;
         if (state.wallet.available < reservedPoints) throw insufficient();
         state.record = { userId, taskId, kind, units, reservedUnits: units, reservedPoints, chargedPoints: 0, exempt,
-          settledUnits: null, status: 'reserved', createdAt: state.at, updatedAt: state.at };
+          settledUnits: null, status: 'reserved', createdAt: state.at, updatedAt: state.at, ...(pricingKey ? { pricingKey } : {}) };
         update(state, userId, taskId, 'reserve', -reservedPoints, reservedPoints);
         return publicReservation(state.record, state.wallet);
       });
@@ -514,7 +521,7 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
     extendReservation({ userId, taskId, units } = {}) {
       identifier(taskId, '任务');
       return run(userId, taskId, state => {
-        const record = requiredRecord(state), points = calculateCredits(record.kind, units);
+        const record = requiredRecord(state), points = calculateCredits(record.kind, units, record.pricingKey);
         if (record.status !== 'reserved') throw conflict('该任务的积分预留已结束，不能追加冻结。');
         if (record.exempt === true) {
           if (units <= record.reservedUnits) return publicReservation(record, state.wallet);
@@ -533,7 +540,7 @@ export function createCreditsLedger({ databaseUrl = process.env.AUTH_DATABASE_UR
     settle({ userId, taskId, units } = {}) {
       identifier(taskId, '任务');
       return run(userId, taskId, state => {
-        const record = requiredRecord(state), cost = calculateCredits(record.kind, units);
+        const record = requiredRecord(state), cost = calculateCredits(record.kind, units, record.pricingKey);
         const points = record.exempt === true ? 0 : cost;
         if (record.status === 'settled') {
           if (record.settledUnits !== units) throw conflict('该任务已经按其他实际用量结算。');

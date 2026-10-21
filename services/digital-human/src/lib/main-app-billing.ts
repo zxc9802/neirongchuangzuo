@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { logServerError } from "./server/safe-log";
 import { estimateScriptDuration } from "./billing-estimate";
+import { generationPrice, generationPoints } from "../../../../design/malaysian-prices.js";
 import {
   getWorkspaceCreditsLedger, calculateWorkspacePoints, workspaceCreditsSnapshot,
   WORKSPACE_VIDEO_POINTS, WORKSPACE_VIDEO_SECONDS,
@@ -74,23 +75,23 @@ export function isExternallyBilledUser(
 }
 
 /**
- * 根据视频/音频时长计算所需积分（20 积分/秒 = 0.20 元/秒，向上取整）
+ * 根据任务记录的价格与时长计算积分；未指定模型价格时保留历史规则。
  */
-export function calculateRequiredPoints(durationSeconds: number, source?: BillingSource, mode?: "api_cost"): number {
+export function calculateRequiredPoints(durationSeconds: number, source?: BillingSource, mode?: "api_cost" | "model_price", pricingKey?: string): number {
   const seconds = Math.max(0, Number(durationSeconds) || 0);
+  if (source === "workspace" && pricingKey) return generationPoints(seconds, pricingKey);
   if (source === "workspace") return mode === "api_cost" ? calculateWorkspaceCostPoints(seconds) : calculateWorkspacePoints(seconds);
   return Math.ceil(seconds * POINTS_PER_SECOND);
 }
 
 export function assertTaskCreditCoverage(
-  billing: { isExternalUser: boolean; status: string; reservedPoints?: number; source?: BillingSource; mode?: "api_cost" } | undefined,
+  billing: { isExternalUser: boolean; status: string; reservedPoints?: number; source?: BillingSource; mode?: "api_cost" | "model_price"; pricingKey?: string } | undefined,
   durationSeconds: number,
 ): void {
   if (!billing?.isExternalUser) return;
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0 ||
     billing.status !== "reserved" || !Number.isSafeInteger(billing.reservedPoints) ||
-    (billing.reservedPoints || 0) < (billing.source === "workspace" && billing.mode === "api_cost"
-      ? calculateWorkspaceCostPoints(durationSeconds) : calculateRequiredPoints(durationSeconds, billing.source))) {
+    (billing.reservedPoints || 0) < calculateRequiredPoints(durationSeconds, billing.source, billing.mode, billing.pricingKey)) {
     throw new MainAppBillingError(
       "实际配音超出预留额度，请缩短文案后重试",
       402,
@@ -101,7 +102,7 @@ export function assertTaskCreditCoverage(
 
 export async function extendTaskCreditCoverage(input: {
   userId?: string;
-  billing: { isExternalUser: boolean; source?: BillingSource; status: string; requestId?: string; reservedPoints?: number } | undefined;
+  billing: { isExternalUser: boolean; source?: BillingSource; status: string; requestId?: string; reservedPoints?: number; mode?: "api_cost" | "model_price"; pricingKey?: string } | undefined;
   durationSeconds: number;
 }): Promise<number | undefined> {
   const current = input.billing;
@@ -126,7 +127,8 @@ export async function extendTaskCreditCoverage(input: {
     assertLedgerReservationActive(result);
     // Only the ledger response can exempt this task; the persisted task flag is display metadata.
     if (result.exempt !== true) {
-      assertTaskCreditCoverage({ ...current, ...(actualCost ? { mode: "api_cost" as const } : {}), reservedPoints: result.reservedPoints }, input.durationSeconds);
+      assertTaskCreditCoverage({ ...current, mode: actualCost ? "api_cost" : record?.pricingKey ? "model_price" : undefined,
+        pricingKey: record?.pricingKey, reservedPoints: result.reservedPoints }, input.durationSeconds);
     }
     return result.reservedPoints;
   } catch (error) {
@@ -150,7 +152,7 @@ export async function assertWorkspaceReservationActive(userId: string, requestId
 /**
  * 根据视频/音频时长计算人民币金额（0.20 元/秒）
  */
-export function calculateCostCny(durationSeconds: number, source?: BillingSource, mode?: "api_cost"): number {
+export function calculateCostCny(durationSeconds: number, source?: BillingSource, mode?: "api_cost" | "model_price"): number {
   if (source === "workspace") return mode === "api_cost" ? Math.max(0, Number(durationSeconds) || 0) * WORKSPACE_CNY_PER_SECOND : 0;
   const seconds = Math.max(0, Number(durationSeconds) || 0);
   return Number((seconds * CNY_PER_SECOND).toFixed(2));
@@ -280,11 +282,14 @@ export async function reserveMainAppCredits(input: {
   taskId?: string;
   estimatedDuration: number;
   minimumDuration?: number;
+  engine?: string;
   beforeReserve?: (reservation: { source: "workspace"; requestId: string; chargeRequired: true;
-    requiredPoints: number; reservedPoints: number; estimatedDuration: number; costCny: number; exempt?: boolean; mode?: "api_cost" }) => void | Promise<void>;
+    requiredPoints: number; reservedPoints: number; estimatedDuration: number; costCny: number; exempt?: boolean; mode?: "api_cost" | "model_price"; pricingKey?: string; ratePerSecond?: number }) => void | Promise<void>;
 }): Promise<{
   source: BillingSource;
-  mode?: "api_cost";
+  mode?: "api_cost" | "model_price";
+  pricingKey?: string;
+  ratePerSecond?: number;
   requestId: string;
   chargeRequired: boolean;
   requiredPoints: number;
@@ -323,6 +328,31 @@ export async function reserveMainAppCredits(input: {
     let wallet;
     try { wallet = await workspaceCreditsSnapshot(input.user.id); }
     catch (error) { throw workspaceBillingError(error); }
+    if (input.engine !== undefined) {
+      const price = generationPrice("digital-human", input.engine);
+      if (!price) throw new MainAppBillingError("对口型模型价格无效", 400, "BILLING_MODEL_INVALID");
+      const estimatedPoints = generationPoints(input.estimatedDuration, price.key);
+      const pending = { source: "workspace" as const, mode: "model_price" as const, pricingKey: price.key,
+        ratePerSecond: price.pointsPerSecond, requestId, chargeRequired: true as const, requiredPoints: estimatedPoints,
+        reservedPoints: 0, estimatedDuration: input.estimatedDuration, costCny: 0 };
+      await input.beforeReserve?.(pending);
+      try {
+        const minimumPoints = generationPoints(input.minimumDuration ?? input.estimatedDuration, price.key);
+        if (wallet.unlimited !== true && wallet.available < minimumPoints) {
+          throw new MainAppBillingError(`积分余额不足：本次预计至少需要 ${minimumPoints} 积分`, 402, "INSUFFICIENT_POINTS");
+        }
+        const units = wallet.unlimited === true || estimatedPoints <= wallet.available ? input.estimatedDuration
+          : wallet.available / price.pointsPerSecond;
+        const reserved = await getWorkspaceCreditsLedger().reserve({ userId: input.user.id, taskId: requestId,
+          kind: "digital-human", units, pricingKey: price.key });
+        assertLedgerReservationActive(reserved);
+        return { ...pending, requiredPoints: reserved.exempt === true ? 0 : estimatedPoints,
+          reservedPoints: reserved.reservedPoints, pointsBalance: reserved.wallet.available, exempt: reserved.exempt === true };
+      } catch (error) {
+        if (error instanceof MainAppBillingError) throw error;
+        throw workspaceBillingError(error);
+      }
+    }
     const actualCost = wallet.pricing?.mode === "api_cost";
     const estimatedPoints = actualCost ? calculateWorkspaceCostPoints(input.estimatedDuration) : requiredPoints;
     await input.beforeReserve?.({ source: "workspace", requestId, chargeRequired: true,

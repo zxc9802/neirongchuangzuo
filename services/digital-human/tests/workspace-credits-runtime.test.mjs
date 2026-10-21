@@ -206,8 +206,8 @@ test("task creation failure refunds its reservation and the persisted task ID ma
   new Function("require", "module", "exports", code)(name => {
     assert.ok(name in deps, `unexpected dependency ${name}`); return deps[name];
   }, module, module.exports);
-  const post = () => module.exports.POST(new NextRequest("https://example.test/api/tasks", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scriptText: "你好", unlimited: true, exempt: true }),
+  const post = engine => module.exports.POST(new NextRequest("https://example.test/api/tasks", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ scriptText: "你好", engine, unlimited: true, exempt: true }),
   }));
   assert.equal((await post()).status, 500);
   assert.equal(calls, 0, "failed task persistence must stop before freezing any credits");
@@ -215,13 +215,20 @@ test("task creation failure refunds its reservation and the persisted task ID ma
   assert.equal((await ledger.snapshot(user.id)).held, 0);
   failCreation = false;
   try {
-    assert.equal((await post()).status, 200);
-    assert.equal(submitted.id, submitted.billing.requestId);
-    assert.equal(submitted.billing.source, "workspace");
-    assert.equal(submitted.billing.exempt, false, "browser flags cannot select free billing");
-    assert.equal((await ledger.reservation(user.id, submitted.id)).status, "reserved");
-    await billing.releaseMainAppCredits({ userId: user.id, requestId: submitted.id, source: "workspace" });
-    finish?.();
+    for (const [engine, rate, reserved] of [[undefined, 21, 126], ["b", 21, 126], ["d", 25, 150], ["e", 205, 1000]]) {
+      assert.equal((await post(engine)).status, 200);
+      assert.equal(submitted.id, submitted.billing.requestId);
+      assert.equal(submitted.billing.source, "workspace");
+      assert.equal(submitted.billing.mode, "model_price");
+      assert.equal(submitted.billing.ratePerSecond, rate);
+      assert.equal(submitted.billing.reservedPoints, reserved);
+      assert.equal(submitted.billing.exempt, false, "browser flags cannot select free billing");
+      const record = await ledger.reservation(user.id, submitted.id);
+      assert.equal(record.status, "reserved");
+      assert.equal(record.pricingKey, `digital-human:${engine || "b"}:myr205-v1`);
+      await billing.releaseMainAppCredits({ userId: user.id, requestId: submitted.id, source: "workspace" });
+      finish?.();
+    }
     loseResponse = true;
     assert.equal((await post()).status, 503);
     assert.equal(submitted.status, "failed");
