@@ -157,8 +157,8 @@ function voicePreview(ctx, voice = currentVoice()) {
 
 function engineMarkup(ctx) {
   const engines = Array.isArray(state.status?.engines) ? state.status.engines.filter(item => ['b', 'd', 'e'].includes(item.id)) : [];
-  if (!engines.length) return `<span class="dh-upload-note">${state.status ? '暂无可用模型' : '正在读取对口型模型'}</span>`;
-  return engines.map(item => `<label class="dh-engine-choice"><input type="radio" name="dh-engine" data-dh-option="engine" value="${ctx.esc(item.id)}" ${item.id === state.engine ? 'checked' : ''} ${item.available ? '' : 'disabled'}><span>${ctx.esc(item.label)}${item.available ? '' : '（待配置）'}</span></label>`).join('');
+  const available = engines.some(item => item.available);
+  return `<select id="dh-engine-select" name="dh-engine" data-dh-option="engine" ${available ? '' : 'disabled'}>${!available ? `<option value="">${state.status ? '暂无可用模型' : '正在读取对口型模型'}</option>` : ''}${engines.map(item => `<option value="${ctx.esc(item.id)}" ${item.id === state.engine ? 'selected' : ''} ${item.available ? '' : 'disabled'}>${ctx.esc(item.label)}${item.available ? '' : '（待配置）'}</option>`).join('')}</select>`;
 }
 
 function generateHint() {
@@ -166,7 +166,6 @@ function generateHint() {
   if (!state.status) return '正在连接生成服务';
   if (!state.status.ready) return '生成服务待配置';
   if (state.submitting) return '正在提交，请稍候';
-  if (hasRunningTask()) return '当前视频正在制作，请等待完成';
   if (state.upload) return '请等待素材上传完成';
   if (!currentAvatar()) return '先添加并选择一个视频形象';
   if (!safeUrl(currentVoice()?.audioUrl)) return '请选择可用的口播声音';
@@ -186,9 +185,9 @@ export function renderDigitalHuman(ctx) {
     <section class="dh-generator" id="dh-generator" aria-labelledby="dh-generator-title">
       <div class="dh-generator-heading"><div><h2 id="dh-generator-title">制作口播视频</h2></div><span class="dh-generator-type">${icon('avatar')}视频数字人</span></div>
       <div class="dh-composer"><div class="dh-avatar-setting" id="dh-materials">${materialsMarkup(ctx)}</div><div class="dh-composer-main">${ctx.renderBusinessEntry?.('avatar') || ''}<div class="dh-field-heading"><label for="dh-script">口播文案</label></div><div class="dh-script-box"><textarea id="dh-script" maxlength="5000" placeholder="填写口播文案">${esc(state.script)}</textarea><div><span id="dh-script-duration">${state.script.trim() ? `约 ${Math.max(1, Math.round(state.script.replace(/\s/g, '').length / 4))} 秒口播` : ''}</span><small id="dh-script-count">${state.script.length} / 5000</small></div></div><div class="dh-script-ideas"><span>宣传方案</span>${button('dh-template', '使用方案口播稿', '', 'data-template="brief"')}${button('business-open', '重新整理宣传信息', '', 'data-mode="avatar"')}</div><section id="dh-voice" class="dh-voice-section" aria-label="口播声音">${voiceMarkup(ctx)}</section></div></div>
-      <fieldset class="dh-engine-section"><legend>对口型模型</legend><div id="dh-engine" class="dh-engine-picker">${engineMarkup(ctx)}</div></fieldset>
+      <div class="dh-generation-controls"><div class="dh-engine-section"><label for="dh-engine-select">对口型模型</label><div id="dh-engine" class="dh-engine-picker">${engineMarkup(ctx)}</div></div><div class="dh-generate-footer"><div class="dh-generation-note"><div id="dh-service-status">${statusMarkup(ctx)}</div><p id="dh-credit-estimate" class="credit-estimate">${esc(videoCreditEstimateText(speechEstimate()))}</p><p id="dh-generate-hint">${esc(hint || '')}</p></div>${button('dh-generate', icon('star') + '<span>立即生成</span>', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}</div></div>
       <details class="dh-advanced"><summary>${icon('settings')}高级设置${icon('chevron')}</summary><div class="dh-advanced-body"><label class="studio-field">语速<select data-dh-option="toneProfile"><option value="low" ${state.toneProfile === 'low' ? 'selected' : ''}>自然（1.0×）</option><option value="high" ${state.toneProfile === 'high' ? 'selected' : ''}>提速（1.2×）</option></select></label><label class="studio-field">视频适配<select data-dh-option="videoFit"><option value="smart" ${state.videoFit === 'smart' ? 'selected' : ''}>智能适配</option><option value="preserve" ${state.videoFit === 'preserve' ? 'selected' : ''}>保留原视频</option></select></label><div class="dh-emotion-field"><label class="dh-emotion-label" for="dh-emotion">表达强度<output id="dh-emotion-value">${Math.round(state.emotionIntensity * 100)}%</output></label><input id="dh-emotion" data-dh-option="emotionIntensity" type="range" min="0.1" max="0.85" step="0.05" value="${state.emotionIntensity}" aria-label="表达强度"><div class="dh-range-labels"><span>平稳</span><span>鲜明</span></div></div></div></details>
-      <footer class="dh-generate-footer"><div class="dh-generation-note"><div id="dh-service-status">${statusMarkup(ctx)}</div><p id="dh-credit-estimate" class="credit-estimate">${esc(videoCreditEstimateText(speechEstimate()))}</p><p id="dh-generate-hint">${esc(hint || '')}</p></div>${button('dh-generate', icon('star') + '<span>生成口播视频</span>', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}</footer><div id="dh-task-status">${taskMarkup(ctx)}</div>
+      <div id="dh-task-status">${taskMarkup(ctx)}</div>
     </section>
     <section class="dh-library" id="dh-library" aria-labelledby="dh-library-title"><div class="dh-library-heading"><div><h2 id="dh-library-title">我的创作</h2><p>成品保留 3 天，请及时下载</p></div><div class="dh-library-tools">${uploadControl(ctx, 'avatar', 'dh-outline-button', '上传视频')}${button('dh-library-refresh', refreshIcon, 'dh-refresh-button', 'aria-label="刷新素材和作品" title="刷新素材和作品"')}</div></div><div class="dh-library-tabs" id="dh-library-tabs" role="tablist" aria-label="素材与作品分类">${libraryTabsMarkup(ctx)}</div><div class="dh-library-grid" id="dh-library-grid" role="tabpanel" aria-labelledby="dh-tab-${state.library.kind}">${state.library.items.map(item => libraryItemMarkup(item, ctx)).join('')}</div><div id="dh-library-state">${libraryStateMarkup(ctx)}</div><div class="dh-library-sentinel" id="dh-library-sentinel" aria-hidden="true"></div></section>
   </div>`;
@@ -205,7 +204,7 @@ function patchGenerate() {
   const button = root.querySelector('[data-action="dh-generate"]');
   if (button) {
     button.disabled = Boolean(hint); button.title = hint;
-    button.querySelector('span').textContent = state.submitting ? '正在提交…' : '生成口播视频';
+    button.querySelector('span').textContent = state.submitting ? '正在提交…' : '立即生成';
   }
   const note = root.querySelector('#dh-generate-hint');
   if (note) note.textContent = hint || '';

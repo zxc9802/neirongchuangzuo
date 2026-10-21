@@ -2,12 +2,14 @@ export const MODEL = 'doubao-seedance-2-0-260128';
 export const PIXVERSE_MODEL = 'fal-ai/pixverse/swap';
 // Retained for recovery and settlement of tasks submitted before removal.
 export const WAN_MODEL = 'fal-ai/wan/v2.2-14b/animate/replace';
+export const WAN3_MODEL = 'wan3.0-video';
 export const DURATIONS = [4, 5, 6, 8, 10, 12, 15];
 export const MODELS = [
   { id: MODEL, name: 'qiya-2.0', description: '最多生成15秒视频，1元/秒', cnyPerSecond: 1, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', description: '最多生成30秒视频，1.5元/秒', cnyPerSecond: 1.5, maxDuration: 30, durations: [...DURATIONS, 20, 25, 30], resolution: '720p' },
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', description: '最多生成15秒视频，0.8元/秒', cnyPerSecond: 0.8, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', description: '最多生成15秒视频，0.5元/秒', cnyPerSecond: 0.5, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
+  { id: WAN3_MODEL, name: 'Wan 3.0', description: '参考视频最多15秒 · 720P · 输入与输出均计费', cnyPerSecond: 0.6, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: PIXVERSE_MODEL, name: 'PixVerse Swap', description: '最长30秒 · 720p · 按实际费用，配音口型另计', maxDuration: 30, durations: Array.from({ length: 29 }, (_, i) => i + 2), resolution: '720p' },
 ];
 export const PROMPT = '编辑视频1。将视频1中的唯一人物完整替换为图片1中的人物。图片1是人物外貌的唯一参考，头部、脸型、五官及其比例、眉眼、鼻子、嘴唇、耳朵、下颌轮廓、发际线和发型都必须采用图片1；不得保留视频1原人物的脸部特征，不得混合两个人的五官，不能只换衣服而保留原脸。人物的服装采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情变化、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样；保留字幕的原文、位置、排版和出现时间，不重画字幕。';
@@ -20,7 +22,9 @@ export function videoConfig(env = {}, publicOrigin) {
     access: env[`${prefix}_ACCESS_KEY`] || env.VIDEO_ACCESS_KEY, secret: env[`${prefix}_SECRET_KEY`] || env.VIDEO_SECRET_KEY });
   const config = { video: credentials('VIDEO'), material: credentials('MATERIAL'),
     publicOrigin: env.VIDEO_PUBLIC_BASE_URL || publicOrigin || env.AUTH_PUBLIC_URL,
-    signingSecret: env.TEMP_ASSET_SIGNING_SECRET, falKey: env.FAL_KEY || env.FAL_API_KEY || env.VIDEO_FAL_KEY };
+    signingSecret: env.TEMP_ASSET_SIGNING_SECRET, falKey: env.FAL_KEY || env.FAL_API_KEY || env.VIDEO_FAL_KEY,
+    dashscopeKey: env.DASHSCOPE_API_KEY };
+  config.wan3Enabled = Boolean(config.dashscopeKey);
   config.enabled = Boolean(config.publicOrigin && config.signingSecret && Object.values(config.video).every(Boolean) && Object.values(config.material).every(Boolean));
   config.falEnabled = Boolean(config.publicOrigin && config.signingSecret && config.falKey);
   if (config.enabled || config.falEnabled) {
@@ -41,11 +45,12 @@ export function videoConfig(env = {}, publicOrigin) {
   return config;
 }
 export function generationBody(task) {
-  // Independent TTS/lip sync consumes the speech timeline after the visual edit.
-  const separateNarration = task.voice && task.voiceEngine === 'indextts2';
-  const lengthPrompt = !separateNarration && task.video?.duration ? `\n视频1实际时长为${task.video.duration.toFixed(3)}秒。动作严格对应原视频时刻，输出超过原视频时长的部分保持末帧静止、闭嘴和无声。` : '';
+  // Separate audio services consume the source after the visual edit.
+  const voiceConversion = task.voice && task.voiceEngine === 'chatterbox';
+  const separateNarration = task.voice && ['indextts2', 'chatterbox'].includes(task.voiceEngine);
+  const lengthPrompt = (!separateNarration || voiceConversion) && task.video?.duration ? `\n视频1实际时长为${task.video.duration.toFixed(3)}秒。动作严格对应原视频时刻，输出超过原视频时长的部分保持末帧静止、闭嘴和无声。` : '';
   const captionPrompt = !separateNarration && task.sourceAudioMode !== 'silent' && task.captions?.cues?.length ? `\n台词来自原视频字幕，优先于听辨结果，以下文字是唯一语音文案，不改写、不漏说，数字和价格按原字说：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)}秒：${segment.text}`).join('；')}。${task.voice ? '' : '保留视频1的人声音色。'}保留视频1已有的清晰字幕，不重画字幕，不修改字幕区域的背景；仅在成片未保留字幕时，系统会按原文补字幕。` : '';
-  let voicePrompt = '';
+  let voicePrompt = voiceConversion ? '\n逐帧保留视频1的说话节奏、开口闭口时间、嘴唇动作和面部表情，只将人物外观替换为图片1。不要重新设计口型，不要改变视频速度，不要新增台词或旁白。' : '';
   if (task.voice && !separateNarration) {
     const segments = task.speech.segments;
     const gaps = [];
@@ -59,9 +64,9 @@ export function generationBody(task) {
   }
   return { modelId: task.model || MODEL, abilityType: 'VIDEO', prompt: PROMPT + lengthPrompt + captionPrompt + voicePrompt,
     // Video editing follows the source; fixed ratio/duration values are rejected by Seedance.
-    payload: { params: { mode: 'fusion_video', resolution: '720p', scale: 'adaptive', duration: -1, generateAudio: !(task.sourceAudioMode === 'silent' && separateNarration) },
+    payload: { params: { mode: 'fusion_video', resolution: '720p', scale: 'adaptive', duration: -1, generateAudio: !voiceConversion && !(task.sourceAudioMode === 'silent' && separateNarration) },
       resources: [`asset://${task.materials.photo.id}`], referVideoUrl: [`asset://${task.materials.video.id}`],
-      ...(task.voice && task.voiceEngine !== 'indextts2' ? { referAudioUrl: [`asset://${task.materials.voice.id}`] } : {}) } };
+      ...(task.voice && !separateNarration ? { referAudioUrl: [`asset://${task.materials.voice.id}`] } : {}) } };
 }
 function nestedVideoUrl(value, key = '', depth = 0) {
   if (depth > 6 || !value) return undefined;

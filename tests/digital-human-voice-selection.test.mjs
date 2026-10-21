@@ -36,7 +36,9 @@ async function loadPage({ voices = [uploadedVoice, defaultVoice], saved = {}, se
     assert.ok(markup.indexOf('id="dh-engine"') < markup.indexOf('<details class="dh-advanced">'), 'model choices are visible without expanding advanced settings');
     assert.doesNotMatch(markup.match(/<details class="dh-advanced">[\s\S]*?<\/details>/)[0], /data-dh-option="engine"/);
     for (const label of ['qy-标准', 'qy-旗舰', 'qy-至臻']) assert.ok(markup.includes(label));
-    assert.equal((markup.match(/name="dh-engine"/g) || []).length, 3);
+    const engineSelect = markup.match(/<select id="dh-engine-select"[\s\S]*?<\/select>/)?.[0];
+    assert.ok(engineSelect, 'model choices use a dropdown');
+    assert.equal((engineSelect.match(/<option /g) || []).length, 3);
     return JSON.parse(storage.get('store-studio:digital-human:v1'));
   } finally {
     mod.disposeDigitalHuman();

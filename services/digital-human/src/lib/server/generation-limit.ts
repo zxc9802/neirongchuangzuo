@@ -7,7 +7,7 @@ const WINDOW_MS = 60 * 60_000;
 const MAX_USER_ATTEMPTS = 6;
 const MAX_GLOBAL_ATTEMPTS = 30;
 const MAX_ACTIVE = 4;
-const activeUsers = new Set<string>();
+const activeUsers = new Map<string, number>();
 
 export class GenerationLimitError extends Error {
   readonly status: number;
@@ -19,18 +19,24 @@ export class GenerationLimitError extends Error {
 
 // The attempt ledger survives task deletion and process restarts. Share the state
 // volume between worker processes; concurrency slots below are per process.
-export function acquireGenerationSlot(userId: string, options: {enforceHourlyLimit?: boolean} = {}): () => void {
-  if (activeUsers.has(userId) || activeUsers.size >= MAX_ACTIVE) {
+export function acquireGenerationSlot(userId: string, options: {enforceHourlyLimit?: boolean; allowConcurrent?: boolean} = {}): () => void {
+  const userActive = activeUsers.get(userId) || 0;
+  if (userActive && !options.allowConcurrent) {
     throw new GenerationLimitError("生成任务正在处理中，请完成后再试");
+  }
+  if ([...activeUsers.values()].reduce((total, count) => total + count, 0) >= MAX_ACTIVE) {
+    throw new GenerationLimitError("生成任务并发已达上限，请稍后再试");
   }
   // Internal/local motion work still reserves concurrency, but is not an external attempt.
   if (options.enforceHourlyLimit !== false) recordHourlyAttempt(userId);
-  activeUsers.add(userId);
+  activeUsers.set(userId, userActive + 1);
   let released = false;
   return () => {
     if (released) return;
     released = true;
-    activeUsers.delete(userId);
+    const remaining = (activeUsers.get(userId) || 1) - 1;
+    if (remaining) activeUsers.set(userId, remaining);
+    else activeUsers.delete(userId);
   };
 }
 

@@ -111,7 +111,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
    packageDailyLimit: Number(runtimeSettings.RESTAURANT_PACKAGE_DAILY_LIMIT || 20),
    mediaEnv: runtimeSettings, providerLedger: handleAI.callLedger, credits, ...restaurantOptions });
  const replicaConfig = videoConfig(runtimeSettings, externalOrigin?.origin);
- const initializeVideo = videoOptions?.initialize || process.env.NODE_ENV === 'production' && (replicaConfig.enabled || replicaConfig.falEnabled);
+ const initializeVideo = videoOptions?.initialize || process.env.NODE_ENV === 'production' && (replicaConfig.enabled || replicaConfig.falEnabled || replicaConfig.wan3Enabled);
  const ready = Promise.all([Promise.resolve(handleAI.ready), creditsReady, ...(restaurantOptions?.initialize ? [restaurant().ready] : []), ...(initializeVideo ? [video().ready] : [])]);
  ready.catch(() => {});
  let closing = false;

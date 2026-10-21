@@ -19,7 +19,8 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
   const keys = ["NODE_ENV", "APP_SESSION_SECRET", "MAIN_APP_SSO_CLIENT_SECRET", "DISABLE_SSO", "GENERATION_LIMIT_PATH"];
   const savedEnv = Object.fromEntries(keys.map(key => [key, process.env[key]]));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "task-create-test-"));
-  let finish;
+  const finishes = [];
+  const finish = () => { for (const resolve of finishes.splice(0)) resolve(); };
   try {
     process.env.NODE_ENV = "production";
     process.env.APP_SESSION_SECRET = "test-session-secret";
@@ -46,7 +47,7 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
         const task = {...data, id: `task-${tasks.length}`, logs: [], createdAt: Date.now()}; tasks.push(task); return task;
       }}},
       "@/lib/engine/pipeline": {runDigitalHumanPipeline: id => {
-        pipelines.push(id); return new Promise(resolve => {finish = resolve;});
+        pipelines.push(id); return new Promise(resolve => {finishes.push(resolve);});
       }},
       "@/lib/store/avatar-store": {AvatarStore: {get: id => id === "avatar" ? ({id: "avatar", userId: user.id, videoPath: "fixture"}) : undefined}},
       "@/lib/store/voice-store": {VoiceStore: {
@@ -91,21 +92,26 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
     const successful = await post();
     assert.equal(successful.status, 200);
     assert.equal(tasks[0].billing.reservedPoints, 120, "3 second estimate reserves 6 seconds including margin");
+    for (let i = 1; i < 4; i++) {
+      assert.equal((await post({avatarId: "avatar", scriptText: `口播${i}`})).status, 200);
+      assert.equal(tasks[i].inputs.scriptText, `口播${i}`);
+    }
+    assert.equal(new Set(tasks.map(task => task.billing.requestId)).size, 4, "parallel jobs reserve credits independently");
     const ledgerCount = requests.length;
     assert.equal((await post()).status, 429);
-    assert.equal(requests.length, ledgerCount, "concurrent attempt must stop before reserving again");
-    assert.equal(pipelines.length, 1);
+    assert.equal(requests.length, ledgerCount, "the fifth concurrent attempt must stop before reserving again");
+    assert.equal(pipelines.length, 4);
     finish(); await new Promise(resolve => setImmediate(resolve));
     mode = "unsafe";
     const failure = await post();
     assert.equal(failure.status, 503);
     assert.doesNotMatch(JSON.stringify(await failure.json()), /NewVendor|FAKE_SECRET/);
-    assert.equal(pipelines.length, 1);
+    assert.equal(pipelines.length, 4);
     user = {...user, id: "admin", role: "admin", billingAudience: "internal"};
     const countBeforeAdmin = requests.length;
     assert.equal((await post()).status, 200);
     assert.equal(requests.length, countBeforeAdmin);
-    assert.equal(tasks[1].billing.isExternalUser, false);
+    assert.equal(tasks.at(-1).billing.isExternalUser, false);
     finish(); await new Promise(resolve => setImmediate(resolve));
     user = {...user, id: "audio-user", role: "member", billingAudience: "external"};
     mode = "ok";

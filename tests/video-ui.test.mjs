@@ -150,9 +150,11 @@ test('edition dropdown stays below voice reference and updates its description a
   assert.match(page.html(), /单个人物 · 2–15 秒/);
 });
 
-for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL]) test(`${model} uses direct voice during task creation and start`, async t => {
+for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan3.0-video']) test(`${model} uses voice conversion during task creation and start`, async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
+    if (path.endsWith('/config') && model === 'wan3.0-video') return Response.json({ enabled: true,
+      models: [{ id: model, enabled: true, description: '输入＋输出 0.42元/秒，换声另计' }] });
     if (!options?.method) return;
     const body = options.method === 'POST' ? JSON.parse(options.body) : options.body;
     calls.push({ path, body });
@@ -163,11 +165,12 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL]) tes
   } });
   page.recover(); await page.poll();
   page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
+  if (model === 'wan3.0-video') assert.match(page.html(), /输入＋输出 0.42元\/秒，换声另计/);
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls[0].body.model, model); assert.equal(calls.at(-1).body.model, model);
-  assert.equal(calls[0].body.voiceEngine, 'seedance'); assert.equal(calls.at(-1).body.voiceEngine, 'seedance');
-  assert.equal(calls[0].body.sourceAudioMode, 'silent'); assert.equal(calls.at(-1).body.sourceAudioMode, 'silent');
+  assert.equal(calls[0].body.voiceEngine, 'chatterbox'); assert.equal(calls.at(-1).body.voiceEngine, 'chatterbox');
+  assert.equal(calls[0].body.sourceAudioMode, 'original'); assert.equal(calls.at(-1).body.sourceAudioMode, 'original');
   const count = calls.length;
   page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.equal(calls.length, count);
@@ -175,7 +178,7 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL]) tes
   assert.match(page.html(), /<select id="replica-models"[^>]*disabled/);
 });
 
-test('direct voice stays hidden and remains the default after starting and creating another task', async t => {
+test('voice conversion stays hidden and remains the default after starting and creating another task', async t => {
   let task; const calls = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
@@ -192,15 +195,15 @@ test('direct voice stays hidden and remains the default after starting and creat
   assert.doesNotMatch(page.html(), /原声参考（默认）|无原声参考|data-source-audio|选择参考视频声音模式/);
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(calls[0].body.sourceAudioMode, 'silent'); assert.equal(calls.at(-1).body.sourceAudioMode, 'silent');
-  assert.equal(calls[0].body.voiceEngine, 'seedance'); assert.equal(calls.at(-1).body.voiceEngine, 'seedance');
+  assert.equal(calls[0].body.sourceAudioMode, 'original'); assert.equal(calls.at(-1).body.sourceAudioMode, 'original');
+  assert.equal(calls[0].body.voiceEngine, 'chatterbox'); assert.equal(calls.at(-1).body.voiceEngine, 'chatterbox');
   assert.doesNotMatch(page.html(), /无原声直配（试用）|参考视频声音/);
   page.node('#replica-new').onclick();
   assert.doesNotMatch(page.html(), /无原声直配（试用）|参考视频声音/);
   assert.doesNotMatch(page.html(), /原声参考（默认）|无原声参考|data-source-audio/);
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(calls.at(-1).body.voiceEngine, 'seedance'); assert.equal(calls.at(-1).body.sourceAudioMode, 'silent');
+  assert.equal(calls.at(-1).body.voiceEngine, 'chatterbox'); assert.equal(calls.at(-1).body.sourceAudioMode, 'original');
 });
 
 test('direct voice requires an uploaded voice before creating a paid task', async t => {
@@ -407,7 +410,7 @@ test('caption drafts start in direct voice without a transcript confirmation ste
   page.node('#replica-submit').onclick(); await page.settle();
   assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', '/api/video-replica/tasks/editable-task/start']);
   assert.equal(calls[1].body.speechConfirmed, undefined);
-  assert.match(page.html(), /正在将原视频语音转为台词/);
+  assert.match(page.html(), /正在保留原声节奏并转换音色/);
   assert.doesNotMatch(page.html(), /replica-speech|原视频台词|textarea|今天吃生腌/);
   assert.equal(task.captions.cues[0].text, '今天吃生腌');
 });
@@ -455,8 +458,8 @@ test('one click uploads every selected asset then starts once without analysis o
   page.node('#replica-submit').onclick(); page.node('#replica-submit').onclick(); await page.settle();
   assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', ...['video', 'photo', 'voice', 'start'].map(kind => `/api/video-replica/tasks/${task.id}/${kind}`)]);
   assert.deepEqual(calls.slice(1, 4).map(call => call.body), files);
-  assert.equal(calls[0].body.voiceEngine, 'seedance');
-  assert.equal(calls[4].body.voiceEngine, 'seedance');
+  assert.equal(calls[0].body.voiceEngine, 'chatterbox');
+  assert.equal(calls[4].body.voiceEngine, 'chatterbox');
   assert.equal(calls[4].body.speechConfirmed, undefined);
   assert.match(page.html(), /id="replica-submit"[^>]*disabled[^>]*>正在自动分析字幕与人声/);
 });
@@ -703,7 +706,7 @@ test('replica has no voice picker or model labels and still sends its default th
   assert.match(page.html(), /声音参考<small>必填/);
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(calls[0].body.voiceEngine, 'seedance'); assert.equal(calls.at(-1).body.voiceEngine, 'seedance');
+  assert.equal(calls[0].body.voiceEngine, 'chatterbox'); assert.equal(calls.at(-1).body.voiceEngine, 'chatterbox');
   assert.doesNotMatch(page.html(), /replica-voice-engine|配音模型|IndexTTS2|Seedance 2.0/);
   const summary = page.html().match(/id="replica-result-summary"[^>]*>(.*?)<div id="replica-progress"/s)[1];
   assert.doesNotMatch(summary, /旗舰模型/);
@@ -712,7 +715,7 @@ test('replica has no voice picker or model labels and still sends its default th
   assert.doesNotMatch(page.html(), /replica-voice-engine|配音模型|IndexTTS2|Seedance 2.0/);
 });
 
-for (const voiceEngine of ['indextts2', 'seedance']) for (const sourceAudioMode of ['original', 'silent']) test(`reopening a ${voiceEngine} ${sourceAudioMode} draft submits direct voice after polling`, async t => {
+for (const voiceEngine of ['indextts2', 'seedance']) for (const sourceAudioMode of ['original', 'silent']) test(`reopening a ${voiceEngine} ${sourceAudioMode} draft submits voice conversion after polling`, async t => {
   let task = { ...speechDraft(), voiceEngine, sourceAudioMode }; const calls = [];
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
     if (path.endsWith('/config')) return Response.json({ enabled: true, voiceEnabled: true,
@@ -728,8 +731,8 @@ for (const voiceEngine of ['indextts2', 'seedance']) for (const sourceAudioMode 
   assert.doesNotMatch(page.html(), /原声参考（默认）|无原声参考|data-source-audio/);
   await page.poll();
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(calls[0].body.voiceEngine, 'seedance'); assert.equal(calls[1].body.voiceEngine, 'seedance');
-  assert.equal(calls[0].body.sourceAudioMode, 'silent'); assert.equal(calls[1].body.sourceAudioMode, 'silent');
+  assert.equal(calls[0].body.voiceEngine, 'chatterbox'); assert.equal(calls[1].body.voiceEngine, 'chatterbox');
+  assert.equal(calls[0].body.sourceAudioMode, 'original'); assert.equal(calls[1].body.sourceAudioMode, 'original');
   assert.doesNotMatch(page.html(), /replica-voice-engine|配音模型|IndexTTS2|Seedance 2.0/);
 });
 

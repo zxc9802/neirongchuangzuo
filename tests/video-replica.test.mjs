@@ -10,7 +10,8 @@ import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
-import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL, WAN_MODEL } from '../services/video/provider.mjs';
+import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL } from '../services/video/provider.mjs';
+import { wan3GenerationBody } from '../services/video/wan3.mjs';
 import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
@@ -44,7 +45,7 @@ async function fixture(t, options = {}) {
       photo: async () => Buffer.from('photo'), probe: async input => ({ ...META, duration: options.narration && input.endsWith('upload.tmp') ? 6 : META.duration }),
       download: async (_url, path) => writeFile(path, VIDEO),
       captions: { extract: async () => null },
-      narration: null, lipsync: null,
+      narration: null, lipsync: null, voiceConversion: null,
       providerStorage: { upload: async input => `https://fal.media/${input.split('/').at(-1)}` },
       pollIntervalMs: 15, ...options, ...overrides });
     await handler.ready;
@@ -492,7 +493,7 @@ test('all four Seedance editions are offered and removed models cannot start or 
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
   assert.deepEqual(config.models.slice(0, 4).map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
-  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15]]);
+  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [false, 15]]);
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '最多生成15秒视频，1元/秒');
   assert.equal(config.models[1].description, '最多生成30秒视频，1.5元/秒');
@@ -1274,6 +1275,71 @@ function fakeNarration(overrides = {}) {
     mux: async (_video, audio, output) => writeFile(output, await readFile(audio)), ...overrides };
 }
 
+for (const model of ['doubao-seedance-2-0-260128', WAN3_MODEL]) test(`Chatterbox receipts survive restart and are metered separately from ${model}`, async t => {
+  let done = false, submissions = 0, wanSubmissions = 0, input, audio;
+  const endpoint = 'fal-ai/chatterbox/speech-to-speech';
+  const app = await fixture(t, { costMode: true, now: () => Date.parse('2026-10-21T12:00:00+08:00'),
+    env: { FAL_KEY: 'test-only-key' }, config: { ...CONFIG, wan3Enabled: true, falKey: 'test-only-key' },
+    wan3Provider: { upload: async input => ({ id: 'oss://test/' + input.split(/[\\/]/).at(-1), status: 2 }),
+      generate: async task => { wanSubmissions++; const body = wan3GenerationBody(task); assert.equal(body.parameters.audio, false);
+        assert.equal(body.input.media.length, 2); assert.match(body.input.prompt, /逐帧保留/); return { taskId: 'wan-paid-1' }; },
+      query: async () => ({ completed: true, url: 'https://result.example/wan.mp4',
+        usage: { duration: 8, input_video_duration: 4, output_video_duration: 4, SR: 720 } }) },
+    voiceConversion: undefined, speech: fakeSpeech(),
+    voice: async (_input, output) => { await writeFile(output, await readFile(audio)); return { duration: 4 }; },
+    download: async (_url, output) => writeFile(output, await readFile(output.endsWith('.wav') ? audio : input)),
+    fetchImpl: async (url, options = {}) => {
+      const target = new URL(url);
+      if (target.hostname === 'api.fal.ai') return Response.json({ prices: [{ endpoint_id: endpoint, currency: 'USD', unit_price: .015 }] });
+      if (target.hostname === 'www.openlux.ai') return Response.json({ data: target.pathname.endsWith('/status') ? { usd_exchange_rate: 1 } : [] });
+      assert.equal(target.hostname, 'queue.fal.run');
+      if (options.method === 'POST') {
+        submissions++; assert.equal(target.pathname, '/' + endpoint);
+        return Response.json({ request_id: 'voice-paid-1', status_url: 'https://queue.fal.run/fal-ai/chatterbox/requests/voice-paid-1/status',
+          response_url: 'https://queue.fal.run/fal-ai/chatterbox/requests/voice-paid-1' });
+      }
+      if (target.pathname.endsWith('/status')) return Response.json({ status: done ? 'COMPLETED' : 'IN_PROGRESS' });
+      return Response.json({ audio: { url: 'https://fal.media/converted.wav' } }, { headers: { 'x-fal-billable-units': '1' } });
+    },
+  });
+  input = join(app.root, 'original.mp4'); audio = join(app.root, 'audio.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=25:d=4',
+    '-f', 'lavfi', '-i', 'sine=duration=4', '-c:v', 'libx264', '-c:a', 'aac', input]);
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', input, '-vn', '-ac', '1', '-ar', '24000', audio]);
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, model } });
+  await app.upload(id);
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: await readFile(input) });
+  await uploadVoice(app, id);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.voiceConversionProgress && submissions === 1);
+  await app.close(); done = true; await app.open();
+  await app.until(id, task => ['running', 'completed'].includes(task.status)); app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.audioCheck.engine, 'chatterbox'); assert.equal(completed.audioCheck.tempoAdjusted, false);
+  assert.equal(submissions, 1); assert.equal(app.state.generations, model === WAN3_MODEL ? 0 : 1);
+  assert.equal(wanSubmissions, model === WAN3_MODEL ? 1 : 0);
+  const bill = await app.wallet.reservation('alice', id);
+  const items = Object.values(bill.costItems);
+  assert.equal(items.length, 2);
+  assert.equal(items.find(item => item.provider === 'fal').metadata.model, endpoint);
+  assert.equal(bill.settledUnits, model === WAN3_MODEL ? 3_375_000 : 4_015_000);
+});
+
+test('Chatterbox requires configured conversion and an original audio track before paid processing', async t => {
+  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 3 }; } });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id } });
+  await app.upload(id); await uploadVoice(app, id);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 503);
+  assert.equal(await app.wallet.reservation('alice', id), null);
+  assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { sourceAudioMode: 'silent', voiceEngine: 'chatterbox' } })).status, 400);
+  await app.close(); await app.open({ voiceConversion: { enabled: true }, probe: async () => ({ ...META, audio: false }) });
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  assert.equal((await app.current(id)).canReplaceSource, true);
+  assert.equal(await app.wallet.reservation('alice', id), null);
+  assert.equal(app.state.generations, 0);
+});
+
 for (const hasSubtitles of [true, false]) test(`IndexTTS uses ${hasSubtitles ? 'detected subtitles' : 'original audio when no subtitles exist'} for narration`, async t => {
   let analyses = 0, narrationSpeech;
   const app = await fixture(t, {
@@ -1505,8 +1571,8 @@ for (const sourceAudioMode of ['original', 'silent']) test(`Seedance ${sourceAud
     narration: fakeNarration({ prepare: async () => assert.fail('Seedance must not prepare IndexTTS'), advance: async () => assert.fail('Seedance must not synthesize IndexTTS') }),
     lipsync: fakeLipsync({ submit: async () => assert.fail('Seedance must not submit a lip-sync job') }) });
   const config = await (await app.call('/config')).json();
-  assert.equal(config.voiceEngine, 'seedance'); assert.equal(config.sourceAudioMode, 'silent');
-  assert.deepEqual(config.voiceEngines.map(engine => engine.id), ['seedance']);
+  assert.equal(config.voiceEngine, 'chatterbox'); assert.equal(config.sourceAudioMode, 'original');
+  assert.deepEqual(config.voiceEngines.map(engine => engine.id), ['chatterbox']);
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   if (sourceAudioMode === 'silent') {
     const source = join(app.root, 'original.mp4');
@@ -1524,8 +1590,16 @@ for (const sourceAudioMode of ['original', 'silent']) test(`Seedance ${sourceAud
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
 });
 
-test('new tasks default to ASR-only direct voice after restart without subtitle, TTS or lip-sync calls', async t => {
+test('new tasks default to whole-track voice conversion after restart without TTS, retiming or lip-sync calls', async t => {
+  let conversions = 0;
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    probe: async () => ({ ...META, duration: 6 }),
+    voiceConversion: { enabled: true, advance: async (task, folder, save) => {
+      if (!task.voiceConversion?.ready) {
+        conversions++; task.voiceConversion = { ready: true, duration: 5.88 };
+        await writeFile(join(folder, 'converted-voice.wav'), 'CONVERTED'); await save();
+      }
+    }, mux: async (_video, audio, output) => writeFile(output, await readFile(audio)) },
     captions: { extract: async () => assert.fail('Direct voice must not read subtitles') },
     narration: fakeNarration({ prepare: async () => assert.fail('Direct voice must not synthesize separate narration') }),
     lipsync: fakeLipsync({ submit: async () => assert.fail('Direct voice must not submit lip sync') }) });
@@ -1533,7 +1607,7 @@ test('new tasks default to ASR-only direct voice after restart without subtitle,
   const created = await app.call('/tasks', { body: { requestId: id } });
   assert.equal(created.status, 201);
   const draft = (await created.json()).task;
-  assert.equal(draft.voiceEngine, 'seedance'); assert.equal(draft.sourceAudioMode, 'silent');
+  assert.equal(draft.voiceEngine, 'chatterbox'); assert.equal(draft.sourceAudioMode, 'original');
   await app.upload(id);
   const source = join(app.root, 'original.mp4');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=320x480:r=24:d=6',
@@ -1545,13 +1619,19 @@ test('new tasks default to ASR-only direct voice after restart without subtitle,
   await uploadVoice(app, id); await app.close(); await app.open();
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   const running = await app.until(id, task => task.status === 'running');
-  assert.equal(running.voiceEngine, 'seedance'); assert.equal(running.sourceAudioMode, 'silent');
+  assert.equal(running.voiceEngine, 'chatterbox'); assert.equal(running.sourceAudioMode, 'original');
   assert.equal(running.speech.source, 'audio'); assert.equal(running.captions, undefined);
-  assert.deepEqual(app.state.body.payload.referAudioUrl, ['asset://voice-id']);
-  assert.equal(app.state.body.payload.params.generateAudio, true);
-  assert.equal((await probeVideo(join(app.root, 'video', id, 'source-silent.mp4'))).audio, false);
+  assert.equal(app.state.body.payload.referAudioUrl, undefined);
+  assert.equal(app.state.body.payload.params.generateAudio, false);
+  assert.equal((await probeVideo(join(app.root, 'video', id, 'source.mp4'))).audio, true);
+  assert.deepEqual(app.state.creates.map(material => material.kind).sort(), ['photo', 'video']);
   app.state.done = true;
-  await app.until(id, task => task.status === 'completed');
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.audioCheck.engine, 'chatterbox');
+  assert.equal(completed.audioCheck.tempoAdjusted, false);
+  assert.equal(completed.audioCheck.lipSync, 'needs_preview');
+  assert.equal(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()).toString(), 'CONVERTED');
+  assert.equal(conversions, 1);
   assert.equal(app.state.generations, 1);
 });
 
@@ -1812,6 +1892,64 @@ test('missing reference voice or lip-sync configuration fails before reserving c
   assert.equal((await app.current(id)).status, 'draft'); assert.equal(app.state.generations, 0);
 });
 
+test('Wan is enabled with its own credentials and validates its 15-second reference limit before billing', async t => {
+  let duration = 15.1;
+  const app = await fixture(t, { costMode: true, config: { wan3Enabled: true },
+    now: () => Date.parse('2026-10-21T12:00:00+08:00'), probe: async () => ({ ...META, duration }) });
+  const config = await (await app.call('/config')).json();
+  assert.equal(config.enabled, true); assert.equal(config.model, WAN3_MODEL);
+  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [WAN3_MODEL]);
+  assert.equal(config.models.find(model => model.id === WAN3_MODEL).cnyPerSecond, .42);
+  const id = randomUUID();
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } })).status, 201);
+  const upload = () => fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal((await upload()).status, 400); assert.equal(await app.wallet.reservation('alice', id), null);
+  duration = 4.582; assert.equal((await upload()).status, 200);
+  const draft = await app.current(id);
+  assert.equal(draft.duration, 4.582); assert.equal(draft.estimatedPoints, Math.ceil(4.582 * 2 * .42 * 125));
+  await app.close(); await app.open({ config: { wan3Enabled: false } });
+  assert.equal((await (await app.call('/config')).json()).enabled, false);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: WAN3_MODEL } })).status, 503);
+});
+
+for (const outcome of ['completed', 'failed', 'uncertain']) test(`Wan ${outcome} keeps one paid dispatch and reconciles actual input plus output after restart`, async t => {
+  let submissions = 0, uploads = 0, ready = false, usageReady = false;
+  const usage = { duration: 9.15, input_video_duration: 4.57, output_video_duration: 4.58, SR: 720 };
+  const app = await fixture(t, { costMode: true, config: { wan3Enabled: true },
+    now: () => Date.parse('2026-10-21T12:00:00+08:00'), probe: async () => ({ ...META, duration: 4.582 }),
+    wan3Provider: {
+      upload: async () => ({ id: `oss://test/material-${++uploads}`, status: 2 }),
+      generate: async () => { submissions++; if (outcome === 'uncertain') throw new VideoError('Lost response', 502, 'VIDEO_PROVIDER_UNAVAILABLE'); return { taskId: 'wan-one-job' }; },
+      query: async id => { assert.equal(id, 'wan-one-job'); return !ready ? {} : outcome === 'failed' ? { failed: true }
+        : { completed: true, url: 'https://result.example/wan.mp4', ...(usageReady ? { usage } : {}) }; },
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } });
+  await app.upload(id);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === (outcome === 'uncertain' ? 'failed' : 'running'));
+  await app.close(); ready = true; await app.open();
+  if (outcome === 'completed') {
+    const settling = await app.until(id, task => task.status === 'settling');
+    assert.equal(settling.resultUrl, null);
+    assert.equal((await app.wallet.reservation('alice', id)).costItems.wan3.status, 'uncertain');
+    await app.close(); usageReady = true; await app.open();
+    const done = await app.until(id, task => task.status === 'completed');
+    assert.equal(done.billing.costCny, 3.843);
+    const bill = await app.wallet.reservation('alice', id);
+    assert.equal(bill.settledUnits, 3_843_000); assert.equal(Object.keys(bill.costItems).length, 1);
+  } else if (outcome === 'failed') {
+    await app.until(id, task => task.status === 'failed' && task.billing?.status === 'settled');
+    assert.equal((await app.wallet.reservation('alice', id)).settledUnits, 0);
+  } else {
+    await app.until(id, task => task.status === 'failed' && task.billing?.status === 'release_pending');
+    assert.equal((await app.wallet.reservation('alice', id)).costItems.wan3.status, 'uncertain');
+    assert.ok((await app.wallet.snapshot('alice')).held > 0);
+  }
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  assert.equal(submissions, 1); assert.equal(uploads, 2); assert.equal(app.state.generations, 0);
+});
+
 test('actual-cost Seedance uses the confirmed 1 CNY per second contract and settles only once',async t=>{
   const app=await fixture(t,{costMode:true}),id=await app.init();await app.upload(id);
   assert.equal((await app.current(id)).estimatedPoints,500,'upload quote uses the new rule before starting');
@@ -1886,7 +2024,7 @@ test('PixVerse survives restart, uploads once, restores captions and meters repl
     },
   });
   const id = randomUUID();
-  await app.call('/tasks', { body: { requestId: id, model } });
+  await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'indextts2', sourceAudioMode: 'original' } });
   await app.upload(id); await uploadVoice(app, id);
   assert.equal((await app.current(id)).estimatedPoints, null);
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);

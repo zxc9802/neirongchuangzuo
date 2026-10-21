@@ -94,6 +94,23 @@ test('eager initialization exposes ready rejection and cleanup is possible befor
   assert.equal(shutdowns, 1);
 });
 
+test('production with only official Wan credentials initializes saved replica jobs before listening', async t => {
+  const original = process.env;
+  process.env = { NODE_ENV: 'production', DASHSCOPE_API_KEY: 'test-only-key' };
+  t.after(() => { process.env = original; });
+  const restored = deferred(); let initialized = 0, closed = 0;
+  const server = createPreviewServer({ createAI: () => fakeHandler(), createVideo: options => {
+    initialized++; assert.equal(options.env.DASHSCOPE_API_KEY, 'test-only-key');
+    return fakeHandler({ ready: restored.promise, shutdown: async () => { closed++; } });
+  } });
+  t.after(() => server.shutdown());
+  assert.equal(initialized, 1);
+  let ready = false; void server.ready.then(() => { ready = true; });
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(ready, false);
+  restored.resolve(); await server.ready; assert.equal(ready, true);
+  await server.shutdown(); assert.equal(closed, 1);
+});
+
 test('graceful close waits for AI drain, rejects new POSTs and keeps result reads available until release', async () => {
   const drain = deferred();
   const drainStarted = deferred();

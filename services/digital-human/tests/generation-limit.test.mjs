@@ -52,6 +52,33 @@ test("global concurrency and the shared hourly budget also bound multiple extern
   }
 });
 
+test("digital-human slots allow the same user to run multiple jobs without undercounting global capacity", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "generation-concurrent-test-"));
+  const saved = process.env.GENERATION_LIMIT_PATH;
+  process.env.GENERATION_LIMIT_PATH = path.join(tmp, "limits.json");
+  const releases = [];
+  try {
+    const { acquireGenerationSlot } = await import("../src/lib/server/generation-limit.ts?concurrent");
+    const options = { allowConcurrent: true };
+    for (let i = 0; i < 3; i++) releases.push(acquireGenerationSlot("same-user", options));
+    releases.push(acquireGenerationSlot("other-user", options));
+    assert.throws(() => acquireGenerationSlot("same-user", options), e => e.status === 429);
+    assert.throws(() => acquireGenerationSlot("third-user", options), e => e.status === 429);
+    releases[1](); releases[1]();
+    releases.push(acquireGenerationSlot("same-user", options));
+    assert.throws(() => acquireGenerationSlot("third-user", options), e => e.status === 429, "releasing one job twice must not free another job's slot");
+    releases.forEach(release => release());
+    for (let i = 0; i < 2; i++) acquireGenerationSlot("same-user", options)();
+    assert.throws(() => acquireGenerationSlot("same-user", options), e => e.status === 429 && /本小时/.test(e.message));
+    assert.equal(JSON.parse(fs.readFileSync(process.env.GENERATION_LIMIT_PATH, "utf8")).length, 7, "capacity rejections do not consume hourly attempts");
+  } finally {
+    releases.forEach(release => release());
+    if (saved === undefined) delete process.env.GENERATION_LIMIT_PATH;
+    else process.env.GENERATION_LIMIT_PATH = saved;
+    fs.rmSync(tmp, {recursive: true, force: true});
+  }
+});
+
 test("internal motion operations retain per-user and global concurrency without consuming external quota", async () => {
   const tmp=fs.mkdtempSync(path.join(os.tmpdir(),"generation-internal-test-"));
   const saved=process.env.GENERATION_LIMIT_PATH;

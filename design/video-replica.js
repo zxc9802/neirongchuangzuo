@@ -7,11 +7,14 @@ const MODELS = [
   { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, description: '最多生成30秒视频，1.5元/秒' },
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, description: '最多生成15秒视频，0.8元/秒' },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, description: '最多生成15秒视频，0.5元/秒' },
+  { id: 'wan3.0-video', name: 'Wan 3.0', maxDuration: 15, description: '参考视频最多15秒 · 720P · 输入与输出均计费，换声另计' },
 ];
-const DIRECT_VOICE = { voiceEngine: 'seedance', sourceAudioMode: 'silent' };
+const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '进度已保存', waiting: '等待继续处理', cancelled: '已停止处理', expired: '已过期' };
-const taskLabel = task => task.voiceEngine === 'seedance' && task.sourceAudioMode === 'silent' && task.status === 'preparing'
+const taskLabel = task => task.voiceEngine === 'chatterbox' && task.status === 'preparing'
+  ? '正在保留原声节奏并转换音色' : task.voiceEngine === 'chatterbox' && task.status === 'verifying'
+  ? '正在合成人物画面与目标声音' : task.voiceEngine === 'seedance' && task.sourceAudioMode === 'silent' && task.status === 'preparing'
   ? '正在将原视频语音转为台词' : task.voiceEngine === 'indextts2' && task.status === 'verifying'
   ? task.narrationProgress?.ready ? '正在同步口型与参考配音' : '正在完成参考声音配音'
   : task.voiceEngine === 'indextts2' && task.status === 'running' && !task.narrationProgress?.ready
@@ -59,13 +62,13 @@ function actionMessage() {
   if (state.error) return displayMessage(state.error);
   if (state.busy) return '';
   if (state.current?.recovery) return state.current.recovery.message;
-  if (state.current?.status === 'verifying') return state.current.voiceEngine === 'indextts2' ? `${taskLabel(state.current)}，请稍候。` : '正在核对已有成片的台词与开口时间，请稍候。';
+  if (state.current?.status === 'verifying') return ['indextts2', 'chatterbox'].includes(state.current.voiceEngine) ? `${taskLabel(state.current)}，请稍候。` : '正在核对已有成片的台词与开口时间，请稍候。';
   if (state.current?.status === 'failed') return failureMessage(state.current);
   return !state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : '';
 }
 function voiceHint() {
-  const task = state.current && state.current.status !== 'draft' ? state.current : DIRECT_VOICE;
-  return `<p class="replica-voice-hint">${task.voiceEngine === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频，原片需包含至少 5 秒清晰原声。' : task.sourceAudioMode === 'silent' ? '由视频模型按原片台词和时间线直接配音，音色只参考上传的声音，无需额外口型处理。情绪参考画面和台词，音色效果需试听。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
+  const task = state.current && state.current.status !== 'draft' ? state.current : DEFAULT_VOICE;
+  return `<p class="replica-voice-hint">${task.voiceEngine === 'chatterbox' ? '将原视频人声转换为上传的音色，尽量保留原台词、语速、停顿和情绪，不逐句变速。原片需有清晰单人声音；音色与口型效果请试听核对。' : task.voiceEngine === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频，原片需包含至少 5 秒清晰原声。' : task.sourceAudioMode === 'silent' ? '由视频模型按原片台词和时间线直接配音，音色只参考上传的声音，无需额外口型处理。情绪参考画面和台词，音色效果需试听。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
 }
 function selectedModel() {
   return MODELS.find(model => model.id === (state.current?.model || state.model))
@@ -77,14 +80,15 @@ function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
   const description = state.config?.models?.find(model => model.id === selected.id)?.description || selected.description;
   return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.map(model => {
-    const unavailable = !state.config?.enabled || state.config.models?.find(item => item.id === model.id)?.enabled === false;
+    const configured = state.config?.models?.find(item => item.id === model.id);
+    const unavailable = !state.config?.enabled || configured?.enabled === false || model.id === 'wan3.0-video' && !configured?.enabled;
     return `<option value="${model.id}" ${selected.id === model.id ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
   }).join('')}</select><p id="replica-model-description" class="replica-model-description">${ctx.esc(description || '历史版本，仅供查看已有成片')}</p></div>`;
 }
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind];
   const saved = state.current?.[kind];
-  const voiceRequired = voice && (!state.current || state.current.status === 'draft' || state.current.voiceEngine === 'indextts2' || state.current.sourceAudioMode === 'silent');
+  const voiceRequired = voice && (!state.current || state.current.status === 'draft' || ['indextts2', 'chatterbox'].includes(state.current.voiceEngine) || state.current.sourceAudioMode === 'silent');
   const disabled = state.busy || pending(state.current) || state.current && state.current.status !== 'draft' && !(video && state.current.canReplaceSource) || voice && !state.config?.voiceEnabled;
   const source = state.urls[kind] || state.current?.[video ? 'sourceVideoUrl' : voice ? 'sourceVoiceUrl' : 'sourcePhotoUrl'];
   const preview = source ? video
@@ -135,9 +139,10 @@ function costText() {
   const task = state.current;
   const unlimited = workspaceCreditsState().snapshot?.unlimited === true, exempt = task?.billing?.exempt === true;
   const actualCost=workspaceCreditsState().snapshot?.pricing?.mode==='api_cost';
+  const conversionCost = !task || task.status === 'draft' || task.voiceEngine === 'chatterbox' ? '；音色转换另按实际用量结算' : '';
   return unlimited ? `${creditEstimateText(task?.estimatedPoints)}${task?.duration ? ` · ${task.duration} 秒` : ''}`
     : exempt ? task?.duration ? `${task.duration} 秒` : '上传后自动识别时长。'
-      : actualCost ? task?.estimatedPoints ? `生成费用预计 ${task.estimatedPoints} 积分 · ${task.duration} 秒` : '按实际算力计费'
+      : actualCost ? task?.estimatedPoints ? `生成费用预计 ${task.estimatedPoints} 积分 · ${task.duration} 秒${conversionCost}` : `按实际算力计费${conversionCost}`
         : task?.estimatedPoints ? `预计冻结 ${task.estimatedPoints} 积分 · ${task.duration} 秒 · 成功后按成片时长结算，不超过预估` : '按视频时长预留积分；失败退回预留积分。';
 }
 function submitArea(ctx) {
@@ -198,7 +203,7 @@ async function submit() {
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
-    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DIRECT_VOICE;
+    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DEFAULT_VOICE;
     // Keep the request ID before networking so an uncertain response can be retried safely.
     if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now() };
     remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode }))).task);
