@@ -118,6 +118,17 @@ for (const language of ['en', 'ms']) test(`${language} translation and reference
   assert.doesNotMatch(JSON.stringify(restored), /translation-key|tts-key/);
 });
 
+test('translated speech longer than its time window is assembled without a quality hold', async t => {
+  const app = await fixture(t, 'en');
+  app.task.speech.segments[0].end = 1;
+  await app.service.advance(app.task, app.folder, app.save);
+  await app.service.advance(app.task, app.folder, app.save);
+  assert.equal(app.task.localization.ready, true);
+  assert.equal(app.task.localization.failed, undefined);
+  assert.equal(Number(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', join(app.folder, 'localized-voice.wav')], { encoding: 'utf8' })), 5);
+  assert.equal(app.calls.filter(call => call.method === 'POST').length, 2);
+});
+
 test('matching language cannot submit localization even if called directly', async t => {
   const app = await fixture(t, 'en'); app.task.speech.language = 'eng';
   await assert.rejects(app.service.advance(app.task, app.folder, app.save), /无需翻译/);

@@ -90,10 +90,6 @@ export function createVoiceConversionService(env = {}, { fetchImpl = fetch, down
     try { await download(state.audioUrl, output, { maxBytes: 32 * 1024 * 1024 }); }
     catch { throw failure('正在重新保存已有换声结果，不会重新生成。', 'VIDEO_CONVERSION_PENDING'); }
     state.duration = await audioDuration(output);
-    // Preserve cadence; reject substantial drift instead of hiding it with time stretching.
-    if (Math.abs(state.duration - state.sourceDuration) > .25) {
-      state.failed = true; await save(); throw failure('换声时长与原声相差超过 0.25 秒，未强行变速，请检查素材后新建复刻。');
-    }
     state.ready = true; await save();
   }
   return { enabled: Boolean(key), advance, mux: muxNarration };

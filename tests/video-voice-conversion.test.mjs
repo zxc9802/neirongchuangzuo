@@ -101,13 +101,21 @@ test('download retry uses the same generated audio and no new generation', async
   assert.equal(downloads, 2);
 });
 
-test('substantial duration drift stops instead of stretching or regenerating speech', async t => {
-  const f = await fixture(t, { duration: 3 });
-  await f.advance();
-  await assert.rejects(f.advance(), { code: 'VIDEO_CONVERSION_FAILED' });
-  await assert.rejects(f.advance(), { code: 'VIDEO_CONVERSION_FAILED' });
-  assert.equal(f.task.voiceConversion.failed, true);
-  assert.equal(f.calls.filter(c => c.method === 'POST').length, 1);
+test('shorter and longer converted audio remain deliverable without regenerating speech', async t => {
+  for (const duration of [3, 5]) {
+    const f = await fixture(t, { duration });
+    await f.advance(); await f.advance(); await f.advance();
+    assert.equal(f.task.voiceConversion.ready, true);
+    assert.equal(f.task.voiceConversion.duration, duration);
+    assert.equal(f.task.voiceConversion.failed, undefined);
+    assert.equal(f.calls.filter(c => c.method === 'POST').length, 1);
+    const video = join(f.folder, 'generated.mp4'), output = join(f.folder, 'result.mp4');
+    execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=15:d=4', '-c:v', 'libx264', video]);
+    await f.service.mux(video, join(f.folder, 'converted-voice.wav'), output, 4);
+    const meta = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type', '-of', 'json', output]));
+    assert.equal(Number(meta.format.duration), 4);
+    assert(meta.streams.some(stream => stream.codec_type === 'audio'));
+  }
 });
 
 test('video model receives original video and lip-motion instructions without a second voice reference', () => {

@@ -19,7 +19,7 @@ import { createNarrationService } from './narration.mjs';
 import { createVoiceConversionService } from './voice-conversion.mjs';
 import { createLipsyncService } from './lipsync.mjs';
 import { createProviderStorage } from './provider-storage.mjs';
-import { languageRoute, normalizeLanguage } from './languages.mjs';
+import { languageRoute } from './languages.mjs';
 import { createLocalizationService } from './localization.mjs';
 import { createHeygenLipsyncService } from './heygen.mjs';
 
@@ -72,7 +72,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       ? config.wan3Enabled : config.enabled) }));
   const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
     { id: 'indextts2', name: 'IndexTTS2', enabled: Boolean(narration?.enabled && lipsync?.enabled) },
-    { id: 'chatterbox', name: 'Chatterbox 音色转换', enabled: Boolean(voiceConversion?.enabled && speech.enabled) }];
+    { id: 'chatterbox', name: 'Chatterbox 音色转换', enabled: Boolean(voiceConversion?.enabled) }];
   const enabled = models.some(model => model.enabled);
   function selectedVoiceEngine(id = 'indextts2') {
     if (!voiceEngines.some(engine => engine.id === id)) throw error('配音模型无效，请刷新页面后重新选择。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
@@ -285,7 +285,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   async function analyzeSource(task) {
     if (task.voiceEngine === 'chatterbox') {
-      // Conversion follows the actual speech, not OCR text or an edited script.
+      // Whole-track conversion uses audio directly; only legacy translation needs text.
+      if (!task.targetLanguage) return;
       if (task.speech?.source !== 'audio' || ['en', 'ms'].includes(task.targetLanguage) && !task.speech.language) {
         task.speech = { ...await speech.analyze(file(task, 'video'), task.video.duration,
           { diagnosticsPath: join(folder(task), 'verification-source.json') }), source: 'audio' };
@@ -398,34 +399,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (!localization?.enabled || !heygen?.enabled) throw error('翻译配音或 HeyGen 官方对口型尚未配置。', 503, 'VIDEO_LOCALIZATION_NOT_CONFIGURED');
         await localization.advance(task, folder(task), () => save(task));
         if (!task.localization.ready) return;
-        if (!task.localization.checked) {
-          const spoken = await speech.analyze(join(folder(task), 'localized-voice.wav'), task.localization.duration,
-            { diagnosticsPath: join(folder(task), 'verification-localized.json') });
-          const detected = normalizeLanguage(spoken.language), comparison = compareSpeech(task.localization.text, spoken.text);
-          // Malay/Indonesian share enough vocabulary to confuse ASR. The explicit
-          // Malay TTS setting plus the full translated transcript must both match.
-          const languageMatched = detected === task.targetLanguage || task.targetLanguage === 'ms' && ['id', 'ind'].includes(detected);
-          if (!languageMatched || !comparison.accepted) {
-            task.localization.failed = true; await save(task);
-            throw error('译后配音的语言或台词核对未通过，已暂停，尚未提交人物生成和对口型。', 422, 'VIDEO_LOCALIZATION_FAILED');
-          }
-          task.localization.checked = true; await save(task);
-        }
       } else if (task.voiceEngine === 'chatterbox') {
         await costMeter.run({ userId: task.userId, taskId: task.billingTaskId || task.id, legacy: task.billing?.mode !== 'api_cost' },
           () => voiceConversion.advance(task, folder(task), () => save(task)));
         if (!task.voiceConversion.ready) return;
-        if (!task.voiceConversion.checked) {
-          const converted = await speech.analyze(join(folder(task), 'converted-voice.wav'), task.voiceConversion.duration,
-            { diagnosticsPath: join(folder(task), 'verification-converted.json') });
-          const comparison = compareSpeech(task.speech.text, converted.text);
-          if (!comparison.accepted) {
-            task.voiceConversion.failed = true; await save(task);
-            throw error('换声后识别的台词与原声差异较大，已暂停生成，请试听核对素材。', 422, 'VIDEO_CONVERSION_FAILED');
-          }
-          task.voiceConversion.checked = true;
-          task.voiceConversion.transcriptDifferences = comparison.differences; await save(task);
-        }
       }
       if (task.sourceAudioMode === 'silent' && task.video.audio && !task.videoAudioRemoved) {
         await removeVideoAudio(file(task, 'video'), join(folder(task), 'source-silent.mp4'));
@@ -515,8 +492,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (task.status === 'verifying') {
       const generated = join(folder(task), 'generated.mp4'), aligned = join(folder(task), 'result.tmp');
       if (task.languageRouting?.translate) {
-        if (task.localization?.failed || !task.localization?.checked) throw error('译后配音尚未通过核对。', 422, 'VIDEO_LOCALIZATION_FAILED');
-        if (task.actualDuration < task.localization.duration - .1) throw error('人物视频短于译后配音，已暂停，未截断台词。', 422, 'VIDEO_LOCALIZATION_FAILED');
+        if (!task.localization?.ready) throw error('译后配音尚未就绪。', 502, 'VIDEO_LOCALIZATION_PENDING');
         if (!task.lipsync) {
           task.lipsyncFiles ||= {};
           for (const [kind, input, type] of [['video', generated, 'video/mp4'], ['audio', join(folder(task), 'localized-voice.wav'), 'audio/wav']]) {
@@ -535,19 +511,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         const mouth = join(folder(task), 'lipsync.mp4');
         try { await download(task.lipsync.url, mouth); }
         catch { throw error('正在保存已完成的 HeyGen 成片，不会重新生成。', 502, 'VIDEO_LIPSYNC_PENDING'); }
-        const metadata = await probe(mouth);
-        if (Math.abs(metadata.duration - task.actualDuration) > .25) throw error('对口型成片时长与人物视频不一致，已保留结果等待核对。', 422, 'VIDEO_LIPSYNC_FAILED');
         await localization.mux(mouth, join(folder(task), 'localized-voice.wav'), aligned, task.actualDuration);
         task.audioCheck = { engine: 'chatterbox-multilingual', language: task.targetLanguage, referenceApplied: true,
           lipSync: 'heygen-precision', warning: '已翻译并按参考声音配音、同步口型，请试听核对译文和遮挡效果。' };
       } else if (task.voiceEngine === 'chatterbox') {
         if (!task.voiceConversion?.ready) throw error('换声结果尚未就绪。', 502, 'VIDEO_CONVERSION_PENDING');
-        if (task.actualDuration < Math.max(task.voiceConversion.duration, task.video.duration) - .25) {
-          throw error('换人视频短于原声，未截断台词或强行变速，请新建复刻。', 422, 'VIDEO_CONVERSION_FAILED');
-        }
         await voiceConversion.mux(generated, join(folder(task), 'converted-voice.wav'), aligned, task.actualDuration);
         task.audioCheck = { engine: 'chatterbox', referenceApplied: true, emotionSource: 'original-video', tempoAdjusted: false,
-          transcriptDifferences: task.voiceConversion.transcriptDifferences, lipSync: 'needs_preview',
+          lipSync: 'needs_preview',
           warning: '已按原声转换音色，未调整语速；请预览核对音色、情绪和口型。' };
       } else if (task.voiceEngine === 'indextts2') {
         if (!task.narration.ready) return;
@@ -587,7 +558,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           transcriptDifferences: Math.max(rawComparison.differences, comparison.differences),
           afterOffsetMs: Math.round((verified.start - task.speech.start) * 1000), lipSync: 'needs_preview' };
       } catch (cause) {
-        if (cause.code !== 'VIDEO_SPEECH_INVALID') throw cause;
+        if (fatal || !/^VIDEO_(SPEECH|TRANSCRIPTION)_/.test(cause.code || '')) throw cause;
         // Transcript/timing checks decide whether correction is safe, never whether to deliver.
         await copyFile(generated, aligned);
         task.audioCheck = { corrected: false, transcriptMatched: null, transcriptDifferences: null, afterOffsetMs: null,
@@ -661,6 +632,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const task = JSON.parse(await readFile(join(storageDir, entry.name, 'task.json'), 'utf8'));
       if (task.id !== entry.name || typeof task.userId !== 'string') throw new Error('Invalid video task');
       jobs.set(task.id, task);
+      // Retired quality checks must not leave already-generated audio permanently held.
+      if (task.status === 'waiting' && task.code === 'VIDEO_CONVERSION_FAILED' && task.voiceConversion
+        && /^(换声后识别的台词与原声差异较大|换声时长与原声相差超过|换人视频短于原声)/.test(task.error || '')) {
+        delete task.voiceConversion.failed;
+        task.recovery.action = 'resume';
+        task.recovery.message = '校验拦截已移除，可以继续处理。';
+        await save(task);
+      }
       if (task.voice && task.actualDuration && !task.cleaned) {
         task.rawReady = await stat(join(folder(task), 'generated.mp4')).then(info => info.isFile() && info.size > 0, () => false);
       }
@@ -701,7 +680,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         const availableModels = models.filter(model => !isFalReplacement(model.id)).map(model => model.id === WAN3_MODEL
           ? { ...model, cnyPerSecond: wan3Price(now()), description: `参考视频最多15秒 · 720P · 输入＋输出 ${wan3Price(now())}元/秒，换声另计` } : model);
         json(res, 200, { enabled: availableModels.some(model => model.enabled), models: availableModels,
-          voiceEnabled: Boolean(speech.enabled && voiceConversion?.enabled), voiceEngines: voiceEngines.filter(engine => engine.id === 'chatterbox'),
+          voiceEnabled: Boolean(voiceConversion?.enabled), voiceEngines: voiceEngines.filter(engine => engine.id === 'chatterbox'),
           voiceEngine: 'chatterbox', sourceAudioMode: 'original', model: availableModels.find(model => model.enabled)?.id || MODEL,
           prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return;
       }
@@ -803,15 +782,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             const asset = materialLibrary && (imported || await materialLibrary.save(userId, { kind, path: temporary, name }));
             task.photo = { ready: true, ...(asset ? { assetId: asset.id } : {}) };
           } else if (kind === 'voice') {
-            if (!speech.enabled) throw error('声音参考的语音识别服务尚未配置。', 503, 'VIDEO_SPEECH_NOT_CONFIGURED');
             await writeFile(temporary, bytes, { mode: 0o600 });
             const normalized = join(folder(task), 'voice.tmp.wav');
             const metadata = imported ? imported.metadata : await voice(temporary, normalized);
             if (imported) await writeFile(normalized, bytes, { mode: 0o600 });
-            const intervals = imported ? [] : await speech.detect(normalized).catch(cause => {
-              if (cause.code !== 'VIDEO_SPEECH_INVALID') throw cause;
-              return [];
-            });
+            const intervals = imported || task.voiceEngine === 'chatterbox' ? [] : await speech.detect(normalized).catch(() => []);
             const voiceMetadata = { ...metadata, speechStart: imported ? metadata.speechStart : intervals[0]?.start ?? null };
             const asset = materialLibrary && (imported || await materialLibrary.save(userId, { kind, path: normalized, name, metadata: voiceMetadata }));
             await rename(normalized, file(task, 'voice')); task.voice = { ...voiceMetadata, ...(asset ? { assetId: asset.id } : {}) }; delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt;
@@ -896,7 +871,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
           if (voiceEngine === 'chatterbox') {
             if (!task.voice) throw error('请先上传目标声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
-            if (!voiceConversion?.enabled || !speech.enabled) throw error('音色转换服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
+            if (!voiceConversion?.enabled) throw error('音色转换服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
           }
           if (voiceEngine === 'indextts2') {
             if (!task.voice) throw error('使用 IndexTTS2 请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');

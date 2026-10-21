@@ -107,7 +107,7 @@ function slot(kind, ctx) {
   return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title"><span>${video ? '01' : voice ? '03' : '02'}</span><h3>${title}${voice ? `<small>${voiceRequired ? '必填' : '选填'} · 更换音色</small>` : ''}</h3></div>
     ${voice ? voiceHint() : ''}<div class="replica-input-preview">${preview}</div>
     <strong class="replica-file-name">${ctx.esc(selected?.name || (saved?.assetId ? '已存入资产，长期保留' : saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : '上传你想替换成的人物'))}</strong>
-    <p>${video ? `单个人物 · 2–${selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '声音分析服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
+    <p>${video ? `单个人物 · 2–${selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}">
     <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${selected || saved ? '更换' : '选择'}${title}</label>${!video ? `<a href="#assets" class="replica-asset-link">从资产选择${voice ? '声音' : '形象'}</a>` : ''}</section>`;
 }

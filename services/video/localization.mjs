@@ -204,9 +204,6 @@ export function createLocalizationService(env = {}, { fetchImpl = fetch, downloa
       const intervals = await detect(output).catch(() => []);
       segment.speechStart = intervals[0]?.start ?? 0; segment.speechEnd = intervals.at(-1)?.end ?? duration;
       const spoken = segment.speechEnd - segment.speechStart, window = segment.end - segment.start;
-      if (!(spoken > 0) || spoken / window > 1.35) {
-        state.failed = true; await save(); throw failure('译后配音超出原台词时间范围，已暂停，未截断台词或强行加速。');
-      }
       // Short speech keeps natural speed and leaves silence at the end of its window.
       segment.end = segment.start + Math.min(window, spoken);
       segment.status = 'ready'; await save();

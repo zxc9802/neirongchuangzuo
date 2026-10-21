@@ -358,7 +358,7 @@ async function localizedReplica(t, { source = 'zh', target = 'en', confidence = 
   return { ...app, id, counts };
 }
 
-async function restoreStartedTranslation(app, targetLanguage) {
+async function restoreStartedTranslation(app, targetLanguage, overrides = {}) {
   await app.close();
   const path = join(app.root, 'video', app.id, 'task.json'), task = JSON.parse(await readFile(path, 'utf8'));
   const pricingKey = generationPrice('video', task.model).key;
@@ -366,7 +366,7 @@ async function restoreStartedTranslation(app, targetLanguage) {
   Object.assign(task, { targetLanguage, status: 'preparing', startedAt: Date.now(), recoveryPolicy: 1,
     recoveryDeadline: Date.now() + 30 * 60_000, pricingKey,
     billing: { status: record.status, reservedPoints: record.reservedPoints, chargedPoints: record.chargedPoints, mode: 'model_price', pricingKey } });
-  await writeFile(path, JSON.stringify(task)); await app.open();
+  await writeFile(path, JSON.stringify(task)); await app.open(overrides);
 }
 
 for (const source of ['zh', 'en', 'ms']) for (const target of ['zh', 'en', 'ms']) {
@@ -377,7 +377,7 @@ for (const source of ['zh', 'en', 'ms']) for (const target of ['zh', 'en', 'ms']
     assert.equal((await app.call(`/tasks/${app.id}/start`, { body: { targetLanguage: target } })).status, 202);
     const running = await app.until(app.id, task => task.status === 'running');
     assert.equal(running.languageRouting, undefined); assert.equal(running.targetLanguage, undefined);
-    assert.equal(running.speech.language, source);
+    assert.equal(running.speech, undefined);
     assert.equal(app.counts.conversions, 1); assert.equal(app.counts.translations, 0);
     await app.close(); await app.open();
     app.state.done = true;
@@ -416,6 +416,19 @@ test('an already-started Malay translation finishes with its original audio and 
   await restoreStartedTranslation(app, 'ms');
   assert.equal((await app.until(app.id, task => task.status === 'completed')).audioCheck.language, 'ms');
   assert.equal(app.counts.lipSubmits, 1);
+});
+
+test('legacy translation delivers without output ASR or duration comparisons', async t => {
+  const app = await localizedReplica(t);
+  app.state.done = true; app.state.lipDone = true;
+  await restoreStartedTranslation(app, 'en', { speech: fakeSpeech({ analyze: async path => {
+    assert(path.endsWith('source.mp4'), 'Generated narration must not be transcribed again');
+    return { ...structuredClone(SPEECH), language: 'zh', languageConfidence: .99 };
+  } }), probe: async path => ({ ...META, duration: path.endsWith('lipsync.mp4') ? 2 : 3 }) });
+  const completed = await app.until(app.id, task => task.status === 'completed');
+  assert.equal(completed.audioCheck.language, 'en');
+  assert.equal(completed.actualDuration, 3);
+  assert.equal(app.counts.lipSubmits, 1); assert.equal(app.state.generations, 1);
 });
 
 test('old draft language choices are cleared at start and the retired language endpoint cannot re-enable translation', async t => {
@@ -758,18 +771,20 @@ test('transcript differences never block delivery and preserve generated audio w
   const timeline = text => ({ ...SPEECH, text, segments: [{ ...SPEECH.segments[0], text,
     words: [{ word: text, start: 1.25, end: 3.5 }] }] });
   const source = timeline('现在九块九，欢迎大家购买。真的好吃');
-  for (const [name, raw, aligned, failedStage] of [
+  for (const [name, raw, aligned, failedStage, failedCode = 'VIDEO_SPEECH_INVALID'] of [
     ['rewritten script', timeline('完全不同的台词重复好多内容'.repeat(10)), source],
     ['changed price', timeline('现在九十九，欢迎大家购买。真的好吃'), source],
     ['missing phrase', timeline('现在九块九'), source],
     ['aligned difference', source, timeline('已经变成完全不同的台词')],
     ['unrecognized generated speech', source, source, 'generated.mp4'],
     ['unrecognized aligned speech', source, source, 'result.tmp'],
+    ['recognizer unavailable', source, source, 'generated.mp4', 'VIDEO_SPEECH_FAILED'],
+    ['recognizer still pending', source, source, 'result.tmp', 'VIDEO_TRANSCRIPTION_PENDING'],
     ['unmatched timing', source, { ...source, segments: [{ ...source.segments[0], start: 2 }] }],
   ]) await t.test(name, async t => {
     const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
       speech: fakeSpeech({ analyze: async path => {
-        if (failedStage && path.endsWith(failedStage)) throw Object.assign(new Error('台词识别不完整'), { code: 'VIDEO_SPEECH_INVALID' });
+        if (failedStage && path.endsWith(failedStage)) throw Object.assign(new Error('台词识别不完整'), { code: failedCode });
         return path.endsWith('source.mp4') ? source : path.endsWith('generated.mp4') ? raw : aligned;
       }, align: async (_source, output, original, generated) => {
         alignmentSegments(original, generated); await writeFile(output, Buffer.from('altered-audio')); return { transcriptMatched: true };
@@ -1796,13 +1811,16 @@ for (const sourceAudioMode of ['original', 'silent']) test(`Seedance ${sourceAud
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
 });
 
-test('new tasks default to whole-track voice conversion after restart without TTS, retiming or lip-sync calls', async t => {
+test('new tasks complete after restart without ASR, VAD or duration quality gates', async t => {
   let conversions = 0;
-  const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
-    probe: async () => ({ ...META, duration: 6 }),
+  const app = await fixture(t, { speech: fakeSpeech({ enabled: false,
+    analyze: async () => assert.fail('Conversion must not depend on recognized dialogue'),
+    detect: async () => assert.fail('Voice upload must not depend on VAD') }),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    probe: async path => ({ ...META, duration: path.endsWith('upload.tmp') || path.endsWith('source.mp4') ? 6 : 4 }),
     voiceConversion: { enabled: true, advance: async (task, folder, save) => {
       if (!task.voiceConversion?.ready) {
-        conversions++; task.voiceConversion = { ready: true, duration: 5.88 };
+        conversions++; task.voiceConversion = { ready: true, duration: 8 };
         await writeFile(join(folder, 'converted-voice.wav'), 'CONVERTED'); await save();
       }
     }, mux: async (_video, audio, output) => writeFile(output, await readFile(audio)) },
@@ -1814,6 +1832,8 @@ test('new tasks default to whole-track voice conversion after restart without TT
   assert.equal(created.status, 201);
   const draft = (await created.json()).task;
   assert.equal(draft.voiceEngine, 'chatterbox'); assert.equal(draft.sourceAudioMode, 'original');
+  const config = await (await app.call('/config')).json();
+  assert.equal(config.voiceEngines[0].enabled, true); assert.equal(config.voiceEnabled, true);
   await app.upload(id);
   const source = join(app.root, 'original.mp4');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=320x480:r=24:d=6',
@@ -1826,7 +1846,7 @@ test('new tasks default to whole-track voice conversion after restart without TT
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   const running = await app.until(id, task => task.status === 'running');
   assert.equal(running.voiceEngine, 'chatterbox'); assert.equal(running.sourceAudioMode, 'original');
-  assert.equal(running.speech.source, 'audio'); assert.equal(running.captions, undefined);
+  assert.equal(running.speech, undefined); assert.equal(running.captions, undefined);
   assert.equal(app.state.body.payload.referAudioUrl, undefined);
   assert.equal(app.state.body.payload.params.generateAudio, false);
   assert.equal((await probeVideo(join(app.root, 'video', id, 'source.mp4'))).audio, true);
@@ -1836,9 +1856,45 @@ test('new tasks default to whole-track voice conversion after restart without TT
   assert.equal(completed.audioCheck.engine, 'chatterbox');
   assert.equal(completed.audioCheck.tempoAdjusted, false);
   assert.equal(completed.audioCheck.lipSync, 'needs_preview');
+  assert.equal(completed.actualDuration, 4);
   assert.equal(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()).toString(), 'CONVERTED');
   assert.equal(conversions, 1);
   assert.equal(app.state.generations, 1);
+});
+
+for (const message of [
+  '换声后识别的台词与原声差异较大，已暂停生成，请试听核对素材。',
+  '换声时长与原声相差超过 0.25 秒，未强行变速，请检查素材后新建复刻。',
+  '换人视频短于原声，未截断台词或强行变速，请新建复刻。',
+]) test(`saved conversion quality holds can resume without new paid conversion: ${message}`, async t => {
+  const app = await localizedReplica(t);
+  await app.call(`/tasks/${app.id}/start`, { body: {} });
+  await app.until(app.id, task => task.status === 'running'); await app.close();
+  const path = join(app.root, 'video', app.id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.status = 'waiting'; saved.error = message; saved.code = 'VIDEO_CONVERSION_FAILED';
+  const verifying = message.startsWith('换人视频');
+  saved.recovery = { action: 'input', resumeStatus: verifying ? 'verifying' : 'preparing', state: 'waiting' };
+  if (verifying) {
+    saved.actualDuration = 3;
+    await writeFile(join(app.root, 'video', app.id, 'generated.mp4'), VIDEO);
+  } else {
+    delete saved.providerId; delete saved.providerDispatched; app.state.generations = 0;
+  }
+  saved.voiceConversion.failed = true;
+  saved.voiceConversion.checked = false;
+  saved.voiceConversion.id = 'existing-conversion';
+  saved.voiceConversion.ready = !message.startsWith('换声时长');
+  await writeFile(path, JSON.stringify(saved));
+  await app.open({ voiceConversion: { enabled: true,
+    advance: async task => {
+      assert.equal(task.voiceConversion.failed, undefined); assert.equal(task.voiceConversion.id, 'existing-conversion');
+      task.voiceConversion.ready = true;
+    },
+    mux: async (_video, audio, output) => writeFile(output, await readFile(audio)) } });
+  assert.equal((await app.current(app.id)).canResume, true);
+  await app.call(`/tasks/${app.id}/resume`, { body: {} }); app.state.done = true;
+  assert.equal((await app.until(app.id, task => task.status === 'completed')).audioCheck.engine, 'chatterbox');
+  assert.equal(app.counts.conversions, 1); assert.equal(app.state.generations, 1);
 });
 
 test('legacy drafts without a recorded voice engine still start with Seedance', async t => {
