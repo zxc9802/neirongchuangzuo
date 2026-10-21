@@ -11,9 +11,14 @@ const MODELS = [
   { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15 },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
+const LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英语' }, { id: 'ms', name: '马来语' }];
+const languageName = code => LANGUAGES.find(item => item.id === code)?.name || code || '待识别';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务').replace(/Wan\s*3\.0/gi, 'qiya-3.0');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '进度已保存', waiting: '等待继续处理', cancelled: '已停止处理', expired: '已过期' };
-const taskLabel = task => task.voiceEngine === 'chatterbox' && task.status === 'preparing'
+const taskLabel = task => task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
+  ? '正在识别原视频语言' : task.languageRouting?.translate && task.status === 'preparing'
+  ? '正在翻译台词并生成配音' : task.languageRouting?.translate && task.status === 'verifying'
+  ? '正在按译后配音同步口型' : task.voiceEngine === 'chatterbox' && task.status === 'preparing'
   ? '正在保留原声节奏并转换音色' : task.voiceEngine === 'chatterbox' && task.status === 'verifying'
   ? '正在合成人物画面与目标声音' : task.voiceEngine === 'seedance' && task.sourceAudioMode === 'silent' && task.status === 'preparing'
   ? '正在将原视频语音转为台词' : task.voiceEngine === 'indextts2' && task.status === 'verifying'
@@ -21,13 +26,13 @@ const taskLabel = task => task.voiceEngine === 'chatterbox' && task.status === '
   : task.voiceEngine === 'indextts2' && task.status === 'running' && !task.narrationProgress?.ready
     ? '正在替换人物并生成参考配音' : labels[task.status] || '正在处理';
 const pending = task => task && !['draft', 'completed', 'failed', 'expired', 'waiting', 'cancelled'].includes(task.status);
-let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
+let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, targetLanguage: 'zh', files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
 let context, timer, polling = false, unsubscribeCredits;
 let selectedMaterials = {};
 function resetFiles() { for (const url of Object.values(state.urls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; selectedMaterials = {}; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
-  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
+  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, targetLanguage: 'zh', files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
 }
 async function request(path, options = {}) {
   const signal = AbortSignal.timeout(options.method === 'PUT' ? 180_000 : options.method ? 60_000 : 15_000);
@@ -46,6 +51,7 @@ function jsonPost(body = {}) { return { method: 'POST', headers: { 'Content-Type
 function remember(task) {
   state.current = task;
   state.model = task.model || state.model;
+  state.targetLanguage = task.targetLanguage || 'zh';
   state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt);
   observeCreditTask(task);
 }
@@ -70,6 +76,7 @@ function actionMessage() {
 }
 function voiceHint() {
   const task = state.current && state.current.status !== 'draft' ? state.current : DEFAULT_VOICE;
+  if (['en', 'ms'].includes(state.current?.targetLanguage || state.targetLanguage)) return '<p class="replica-voice-hint">先识别原视频语言。同语言保留原台词并转换音色；语言不同时翻译台词，用参考音色配音并同步口型。</p>';
   return `<p class="replica-voice-hint">${task.voiceEngine === 'chatterbox' ? '将原视频人声转换为上传的音色，尽量保留原台词、语速、停顿和情绪，不逐句变速。原片需有清晰单人声音；音色与口型效果请试听核对。' : task.voiceEngine === 'indextts2' ? '上传声音参考后，单独生成配音并同步口型；情绪参考原视频，原片需包含至少 5 秒清晰原声。' : task.sourceAudioMode === 'silent' ? '由视频模型按原片台词和时间线直接配音，音色只参考上传的声音，无需额外口型处理。情绪参考画面和台词，音色效果需试听。' : '由视频模型生成配音，同时参考原视频的情绪和上传的声音。'}</p>`;
 }
 function selectedModel() {
@@ -78,6 +85,11 @@ function selectedModel() {
       ? { id: state.current.model, name: 'PixVerse Swap', maxDuration: 30 } : MODELS[0]);
 }
 function modelName(task) { return (task.model === 'fal-ai/pixverse/swap' ? 'PixVerse Swap' : MODELS.find(model => model.id === (task.model || DEFAULT_MODEL))?.name) || ''; }
+function languagePicker(ctx) {
+  const selected = state.current?.targetLanguage || state.targetLanguage || 'zh';
+  const locked = state.busy || state.current && state.current.status !== 'draft';
+  return `<div class="replica-model-setting"><label for="replica-language">生成语言</label><select id="replica-language" class="replica-models" ${locked ? 'disabled' : ''}>${LANGUAGES.map(item => `<option value="${item.id}" ${selected === item.id ? 'selected' : ''}>${ctx.esc(item.name)}</option>`).join('')}</select><p class="replica-model-description">自动识别原视频语言；语言一致时保留原方案。英语和马来语仅在语言不同时翻译配音并同步口型；中文沿用原方案。</p></div>`;
+}
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
   const price = generationPrice('video', selected.id);
@@ -125,7 +137,8 @@ function progress(ctx) {
   const received = Number(task.downloadProgress?.receivedBytes), total = Number(task.downloadProgress?.totalBytes);
   const mb = bytes => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   const download = Number.isFinite(received) && received >= 0 ? `<p>保存成片：${mb(received)}${total > 0 ? ` / ${mb(total)}` : ''}</p>${total > 0 ? `<progress aria-label="成片保存进度" max="${total}" value="${Math.min(received, total)}"></progress>` : ''}` : '';
-  const narration = task.narrationProgress ? `<p>配音已完成 ${task.narrationProgress.completed} / ${task.narrationProgress.total} 段</p>` : '';
+  const voiceProgress = task.localizationProgress || task.narrationProgress;
+  const narration = voiceProgress ? `<p>配音已完成 ${voiceProgress.completed} / ${voiceProgress.total} 段</p>` : '';
   return `${narration}<p>已等待 ${duration(elapsed)} · ${task.status === 'waiting' ? '进度已保存' : task.lastCheckedAt ? `最近收到模型回复：${duration(now - task.lastCheckedAt)}前` : '等待模型回复'}</p>${download}
     ${state.pollError ? '<p>正在重新连接，已有任务进度已保留。</p>' : pending(task) && elapsed >= 600_000 ? '<p>等待时间较长，仍在查询原任务，请勿重复提交。</p>' : ''}
     <small>任务编号：${ctx.esc(task.id)}</small>`;
@@ -135,7 +148,9 @@ function history(ctx) {
 }
 function summary(ctx) {
   const task = state.current;
-  return task ? `<div><strong>${taskLabel(task)}</strong><span>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${task.captionCheck?.warning ? `<span>${ctx.esc(displayMessage(task.captionCheck.warning))}</span>` : ''}${task.audioCheck ? `<span>${task.audioCheck.engine === 'indextts2' ? '已使用参考声音配音，并按新配音处理口型；请预览核对效果。' : task.audioCheck.warning ? ctx.esc(displayMessage(task.audioCheck.warning)) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
+  const route = task?.languageRouting;
+  const language = route ? `<span>原视频：${ctx.esc(languageName(route.source))} · 所选语言：${ctx.esc(languageName(route.target))} · ${route.translate ? '翻译配音并同步口型' : route.reason === 'same-language' ? '语言一致，沿用原方案' : '中文沿用原方案'}</span>` : '';
+  return task ? `<div><strong>${taskLabel(task)}</strong>${language}<span>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${task.captionCheck?.warning ? `<span>${ctx.esc(displayMessage(task.captionCheck.warning))}</span>` : ''}${task.audioCheck ? `<span>${task.audioCheck.engine === 'indextts2' ? '已使用参考声音配音，并按新配音处理口型；请预览核对效果。' : task.audioCheck.warning ? ctx.esc(displayMessage(task.audioCheck.warning)) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
 }
 function playerStyle(task) {
   let width = Number(task?.video?.width), height = Number(task?.video?.height);
@@ -171,7 +186,7 @@ export function renderVideoReplica(ctx) {
   const task = state.current;
   return `<div class="replica-heading"><div><span class="replica-eyebrow">1:1复刻 · ${ctx.esc(selectedModel().name)}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
     <div class="replica-toolbar"><button type="button" id="replica-new" class="secondary" ${state.busy ? 'disabled' : ''}>新建复刻</button></div>
-    <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${modelPicker(ctx)}
+    <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${modelPicker(ctx)}${languagePicker(ctx)}
       <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
       <div id="replica-submit-area" class="replica-submit-area">${submitArea(ctx)}</div></section>
       <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
@@ -192,6 +207,14 @@ async function selectModel(id) {
     }
     remember((await request(`/tasks/${state.current.id}/model`, jsonPost({ model: id }))).task);
   }
+  catch (cause) { state.error = cause.message; }
+  finally { state.busy = false; refresh(); }
+}
+async function selectLanguage(value) {
+  if (state.busy || state.current && state.current.status !== 'draft' || !LANGUAGES.some(item => item.id === value)) return;
+  if (!state.current) { state.targetLanguage = value; refresh(); return; }
+  state.busy = true; state.error = ''; refresh();
+  try { remember((await request(`/tasks/${state.current.id}/language`, jsonPost({ targetLanguage: value }))).task); }
   catch (cause) { state.error = cause.message; }
   finally { state.busy = false; refresh(); }
 }
@@ -218,10 +241,10 @@ async function submit() {
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
-    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DEFAULT_VOICE;
+    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DEFAULT_VOICE, targetLanguage = state.current?.targetLanguage || state.targetLanguage || 'zh';
     // Keep the request ID before networking so an uncertain response can be retried safely.
     if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now() };
-    remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode }))).task);
+    remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode, targetLanguage }))).task);
     if (state.current.status === 'draft') {
       for (const kind of ['video', 'photo', 'voice']) {
         if (selectedMaterials[kind]) {
@@ -232,7 +255,7 @@ async function submit() {
         remember((await request(`/tasks/${id}/${kind}`, { method: 'PUT', headers: { 'Content-Type': state.files[kind].type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(state.files[kind].name) }, body: state.files[kind] })).task);
       }
       resetFiles();
-      remember((await request(`/tasks/${id}/start`, jsonPost({ model, voiceEngine, sourceAudioMode }))).task);
+      remember((await request(`/tasks/${id}/start`, jsonPost({ model, voiceEngine, sourceAudioMode, targetLanguage }))).task);
     }
     void refreshWorkspaceCredits();
   } catch (cause) { state.error = cause.message; }
@@ -308,12 +331,13 @@ export function bindVideoReplica(ctx) {
   context = ctx;
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
   document.querySelector('#replica-models').onchange = event => { void selectModel(event.target.value); };
+  document.querySelector('#replica-language').onchange = event => { void selectLanguage(event.target.value); };
   for (const kind of ['video', 'photo', 'voice']) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
   const resume = document.querySelector('#replica-resume'); if (resume) resume.onclick = () => { void recoverTask('resume'); };
   const cancel = document.querySelector('#replica-cancel'); if (cancel) cancel.onclick = () => { void recoverTask('cancel'); };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
-  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; state.error = ''; refresh(); };
+  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; state.targetLanguage = 'zh'; state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };
   document.querySelector('#replica-history').onclick = event => {
     const button = event.target.closest('[data-replica-task]'); if (!button || state.busy) return;

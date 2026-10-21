@@ -18,6 +18,7 @@ import { isTaskOutputExpired, taskCompletedAt, taskOutputExpiresAt } from "@/lib
 export { sanitizePublicText } from "@/lib/server/public-sanitizer";
 
 const PUBLIC_ERRORS: Record<string, string> = {
+  SPEECH_LANGUAGE_UNCERTAIN: "无法可靠识别文案语言，请使用清晰的中文、英文或马来语文案",
   INSUFFICIENT_POINTS: "积分余额不足，请缩短文案或联系管理员补充积分",
   TASK_RESTARTED_BEFORE_SUBMISSION: "服务重启中断了任务，预留积分已退回，请重新创建任务",
   TASK_RESTARTED_AFTER_SUBMISSION: "任务被重启中断，积分仍在核对，请恢复原任务或联系管理员",

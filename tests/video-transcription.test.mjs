@@ -107,12 +107,24 @@ test('Scribe word timing reaches narration without reading audio-event labels al
   const diagnosticPath = join(app.audio + '.diagnostic.json');
   const speech = await service.analyze(app.audio, 5, { diagnosticsPath: diagnosticPath });
   assert.equal(speech.engine, 'silero-vad+scribe-v2');
+  assert.equal(speech.language, 'zh');
   assert.equal(speech.text, '你好。世界');
   assert.equal(speech.start, 1); assert.equal(speech.end, 2.5);
   const diagnostic = JSON.parse(await readFile(diagnosticPath, 'utf8'));
   assert.deepEqual(diagnostic.asr.words.map(word => [word.word, word.start, word.end]), [['你好', 1, 1.5], ['。', 1.5, 1.5], ['世界', 2, 2.5]]);
   await assert.rejects(readFile(app.audio + '.asr.wav'), { code: 'ENOENT' });
 });
+
+for (const [code, language, text] of [['eng', 'en', 'Hello world'], ['msa', 'ms', 'Selamat datang']]) {
+  test(`Scribe preserves ${language} word spacing and language confidence`, async t => {
+    const [first, second] = text.split(' ');
+    const app = await fixture(t, { result: () => Response.json({ text, language_code: code, language_probability: .99,
+      words: [{ text: first, type: 'word', start: 1, end: 1.5 }, { text: ' ', type: 'spacing', start: 1.5, end: 1.5 },
+        { text: second, type: 'word', start: 2, end: 2.5 }] }) });
+    const speech = await createSpeechService(app.env, app.fetchImpl).analyze(app.audio, 5);
+    assert.equal(speech.text, text); assert.equal(speech.language, language); assert.equal(speech.languageConfidence, .99);
+  });
+}
 
 test('Scribe zero-duration final characters stay before the original speech pause', () => {
   const timeline = speechTimeline({ words: [

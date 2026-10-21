@@ -1,6 +1,7 @@
 # 数字人模块来源
 
 - 上游仓库：https://github.com/zxc9802/shuzirenzhinengti
+- 2026-10-21 配音语言分流：数字人视频和 MP3 配音先识别文案的主要语言。中文继续使用 IndexTTS-2 及原有豆包备用配音；英文、马来语使用 fal Chatterbox 多语言配音，沿用用户选择的参考音色。英文和马来语文案按最多 300 字符分段，保留词序、标点、原语速选项及音轨拼接；缓存按语言与模型隔离。纯中文不增加语言识别请求，其他文案使用现有 GPT-6 Luna，服务不可用时通过 fal OpenRouter 兜底；无法可靠识别时停止，不猜测语言。文案不会被翻译或改写。模型参数见 [fal 官方接口](https://fal.ai/models/fal-ai/chatterbox/text-to-speech/multilingual/api)。
 - 2026-10-10 配音同步：`indextts.ts`、`speech-stitch.ts` 与上游 `6d7430377d305c89dcc4f8980119e0cc666d7eec` 一致，保留最多三路分句合成、首尾静音检测、按句拼接和情绪参考传递。同步相关音频回归用例及 FFmpeg 标准错误输出选项。主工作台默认情绪强度为 0.8，旧草稿首次迁移到参考音频配置后使用 0.8；后续手动选择继续保存。
 - 导入版本：`393d2eccd7d6e1b1d7423f40e1d7e97cef73b2cd`
 - 导入日期：2026-09-23

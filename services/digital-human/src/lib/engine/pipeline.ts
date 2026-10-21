@@ -7,7 +7,8 @@ import { withTaskExecution } from "./task-execution";
 import { startTaskHeartbeat, withTaskBillingGuard } from "../server/task-worker";
 import { TaskStore, TaskItem, TaskStep } from "../store/task-store";
 import { getAppConfig } from "../config";
-import { generateIndexTTS } from "./indextts";
+import { generateIndexTTS, generateChatterboxTTS, type IndexTTSOptions } from "./indextts";
+import { detectSpeechLanguage } from "./speech-language";
 import { prepareFaceLipsync, finalizeFaceLipsync } from "./face-lipsync";
 import { deliverNarrationFallback } from "./narration-fallback";
 import { prepareSceneContinuation } from "./scene-tail";
@@ -191,6 +192,10 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
     if (task.billing?.source !== "workspace") assertTaskCreditCoverage(task.billing, task.billing?.estimatedDuration || 0);
 
     // 2. Step: Speech Synthesis
+    const speechLanguage = task.results.speechLanguage || await detectSpeechLanguage(task.inputs.scriptText, config);
+    ensureTaskActive();
+    TaskStore.update(taskId, { results: { speechLanguage } });
+    log(`已识别文案语言：${{ zh: "中文", en: "英语", ms: "马来语" }[speechLanguage]}，正在准备配音。`);
     log("🗣️ 第一步: 正在合成定制原声配音 (根据字数可能需要 1~3 分钟)...");
     const storedSpeakerSource =
       task.inputs.speakerAudioUrl ||
@@ -204,7 +209,7 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       `speaker-reference${[".mp3", ".wav", ".m4a"].includes(speakerExt) ? speakerExt : ".mp3"}`,
       storedSpeakerSource === config.indexttsSpeakerAudioUrl
     );
-    const emotionAudioUrl = storedEmotionSource
+    const emotionAudioUrl = speechLanguage === "zh" && storedEmotionSource
       ? await externalizeReference(
           storedEmotionSource,
           "emotion-reference.wav",
@@ -212,8 +217,8 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         )
       : "";
 
-    const ttsResult = await generateIndexTTS(task.inputs.scriptText, {
-      apiKey: config.indexttsFalApiKey,
+    const ttsOptions: IndexTTSOptions = {
+      apiKey: speechLanguage === "zh" ? config.indexttsFalApiKey : config.falApiKey,
       speakerAudioUrl: speakerUrl,
       emotionAudioUrl: emotionAudioUrl,
       emotionIntensity: task.inputs.emotionIntensity,
@@ -234,7 +239,10 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
         "warn",
         "主配音服务暂不可用，已自动切换备用配音，重新生成完整音轨"
       ),
-    });
+    };
+    const ttsResult = speechLanguage === "zh"
+      ? await generateIndexTTS(task.inputs.scriptText, ttsOptions)
+      : await generateChatterboxTTS(task.inputs.scriptText, speechLanguage, ttsOptions);
     ensureTaskActive();
 
     const sha256Audio = await sha256File(ttsResult.finalWavPath);

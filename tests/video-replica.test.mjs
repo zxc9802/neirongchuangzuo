@@ -239,6 +239,98 @@ async function uploadVoice(app, id) {
   assert.equal(response.status, 200, await response.text());
 }
 
+async function localizedReplica(t, { source = 'zh', target = 'en', confidence = .99, outputLanguage = target,
+  uncertain = false, disconnected = false } = {}) {
+  const counts = { conversions: 0, translations: 0, lipSubmits: 0, lipQueries: 0 }, text = 'Hello everyone';
+  const app = await fixture(t, { speech: fakeSpeech({ analyze: async path => ({ ...structuredClone(SPEECH),
+    text, language: path.endsWith('localized-voice.wav') ? outputLanguage : source, languageConfidence: confidence }) }),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 3 }; },
+    voiceConversion: { enabled: true, advance: async (task, folder, save) => {
+      counts.conversions++; task.voiceConversion = { ready: true, duration: 4 };
+      await writeFile(join(folder, 'converted-voice.wav'), 'ORIGINAL'); await save();
+    }, mux: async (_video, audio, output) => writeFile(output, await readFile(audio)) },
+    localization: { enabled: !disconnected, advance: async (task, folder, save) => {
+      counts.translations++; task.localization = { ready: true, duration: 4, text, segments: [{ status: 'ready' }] };
+      await writeFile(join(folder, 'localized-voice.wav'), 'TRANSLATED'); await save();
+    }, mux: async (_video, audio, output) => writeFile(output, await readFile(audio)) },
+    heygen: { enabled: !disconnected, submit: async () => {
+      counts.lipSubmits++;
+      if (uncertain) throw new VideoError('Submission uncertain', 502, 'VIDEO_LIPSYNC_UNCERTAIN');
+      return { id: 'ls_test', provider: 'heygen' };
+    }, query: async () => { counts.lipQueries++; return app.state.lipDone ? 'https://files.heygen.ai/output.mp4' : null; } },
+  });
+  const id = randomUUID();
+  assert.equal((await app.call('/tasks', { body: { requestId: id, targetLanguage: target } })).status, 201);
+  await app.upload(id); await uploadVoice(app, id);
+  return { ...app, id, counts };
+}
+
+for (const source of ['zh', 'en', 'ms']) for (const target of ['zh', 'en', 'ms']) {
+  test(`language routing ${source} -> ${target} preserves the required pipeline through restart`, async t => {
+    const translate = target !== 'zh' && source !== target;
+    const app = await localizedReplica(t, { source, target, disconnected: !translate });
+    await app.close(); await app.open();
+    assert.equal((await app.current(app.id)).targetLanguage, target);
+    assert.equal((await app.call(`/tasks/${app.id}/start`, { body: {} })).status, 202);
+    const running = await app.until(app.id, task => task.status === 'running');
+    assert.equal(running.languageRouting.translate, translate);
+    assert.equal(app.counts.conversions, translate ? 0 : 1);
+    assert.equal(app.counts.translations, translate ? 1 : 0);
+    assert.equal((await app.call(`/tasks/${app.id}/language`, { body: { targetLanguage: 'ms' } })).status, 409);
+    app.state.done = true;
+    if (translate) {
+      await app.until(app.id, task => task.status === 'verifying' && app.counts.lipQueries > 0);
+      await app.close(); await app.open();
+    }
+    app.state.lipDone = true;
+    const completed = await app.until(app.id, task => task.status === 'completed');
+    assert.equal(completed.audioCheck.lipSync, translate ? 'heygen-precision' : 'needs_preview');
+    assert.equal(app.counts.lipSubmits, translate ? 1 : 0);
+    assert.equal(Buffer.from(await (await app.call(`/tasks/${app.id}/result`)).arrayBuffer()).toString(), translate ? 'TRANSLATED' : 'ORIGINAL');
+  });
+}
+
+for (const overrides of [{ source: undefined }, { source: 'und' }, { confidence: .3 }, { outputLanguage: 'id' }]) {
+  test(`unreliable source or wrong translated language pauses before visual/lipsync generation: ${JSON.stringify(overrides)}`, async t => {
+    const app = await localizedReplica(t, { ...overrides, source: Object.hasOwn(overrides, 'source') ? overrides.source || 'und' : 'zh' });
+    await app.call(`/tasks/${app.id}/start`, { body: {} });
+    const waiting = await app.until(app.id, task => task.status === 'waiting');
+    assert.equal(waiting.canResume, false); assert.equal(app.state.generations, 0); assert.equal(app.counts.lipSubmits, 0);
+    assert.equal(app.counts.translations, overrides.outputLanguage ? 1 : 0);
+    assert.match(waiting.recovery.message, /语言|核对/);
+  });
+}
+
+test('uncertain HeyGen submission stays held after restart without a second paid call', async t => {
+  const app = await localizedReplica(t, { uncertain: true });
+  app.state.done = true;
+  await app.call(`/tasks/${app.id}/start`, { body: {} });
+  assert.equal((await app.until(app.id, task => task.status === 'waiting')).canResume, false);
+  await app.close(); await app.open();
+  await app.call(`/tasks/${app.id}/resume`, { body: {} });
+  assert.equal((await app.current(app.id)).status, 'waiting');
+  assert.equal(app.counts.lipSubmits, 1); assert.equal(app.state.generations, 1);
+});
+
+test('a matching Malay TTS transcript tolerates the known Indonesian ASR label', async t => {
+  const app = await localizedReplica(t, { source: 'zh', target: 'ms', outputLanguage: 'ind' });
+  app.state.done = true; app.state.lipDone = true;
+  await app.call(`/tasks/${app.id}/start`, { body: {} });
+  assert.equal((await app.until(app.id, task => task.status === 'completed')).audioCheck.language, 'ms');
+  assert.equal(app.counts.lipSubmits, 1);
+});
+
+test('language validation and draft edits are persisted and reject invalid target values', async t => {
+  const app = await localizedReplica(t);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), targetLanguage: 'id' } })).status, 400);
+  assert.equal((await app.call(`/tasks/${app.id}/language`, { body: { targetLanguage: 'fr' } })).status, 400);
+  assert.equal((await app.call(`/tasks/${app.id}/language`, { body: { targetLanguage: 'ms' } })).status, 200);
+  await app.close(); await app.open();
+  assert.equal((await app.current(app.id)).targetLanguage, 'ms');
+  assert.equal((await app.call(`/tasks/${app.id}/start`, { body: { targetLanguage: 'xx' } })).status, 400);
+  assert.equal(await app.wallet.reservation('alice', app.id), null);
+});
+
 const CAPTIONS = { engine: 'rapidocr', kind: 'burned', width: 512, height: 768, cues: [
   { start: 0.3, end: 1.5, text: '生腌真好吃', box: [100, 550, 412, 600] },
   { start: 2, end: 3.5, text: '只要9.9元', box: [100, 550, 412, 600] },

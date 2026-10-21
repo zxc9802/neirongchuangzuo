@@ -7,6 +7,41 @@ const finiteWallet = () => ({ available: 1000, held: 0, total: 1000, unlimited: 
 const STANDARD_MODEL = 'doubao-seedance-2-0-260128', PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
 const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
 
+for (const language of ['zh', 'en', 'ms']) test(`language selector submits ${language} at creation and start`, async t => {
+  let task; const posts = [];
+  const page = await fixture(t, { apiFetch: (path, options) => {
+    if (!options?.method) return;
+    const body = options.method === 'POST' ? JSON.parse(options.body) : {};
+    if (options.method === 'POST') posts.push({ path, body });
+    if (path.endsWith('/tasks')) task = { id: body.requestId, status: 'draft', targetLanguage: body.targetLanguage };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll();
+  for (const name of ['中文', '英语', '马来语']) assert.ok(page.html().includes(`>${name}</option>`));
+  page.node('#replica-language').onchange({ target: { value: language } }); await page.settle();
+  assert.match(page.html(), new RegExp(`option value="${language}" selected`));
+  for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  for (const suffix of ['/tasks', '/start']) assert.equal(posts.find(item => item.path.endsWith(suffix)).body.targetLanguage, language);
+});
+
+test('language detection and routing appear in progress without replacing reference players', async t => {
+  const task = { id: 'language-preview', status: 'preparing', voiceEngine: 'chatterbox', targetLanguage: 'ms', createdAt: Date.now() };
+  const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /正在识别原视频语言/);
+  assert.match(page.html(), /id="replica-language"[^>]*disabled/);
+  const renders = page.renders();
+  task.languageRouting = { source: 'ms', target: 'ms', translate: false, reason: 'same-language' };
+  await page.poll();
+  assert.match(page.node('#replica-result-summary').innerHTML, /原视频：马来语.*语言一致，沿用原方案/);
+  task.languageRouting = { source: 'zh', target: 'ms', translate: true, reason: 'different-language' };
+  await page.poll();
+  assert.match(page.node('#replica-result-summary').innerHTML, /正在翻译台词并生成配音/);
+  task.status = 'verifying'; await page.poll();
+  assert.match(page.node('#replica-result-summary').innerHTML, /正在按译后配音同步口型/);
+  assert.equal(page.renders(), renders);
+});
+
 for (const stage of ['create', 'upload']) test(`a stalled replica ${stage} request releases the busy UI without automatic resubmission`, async t => {
   const controllers = new Map(); let task, posts = 0;
   t.mock.method(AbortSignal, 'timeout', ms => {

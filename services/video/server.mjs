@@ -19,6 +19,9 @@ import { createNarrationService } from './narration.mjs';
 import { createVoiceConversionService } from './voice-conversion.mjs';
 import { createLipsyncService } from './lipsync.mjs';
 import { createProviderStorage } from './provider-storage.mjs';
+import { VIDEO_LANGUAGES, targetLanguage, languageRoute, normalizeLanguage } from './languages.mjs';
+import { createLocalizationService } from './localization.mjs';
+import { createHeygenLipsyncService } from './heygen.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
@@ -49,13 +52,16 @@ async function readJSON(req) {
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, speech, captions = createCaptionService(env),
-  narration, lipsync, voiceConversion, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
   if (speech === undefined) speech = createSpeechService(env, costMeter.fetch);
   if (narration === undefined) narration = createNarrationService(env, { fetchImpl: costMeter.fetch, recoverReceipt: costMeter.recoverFalRequest, now });
   if (lipsync === undefined) lipsync = createLipsyncService(env, costMeter.fetch);
   if (voiceConversion === undefined) voiceConversion = createVoiceConversionService(env, { fetchImpl: costMeter.fetch, download, upload: providerStorage.upload });
+  if (heygen === undefined) heygen = createHeygenLipsyncService(env, costMeter.fetch);
+  if (localization === undefined) localization = createLocalizationService(env, { fetchImpl: costMeter.fetch, download,
+    upload: providerStorage.upload, detect: path => speech.detect(path) });
   provider ||= createVideoProvider(config,costMeter.fetch);
   falProvider ||= createFalVideoProvider(config,costMeter.fetch);
   pixverseProvider ||= createPixverseProvider(config,costMeter.fetch);
@@ -153,10 +159,17 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       recovery: task.recovery && { state: task.recovery.state, message: task.recovery.message, nextAttemptAt: task.recovery.nextAttemptAt },
       canResume: !expired && task.status === 'waiting' && task.recovery?.resumeStatus !== 'submitting' && !task.lipsync?.submitting
         && !task.voiceConversion?.submitting && !task.voiceConversion?.failed
+        && !task.languageDetection?.pending
+        && !task.localization?.failed && !task.localization?.translating && !task.localization?.segments?.some(segment => segment.status === 'submitting')
+        && !task.localization?.translationFallback?.submitting
         && ['resume', 'account', 'confirm'].includes(task.recovery?.action),
       canReplaceSource: !expired && task.status === 'waiting' && task.recovery?.action === 'input' && !task.billing && !task.providerDispatched,
       canCancel: !expired && (ACTIVE.has(task.status) || task.status === 'waiting'),
       sourceAudioMode: task.sourceAudioMode || 'original',
+      targetLanguage: task.targetLanguage || 'zh', languageRouting: task.languageRouting,
+      localizationProgress: task.localization && { ready: task.localization.ready, text: task.localization.text,
+        completed: task.localization.segments?.filter(segment => segment.status === 'ready').length || 0,
+        total: task.localization.segments?.length || 0 },
       voiceConversionProgress: task.voiceConversion && { ready: task.voiceConversion.ready },
       voiceEngine: task.voiceEngine || (task.model === FAL_MODEL ? undefined : 'seedance'), narrationProgress: task.narration && { ready: task.narration.ready,
         completed: task.narration.segments.filter(segment => segment.status === 'ready').length, total: task.narration.segments.length },
@@ -186,7 +199,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       if ((isFalReplacement(task.model) || task.voiceEngine === 'chatterbox') && record?.kind === 'api-cost' && record.status === 'reserved') {
         // A playable result can arrive before its usage header. Re-read only saved receipts.
-        const urls = [task.falQueue?.result, task.lipsync?.resultUrl, task.voiceConversion?.resultUrl, ...(task.narration?.segments || []).flatMap(segment =>
+        const urls = [task.falQueue?.result, task.lipsync?.resultUrl, task.voiceConversion?.resultUrl, task.localization?.translationFallback?.resultUrl,
+          ...(task.localization?.segments || []).map(segment => segment.resultUrl), ...(task.narration?.segments || []).flatMap(segment =>
           [segment.falQueue?.result, ...(segment.previousJobs || []).map(job => job.falQueue?.result)])];
         for (const name of ['source.mp4', 'generated.mp4', 'result.tmp']) {
           const transcription = await readFile(join(folder(task), name + '.asr.json'), 'utf8').then(JSON.parse).catch(() => null);
@@ -240,6 +254,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     task.error = cause.message; task.code = cause.code; task.status = 'waiting'; await save(task);
   }
   async function recover(task, cause) {
+    if (['VIDEO_LANGUAGE_UNCERTAIN', 'VIDEO_LOCALIZATION_FAILED', 'VIDEO_LOCALIZATION_UNCERTAIN'].includes(cause.code)) {
+      await hold(task, { message: cause.message, code: cause.code, recoveryAction: cause.code === 'VIDEO_LOCALIZATION_UNCERTAIN' ? 'confirm' : 'input' });
+      task.recovery.message = cause.message; await save(task); return;
+    }
     if (['VIDEO_CONVERSION_FAILED', 'VIDEO_CONVERSION_UNCERTAIN'].includes(cause.code)) {
       await hold(task, { message: cause.message, code: cause.code, recoveryAction: cause.code.endsWith('UNCERTAIN') ? 'confirm' : 'input' }); return;
     }
@@ -267,7 +285,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   async function analyzeSource(task) {
     if (task.voiceEngine === 'chatterbox') {
       // Conversion follows the actual speech, not OCR text or an edited script.
-      if (task.speech?.source !== 'audio') {
+      if (task.speech?.source !== 'audio' || ['en', 'ms'].includes(task.targetLanguage) && !task.speech.language) {
         task.speech = { ...await speech.analyze(file(task, 'video'), task.video.duration,
           { diagnosticsPath: join(folder(task), 'verification-source.json') }), source: 'audio' };
         task.originalSpeech = structuredClone(task.speech);
@@ -351,6 +369,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         await archiveTaskMaterials(task);
         for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         await rm(join(folder(task), 'narration'), { recursive: true, force: true });
+        await rm(join(folder(task), 'localization'), { recursive: true, force: true });
+        for (const name of ['localized-voice.wav', 'localized-voice.wav.asr.json', 'localized-voice.wav.asr.json.tmp',
+          'localized-voice.wav.asr.wav', 'localized-voice.wav.vad.pcm', 'verification-localized.json']) await rm(join(folder(task), name), { force: true });
         for (const name of ['source.mp4', 'generated.mp4', 'result.tmp']) {
           await rm(join(folder(task), name + '.asr.json'), { force: true });
           await rm(join(folder(task), name + '.asr.json.tmp'), { force: true });
@@ -367,7 +388,28 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!ACTIVE.has(task.status)) return;
     if (task.status === 'preparing') {
       await analyzeSource(task);
-      if (task.voiceEngine === 'chatterbox') {
+      if (task.targetLanguage && task.voiceEngine === 'chatterbox') {
+        await localization?.detectLanguage?.(task, () => save(task));
+        task.languageRouting = languageRoute(task.speech, task.targetLanguage); await save(task);
+      }
+      if (task.languageRouting?.translate) {
+        if (!localization?.enabled || !heygen?.enabled) throw error('翻译配音或 HeyGen 官方对口型尚未配置。', 503, 'VIDEO_LOCALIZATION_NOT_CONFIGURED');
+        await localization.advance(task, folder(task), () => save(task));
+        if (!task.localization.ready) return;
+        if (!task.localization.checked) {
+          const spoken = await speech.analyze(join(folder(task), 'localized-voice.wav'), task.localization.duration,
+            { diagnosticsPath: join(folder(task), 'verification-localized.json') });
+          const detected = normalizeLanguage(spoken.language), comparison = compareSpeech(task.localization.text, spoken.text);
+          // Malay/Indonesian share enough vocabulary to confuse ASR. The explicit
+          // Malay TTS setting plus the full translated transcript must both match.
+          const languageMatched = detected === task.targetLanguage || task.targetLanguage === 'ms' && ['id', 'ind'].includes(detected);
+          if (!languageMatched || !comparison.accepted) {
+            task.localization.failed = true; await save(task);
+            throw error('译后配音的语言或台词核对未通过，已暂停，尚未提交人物生成和对口型。', 422, 'VIDEO_LOCALIZATION_FAILED');
+          }
+          task.localization.checked = true; await save(task);
+        }
+      } else if (task.voiceEngine === 'chatterbox') {
         await costMeter.run({ userId: task.userId, taskId: task.billingTaskId || task.id, legacy: task.billing?.mode !== 'api_cost' },
           () => voiceConversion.advance(task, folder(task), () => save(task)));
         if (!task.voiceConversion.ready) return;
@@ -470,7 +512,33 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     if (task.status === 'verifying') {
       const generated = join(folder(task), 'generated.mp4'), aligned = join(folder(task), 'result.tmp');
-      if (task.voiceEngine === 'chatterbox') {
+      if (task.languageRouting?.translate) {
+        if (task.localization?.failed || !task.localization?.checked) throw error('译后配音尚未通过核对。', 422, 'VIDEO_LOCALIZATION_FAILED');
+        if (task.actualDuration < task.localization.duration - .1) throw error('人物视频短于译后配音，已暂停，未截断台词。', 422, 'VIDEO_LOCALIZATION_FAILED');
+        if (!task.lipsync) {
+          task.lipsyncFiles ||= {};
+          for (const [kind, input, type] of [['video', generated, 'video/mp4'], ['audio', join(folder(task), 'localized-voice.wav'), 'audio/wav']]) {
+            if (!task.lipsyncFiles[kind]) { task.lipsyncFiles[kind] = await providerStorage.upload(input, type); await save(task); }
+          }
+          task.lipsync = { submitting: true, provider: 'heygen' }; await save(task);
+          try { task.lipsync = await heygen.submit(task.lipsyncFiles.video, task.lipsyncFiles.audio); }
+          catch (cause) { if (cause.providerNotDispatched) { delete task.lipsync; await save(task); } throw cause; }
+          await save(task); return;
+        }
+        if (task.lipsync.submitting) throw error('HeyGen 提交未获确认，请核对原任务，未重复提交。', 502, 'VIDEO_LIPSYNC_UNCERTAIN');
+        if (!task.lipsync.url) {
+          const url = await heygen.query(task.lipsync); if (!url) return;
+          task.lipsync.url = url; await save(task);
+        }
+        const mouth = join(folder(task), 'lipsync.mp4');
+        try { await download(task.lipsync.url, mouth); }
+        catch { throw error('正在保存已完成的 HeyGen 成片，不会重新生成。', 502, 'VIDEO_LIPSYNC_PENDING'); }
+        const metadata = await probe(mouth);
+        if (Math.abs(metadata.duration - task.actualDuration) > .25) throw error('对口型成片时长与人物视频不一致，已保留结果等待核对。', 422, 'VIDEO_LIPSYNC_FAILED');
+        await localization.mux(mouth, join(folder(task), 'localized-voice.wav'), aligned, task.actualDuration);
+        task.audioCheck = { engine: 'chatterbox-multilingual', language: task.targetLanguage, referenceApplied: true,
+          lipSync: 'heygen-precision', warning: '已翻译并按参考声音配音、同步口型，请试听核对译文和遮挡效果。' };
+      } else if (task.voiceEngine === 'chatterbox') {
         if (!task.voiceConversion?.ready) throw error('换声结果尚未就绪。', 502, 'VIDEO_CONVERSION_PENDING');
         if (task.actualDuration < Math.max(task.voiceConversion.duration, task.video.duration) - .25) {
           throw error('换人视频短于原声，未截断台词或强行变速，请新建复刻。', 422, 'VIDEO_CONVERSION_FAILED');
@@ -633,6 +701,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         json(res, 200, { enabled: availableModels.some(model => model.enabled), models: availableModels,
           voiceEnabled: Boolean(speech.enabled && voiceConversion?.enabled), voiceEngines: voiceEngines.filter(engine => engine.id === 'chatterbox'),
           voiceEngine: 'chatterbox', sourceAudioMode: 'original', model: availableModels.find(model => model.enabled)?.id || MODEL,
+          languages: VIDEO_LANGUAGES, localizationEnabled: Boolean(localization?.enabled && heygen?.enabled),
           prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return;
       }
       if (path === `${PREFIX}/tasks` && req.method === 'GET') {
@@ -649,12 +718,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const model = selectedModel(body.model);
           // Keep explicit legacy parameters compatible; new clients convert the source voice.
           const task = { id: body.requestId, userId, model, voiceEngine: selectedVoiceEngine(body.voiceEngine ?? 'chatterbox'),
+            targetLanguage: targetLanguage(body.targetLanguage),
             sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model),
             status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
-      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|source-audio|analyze|speech|recheck|start|result|resume|cancel))?$/.exec(path);
+      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|language|source-audio|analyze|speech|recheck|start|result|resume|cancel))?$/.exec(path);
       const task = match && jobs.get(match[1]);
       if (!task || task.userId !== userId) throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
       if (!match[2] && req.method === 'GET') { json(res, 200, { task: view(task) }); return; }
@@ -700,6 +770,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             task.sourceAudioMode = 'original';
           }
           if (task.video) task.duration = duration;
+          await save(task); json(res, 200, { task: view(task) }); return;
+        }
+        if (match[2] === 'language' && req.method === 'POST') {
+          const body = await readJSON(req);
+          if (task.status !== 'draft') throw error('任务已提交，不能更改生成语言。', 409);
+          task.targetLanguage = targetLanguage(body.targetLanguage);
+          delete task.languageRouting;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'source-audio' && req.method === 'POST') {
@@ -750,6 +827,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             const duration = videoDuration(metadata, model);
             task.model = model;
             task.video = metadata;
+            delete task.languageRouting; delete task.languageDetection; delete task.localization;
             delete task.voiceConversion;
             delete task.videoAudioRemoved;
             delete task.videoCaptionsRemoved; delete task.captions; delete task.captionsChecked; delete task.captionCheck;
@@ -817,6 +895,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
           if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
           const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
+          const language = targetLanguage(body.targetLanguage ?? task.targetLanguage);
+          if (language !== 'zh' && voiceEngine !== 'chatterbox') throw error('英语和马来语请选择当前的参考音色方案。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
           if (voiceEngine === 'chatterbox') {
             if (!task.voice) throw error('请先上传目标声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
             if (!voiceConversion?.enabled || !speech.enabled) throw error('音色转换服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
@@ -837,6 +917,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.pricingKey = generationPrice('video', model)?.key;
           task.cnyPerSecond = model === WAN3_MODEL ? wan3Price(now()) : models.find(item => item.id === model).cnyPerSecond;
           task.voiceEngine = voiceEngine;
+          task.targetLanguage = language;
           task.recoveryPolicy = ['indextts2', 'chatterbox'].includes(voiceEngine) || sourceAudioMode === 'silent' ? 1 : undefined;
           if (task.recoveryPolicy) task.recoveryDeadline = now() + 30 * 60_000;
           task.sourceAudioMode = sourceAudioMode;

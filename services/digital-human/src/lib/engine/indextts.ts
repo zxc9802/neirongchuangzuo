@@ -9,12 +9,13 @@ import { splitSpeechText, stitchSpeechSegments } from "./speech-stitch";
 
 const TTS_CONCURRENCY = 3;
 const FAL_ENDPOINT = "https://queue.fal.run/fal-ai/index-tts-2/text-to-speech";
+const CHATTERBOX_ENDPOINT = "https://queue.fal.run/fal-ai/chatterbox/text-to-speech/multilingual";
 
-function falQueueUrl(value: string): string {
+function falQueueUrl(value: string, chatterbox = false): string {
   const url = new URL(value);
   if (url.origin !== "https://queue.fal.run" || url.username || url.password ||
-    !/^\/fal-ai\/index-tts-2(?:\/|$)/.test(url.pathname)) {
-    throw new Error("fal IndexTTS-2 返回的任务地址无效");
+    !(chatterbox ? /^\/fal-ai\/chatterbox(?:\/|$)/ : /^\/fal-ai\/index-tts-2(?:\/|$)/).test(url.pathname)) {
+    throw new Error("fal 配音返回的任务地址无效");
   }
   return url.href;
 }
@@ -30,7 +31,7 @@ async function readFalJob(url: string, apiKey: string): Promise<any | null> {
     await response.body?.cancel().catch(() => {});
     return null;
   }
-  if (!response.ok) throw new Error(`fal IndexTTS-2 任务查询失败 (${response.status})`);
+  if (!response.ok) throw new Error(`fal 配音任务查询失败 (${response.status})`);
   try { return await response.json(); } catch { return null; }
 }
 let activeRequests = 0;
@@ -103,7 +104,7 @@ export async function generateIndexTTS(
   options: IndexTTSOptions
 ): Promise<IndexTTSResult> {
   try {
-    return await generatePrimaryIndexTTS(text, options);
+    return await generatePrimarySpeech(text, options);
   } catch (primaryError) {
     if (!options.fallback?.apiKey || !options.fallback.speakerId) throw primaryError;
     options.checkActive?.();
@@ -130,9 +131,19 @@ export async function generateIndexTTS(
   }
 }
 
-async function generatePrimaryIndexTTS(
+export async function generateChatterboxTTS(
   text: string,
-  options: IndexTTSOptions
+  language: "en" | "ms",
+  options: IndexTTSOptions,
+): Promise<IndexTTSResult> {
+  // English/Malay must never fall back to the Chinese-only voice route.
+  return generatePrimarySpeech(text, options, language);
+}
+
+async function generatePrimarySpeech(
+  text: string,
+  options: IndexTTSOptions,
+  language?: "en" | "ms",
 ): Promise<IndexTTSResult> {
   const {
     apiKey,
@@ -144,9 +155,10 @@ async function generatePrimaryIndexTTS(
     onLog = () => {},
     cacheScope = "local",
   } = options;
+  const modelName = language ? "Chatterbox" : "IndexTTS-2";
 
   if (!apiKey) {
-    throw new Error("fal IndexTTS-2 配音密钥未配置（FAL_KEY / FAL_API_KEY / VIDEO_FAL_KEY）");
+    throw new Error(`fal ${modelName} 配音密钥未配置（FAL_KEY / FAL_API_KEY / VIDEO_FAL_KEY）`);
   }
   if (!speakerAudioUrl) {
     throw new Error("INDEXTTS_SPEAKER_AUDIO_URL is required");
@@ -159,7 +171,7 @@ async function generatePrimaryIndexTTS(
 
   const rawWavPath = path.join(outDir, "voice-raw.wav");
   const finalWavPath = path.join(outDir, "voice-track.wav");
-  const cacheKey = getCacheKey(
+  const primaryCacheKey = getCacheKey(
     text,
     speakerAudioUrl,
     emotionAudioUrl,
@@ -167,6 +179,7 @@ async function generatePrimaryIndexTTS(
     toneProfile,
     cacheScope
   );
+  const cacheKey = language ? crypto.createHash("sha256").update(`chatterbox-v1|${language}|${primaryCacheKey}`).digest("hex") : primaryCacheKey;
 
   const globalCacheDir = path.join(process.cwd(), ".runtime", "tts-cache", cacheKey);
 
@@ -206,7 +219,7 @@ async function generatePrimaryIndexTTS(
   }
 
   // 2. Cache Miss: Synthesize short sentences and join them before applying the final speech rate.
-  const segments = splitSpeechText(text);
+  const segments = splitSpeechText(text, language);
   let audioUrl: string | null = null;
   if (segments.length > 1) {
     onLog(`文案已分为 ${segments.length} 段，最多 ${TTS_CONCURRENCY} 段同时合成，完成后按原顺序拼接...`);
@@ -218,7 +231,7 @@ async function generatePrimaryIndexTTS(
         const index = next++;
         try {
           onLog(`正在合成第 ${index + 1}/${segments.length} 段...`);
-          const part = await generatePrimaryIndexTTS(segments[index], {
+          const part = await generatePrimarySpeech(segments[index], {
             ...options,
             toneProfile: "low",
             outDir: path.join(outDir, "tts-segments", String(index + 1)),
@@ -226,7 +239,7 @@ async function generatePrimaryIndexTTS(
               if (failure) throw failure;
               onLog(`[第 ${index + 1}/${segments.length} 段] ${message}`);
             },
-          });
+          }, language);
           parts[index] = { text: segments[index], audioPath: part.rawWavPath };
         } catch (error) {
           failure ||= error;
@@ -240,25 +253,29 @@ async function generatePrimaryIndexTTS(
     const release = await acquireRequestSlot();
     try {
       options.checkActive?.();
-      onLog(`正在向 fal.ai 提交 IndexTTS-2 语音合成请求...`);
+      onLog(`正在向 fal.ai 提交 ${modelName} 语音合成请求...`);
 
-      const payload: Record<string, any> = {
+      const payload: Record<string, any> = language ? {
+        text: text.trim(), voice: speakerAudioUrl,
+        custom_audio_language: language === "ms" ? "malay" : "english",
+        cfg_scale: 0, exaggeration: 0.5, temperature: 0.7,
+      } : {
         prompt: text.trim(),
         audio_url: speakerAudioUrl,
         strength: Math.min(Math.max(emotionIntensity, 0), 0.85),
         should_use_prompt_for_emotion: false,
       };
 
-      if (emotionAudioUrl && emotionAudioUrl.startsWith("http")) {
+      if (!language && emotionAudioUrl && emotionAudioUrl.startsWith("http")) {
         payload.emotional_audio_url = emotionAudioUrl;
-      } else {
+      } else if (!language) {
         payload.emotional_strengths = { calm: 1.0 };
       }
 
       onLog(`[TTS] 👤 发音人音色克隆: ${speakerAudioUrl}`);
-      onLog(`[TTS] 🎭 语气与情绪参考音频: ${payload.emotional_audio_url || "基准"} (情绪强度: ${payload.strength})`);
+      if (!language) onLog(`[TTS] 🎭 语气与情绪参考音频: ${payload.emotional_audio_url || "基准"} (情绪强度: ${payload.strength})`);
 
-      const createResp = await fetch(FAL_ENDPOINT, {
+      const createResp = await fetch(language ? CHATTERBOX_ENDPOINT : FAL_ENDPOINT, {
         method: "POST",
         redirect: "error",
         headers: {
@@ -271,16 +288,16 @@ async function generatePrimaryIndexTTS(
 
       if (!createResp.ok) {
         const errText = await createResp.text();
-        throw new Error(`fal IndexTTS-2 任务创建失败 (${createResp.status}): ${errText}`);
+        throw new Error(`fal ${modelName} 任务创建失败 (${createResp.status}): ${errText}`);
       }
 
       const createJson = await createResp.json();
       const taskId = createJson.request_id;
       if (!taskId || !createJson.status_url || !createJson.response_url) {
-        throw new Error("fal IndexTTS-2 未返回完整任务编号，未自动重新提交");
+        throw new Error(`fal ${modelName} 未返回完整任务编号，未自动重新提交`);
       }
-      const statusUrl = falQueueUrl(createJson.status_url);
-      const resultUrl = falQueueUrl(createJson.response_url);
+      const statusUrl = falQueueUrl(createJson.status_url, Boolean(language));
+      const resultUrl = falQueueUrl(createJson.response_url, Boolean(language));
 
       // Poll for completion. Long scripts need more than the old 5-minute cap.
       const ttsTimeoutMs = Math.min(
@@ -300,19 +317,19 @@ async function generatePrimaryIndexTTS(
         const pollJson = await readFalJob(statusUrl, apiKey);
         if (!pollJson) { onLog("配音查询暂时不可用，正在重试原任务，不会重复提交。"); continue; }
         if (pollJson.error || ["FAILED", "ERROR", "CANCELLED"].includes(pollJson.status)) {
-          throw new Error(`fal IndexTTS-2 合成失败: ${JSON.stringify(pollJson)}`);
+          throw new Error(`fal ${modelName} 合成失败: ${JSON.stringify(pollJson)}`);
         }
         if (pollJson.status === "COMPLETED") {
           const result = await readFalJob(resultUrl, apiKey);
           if (!result) { onLog("配音结果暂时无法读取，正在取回原任务结果。"); continue; }
-          if (result.error) throw new Error(`fal IndexTTS-2 合成失败: ${JSON.stringify(result.error)}`);
+          if (result.error) throw new Error(`fal ${modelName} 合成失败: ${JSON.stringify(result.error)}`);
           audioUrl = typeof result.audio === "string" ? result.audio : result.audio?.url;
           break;
         }
       }
 
       if (!audioUrl) {
-        throw new Error(`IndexTTS-2 超时或未获取到音频下载地址`);
+        throw new Error(`${modelName} 超时或未获取到音频下载地址`);
       }
 
       onLog(`TTS 合成成功，正在下载音频文件...`);

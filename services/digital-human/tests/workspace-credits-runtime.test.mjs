@@ -6,6 +6,7 @@ import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 import ts from "typescript";
+import * as speechLanguage from "../src/lib/engine/speech-language.ts";
 import { NextRequest, NextResponse } from "next/server.js";
 import * as publicContract from "../src/lib/public-contract.ts";
 
@@ -370,7 +371,7 @@ test("workspace pipeline settles lip-sync but releases holds for clearly labelle
       });
       let task = { id: reservation.requestId, userId, status: "pending", logs: [],
         billing: { ...reservation, isExternalUser: true, status: "reserved" },
-        inputs: { videoPath: audioOnly ? "" : source, outputType: audioOnly ? "audio" : "video", scriptText: "fixture", speakerAudioUrl: speaker,
+        inputs: { videoPath: audioOnly ? "" : source, outputType: audioOnly ? "audio" : "video", scriptText: "测试文案", speakerAudioUrl: speaker,
           videoFit: "smart", lipsyncProvider: "veed" }, results: {} };
       const TaskStore = { get: () => task, isDeleted: () => false,
         addLog: (_id, message, level, publicMessage) => task.logs.push({ message, level, publicMessage }),
@@ -381,6 +382,7 @@ test("workspace pipeline settles lip-sync but releases holds for clearly labelle
         "../server/task-worker": workers,
         "../store/task-store": { TaskStore },
         "../config": { getAppConfig: () => ({ storageDir: path.join(temp, "jobs"), publicBaseUrl: "https://example.test", indexttsSpeakerAudioUrl: speaker }) },
+        "./speech-language": speechLanguage,
         "./indextts": { generateIndexTTS: async (_script, options) => {
           const file = path.join(options.outDir, "voice-track.wav"); fs.writeFileSync(file, "fixture");
           return { finalWavPath: file, rawDuration: 30, selectedDuration: 30 };
@@ -490,7 +492,7 @@ test("MP3 settlement outages preserve a recoverable file and recovery probes and
     const TaskStore = mutableTaskStore({ id: taskId, userId, status: "pending", createdAt: Date.now(), updatedAt: Date.now(),
       progress: 0, step: "idle", logs: [], executionOwner: workers.currentTaskWorker(),
       billing: { ...reservation, isExternalUser: true, status: "reserved" },
-      inputs: { outputType: "audio", scriptText: "fixture", speakerAudioUrl: speaker }, results: {} });
+      inputs: { outputType: "audio", scriptText: "测试文案", speakerAudioUrl: speaker }, results: {} });
     let ttsCalls = 0, settlements = 0, downloads = 0;
     const config = { storageDir: path.join(temp, "jobs"), publicBaseUrl: "https://example.test", indexttsSpeakerAudioUrl: speaker };
     const baseDeps = {
@@ -508,6 +510,7 @@ test("MP3 settlement outages preserve a recoverable file and recovery probes and
       "../mcp/heygen-adapter": { HeyGenMcpAdapter: {} },
       "../media-path-policy": { resolveAllowedLocalMediaPath: value => value },
       "../server/media-response": { getTrustedExternalMediaUrl: async () => { throw new Error("local fixture"); } },
+      "./speech-language": speechLanguage,
       "./indextts": { generateIndexTTS: async (_script, options) => {
         ttsCalls++;
         const wav = path.join(options.outDir, "voice-track.wav");

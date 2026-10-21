@@ -1,5 +1,6 @@
 const IMPLEMENTATION_TERMS = [
   /\bindex\s*tts(?:-?2)?\b/gi,
+  /\bchatterbox\b/gi,
   /\b302\.ai\b/gi,
   /\bfal\.ai\b/gi,
   /\bveed(?:\s+lipsync)?\b/gi,

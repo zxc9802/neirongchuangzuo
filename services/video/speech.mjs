@@ -4,6 +4,7 @@ import { readFile, writeFile, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { VideoError } from './provider.mjs';
 import { createTranscriptionService } from './transcription.mjs';
+import { normalizeLanguage } from './languages.mjs';
 
 const run = promisify(execFile);
 const worker = fileURLToPath(new URL('./speech_vad.py', import.meta.url));
@@ -174,12 +175,16 @@ export function createSpeechService(env = {}, fetchImpl = fetch) {
       await run('ffmpeg', ['-v', 'error', '-y', '-protocol_whitelist', 'file,pipe', '-i', path,
         '-map', '0:a:0', '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', audio], { timeout: 30_000 });
       const result = await transcription.transcribe(audio, path + '.asr.json');
-      const data = { text: result.words.filter(word => ['word', 'spacing'].includes(word.type)).map(word => word.text).join(''),
-        words: result.words.filter(word => word.type === 'word')
-          .map(word => ({ word: word.text, start: word.start, end: word.end })) };
+      const words = [];
+      for (const word of result.words) {
+        if (word.type === 'word') words.push({ word: word.text, start: word.start, end: word.end });
+        else if (word.type === 'spacing' && words.length) words.at(-1).word += word.text;
+      }
+      const data = { text: words.map(word => word.word).join('').trim(), words };
       const diagnostic = { duration, vad: intervals, asr: data, provider: 'fal', model: 'scribe-v2' };
       try {
-        const timeline = { ...speechTimeline(data, intervals, duration), engine: 'silero-vad+scribe-v2' };
+        const timeline = { ...speechTimeline(data, intervals, duration), engine: 'silero-vad+scribe-v2',
+          language: normalizeLanguage(result.language_code), languageConfidence: result.language_probability };
         if (diagnosticsPath) await writeFile(diagnosticsPath, JSON.stringify({ ...diagnostic, timeline }), { mode: 0o600 });
         return timeline;
       } catch (cause) {

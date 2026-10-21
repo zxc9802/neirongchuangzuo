@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import ts from 'typescript';
+import * as speechLanguage from '../src/lib/engine/speech-language.ts';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'dh-actual-cost-'));
 const saved=Object.fromEntries(['AUTH_DATABASE_URL','WORKSPACE_DATA_DIR','NODE_ENV','CREDITS_BILLING_MODE'].map(key=>[key,process.env[key]]));
@@ -98,7 +99,7 @@ test('MP3 and complete digital-human pipelines settle their recorded price using
     const source=path.join(root,id+'.mp4'),speaker=path.join(root,id+'.wav');fs.writeFileSync(source,'fixture');fs.writeFileSync(speaker,'fixture');
     let task={id:reservation.requestId,userId:id,status:'pending',createdAt:Date.now(),updatedAt:Date.now(),progress:0,logs:[],
       billing:{...reservation,isExternalUser:true,status:'reserved'},
-      inputs:{outputType,videoPath:source,scriptText:'fixture',speakerAudioUrl:speaker,videoFit:'smart',lipsyncProvider:'veed'},results:{}};
+      inputs:{outputType,videoPath:source,scriptText:'测试文案',speakerAudioUrl:speaker,videoFit:'smart',lipsyncProvider:'veed'},results:{}};
     const TaskStore={get:()=>task,isDeleted:()=>false,addLog:(_id,message)=>task.logs.push({message}),
       update:(_id,value)=>task={...task,...value,results:{...task.results,...value.results}}};
     const probe={durationSeconds:30,width:160,height:120,fps:30,hasAudio:true};let ttsCalls=0,mouths=0;
@@ -106,6 +107,7 @@ test('MP3 and complete digital-human pipelines settle their recorded price using
       '../server/safe-log':{logServerError:()=>undefined},
       './task-execution':{withTaskExecution:async(_id,action)=>action()},'../server/task-worker':workers,
       '../store/task-store':{TaskStore},'../config':{getAppConfig:()=>({storageDir:path.join(root,'jobs'),publicBaseUrl:'https://example.test',indexttsSpeakerAudioUrl:speaker})},
+      './speech-language':speechLanguage,
       './indextts':{generateIndexTTS:async(_script,options)=>{ttsCalls++;const file=path.join(options.outDir,'voice-track.wav');fs.writeFileSync(file,'fixture');return{finalWavPath:file,rawDuration:30,selectedDuration:30};}},
       './face-lipsync':{prepareFaceLipsync:async options=>({videoPath:source,audioPath:options.audioPath,durationSeconds:30.9}),finalizeFaceLipsync:async options=>{fs.writeFileSync(options.outputPath,'fixture');return probe;}},
       './scene-tail':{prepareSceneContinuation:async({inputPath})=>inputPath},'./video-preview':{createVideoPreview:async()=>undefined},

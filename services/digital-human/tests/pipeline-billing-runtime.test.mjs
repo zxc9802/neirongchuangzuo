@@ -12,6 +12,7 @@ import * as sceneTail from "../src/lib/engine/scene-tail.ts";
 import * as retention from "../src/lib/task-output-retention.ts";
 import * as safeLog from "../src/lib/server/safe-log.ts";
 import * as taskExecution from "../src/lib/engine/task-execution.ts";
+import * as speechLanguage from "../src/lib/engine/speech-language.ts";
 import { isTaskOutputDeliverable } from "../src/lib/server/public-data.ts";
 
 const source = fs.readFileSync(new URL("../src/lib/engine/pipeline.ts", import.meta.url), "utf8");
@@ -40,13 +41,20 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       const generated = spawnSync("ffmpeg", ["-v", "error", ...args], {encoding: "utf8"});
       assert.equal(generated.status, 0, generated.stderr);
     }
-    for (const scenario of ["veed-v2-success", "latentsync-success", "extended-source", "alignment-uncertain", "face-input-failure", "face-runtime-failure", "provider-failure", "provider-timeout", "composite-failure", "media-prep-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage"]) {
+    for (const scenario of ["veed-v2-success", "latentsync-success", "extended-source", "alignment-uncertain", "face-input-failure", "face-runtime-failure", "provider-failure", "provider-timeout", "composite-failure", "media-prep-failure", "under-reserved", "silent-smart", "external-success", "internal-success", "settle-outage", "preserve-failure", "setup-failure", "audio-only", "audio-under-reserved", "audio-settle-outage", "english-video", "malay-video", "audio-english", "audio-malay", "unknown-language"]) {
       const provider = scenario.startsWith("veed-v2-") ? "veed-v2" : scenario.startsWith("latentsync-") ? "latentsync" : "veed";
       const audioOnly = scenario.startsWith("audio-");
       const fullFrame = scenario.startsWith("face-") || provider !== "veed";
       const fallback = ["provider-failure", "provider-timeout", "composite-failure", "media-prep-failure"].includes(scenario);
       const events = [];
+      const language = scenario.includes("english") ? "en" : scenario.includes("malay") ? "ms" : "zh";
+      const scriptText = language === "en" ? "Welcome everyone." : language === "ms" ? "Selamat datang semua." : scenario === "unknown-language" ? "12345" : "你好";
       globalThis.fetch = async (url, init) => {
+        if (url === 'https://fal.run/openrouter/router') {
+          assert.deepEqual(JSON.parse(JSON.parse(init.body).prompt), {script: scriptText});
+          events.push({stage: 'language'});
+          return Response.json({output: JSON.stringify({language})});
+        }
         assert.ok(String(url).endsWith("/api/sso/billing"), "no real network calls");
         const request = JSON.parse(init.body);
         events.push({stage: "ledger", action: request.action, points: request.points});
@@ -60,7 +68,7 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
       let task = {id: scenario, userId: user.id, status: "pending", logs: [],
         billing: {isExternalUser: reservation.chargeRequired, status: reservation.chargeRequired ? "reserved" : "not_applicable",
           requestId: reservation.requestId, estimatedDuration: 6, estimatedPoints: reservation.requiredPoints, reservedPoints: reservation.reservedPoints},
-        inputs: {videoPath: audioOnly ? "" : scenario === "extended-source" ? short : scenario === "silent-smart" ? silent : sound, videoUrl: "", outputType: audioOnly ? "audio" : "video", scriptText: "你好",
+        inputs: {videoPath: audioOnly ? "" : scenario === "extended-source" ? short : scenario === "silent-smart" ? silent : sound, videoUrl: "", outputType: audioOnly ? "audio" : "video", scriptText,
           speakerAudioUrl: speaker, videoFit: scenario === "preserve-failure" ? "preserve" : "smart", lipsyncProvider: provider}, results: {}};
       const TaskStore = {get: () => task, isDeleted: () => false,
         addLog: (_id, message, level, publicMessage) => task.logs.push({message, level, publicMessage}),
@@ -70,7 +78,8 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
         "./scene-tail": sceneTail,
         "../server/task-worker": {startTaskHeartbeat: () => () => {}, withTaskBillingGuard: async (_id, action) => action()},
         "../store/task-store": {TaskStore},
-        "../config": {getAppConfig: () => ({storageDir: path.join(tmp, "jobs"), publicBaseUrl: "https://media.example.test", indexttsSpeakerAudioUrl: speaker})},
+        "../config": {getAppConfig: () => ({storageDir: path.join(tmp, "jobs"), publicBaseUrl: "https://media.example.test", indexttsSpeakerAudioUrl: speaker, falApiKey: 'fal-test'})},
+        "./speech-language": speechLanguage,
         "./indextts": {generateIndexTTS: async (_text, options) => {
           events.push({stage: "tts"});
           const wav = path.join(options.outDir, "voice-track.wav"); fs.writeFileSync(wav, "fixture");
@@ -133,6 +142,18 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
         "../main-app-billing": billing,
         "../task-output-retention": retention,
       };
+      const synthesize = deps["./indextts"].generateIndexTTS;
+      deps["./indextts"].generateIndexTTS = async (text, options) => {
+        assert.equal(language, "zh", "English/Malay must not reach IndexTTS");
+        return synthesize(text, options);
+      };
+      deps["./indextts"].generateChatterboxTTS = async (text, detectedLanguage, options) => {
+        assert.equal(detectedLanguage, language); assert.equal(text, scriptText);
+        assert.equal(options.apiKey, 'fal-test');
+        assert.match(options.speakerAudioUrl, /speaker-reference\.wav$/);
+        events.push({stage: 'chatterbox'});
+        return synthesize(text, options);
+      };
       if (scenario === "setup-failure") {
         deps.fs = {...fs, mkdirSync: (target, options) => {
           if (target === path.join(tmp, "jobs", scenario)) throw Object.assign(new Error("simulated disk full"), {code: "ENOSPC"});
@@ -172,19 +193,25 @@ test("pipeline checks real duration before paid lipsync, preserves refunds and s
         assert.equal(probe.width, 160);
         assert.ok(Math.abs(probe.durationSeconds - duration) < 0.1, "fallback must keep the complete narration");
         assert.ok(task.logs.some(log => log.message.includes("未调整口型")));
-      } else if (scenario.endsWith("under-reserved") || scenario === "setup-failure") {
+      } else if (scenario.endsWith("under-reserved") || scenario === "setup-failure" || scenario === "unknown-language") {
         assert.equal(events.some(e => e.stage === "lipsync"), false, scenario);
         assert.equal(task.status, "failed", scenario);
         assert.equal(task.billing.status, "released", scenario);
         assert.equal(isTaskOutputDeliverable(task), false, scenario);
         if (scenario.endsWith("under-reserved")) assert.equal(task.errorCode, "BILLING_RESERVATION_TOO_SMALL");
         if (scenario === "setup-failure") assert.equal(events.some(e => e.stage === "tts"), false);
+        if (scenario === "unknown-language") {
+          assert.equal(task.errorCode, "SPEECH_LANGUAGE_UNCERTAIN");
+          assert.equal(events.some(e => e.stage === "tts"), false);
+        }
       } else if (scenario.endsWith("settle-outage")) {
         assert.equal(task.billing.status, "settle_pending");
         assert.equal(events.some(e => e.action === "release"), false);
         assert.equal(isTaskOutputDeliverable(task), false);
       } else {
         assert.equal(task.status, "completed", `${scenario}: ${task.error}`);
+        assert.equal(task.results.speechLanguage, language);
+        assert.equal(events.filter(e => e.stage === 'chatterbox').length, language === 'zh' ? 0 : 1);
         assert.equal(isTaskOutputDeliverable(task), true);
         assert.equal(events.filter(e => e.action === "settle").length, scenario === "internal-success" ? 0 : 1);
         if (audioOnly) {

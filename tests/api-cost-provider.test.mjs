@@ -74,3 +74,14 @@ test('fal final units use the exact submitted endpoint tariff, including queue p
   await meter.run(scope,()=>meter.fetch('https://queue.fal.run/openai/gpt-image-2.5/requests/fal-request'));
   const done=await x.settleCost(scope);assert.equal(done.settledUnits,268960);assert.equal(done.chargedPoints,34);
 });
+
+test('fal OpenRouter translation bills fractional units once, not one cent per request',async t=>{
+  const x=await ledger(t),scope={userId:'alice',taskId:'translation'};await x.reserveCost(scope);
+  const meter=createApiCostMeter({credits:x,prices:{fal:async model=>{
+    assert.equal(model,'openrouter/router');return {unit_price:.01,fx:6.718};
+  }},fetchImpl:async url=>url.includes('/requests/')?new Response('{"output":"{}"}',{headers:{'x-fal-billable-units':'0.00232000'}}):reply({request_id:'translation-request'})});
+  await meter.run(scope,()=>meter.fetch('https://queue.fal.run/openrouter/router',{method:'POST',headers:{Authorization:'Key test'},body:'{"model":"openai/gpt-6-luna","prompt":"Translate"}'}));
+  for(let i=0;i<2;i++)await meter.run(scope,()=>meter.fetch('https://queue.fal.run/openrouter/router/requests/translation-request'));
+  const done=await x.settleCost(scope);assert.equal(done.settledUnits,Math.round(.0000232*6.718*1e6));
+  assert.equal(Object.keys(done.costItems).length,1);
+});

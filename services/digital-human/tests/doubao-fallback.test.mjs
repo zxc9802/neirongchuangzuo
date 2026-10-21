@@ -7,6 +7,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import * as media from '../src/lib/engine/ffmpeg.ts';
 import * as stitch from '../src/lib/engine/speech-stitch.ts';
+import * as speechLanguage from '../src/lib/engine/speech-language.ts';
 
 function load(relative, dependencies) {
   const source = fs.readFileSync(new URL(relative, import.meta.url), 'utf8');
@@ -109,7 +110,7 @@ for (const complete of [true, false]) {
           publicBaseUrl: 'https://media.example.test', indexttsFalApiKey: h.options.apiKey,
           doubaoTtsApiKey: h.options.fallback.apiKey,
           doubaoTtsVoiceMap: {'selected-voice': h.options.fallback.speakerId}})},
-        './indextts': {generateIndexTTS: h.generate}, './ffmpeg': {...media, prepareSourceVideo: noVideo},
+        './indextts': {generateIndexTTS: h.generate}, './speech-language': speechLanguage, './ffmpeg': {...media, prepareSourceVideo: noVideo},
         './video-preview': {createVideoPreview: noVideo},
         './face-lipsync': {prepareFaceLipsync: noVideo, finalizeFaceLipsync: noVideo},
         './narration-fallback': {deliverNarrationFallback: noVideo},

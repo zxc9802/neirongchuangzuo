@@ -88,6 +88,7 @@ export interface TaskItem {
     lipsyncProvider?: LipsyncProvider;
   };
   results: {
+    speechLanguage?: "zh" | "en" | "ms";
     deliveryMode?: "narration_fallback";
     originalVideoUrl?: string;
     finalVideoUrl?: string;

@@ -5,24 +5,26 @@ import { execMediaCommand, probeMedia } from "./ffmpeg";
 // Keep individual requests short enough that the provider rarely needs another internal split.
 const MAX_SEGMENT_CHARACTERS = 50;
 
-export function splitSpeechText(text: string): string[] {
+export function splitSpeechText(text: string, language: "zh" | "en" | "ms" = "zh"): string[] {
   const result: string[] = [];
-  const sentences = new Intl.Segmenter("zh", { granularity: "sentence" });
-  const words = new Intl.Segmenter("zh", { granularity: "word" });
+  const maxCharacters = language === "zh" ? MAX_SEGMENT_CHARACTERS : 300;
+  const sentences = new Intl.Segmenter(language, { granularity: "sentence" });
+  const words = new Intl.Segmenter(language, { granularity: "word" });
   const length = (value: string) => Array.from(value).length;
   for (const { segment } of sentences.segment(text.trim())) {
     const sentence = segment.trim();
     if (!sentence) continue;
-    if (length(sentence) <= MAX_SEGMENT_CHARACTERS) {
+    if (length(sentence) <= maxCharacters) {
       result.push(sentence);
       continue;
     }
     let current = "";
     for (const clause of sentence.split(/(?<=[，,、：:])/u)) {
-      const units = length(clause) <= MAX_SEGMENT_CHARACTERS
+      const units = length(clause) <= maxCharacters
         ? [clause] : Array.from(words.segment(clause), item => item.segment);
       for (const unit of units) {
-        if (current && length(current + unit) > MAX_SEGMENT_CHARACTERS) {
+        if (language !== "zh" && length(unit) > maxCharacters) throw new Error("文案中有超过 300 字符的连续单词，请检查后重试");
+        if (current && length(current + unit) > maxCharacters) {
           if (current.trim()) result.push(current.trim());
           current = "";
         }
