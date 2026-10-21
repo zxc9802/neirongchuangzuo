@@ -4,12 +4,25 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { DEFAULT_VIDEO_SETTINGS, VIDEO_MODELS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES } from '../design/video-catalog.js';
 
 async function fixture(t, api) {
-  const names = ['document', 'workspaceUser', 'fetch', 'setInterval', 'clearInterval', 'EventSource', 'SpeechRecognition', 'webkitSpeechRecognition', 'FormData'];
+  const names = ['document', 'workspaceUser', 'fetch', 'setInterval', 'clearInterval', 'EventSource', 'SpeechRecognition', 'webkitSpeechRecognition', 'FormData', 'localStorage', 'innerWidth', 'innerHeight'];
   const old = Object.fromEntries(names.map(k => [k, globalThis[k]])), nodes = new Map();
-  const node = k => { if (!nodes.has(k)) nodes.set(k, { clicks: 0, click() { this.clicks++; }, close() {}, addEventListener(type, callback) { this[type] = callback; } }); return nodes.get(k); };
+  const node = k => {
+    if (!nodes.has(k)) nodes.set(k, { clicks: 0, dataset: {}, style: {}, childNodes: [], classList: {add(){},remove(){},toggle(){}},
+      click() { this.clicks++; }, close() { this.open=false; }, remove(){}, focus(){}, contains(){return false;},
+      setAttribute(){}, getBoundingClientRect(){return {left:10,top:40,bottom:60,height:200,width:300};},
+      querySelector(){return null;}, querySelectorAll(){return [];},
+      addEventListener(type, callback) { if (!['close','click'].includes(type)) this[type] = callback; }
+    });
+    return nodes.get(k);
+  };
   let poll, html, modal;
   globalThis.workspaceUser = { id: crypto.randomUUID() };
-  globalThis.document = { body: { dataset: { page: 'video' } }, querySelector: node };
+  const store=new Map(); globalThis.localStorage={getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v)};
+  globalThis.innerWidth=1920;globalThis.innerHeight=900;
+  globalThis.document = { body: { dataset: { page: 'video' },append(n){nodes.set('.vc-popover',n);} },
+    addEventListener(){},querySelectorAll(){return [];},createElement(){return node('created-'+crypto.randomUUID());},
+    querySelector:k=>['#vc-result-video','.vc-conversation','.vc-task-list','#modal[open]'].includes(k)?null:node(k) };
+
   globalThis.EventSource = undefined;
   globalThis.setInterval = cb => { poll = cb; return 1; }; globalThis.clearInterval = () => {};
   globalThis.fetch = async (path, options) => path === '/api/workspace/credits' ? Response.json({ unlimited: true }) : api(path, options);
@@ -19,16 +32,17 @@ async function fixture(t, api) {
   ctx.refresh(); module.bindVideoCreator(ctx);
   t.after(() => { module.disposeVideoCreator(); for (const key of names) { if (old[key] === undefined) delete globalThis[key]; else globalThis[key] = old[key]; } });
   await delay(15);
-  return { node, ctx, html: () => html, modal: () => modal, action: (name, data = {}, actionContext = ctx) => module.handleVideoCreatorAction(name, { dataset: data }, actionContext), async poll() { await poll(); await delay(5); } };
+  return { node, ctx, html: () => html, modal: () => modal, popover:()=>node('.vc-popover').innerHTML, action: (name, data = {}, actionContext = ctx) => module.handleVideoCreatorAction(name, { dataset: data, getBoundingClientRect(){return {left:10,top:600,bottom:630};},setAttribute(){} }, actionContext), async poll() { await poll(); await delay(5); } };
 }
 
 function composerApi() {
-  const data = { conversation: null, scriptCalls: 0, uploads: [] };
+  const data = { conversation: null, scriptCalls: 0, uploads: [], tasks: [] };
   data.api = async (path, options) => {
+    if (path === '/uploaded') return new Response('photo', {headers:{'Content-Type':'image/jpeg'}});
     const body = options?.body && options.method !== 'PUT' ? JSON.parse(options.body) : null;
     if (path.endsWith('/config')) return Response.json({ directorEnabled: true, generationEnabled: true });
     if (path.endsWith('/quote')) return Response.json({ points: 1000, affordable: true });
-    if (path.endsWith('/tasks')) return Response.json({ tasks: [] });
+    if (path.endsWith('/tasks')) return Response.json({ tasks: data.tasks });
     if (path.endsWith('/conversations') && body) { data.conversation = { id: body.requestId, version: 1, skill: body.skill, settings: body.settings, assets: [], operations: [], tasks: [] }; return Response.json({ conversation: data.conversation }); }
     if (path.endsWith('/conversations')) return Response.json({ conversations: [] });
     if (options?.method === 'PUT') { data.uploads.push(options); data.conversation.assets.push({ id: crypto.randomUUID(), name: decodeURIComponent(options.headers['X-File-Name']), type: options.headers['Content-Type'].startsWith('audio') ? 'audio' : 'image', purpose: options.headers['X-Asset-Purpose'], url: '/uploaded' }); return Response.json({ conversation: data.conversation }); }
@@ -39,15 +53,14 @@ function composerApi() {
 }
 
 test('resolution chooser only exposes 720p for every model and legacy scripts require a matching new plan', async t => {
-  const data = composerApi(), f = await fixture(t, data.api), form = f.node('#vc-settings-form');
-  form.elements = Object.fromEntries(Object.entries(DEFAULT_VIDEO_SETTINGS).map(([key,value]) => [key,{value:String(value)}]));
+  const data = composerApi(), f = await fixture(t, data.api);
   f.action('vc-settings');
-  assert.match(f.modal().content, /<select name="resolution"><option selected>720p<\/option><\/select>/);
-  assert.doesNotMatch(f.modal().content, /480p|1080p/);
+  assert.match(f.popover(), /720p/);
+  assert.doesNotMatch(f.popover(), /480p|1080p|<select/);
+  f.action('vc-close-popover');
   for (const model of VIDEO_MODELS) {
-    form.elements.model.value = model.id; form.elements.model.onchange();
-    assert.match(form.elements.resolution.innerHTML, /720p/);
-    assert.doesNotMatch(form.elements.resolution.innerHTML, /480p|1080p/);
+    f.action('vc-setting-choice',{field:'model',value:model.id});
+    f.action('vc-settings'); assert.match(f.popover(),/720p/);assert.doesNotMatch(f.popover(),/480p|1080p/); f.action('vc-close-popover');
   }
   f.node('#vc-images').onchange({ target:{files:[new File(['photo'],'餐位.jpg',{type:'image/jpeg'})]} }); await delay(25);
   data.conversation.operations=[{id:'legacy',status:'completed',skill:'store-discovery',settings:{...DEFAULT_VIDEO_SETTINGS,resolution:'480p'},message:'介绍门店',
@@ -72,6 +85,31 @@ test('client applies the exclusive 50MB image boundary to both image groups with
   assert.equal(data.scriptCalls,0);
 });
 
+test('changing referenced materials forks the conversation, keeps old scripts intact and deduplicates library copies', async t => {
+  const data=composerApi(),f=await fixture(t,data.api);
+  f.node('#vc-images').onchange({target:{files:['a.jpg','b.jpg'].map(name=>new File(['photo'],name,{type:'image/jpeg'}))}});await delay(30);
+  const original=data.conversation;
+  original.operations=[{id:'original-script',skill:'store-discovery',status:'completed',settings:DEFAULT_VIDEO_SETTINGS,message:'原方案',result:{script:{title:'原方案',shots:[],videoPrompt:'@图片1 @图片2'}}}];
+  await f.poll();
+  f.action('vc-reference-group',{purpose:'reference'});
+  f.action('vc-library-toggle',{id:original.assets[0].id});
+  f.action('vc-confirm-library');await delay(50);
+  assert.notEqual(data.conversation.id,original.id);assert.equal(data.conversation.assets.length,1);assert.equal(data.conversation.assets[0].name,'b.jpg');
+  assert.equal(original.assets.length,2);assert.equal(original.operations[0].id,'original-script');
+  f.action('vc-reference-group',{purpose:'reference'});
+  assert.equal((f.node('#vc-library-grid').innerHTML.match(/data-action="vc-library-toggle"/g)||[]).length,2);
+  assert.equal(data.scriptCalls,0);
+});
+
+test('favorites and recoverable task removal are browser presentation changes and never delete server tasks', async t => {
+  const data=composerApi(),f=await fixture(t,data.api),task={id:'finished',conversationId:'saved',status:'completed',title:'验收视频',duration:30,createdAt:Date.now(),settings:DEFAULT_VIDEO_SETTINGS,resultUrl:'/result.mp4'};
+  data.tasks=[task];await f.poll();
+  f.action('vc-favorite',{id:task.id});f.action('vc-preview',{value:'favorites'});assert.match(f.html(),/取消收藏 验收视频/);
+  f.action('vc-hide-task',{id:task.id});assert.match(f.modal().content,/当前浏览器列表/);
+  f.action('vc-confirm-hide',{kind:'task',id:task.id});assert.doesNotMatch(f.html(),/data-action="vc-select-task"[^>]*data-id="finished"/);assert.equal(data.tasks.length,1);
+  f.action('vc-restore-record',{kind:'task',id:task.id});assert.match(f.html(),/data-action="vc-select-task"[^>]*data-id="finished"/);assert.equal(data.tasks.length,1);
+});
+
 test('creative plan exposes material decisions, cast continuity and actionable shots without executing model markup', async t => {
   const data = composerApi(), f = await fixture(t, data.api);
   f.node('#vc-images').onchange({ target:{ files:[new File(['photo'],'餐位.jpg',{type:'image/jpeg'})] } }); await delay(25);
@@ -92,30 +130,27 @@ test('changing applied script settings returns to the director while unchanged s
   const op = {id:'applied',status:'completed',skill:'store-discovery',settings:{...DEFAULT_VIDEO_SETTINGS},message:'介绍门店',
     result:{script:{title:'原脚本',shots:[],videoPrompt:'原25秒完整提示词',referenceImageIds:data.conversation.assets.map(a=>a.id)}}};
   data.conversation.operations=[op]; await f.poll(); f.action('vc-apply',{id:op.id}); await delay(10);
-  const form = f.node('#vc-settings-form');
-  form.elements=Object.fromEntries(Object.entries(DEFAULT_VIDEO_SETTINGS).map(([key,value])=>[key,{value:String(value)}]));
-  globalThis.FormData = class { constructor(form) { this.form=form; } *[Symbol.iterator]() { for(const [key,item] of Object.entries(this.form.elements)) yield [key,item.value]; } };
-  f.action('vc-settings'); form.onsubmit({preventDefault(){}});
+  f.action('vc-setting-choice',{field:'language',value:'zh'});
   assert.match(f.html(), /视频提示词/); assert.match(f.html(), /原25秒完整提示词/);
-  form.elements.duration.value='15'; form.elements.generateAudio.value='false';
-  f.action('vc-settings'); form.onsubmit({preventDefault(){}});
-  assert.match(f.html(), /编导要求/); assert.match(f.html(), /按当前15秒、中文、静音设置调整上一版脚本/);
+  f.action('vc-setting-choice',{field:'generateAudio',value:'false'});
+  assert.match(f.html(), /编导要求/); assert.match(f.html(), /按当前25秒、中文、静音设置调整上一版脚本/);
   f.action('vc-stage-generation'); assert.doesNotMatch(f.html(), /原25秒完整提示词/);
-  f.node('#vc-prompt').input({target:{value:'自主填写的提示词'}});
-  f.action('vc-settings'); form.elements.ratio.value='16:9'; form.onsubmit({preventDefault(){}});
+  f.node('#vc-prompt').childNodes=[{nodeType:3,nodeValue:'自主填写的提示词'}];f.node('#vc-prompt').input();
+  f.action('vc-setting-choice',{field:'ratio',value:'16:9'});
   assert.match(f.html(), /自主填写的提示词/); assert.match(f.html(), /视频提示词/);
+
 });
 
 test('composer groups real image, character and voice uploads and keeps drafts when leaving the director', async t => {
   const data = composerApi(), f = await fixture(t, data.api);
   assert.match(f.html(), /退出编导/); assert.match(f.html(), /添加角色/); assert.match(f.html(), /已消耗 0 积分/); assert.match(f.html(), /aria-label="语音输入"/);
-  f.action('vc-reference-group', { purpose: 'character' }); assert.equal(f.node('#vc-characters').clicks, 1);
+  f.action('vc-reference-group', { purpose: 'character' }); assert.equal(f.modal().title,'选择素材'); f.action('vc-library-upload'); assert.equal(f.node('#vc-characters').clicks,1);
   for (const [input, purpose, name, type] of [['#vc-images','reference','门店.jpg','image/jpeg'], ['#vc-characters','character','角色.jpg','image/jpeg'], ['#vc-audio','voice','参考.mp3','audio/mpeg']]) {
     f.node(input).onchange({ target: { files: [new File(['test'], name, { type })] } }); await delay(20);
     assert.equal(data.uploads.at(-1).headers['X-Asset-Purpose'], purpose);
   }
   assert.equal(data.conversation.assets.length, 3);
-  f.action('vc-reference-group', { purpose: 'character' }); assert.equal(f.modal().title, '角色参考'); assert.match(f.modal().content, /角色.jpg/); assert.doesNotMatch(f.modal().content, /门店.jpg/);
+  f.action('vc-reference-group', { purpose: 'character' }); assert.equal(f.modal().title, '选择素材'); assert.match(f.node('#vc-library-grid').innerHTML, /角色.jpg/); assert.doesNotMatch(f.node('#vc-library-grid').innerHTML, /门店.jpg/); f.action('vc-cancel-library');
   f.node('#vc-message').input({ target: { value: '保留这段编导要求' } });
   f.action('vc-stage-generation'); assert.match(f.html(), /视频提示词/);
   f.action('vc-stage-director'); assert.match(f.html(), /保留这段编导要求/); assert.equal(data.conversation.assets.length, 3);
@@ -196,7 +231,7 @@ test('each module uses its own initial request, and switching direction prevents
   });
   for (const [skill, words, placeholder] of [['store-visit', '到店实录', '一次到店体验'], ['signature', '主推产品', '主推哪款'], ['group-buy', '套餐资料', '套餐内容、价格']]) {
     f.action('vc-new'); f.action('vc-skill', { value: skill }); await delay(15);
-    assert.match(f.html(), new RegExp(placeholder));
+    assert.match(f.html(), /分析素材，并生成脚本/);
     f.node('#vc-images').onchange({ target: { files: [new File(['photo'], '实拍.jpg', { type: 'image/jpeg' })] } }); await delay(20);
     f.action('vc-send'); await delay(20);
     assert.match(sent.at(-1).message, new RegExp(words));
@@ -244,7 +279,7 @@ test('applying and reopening a video keeps the exact planned images in the edito
   });
   f.node('#vc-images').onchange({ target: { files: ['person.jpg','food.jpg','space.jpg'].map(n => new File(['photo'],n,{type:'image/jpeg'})) } }); await delay(25);
   f.action('vc-send'); await delay(25); f.action('vc-apply',{id:op.id}); await delay(10);
-  assert.doesNotMatch(f.html(), /alt="person.jpg"/); assert.match(f.html(), /alt="food.jpg"/); assert.match(f.html(), /alt="space.jpg"/);
+  assert.doesNotMatch(f.html(), /alt="person.jpg"/); assert.match(f.html(), /alt="food.jpg"/); assert.match(f.html(), /2<\/span>/);
   f.action('vc-generate'); await delay(25); assert.deepEqual(submitted.referenceImageIds,op.result.script.referenceImageIds);
   f.action('vc-new'); f.action('vc-select-task',{id:task.id}); await delay(25);
   assert.doesNotMatch(f.html(), /alt="person.jpg"/);
