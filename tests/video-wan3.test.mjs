@@ -17,6 +17,7 @@ test('official Wan reuses the replica prompt and preserves original timing with 
     assert.equal(body.model, WAN3_MODEL);
     assert.ok(body.input.prompt.startsWith(generationBody(input).prompt));
     assert.match(body.input.prompt, /黑边必须保持纯黑，不能扩图、填充背景/);
+    assert.match(body.input.prompt, /原视频没有黑边时，不得新增黑边或缩小有效画面/);
     assert.deepEqual(body.input.media, [{ type: 'reference_image', url: task.materials.photo.id }, { type: 'reference_video', url: task.materials.video.id }]);
     assert.deepEqual(body.parameters, { resolution: '720P', ratio: 'adaptive', duration: -1, audio: !input.voice, prompt_extend: false, watermark: false });
   }
