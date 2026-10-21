@@ -12,7 +12,7 @@ export const MODELS = [
   { id: WAN3_MODEL, name: 'Wan 3.0', description: '参考视频最多15秒 · 720P · 输入与输出均计费', cnyPerSecond: 0.6, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: PIXVERSE_MODEL, name: 'PixVerse Swap', description: '最长30秒 · 720p · 按实际费用，配音口型另计', maxDuration: 30, durations: Array.from({ length: 29 }, (_, i) => i + 2), resolution: '720p' },
 ];
-export const PROMPT = '编辑视频1。将视频1中的唯一人物完整替换为图片1中的人物。图片1是人物外貌的唯一参考，头部、脸型、五官及其比例、眉眼、鼻子、嘴唇、耳朵、下颌轮廓、发际线和发型都必须采用图片1；不得保留视频1原人物的脸部特征，不得混合两个人的五官，不能只换衣服而保留原脸。人物的服装采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情变化、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样；保留字幕的原文、位置、排版和出现时间，不重画字幕。检查画面中是否有叠加水印；如果识别到平台角标、账号水印、半透明文字或图案水印，必须在生成结果的全片中去除，并自然修复被遮挡的画面，不得保留、复制或新增水印，不用模糊、马赛克或裁切画面的方式遮盖水印。上述保留要求不适用于叠加水印；正常字幕、商品包装文字和场景中的真实招牌不属于水印，须保持原样。';
+export const PROMPT = '编辑视频1。同时完成两项编辑：人物替换和原视频叠加水印去除。将视频1中的唯一人物完整替换为图片1中的人物。删除视频1画面中已有的平台和作者水印，包括抖音/TikTok、快手、小红书等平台的图标及名称、抖音号等账号ID、@用户名、作者昵称及其相邻角标；这些叠加标记属于水印，不属于需要保留的台词字幕或场景标识。无论水印位于左上角、右上角、底部还是随时间移动，都要从第一帧到最后一帧去除，包括半透明文字和图案水印，并自然重建被遮挡的背景，不得保留、复制或新增水印，不用模糊、马赛克、色块或裁切画面的方式遮盖水印。去水印要求优先于下文的背景、字幕和口型保留要求。图片1是人物外貌的唯一参考，头部、脸型、五官及其比例、眉眼、鼻子、嘴唇、耳朵、下颌轮廓、发际线和发型都必须采用图片1；不得保留视频1原人物的脸部特征，不得混合两个人的五官，不能只换衣服而保留原脸。人物的服装采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情变化、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样，但上述保留要求仅适用于非水印内容；保留正常台词字幕的原文、位置、排版和出现时间，不重画字幕。正常台词字幕、商品包装文字和场景中的真实招牌不属于水印，须保持原样。';
 export class VideoError extends Error {
   constructor(message, status = 400, code = 'VIDEO_INVALID_INPUT') { super(message); this.status = status; this.code = code; }
 }
@@ -49,8 +49,8 @@ export function generationBody(task) {
   const voiceConversion = task.voice && task.voiceEngine === 'chatterbox';
   const separateNarration = task.voice && ['indextts2', 'chatterbox'].includes(task.voiceEngine);
   const lengthPrompt = (!separateNarration || voiceConversion) && task.video?.duration ? `\n视频1实际时长为${task.video.duration.toFixed(3)}秒。动作严格对应原视频时刻，输出超过原视频时长的部分保持末帧静止、闭嘴和无声。` : '';
-  const captionPrompt = !separateNarration && task.sourceAudioMode !== 'silent' && task.captions?.cues?.length ? `\n台词来自原视频字幕，优先于听辨结果，以下文字是唯一语音文案，不改写、不漏说，数字和价格按原字说：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)}秒：${segment.text}`).join('；')}。${task.voice ? '' : '保留视频1的人声音色。'}保留视频1已有的清晰字幕，不重画字幕，不修改字幕区域的背景；仅在成片未保留字幕时，系统会按原文补字幕。` : '';
-  let voicePrompt = voiceConversion ? '\n逐帧保留视频1的说话节奏、开口闭口时间、嘴唇动作和面部表情，只将人物外观替换为图片1。不要重新设计口型，不要改变视频速度，不要新增台词或旁白。' : '';
+  const captionPrompt = !separateNarration && task.sourceAudioMode !== 'silent' && task.captions?.cues?.length ? `\n台词来自原视频字幕，优先于听辨结果，以下文字是唯一语音文案，不改写、不漏说，数字和价格按原字说：${task.speech.segments.map(segment => `${segment.start.toFixed(3)}–${segment.end.toFixed(3)}秒：${segment.text}`).join('；')}。${task.voice ? '' : '保留视频1的人声音色。'}保留视频1已有的清晰台词字幕，不重画字幕；台词字幕区域的背景仅在去除叠加水印时允许修复，平台图标、账号和昵称水印不得当成字幕保留；仅在成片未保留字幕时，系统会按原文补字幕。` : '';
+  let voicePrompt = voiceConversion ? '\n逐帧保留视频1的说话节奏、开口闭口时间、嘴唇动作和面部表情，将人物外观替换为图片1，同时完成上述全片去水印编辑。不要重新设计口型，不要改变视频速度，不要新增台词或旁白。' : '';
   if (task.voice && !separateNarration) {
     const segments = task.speech.segments;
     const gaps = [];

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generationBody } from '../services/video/provider.mjs';
+import { generationBody, MODELS, WAN3_MODEL } from '../services/video/provider.mjs';
+import { wan3GenerationBody } from '../services/video/wan3.mjs';
 
 const task = overrides => ({
   duration: 15,
@@ -9,6 +10,25 @@ const task = overrides => ({
   materials: { photo: { id: 'photo-1' }, video: { id: 'video-1' }, voice: { id: 'voice-1' } },
   ...overrides,
 });
+
+for (const { id: model } of MODELS.filter(model => model.id.startsWith('doubao-seedance-') || model.id === WAN3_MODEL)) {
+  test(`${model} requests source-watermark removal without conflicting voice or caption instructions`, () => {
+    for (const voiceEngine of [undefined, 'chatterbox', 'indextts2']) {
+      const input = task({ model, voiceEngine, ...(voiceEngine ? { voice: {} } : {}),
+        captions: { cues: [{ start: 0, end: 2, text: '只要9.9元' }] },
+        speech: { segments: [{ start: 0, end: 2, text: '只要9.9元' }] },
+      });
+      const prompt = model === WAN3_MODEL ? wan3GenerationBody(input).input.prompt : generationBody(input).prompt;
+      assert.match(prompt, /同时完成两项编辑：人物替换和原视频叠加水印去除/);
+      assert.match(prompt, /抖音\/TikTok.*账号ID.*@用户名.*作者昵称/);
+      assert.match(prompt, /去水印要求优先于下文的背景、字幕和口型保留要求/);
+      assert.match(prompt, /正常台词字幕、商品包装文字和场景中的真实招牌不属于水印/);
+      assert.doesNotMatch(prompt, /只将人物外观|不修改字幕区域的背景/);
+      if (voiceEngine === 'chatterbox') assert.match(prompt, /嘴唇动作.*同时完成上述全片去水印编辑/);
+      if (!voiceEngine) assert.match(prompt, /平台图标、账号和昵称水印不得当成字幕保留/);
+    }
+  });
+}
 
 for (const model of [undefined, 'doubao-seedance-2-0-260128', 'doubao-seedance-2-5-260628']) {
   test(`${model || 'default model'} edits the source with adaptive ratio and duration`, () => {
