@@ -52,6 +52,23 @@ function composerApi() {
   return data;
 }
 
+test('a full history and favorites do not preload completed video streams', async t => {
+  const data = composerApi();
+  data.tasks = Array.from({ length: 50 }, (_, i) => ({
+    id: crypto.randomUUID(), conversationId: crypto.randomUUID(), referenceImageIds: [crypto.randomUUID()],
+    title: '历史视频' + i, status: 'completed', createdAt: Date.now() - i, duration: 30,
+    settings: DEFAULT_VIDEO_SETTINGS, resultUrl: '/api/video-creator/tasks/' + crypto.randomUUID() + '/result',
+  }));
+  const f = await fixture(t, data.api);
+  assert.equal((f.html().match(/decoding="async"/g) || []).length, 50);
+  assert.doesNotMatch(f.html(), /<video|#t=0\.1/);
+  for (const task of data.tasks.slice(0, 10)) f.action('vc-favorite', { id: task.id });
+  f.action('vc-preview', { value: 'favorites' });
+  assert.equal((f.html().match(/decoding="async"/g) || []).length, 60);
+  assert.doesNotMatch(f.html(), /<video|#t=0\.1/);
+  assert.match(f.html(), new RegExp(data.tasks[0].conversationId + '/assets/' + data.tasks[0].referenceImageIds[0]));
+});
+
 test('resolution chooser only exposes 720p for every model and legacy scripts require a matching new plan', async t => {
   const data = composerApi(), f = await fixture(t, data.api);
   f.action('vc-settings');
