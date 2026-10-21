@@ -37,7 +37,7 @@ const files = new Map([
   ['/video-replica.css', ['design/video-replica.css', 'text/css; charset=utf-8']],
   ...['video-creator', 'video-creator-ui', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/video-creator.css', ['design/video-creator.css', 'text/css; charset=utf-8']],
-  ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-upload', 'image-presets', 'image-preset-ui', 'generated-assets', 'model-labels'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
+  ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-upload', 'image-presets', 'image-preset-ui', 'generated-assets', 'model-labels', 'malaysian-prices'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ...['digital-human', 'digital-human-api'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ['/digital-human.css', ['design/digital-human.css', 'text/css; charset=utf-8']],
   ...['home', 'studios', 'product', 'agent-chat', 'business-flow', 'generated-assets'].map(name=>[`/${name}.css`,[`design/${name}.css`,'text/css; charset=utf-8']]),
