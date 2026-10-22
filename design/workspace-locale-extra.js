@@ -1,5 +1,14 @@
 // Static interface translations; never sent to an AI service at runtime.
 export const EXTRA_UI_COPY = {
+  "草稿已保存": { "en": "Draft saved", "ms": "Draf disimpan" },
+  "草稿未保存，请保留当前页面": { "en": "Draft not saved. Keep this page open.", "ms": "Draf belum disimpan. Biarkan halaman ini terbuka." },
+  "展开素材": { "en": "Show materials", "ms": "Tunjukkan bahan" },
+  "收起素材": { "en": "Hide materials", "ms": "Sembunyikan bahan" },
+  "替换素材": { "en": "Replace material", "ms": "Gantikan bahan" },
+  "在编导中引用素材": { "en": "Reference a material in the director", "ms": "Rujuk bahan dalam pengarah" },
+  "有素材已移除，请修改标记处的引用后继续。": { "en": "A material was removed. Update the marked references to continue.", "ms": "Bahan telah dialih keluar. Kemas kini rujukan bertanda untuk meneruskan." },
+  "原素材已过期，文字已恢复，请重新添加素材。": { "en": "The original materials expired. Your text was restored; please add materials again.", "ms": "Bahan asal telah tamat tempoh. Teks dipulihkan; sila tambah bahan semula." },
+  "请选择大小符合要求的同类型素材。": { "en": "Choose a material of the same type within the size limit.", "ms": "Pilih bahan daripada jenis yang sama dalam had saiz." },
   "{value0}，请在右侧查看进度。": { "en": "{value0}. See progress on the right.", "ms": "{value0}. Lihat kemajuan di sebelah kanan." },
   "补充修改要求，或应用脚本生成视频": { "en": "Add changes, or apply the script to create a video", "ms": "Tambah perubahan, atau gunakan skrip untuk menjana video" },
   "脚本已生成": { "en": "Script ready", "ms": "Skrip tersedia" },

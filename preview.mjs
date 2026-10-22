@@ -37,7 +37,7 @@ const files = new Map([
   ['/restaurant.css', ['design/restaurant.css', 'text/css; charset=utf-8']],
   ['/video-replica.js', ['design/video-replica.js', 'text/javascript; charset=utf-8']],
   ['/video-replica.css', ['design/video-replica.css', 'text/css; charset=utf-8']],
-  ...['video-creator', 'video-creator-ui', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ...['video-creator', 'video-creator-ui', 'video-creator-drafts', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/video-creator.css', ['design/video-creator.css', 'text/css; charset=utf-8']],
   ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-upload', 'image-presets', 'image-preset-ui', 'generated-assets', 'model-labels', 'malaysian-prices'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ...['digital-human', 'digital-human-api'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),

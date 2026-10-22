@@ -3,6 +3,7 @@ import { markdownText } from './markdown.js';
 import { collectGeneratedAssets } from './generated-assets.js';
 import { uiIcon, SKILL_ART, mediaUrl, readUiStore, writeUiStore, promptMarkup, readPromptEditor, insertEditorText, directorDocument, emptyDirectorArt, previewArtwork, encodeWav } from './video-creator-ui.js';
 import { VIDEO_SKILLS, VIDEO_HOOKS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, videoAssetPurpose } from './video-catalog.js';
+import { draftSnapshot, remapMaterialReferences, hasMissingReferences } from './video-creator-drafts.js';
 import { accountStorageKey } from './account-storage.js';
 import { refreshWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 
@@ -19,10 +20,11 @@ function replanResolution(settings) {
 }
 function reset() { closePopover(); stopVoice(); stopRecording(true); state = { owner: owner(), skill: VIDEO_SKILLS[0].id, settings: { ...DEFAULT_VIDEO_SETTINGS }, config: null, session: null,
   tasks: [], conversations: [], input: '', prompt: '', scriptId: null, referenceImageIds: null, stage: 'director', busy: false, activity: '', actionToken: null, error: '', errorSource: '', errorKind: '', selectedTask: null,
-  preview: 'result', sidebar: uiRead('sidebar', typeof innerWidth !== 'number' || innerWidth >= 1180), queue: uiRead('queue', true), popover: null, picker: null, quote: null, quoteError: '', uploadLabel: '', bridge: null }; }
+  draftId: null, draftRestored: false, expandedMaterials: true, preview: 'result', sidebar: uiRead('sidebar', typeof innerWidth !== 'number' || innerWidth >= 1180), queue: uiRead('queue', true), popover: null, picker: null, quote: null, quoteError: '', uploadLabel: '', bridge: null }; }
 function refresh() {
+  persistDraft();
   if (!context || document.body.dataset.page !== 'video' || state.owner !== owner()) return;
-  if (state.popover) { state.refreshQueued = true; return; }
+  if (state.popover || document.querySelector('#modal[open]')) { state.refreshQueued = true; return; }
   const active = document.activeElement, editor = active?.matches('.vc-rich-editor') && active;
   const conversation = document.querySelector('.vc-conversation');
   state.view = { focus: active?.id, start: active?.selectionStart, end: active?.selectionEnd, scroll: conversation?.scrollTop, follow: conversation && conversation.scrollHeight - conversation.clientHeight - conversation.scrollTop < 100, queueScroll: document.querySelector('.vc-task-list')?.scrollTop, richScroll: document.querySelector('#vc-prompt')?.scrollTop };
@@ -34,12 +36,48 @@ function refresh() {
   if (video) state.view.playback = { id: state.selectedTask, time: video.currentTime, paused: video.paused, muted: video.muted };
   context.refresh();
 }
+function localDrafts() { return uiRead('drafts', []).filter(d => d && typeof d.id === 'string' && VIDEO_SKILLS.some(s => s.id === d.skill)); }
+function persistDraft(force = false) {
+  if (!state || state.owner !== owner() || state.restoringDraft) return true;
+  if (!state.draftId && (force || !state.selectedTask && (state.input || state.prompt || state.session?.assets.length))) state.draftId = crypto.randomUUID();
+  if (!state.draftId) return true;
+  const snapshot = draftSnapshot(state), drafts = localDrafts(), old = drafts.find(d => d.id === snapshot.id);
+  const fingerprint = JSON.stringify(snapshot);
+  if (old?.fingerprint === fingerprint) { state.draftSaveFailed = false; return true; }
+  const saved = { ...snapshot, fingerprint, updatedAt: Date.now() };
+  if (!uiWrite('drafts', [saved, ...drafts.filter(d => d.id !== saved.id)])) { state.draftSaveFailed = true; const label = document.querySelector('#vc-draft-status'); if (label) label.textContent = '草稿未保存，请保留当前页面'; return false; }
+  state.draftSaveFailed = false; uiWrite('active-draft', saved.id);
+  const label = document.querySelector('#vc-draft-status'); if (label) label.textContent = '草稿已保存';
+  return true;
+}
+async function openLocalDraft(id) {
+  if (!persistDraft()) return;
+  const draft = localDrafts().find(d => d.id === id); if (!draft) return;
+  const account = state.owner;
+  let session = null;
+  try { if (draft.conversationId) session = (await request(`/conversations/${draft.conversationId}`)).conversation; }
+  catch (cause) { if (cause.status !== 404 && cause.status !== 410) throw cause; context.toast('原素材已过期，文字已恢复，请重新添加素材。'); }
+  if (state.owner !== account) return;
+  state.restoringDraft = true;
+  state.session = null; if (session) saveSession(session);
+  Object.assign(state, { draftId: draft.id, skill: draft.skill, settings: editableSettings(draft.settings), input: draft.input || '', prompt: draft.prompt || '',
+    stage: draft.stage === 'generation' ? 'generation' : 'director', scriptId: draft.scriptId || null, referenceImageIds: draft.referenceImageIds || null,
+    selectedTask: draft.selectedTask || null, preview: 'result', pendingScriptRequest: null, generationRequest: null });
+  state.restoringDraft = false; uiWrite('active-draft', draft.id); state.quote = null; void quote();
+}
+const meaningfulDraft = d => Boolean(d.conversationId || d.input?.trim() || d.prompt?.trim());
+function localDraftRows(ctx) {
+  return localDrafts().filter(d => d.id !== state.draftId && meaningfulDraft(d) && !uiRead('hidden-local-drafts', []).includes(d.id)).map(d => `<article class="vc-task-row"><button type="button" class="vc-task" data-action="vc-open-local-draft" data-id="${ctx.esc(d.id)}" ${state.busy ? 'disabled' : ''} aria-label="打开草稿 ${ctx.esc(d.title)}"><span class="vc-task-thumb vc-draft-thumb">${ctx.icon('list')}</span><span class="vc-task-copy"><strong>${ctx.esc(d.title)}</strong><span class="vc-task-status">草稿</span><small>${new Date(d.updatedAt).toLocaleString(uiLocale(), {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</small></span></button></article>`).join('');
+}
+function editorAssets(root) { return root?.id === 'vc-message' ? state.session?.assets || [] : referenceAssets(); }
+function editorField(root) { return root?.id === 'vc-message' ? 'input' : 'prompt'; }
+function missingReferenceNotice() { return hasMissingReferences(state.stage === 'director' ? state.input : state.prompt) ? '<p class="vc-reference-warning" role="status">有素材已移除，请修改标记处的引用后继续。</p>' : ''; }
 function currentTask() { return state.tasks.find(t => t.id === state.selectedTask); }
 function pendingOp() { return state.session?.operations.findLast(o => ['queued', 'running', 'settling'].includes(o.status)); }
 function locked() { return state.busy || Boolean(voiceSession) || Boolean(pendingOp()) || state.session?.tasks.some(busyTask); }
 function latestScript() { return state.session?.operations.findLast(o => o.status === 'completed' && o.skill === state.skill && o.result?.script); }
 function canSendDirector() {
-  return !locked() && state.config?.directorEnabled !== false && state.session?.assets.some(a => a.type === 'image')
+  return !locked() && !hasMissingReferences(state.input) && state.config?.directorEnabled !== false && state.session?.assets.some(a => a.type === 'image' && !a.expired && a.url)
     && (Boolean(state.input.trim()) || !state.session.operations.length);
 }
 function updateDirectorControls() {
@@ -79,6 +117,10 @@ function stopVoice() {
   if (state?.owner === current.owner) state[current.target] = current.final ? (current.prefix + current.final).slice(0, current.target === 'prompt' ? 12000 : 8000) : current.initial;
   try { current.recognition.abort(); } catch {}
 }
+function syncVoiceControls() {
+  document.querySelectorAll('[data-action="vc-direct-voice"]').forEach(b => { b.disabled = !voiceSession && (!speechEngine() || locked()); b.setAttribute('aria-label', voiceSession ? '停止语音输入' : '语音输入视频提示词'); b.classList.toggle('is-listening', Boolean(voiceSession)); });
+  const root = document.querySelector('#vc-expanded-prompt'); if (root) { root.setAttribute('contenteditable', String(!locked())); root.innerHTML = promptMarkup(state.prompt, referenceAssets()); }
+}
 function toggleVoice() {
   if (voiceSession) { try { voiceSession.recognition.stop(); } catch { stopVoice(); refresh(); } return; }
   if (locked()) return;
@@ -89,21 +131,23 @@ function toggleVoice() {
   recognition.lang = ({ zh: 'zh-CN', en: 'en-US', th: 'th-TH', ms: 'ms-MY', pt: 'pt-BR' })[state.settings.language] || 'zh-CN';
   recognition.continuous = true; recognition.interimResults = true;
   const valid = () => voiceSession === current && state.owner === current.owner && owner() === current.owner && document.body.dataset.page === 'video';
-  const finish = () => { if (voiceSession !== current) return; clearTimeout(current.timer); voiceSession = null; if (state.owner === current.owner) state[current.target] = current.final ? (current.prefix + current.final).slice(0, current.target === 'prompt' ? 12000 : 8000) : current.initial; refresh(); };
+  const finish = () => { if (voiceSession !== current) return; clearTimeout(current.timer); voiceSession = null; if (state.owner === current.owner) state[current.target] = current.final ? (current.prefix + current.final).slice(0, current.target === 'prompt' ? 12000 : 8000) : current.initial; syncVoiceControls(); refresh(); };
   recognition.onresult = event => {
     if (!valid()) return; let final = '', interim = '';
     for (let i = 0; i < event.results.length; i++) { const result = event.results[i]; if (result.isFinal) final += result[0].transcript; else interim += result[0].transcript; }
     current.final = final; state[current.target] = (current.prefix + final + interim).slice(0, current.target === 'prompt' ? 12000 : 8000);
-    const input = document.querySelector(current.target === 'prompt' ? '#vc-prompt' : '#vc-message'); if (input) { if (current.target === 'prompt') input.innerHTML = promptMarkup(state.prompt, referenceAssets()); else input.value = state.input; }
+    const input = document.querySelector(current.target === 'prompt' ? '#vc-expanded-prompt' : '#vc-message') || document.querySelector('#vc-prompt'); if (input) { if (current.target === 'prompt') input.innerHTML = promptMarkup(state.prompt, referenceAssets()); else input.innerHTML = promptMarkup(state.input, state.session?.assets || []); }
+    persistDraft(true);
     if (current.prefix.length + final.length + interim.length >= (current.target === 'prompt' ? 12000 : 8000)) recognition.stop();
   };
   recognition.onerror = event => {
     if (!valid()) return;
     if (event.error !== 'aborted') { state.error = ({ 'not-allowed': '请允许浏览器使用麦克风后重试。', 'service-not-allowed': '浏览器暂不允许语音识别，请直接输入文字。', 'audio-capture': '未找到可用麦克风，请检查设备。', network: '语音识别连接失败，请重试或直接输入文字。', 'no-speech': '没有识别到声音，请重试。' })[event.error] || '语音识别未完成，请重试或直接输入文字。'; state.errorSource = 'action'; }
+    if (state.error && document.querySelector('#modal[open]')) context.toast(state.error);
     finish();
   };
   recognition.onend = finish;
-  try { recognition.start(); current.timer = setTimeout(() => { if (valid()) recognition.stop(); }, 90000); refresh(); }
+  try { recognition.start(); current.timer = setTimeout(() => { if (valid()) recognition.stop(); }, 90000); syncVoiceControls(); refresh(); }
   catch { state.error = '无法启动语音输入，请检查浏览器和麦克风权限。'; state.errorSource = 'action'; finish(); }
 }
 async function request(path, options = {}) {
@@ -139,6 +183,17 @@ async function ensureSession() {
   saveSession(data.conversation); return state.session.id;
 }
 async function upload(files, purpose) {
+  const reopen = state.uploadReturnExpanded; state.uploadReturnExpanded = false;
+  const replaceId = state.replaceUploadId; state.replaceUploadId = null;
+  if (replaceId) {
+    const file = files[0], before = referenceAssets(), old = before.find(a => a.id === replaceId);
+    if (!old || !file) return;
+    const image = ['image/jpeg', 'image/png', 'image/webp'].includes(file.type), audio = ['audio/mpeg','audio/wav','audio/x-wav'].includes(file.type);
+    if (old.type === 'image' ? !image || file.size >= VIDEO_IMAGE_MAX_BYTES : !audio || file.size > VIDEO_AUDIO_MAX_BYTES) { context.toast('请选择大小符合要求的同类型素材。'); return; }
+    const replacement = { id: crypto.randomUUID(), file, name: file.name, type: old.type, purpose: videoAssetPurpose(old) };
+    await perform(() => replaceMaterialSet(before.map(a => a.id === old.id ? replacement : a), { [old.id]: replacement.id }));
+    if (reopen) expandEditor(); return;
+  }
   await perform(async () => {
     for (const file of files) {
       const image = ['image/jpeg', 'image/png', 'image/webp'].includes(file.type), audio = ['audio/mpeg', 'audio/wav', 'audio/x-wav'].includes(file.type);
@@ -146,7 +201,11 @@ async function upload(files, purpose) {
       if (image ? file.size >= VIDEO_IMAGE_MAX_BYTES : file.size > VIDEO_AUDIO_MAX_BYTES) throw new Error(image ? '单张图片需小于50MB。' : '声音文件不能超过15MB。');
     }
     const account = state.owner;
-    if (state.session && (state.session.operations.length || state.session.tasks.length || purpose === 'voice' && state.session.assets.some(a => a.type === 'audio'))) await forkUploadSession(purpose);
+    if (state.session && (state.session.operations.length || state.session.tasks.length || state.prompt || purpose === 'voice' && state.session.assets.some(a => a.type === 'audio'))) {
+      const previous = referenceAssets().filter(a => purpose !== 'voice' || a.type !== 'audio');
+      const added = files.map(file => ({ id: crypto.randomUUID(), file, name: file.name, type: file.type.startsWith('audio/') ? 'audio' : 'image', purpose: purpose || 'reference' }));
+      return replaceMaterialSet([...previous, ...added]);
+    }
     if (state.owner !== account || owner() !== account) return;
     const id = await ensureSession();
     for (let index = 0; index < files.length; index++) {
@@ -163,21 +222,9 @@ async function upload(files, purpose) {
       if (state.owner !== account) return; saveSession(data.conversation);
     }
     state.scriptId = null; state.referenceImageIds = null; state.quote = null; void quote();
+    state.expandedMaterials = true;
   });
-}
-async function forkUploadSession(purpose) {
-  const account = state.owner, previous = state.session.assets.filter(a => purpose !== 'voice' || a.type !== 'audio');
-  const files = await Promise.all(previous.map(async a => ({ file: await fileForAsset(a), purpose: videoAssetPurpose(a), origin: a })));
-  if (state.owner !== account) return;
-  const data = await request('/conversations', post({ requestId: crypto.randomUUID(), skill: state.skill, settings: state.settings }));
-  if (state.owner !== account) return;
-  state.session = data.conversation; state.selectedTask = null; state.scriptId = null; state.referenceImageIds = null; state.prompt = ''; state.stage = 'director'; state.preview = 'result';
-  for (const [index, item] of files.entries()) {
-    if (state.owner !== account) return;
-    state.uploadLabel = `准备素材 ${index + 1}/${files.length}`; refresh();
-    const { file, purpose, origin } = item, uploaded = await request(`/conversations/${state.session.id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': purpose }, body: file });
-    if (state.owner !== account) return; saveSession(uploaded.conversation); rememberOrigin(state.session.assets.findLast(a => a.name === file.name), origin);
-  }
+  if (reopen) expandEditor();
 }
 function consumedCredits() {
   const operations = state.session?.operations || [];
@@ -254,6 +301,7 @@ function rememberOrigin(asset, origin) {
   uiWrite('assets', previous.map(a => a.id === asset.id ? { ...a, originKey: original.originKey || origin.id, category: original.category, libraryKind: original.libraryKind } : a));
 }
 function modal(title, body, wide = false) {
+  if (title !== '视频提示词 · 指令编辑' && document.querySelector('#modal')?.classList.contains('vc-expanded-modal')) state.returnExpanded = true;
   document.querySelector('#modal').classList.remove('vc-expanded-modal', 'vc-lightbox-modal', 'vc-asset-modal', 'vc-tool-modal');
   context.openModal(title, '', body.replace(/<button(?![^>]*\btype=)/g, '<button type="button"'), wide);
   document.querySelector('#modal').classList.add('vc-dialog');
@@ -292,10 +340,15 @@ function navigation(ctx) {
   return `<aside class="vc-skill-sidebar ${state.sidebar ? '' : 'is-collapsed'}" aria-label="AI视频技能导航"><header><strong>AI 视频</strong>${ctx.button('vc-sidebar', uiIcon(state.sidebar ? 'fold' : 'unfold'), 'vc-icon', `aria-label="${state.sidebar ? '收起' : '展开'}技能导航" aria-expanded="${state.sidebar}"`)}</header><div class="vc-sidebar-content"><p>同城到店</p>${VIDEO_SKILLS.map(s => ctx.button('vc-skill', `<img src="${SKILL_ART[s.id]}" alt=""><span><strong>${s.name}</strong><small>${ctx.esc(s.description)}</small></span>`, `vc-sidebar-skill ${state.skill === s.id ? 'selected' : ''}`, `data-value="${s.id}" ${locked() ? 'disabled' : ''}`)).join('')}</div></aside>`;
 }
 function composerMedia(ctx, assets, disabled) {
-  return `<div class="vc-reference-groups" aria-label="创作参考素材">${[['reference', '添加图片', 'image'], ['character', '添加角色', 'person'], ['voice', '添加声音', 'voice']].map(([purpose, label, symbol]) => {
+  const groups = `<div class="vc-reference-groups" aria-label="创作参考素材">${[['reference', '添加图片', 'image'], ['character', '添加角色', 'person'], ['voice', '添加声音', 'voice']].map(([purpose, label, symbol]) => {
     const selected = assets.filter(a => videoAssetPurpose(a) === purpose), images = selected.filter(a => a.type === 'image');
     return ctx.button('vc-reference-group', `<span class="vc-reference-tile ${selected.length > 1 ? 'is-stacked' : ''}">${images[0] ? `<img src="${ctx.esc(mediaUrl(images[0].url))}" alt="${ctx.esc(images[0].name)}">` : symbol === 'image' ? ctx.icon('image') : composerIcon(symbol)}${selected.length ? `<span class="vc-reference-count">${selected.length}</span>` : ''}<span class="vc-reference-plus">+</span></span><span class="vc-reference-label">${label}${purpose !== 'reference' ? '<small>（可选）</small>' : ''}</span>`, 'vc-reference-group', `data-purpose="${purpose}" aria-label="${label}" ${disabled ? 'disabled' : ''}`);
   }).join('')}</div>`;
+  const tiles = assets.map(asset => {
+    const index = asset.type === 'image' ? assets.filter(a => a.type === 'image').indexOf(asset) + 1 : assets.filter(a => a.type === 'audio').indexOf(asset) + 1;
+    return `<div class="vc-inline-material"><button type="button" class="vc-inline-preview" data-action="vc-preview-asset" data-id="${ctx.esc(asset.id)}" aria-label="${asset.type === 'image' ? '预览' : '试听'} ${ctx.esc(asset.name)}">${asset.type === 'image' ? `<img src="${ctx.esc(mediaUrl(asset.url))}" alt="${ctx.esc(asset.name)}">` : composerIcon('voice')}<span>${asset.type === 'image' ? '图片' : '声音'}${index}</span></button><div class="vc-inline-actions">${ctx.button('vc-inline-replace', uiIcon('edit'), 'vc-icon', `data-id="${ctx.esc(asset.id)}" aria-label="替换 ${ctx.esc(asset.name)}" ${disabled ? 'disabled' : ''}`)}${ctx.button('vc-inline-remove', uiIcon('close'), 'vc-icon', `data-id="${ctx.esc(asset.id)}" aria-label="移除 ${ctx.esc(asset.name)}" ${disabled ? 'disabled' : ''}`)}</div><div class="vc-inline-hover" aria-hidden="true">${asset.type === 'image' ? `<img src="${ctx.esc(mediaUrl(asset.url))}" alt="">` : ''}<small>${ctx.esc(asset.name)}</small></div></div>`;
+  }).join('');
+  return `<div class="vc-material-composer">${groups}${assets.length ? `${ctx.button('vc-toggle-materials', state.expandedMaterials ? '收起素材' : '展开素材', 'vc-material-toggle', `aria-expanded="${state.expandedMaterials}"`)}<div class="vc-inline-materials" ${state.expandedMaterials ? '' : 'hidden'}>${tiles}</div>` : ''}</div>`;
 }
 function filteredLibrary() {
   const picker = state.picker; if (!picker) return [];
@@ -311,9 +364,10 @@ function filteredLibrary() {
   });
 }
 function renderLibraryGrid() {
-  const { esc, button, icon } = context, picker = state.picker, assets = filteredLibrary(), max = picker.purpose === 'voice' ? 1 : picker.purpose === 'character' ? 10 : 30;
+  const { esc, button, icon } = context, picker = state.picker, assets = filteredLibrary(), max = picker.replaceId || picker.purpose === 'voice' ? 1 : picker.purpose === 'character' ? 10 : 30;
   const grid = document.querySelector('#vc-library-grid'); if (!grid) return;
   grid.innerHTML = `<button type="button" data-action="vc-library-upload" class="vc-library-upload">${icon('plus')}<span>上传文件</span><small>${picker.purpose === 'voice' ? 'MP3、WAV · 最大15MB' : 'JPG、PNG、WebP · 单张小于50MB'}</small></button>${assets.slice(0, picker.limit).map(a => `<article class="vc-library-item ${picker.ids.has(a.id) ? 'selected' : ''}"><button type="button" data-action="vc-library-toggle" data-id="${esc(a.id)}" aria-pressed="${picker.ids.has(a.id)}" aria-label="选择 ${esc(a.name)}"><span class="vc-library-image">${a.type === 'image' ? `<img src="${esc(mediaUrl(a.url))}" alt="" loading="lazy">` : composerIcon('voice')}<span class="vc-library-check">${picker.ids.has(a.id) ? uiIcon('check') : ''}</span></span><strong title="${esc(a.name)}">${esc(a.name)}</strong><small>${a.createdAt ? new Date(a.createdAt).toLocaleDateString(uiLocale()) : a.purpose === 'character' ? '角色参考' : '上传素材'}</small></button><div class="vc-library-item-actions">${button('vc-preview-asset', a.type === 'audio' ? '试听' : '预览', 'textbutton', `data-id="${esc(a.id)}"`)}</div></article>`).join('')}${!assets.length ? '<p class="vc-library-empty">上传素材后，在这里选择使用</p>' : ''}`;
+  document.querySelector('#vc-library-confirm').disabled = Boolean(picker.replaceId && picker.ids.size !== 1);
   document.querySelector('#vc-library-count').textContent = `已选 ${picker.ids.size}/${max}`;
   document.querySelector('#vc-library-confirm').textContent = `确认选择（${picker.ids.size}/${max}）`;
   const more = document.querySelector('#vc-library-more'); if (more) more.hidden = assets.length <= picker.limit;
@@ -353,15 +407,16 @@ function createCharacter() {
     if (added) uiWrite('assets',uiRead('assets',[]).map(a=>a.id===added.id?{...a,category,libraryKind:kind}:a));
   };
 }
-function referencePicker(purpose, ctx) {
+function referencePicker(purpose, ctx, replaceId = null) {
+  state.replaceUploadId = null;
   if (locked()) return;
-  state.picker = { purpose, tab: purpose === 'character' ? 'roles' : 'assets', query: '', source: 'all', limit: 24, ids: new Set((state.session?.assets || []).filter(a => videoAssetPurpose(a) === purpose).map(a => a.id)) };
-  modal(purpose === 'voice' ? '选择声音' : '选择素材', `<div class="vc-library-tabs">${[['assets', '我的资产'], ['roles', '角色库'], ['faces', '人脸库']].filter(([key]) => purpose !== 'voice' || key === 'assets').map(([key, label]) => ctx.button('vc-library-tab', label, state.picker.tab === key ? 'selected' : '', `data-value="${key}"`)).join('')}<span id="vc-library-count"></span></div><div class="vc-library-toolbar"><span>我的素材库 ${uiIcon('down')}</span><div class="vc-search">${ctx.icon('search')}<input id="vc-library-search" type="search" placeholder="搜索文件名称" aria-label="搜索素材"></div><select id="vc-library-type" aria-label="文件类型"><option value="all">全部类型</option>${(purpose === 'voice' ? ['mp3','wav'] : ['jpg','jpeg','png','webp']).map(type=>`<option value="${type}">${type.toUpperCase()}</option>`).join('')}</select>${purpose === 'voice' ? ctx.button('vc-record', composerIcon('mic') + '录音', 'vc-outline', typeof MediaRecorder === 'undefined' ? 'disabled title="当前浏览器不支持录音"' : '') : ctx.button('vc-create-character', uiIcon('plus') + '创建角色', 'vc-outline')}</div><div class="vc-library-sources">${[['all', '全部'], ['uploaded', '我上传的'], ['generated', 'AI生成的']].map(([id, label]) => ctx.button('vc-library-source', label, id === 'all' ? 'selected' : '', `data-value="${id}"`)).join('')}</div><div id="vc-library-grid" class="vc-library-grid"></div><button type="button" class="vc-library-more" id="vc-library-more" data-action="vc-library-more">加载更多</button><footer class="modal-actions"><label class="vc-select-all"><input id="vc-library-all" type="checkbox">全选</label>${ctx.button('vc-cancel-library', '取消', 'secondary')}${ctx.button('vc-confirm-library', '确认选择', 'primary', 'id="vc-library-confirm"')}</footer>`, true);
+  state.picker = { purpose, replaceId, tab: purpose === 'character' ? 'roles' : 'assets', query: '', source: 'all', limit: 24, ids: new Set(replaceId ? [] : referenceAssets().filter(a => videoAssetPurpose(a) === purpose).map(a => a.id)) };
+  modal(replaceId ? '替换素材' : purpose === 'voice' ? '选择声音' : '选择素材', `<div class="vc-library-tabs">${[['assets', '我的资产'], ['roles', '角色库'], ['faces', '人脸库']].filter(([key]) => purpose !== 'voice' || key === 'assets').map(([key, label]) => ctx.button('vc-library-tab', label, state.picker.tab === key ? 'selected' : '', `data-value="${key}"`)).join('')}<span id="vc-library-count"></span></div><div class="vc-library-toolbar"><span>我的素材库 ${uiIcon('down')}</span><div class="vc-search">${ctx.icon('search')}<input id="vc-library-search" type="search" placeholder="搜索文件名称" aria-label="搜索素材"></div><select id="vc-library-type" aria-label="文件类型"><option value="all">全部类型</option>${(purpose === 'voice' ? ['mp3','wav'] : ['jpg','jpeg','png','webp']).map(type=>`<option value="${type}">${type.toUpperCase()}</option>`).join('')}</select>${purpose === 'voice' ? ctx.button('vc-record', composerIcon('mic') + '录音', 'vc-outline', typeof MediaRecorder === 'undefined' ? 'disabled title="当前浏览器不支持录音"' : '') : ctx.button('vc-create-character', uiIcon('plus') + '创建角色', 'vc-outline')}</div><div class="vc-library-sources">${[['all', '全部'], ['uploaded', '我上传的'], ['generated', 'AI生成的']].map(([id, label]) => ctx.button('vc-library-source', label, id === 'all' ? 'selected' : '', `data-value="${id}"`)).join('')}</div><div id="vc-library-grid" class="vc-library-grid"></div><button type="button" class="vc-library-more" id="vc-library-more" data-action="vc-library-more">加载更多</button><footer class="modal-actions"><label class="vc-select-all"><input id="vc-library-all" type="checkbox">全选</label>${ctx.button('vc-cancel-library', '取消', 'secondary')}${ctx.button('vc-confirm-library', '确认选择', 'primary', 'id="vc-library-confirm"')}</footer>`, true);
   document.querySelector('#modal').classList.add('vc-asset-modal');
   document.querySelector('#vc-library-type').onchange = e => { state.picker.filetype = e.target.value; renderLibraryGrid(); };
   document.querySelector('#vc-library-search').oninput = e => { state.picker.query = e.target.value; renderLibraryGrid(); };
   document.querySelector('#vc-library-all').onchange = e => {
-    const max = purpose === 'voice' ? 1 : purpose === 'character' ? 10 : 30;
+    const max = replaceId || purpose === 'voice' ? 1 : purpose === 'character' ? 10 : 30;
     state.picker.ids = new Set(e.target.checked ? filteredLibrary().slice(0, max).map(a => a.id) : []); renderLibraryGrid();
   };
   renderLibraryGrid();
@@ -387,26 +442,50 @@ async function fileForAsset(asset) {
   if (!response.ok) throw new Error('素材读取失败，请重新上传。');
   return new File([await response.blob()], asset.name, { type: asset.type === 'audio' ? 'audio/wav' : 'image/jpeg' });
 }
-async function applyLibrarySelection() {
-  const picker = state.picker, before = state.session?.assets || [], library = assetLibrary();
-  const group = [...picker.ids].map(id => library.find(a => a.id === id)).filter(Boolean).map(a => ({ ...a, purpose: picker.purpose }));
-  const next = before.filter(a => videoAssetPurpose(a) !== picker.purpose).concat(group);
+async function replaceMaterialSet(next, replacements = {}) {
+  const account = state.owner, before = state.session?.assets || [], oldRefs = referenceAssets(), previous = { session: state.session, input: state.input, prompt: state.prompt, stage: state.stage, selectedTask: state.selectedTask, scriptId: state.scriptId, referenceImageIds: state.referenceImageIds };
   if (next.filter(a => a.type === 'image').length > 30) throw new Error('图片与角色参考合计最多30张。');
-  if (before.length === next.length && before.every(a => next.some(n => n.id === a.id && videoAssetPurpose(a) === videoAssetPurpose(n)))) return;
+  if (next.filter(a => a.type === 'audio').length > 1) throw new Error('最多选择一段声音参考。');
+  if (next.filter(a => videoAssetPurpose(a) === 'character').length > 10) throw new Error('最多添加10张角色参考图。');
   const files = await Promise.all(next.map(async a => ({ file: await fileForAsset(a), purpose: videoAssetPurpose(a), origin: a })));
-  const account = state.owner;
-  if (account !== owner()) throw new Error('账号已切换，请重新选择素材。');
-  // A new conversation preserves old scripts and tasks while changing their reference material.
-  const data = await request('/conversations', post({ requestId: crypto.randomUUID(), skill: state.skill, settings: state.settings }));
   if (state.owner !== account) return;
-  state.session = data.conversation; state.selectedTask = null; state.scriptId = null; state.referenceImageIds = null; state.prompt = ''; state.stage = 'director'; state.preview = 'result';
-  for (let index = 0; index < files.length; index++) {
+  // Build the replacement separately. A failed upload leaves the previous draft intact.
+  const data = await request('/conversations', post({ requestId: crypto.randomUUID(), skill: state.skill, settings: state.settings }));
+  let session = data.conversation; const ids = {};
+  for (const [index, item] of files.entries()) {
     if (state.owner !== account) return;
-    const { file, purpose, origin } = files[index]; state.uploadLabel = `准备素材 ${index + 1}/${files.length}`; refresh();
-    const uploaded = await request(`/conversations/${state.session.id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': purpose }, body: file });
-    if (state.owner !== account) return; saveSession(uploaded.conversation); rememberOrigin(state.session.assets.findLast(a => a.name === file.name), origin);
+    state.uploadLabel = `准备素材 ${index + 1}/${files.length}`; refresh();
+    const { file, purpose, origin } = item;
+    const uploaded = await request(`/conversations/${session.id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': purpose }, body: file });
+    session = uploaded.conversation; ids[origin.id] = session.assets.at(-1).id;
   }
-  rememberAssets(); state.quote = null; void quote();
+  if (state.owner !== account) return;
+  persistDraft();
+  if (previous.session && !previous.session.operations.length && !previous.session.tasks.length) uiWrite('hidden-drafts', [...new Set([...uiRead('hidden-drafts', []), previous.session.id])]);
+  state.session = null; saveSession(session);
+  const selected = next.map(a => ({ ...a, id: ids[a.id] }));
+  const mapping = { ...ids }; for (const [old, replacement] of Object.entries(replacements)) mapping[old] = ids[replacement];
+  state.input = remapMaterialReferences(previous.input, before, selected, mapping);
+  state.prompt = remapMaterialReferences(previous.prompt, oldRefs, selected, mapping);
+  state.referenceImageIds = selected.filter(a => a.type === 'image').map(a => a.id);
+  state.selectedTask = null; state.scriptId = null; state.pendingScriptRequest = null; state.generationRequest = null; state.stage = previous.stage; state.expandedMaterials = true;
+  for (const item of files) rememberOrigin(session.assets.find(a => a.id === ids[item.origin.id]), item.origin);
+  persistDraft(true); state.quote = null; void quote();
+}
+async function applyLibrarySelection(picker = state.picker) {
+  if (!picker) return;
+  const before = referenceAssets(), library = assetLibrary();
+  if (picker.replaceId) {
+    const replacement = library.find(a => a.id === [...picker.ids][0]); if (!replacement) return;
+    if (before.some(a => a.id === replacement.id && a.id !== picker.replaceId)) throw new Error('这份素材已在当前创作中，请选择另一份。');
+    const next = before.map(a => a.id === picker.replaceId ? { ...replacement, purpose: videoAssetPurpose(a) } : a);
+    return replaceMaterialSet(next, { [picker.replaceId]: replacement.id });
+  }
+  const group = [...picker.ids].map(id => library.find(a => a.id === id)).filter(Boolean).map(a => ({ ...a, purpose: picker.purpose }));
+  const next = before.filter(a => videoAssetPurpose(a) !== picker.purpose || picker.ids.has(a.id));
+  next.push(...group.filter(a => !next.some(n => n.id === a.id)));
+  if (before.length === next.length && before.every((a, i) => a.id === next[i].id)) return;
+  return replaceMaterialSet(next);
 }
 function previewAsset(id) {
   const asset = assetLibrary().find(a => a.id === id); if (!asset) return;
@@ -443,7 +522,7 @@ function savePromptDialog(id) {
   const existing = id && savedPrompts().find(p => p.id === id), prompt = existing?.prompt ?? state.prompt;
   if (!prompt.trim()) { context.toast('先填写或应用一份脚本。'); return; }
   const { esc } = context;
-  modal(existing ? '编辑提示词' : '保存提示词', `<form id="vc-save-form"><label class="vc-form-label">提示词名称<input name="title" required maxlength="60" placeholder="给提示词起个名字" value="${esc(existing?.title || '')}"></label><label class="vc-checkbox"><input type="checkbox" name="references" ${existing?.references?.length ? 'checked' : ''}>同时保存参考素材</label><div class="vc-save-references">${(existing?.references || referenceAssets()).filter(a => a.type === 'image').map((a, i) => `<span><img src="${esc(mediaUrl(a.url))}" alt="">@图片${i + 1}</span>`).join('')}</div><label class="vc-form-label">提示词内容<textarea name="prompt" required maxlength="12000">${esc(prompt)}</textarea></label><footer class="modal-actions">${context.button('vc-close-dialog', '取消', 'secondary')}<button type="submit" class="primary">保存</button></footer></form>`);
+  modal(existing ? '编辑提示词' : '保存提示词', `<form id="vc-save-form"><label class="vc-form-label">提示词名称<input name="title" required maxlength="60" placeholder="给提示词起个名字" value="${esc(existing?.title || '')}"></label><label class="vc-checkbox"><input type="checkbox" name="references" ${existing?.references?.length ? 'checked' : ''}>同时保存参考素材</label><div class="vc-save-references">${(existing?.references || referenceAssets()).map((a, i) => `<span>${a.type === 'image' ? `<img src="${esc(mediaUrl(a.url))}" alt="">@图片${i + 1}` : uiIcon('sound') + '@声音1'}</span>`).join('')}</div><label class="vc-form-label">提示词内容<textarea name="prompt" required maxlength="12000">${esc(prompt)}</textarea></label><footer class="modal-actions">${context.button('vc-close-dialog', '取消', 'secondary')}<button type="submit" class="primary">保存</button></footer></form>`);
   document.querySelector('#vc-save-form').onsubmit = e => {
     e.preventDefault(); const data = new FormData(e.target), saved = { id: existing?.id || crypto.randomUUID(), title: String(data.get('title')).trim(), prompt: String(data.get('prompt')).trim(), settings: { ...(existing?.settings || state.settings) }, createdAt: existing?.createdAt || Date.now(), references: data.has('references') ? (existing?.references || referenceAssets()).map(({ id, name, type, purpose, url, expiresAt, file }) => ({ id, name, type, purpose, url: mediaUrl(url), expiresAt })) : [] };
     if (!saved.title || !saved.prompt) return;
@@ -455,34 +534,45 @@ function promptLibrary() {
   modal('我的提示词', `<div class="vc-prompt-library">${savedPrompts().map(p => `<article><header><strong>${esc(p.title || '未命名提示词')}</strong><span>AI 视频</span></header><small>${p.createdAt ? new Date(p.createdAt).toLocaleDateString(uiLocale()) : ''} · ${p.references?.length ? p.references.length + '份参考素材' : '无参考素材'}</small><p>${esc(p.prompt.slice(0, 220))}</p><footer>${button('vc-edit-prompt', uiIcon('edit'), 'vc-icon', `data-id="${p.id}" aria-label="编辑提示词 ${esc(p.title || '')}"`)}${button('vc-delete-prompt', uiIcon('trash'), 'vc-icon', `data-id="${p.id}" aria-label="删除提示词 ${esc(p.title || '')}"`)}${button('vc-use-prompt', '使用提示词', 'vc-outline', `data-id="${p.id}"`)}</footer></article>`).join('') || '<div class="vc-blank"><span>还没有保存的提示词</span></div>'}</div>`, true);
 }
 function expandEditor() {
-  modal('视频提示词 · 指令编辑', `<div class="vc-expanded-content">${composerMedia(context, referenceAssets(), locked())}<div id="vc-expanded-prompt" class="vc-rich-editor" role="textbox" aria-label="完整视频提示词" aria-multiline="true" contenteditable="${!locked()}" data-placeholder="描述画面、镜头、氛围和声音…">${promptMarkup(state.prompt, referenceAssets())}</div><footer><span id="vc-expanded-count">${state.prompt.length}/12000</span>${context.button('vc-collapse-editor', uiIcon('expand') + '收起', 'vc-outline')}</footer></div>`, true);
+  state.returnExpanded = false;
+  modal('视频提示词 · 指令编辑', `<div class="vc-expanded-content"><div class="vc-expanded-toolbar"><span>${referenceAssets().length}/31</span><span>${context.button('vc-save-prompt', context.icon('save'), 'vc-icon', `aria-label="保存当前提示词" ${state.prompt.trim() ? '' : 'disabled'}`)}${context.button('vc-saved-prompts', context.icon('list'), 'vc-icon', 'aria-label="我的提示词"')}${context.button('vc-collapse-editor', uiIcon('expand'), 'vc-icon', 'aria-label="收起"')}</span></div>${composerMedia(context, referenceAssets(), locked())}<div id="vc-expanded-prompt" class="vc-rich-editor" role="textbox" aria-label="完整视频提示词" aria-multiline="true" contenteditable="${!locked()}" data-placeholder="描述画面、镜头、氛围和声音…">${promptMarkup(state.prompt, referenceAssets())}</div>${missingReferenceNotice()}<footer><span id="vc-expanded-count">${state.prompt.length}/12000</span><span>${context.button('vc-reference-menu', '@', 'vc-icon', 'aria-label="引用素材"')}${context.button('vc-direct-voice', composerIcon('mic'), 'vc-voice', `aria-label="${voiceSession ? '停止语音输入' : '语音输入视频提示词'}" ${!voiceSession && (!speechEngine() || locked()) ? 'disabled' : ''}`)}</span></footer></div>`, true);
   document.querySelector('#modal').classList.add('vc-expanded-modal'); bindRichEditor(document.querySelector('#vc-expanded-prompt'));
 }
 function bindRichEditor(root) {
   if (!root) return;
-  root.addEventListener('input', () => {
-    const prompt = readPromptEditor(root);
-    if (prompt.length > 12000) { root.innerHTML = promptMarkup(state.prompt, referenceAssets()); context.toast('提示词最多12000字。'); return; }
-    state.prompt = prompt; state.scriptId = null;
-    document.querySelectorAll('#vc-prompt-count,#vc-expanded-count').forEach(el => { el.textContent = prompt.length + '/12000'; });
+  const field = editorField(root), limit = field === 'input' ? 8000 : 12000;
+  root.addEventListener('input', event => {
+    if (voiceSession) return;
+    const value = typeof event?.target?.value === 'string' ? event.target.value : readPromptEditor(root);
+    if (value.length > limit) { root.innerHTML = promptMarkup(state[field], editorAssets(root)); context.toast(`最多${limit}字。`); return; }
+    state[field] = value; if (field === 'prompt') state.scriptId = null;
+    persistDraft(true); updateDirectorControls();
+    document.querySelectorAll('[data-action="vc-save-prompt"]').forEach(el => { el.disabled = !state.prompt.trim(); });
+    document.querySelectorAll('#vc-prompt-count,#vc-expanded-count').forEach(el => { el.textContent = state.prompt.length + '/12000'; });
     const generate = document.querySelector('[data-action="vc-generate"]'); if (generate) generate.disabled = !canGenerate();
   });
-  root.addEventListener('paste', e => { e.preventDefault(); const text = e.clipboardData.getData('text/plain'); const remaining = 12000 - state.prompt.length; insertEditorText(root, text.slice(0, remaining)); });
+  root.addEventListener('paste', e => { e.preventDefault(); insertEditorText(root, e.clipboardData.getData('text/plain').slice(0, limit)); });
   root.addEventListener('keydown', e => {
-    if (e.key === '@' && referenceAssets().length) {
-      setTimeout(() => { if (root.isConnected) referenceMenu(root); }, 0);
-    }
-    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); document.querySelector('[data-action="vc-generate"]')?.click(); }
+    if (e.isComposing) return;
+    if (state.popover === 'references' && e.key === 'ArrowDown') { e.preventDefault(); document.querySelector('.vc-popover-references button')?.focus(); return; }
+    if (e.key === '@' && editorAssets(root).length) setTimeout(() => { if (root.isConnected) referenceMenu(root); }, 0);
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); document.querySelector(`[data-action="${field === 'input' ? 'vc-send' : 'vc-generate'}"]`)?.click(); }
   });
 }
 function referenceMenu(root) {
-  state.editorTarget = root.id;
-  const selection = window.getSelection(); state.editorRange = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
-  openPopover('references', root, `<h3>引用素材</h3><div class="vc-reference-options">${referenceAssets().map((a, i) => context.button('vc-insert-reference', `${a.type === 'image' ? `<img src="${context.esc(mediaUrl(a.url))}" alt="">` : composerIcon('voice')}<span>${a.type === 'image' ? `@图片${referenceAssets().filter(x => x.type === 'image').indexOf(a) + 1}` : '@声音1'}</span><small>${context.esc(a.name)}</small>`, '', `data-id="${a.id}"`)).join('')}</div>`, 330);
+  if (!root) return; state.editorTarget = root.id;
+  const selection = window.getSelection(); state.editorRange = selection?.rangeCount && root.contains(selection.anchorNode) ? selection.getRangeAt(0).cloneRange() : state.referenceCaret?.target === root.id && root.contains(state.referenceCaret.range.commonAncestorContainer) ? state.referenceCaret.range : null;
+  state.referenceCaret = null;
+  openPopover('references', root, `<h3>引用素材</h3><div class="vc-reference-options">${editorAssets(root).map((a, i) => context.button('vc-insert-reference', `${a.type === 'image' ? `<img src="${context.esc(mediaUrl(a.url))}" alt="">` : composerIcon('voice')}<span>${a.type === 'image' ? `@图片${editorAssets(root).filter(x => x.type === 'image').indexOf(a) + 1}` : '@声音1'}</span><small>${context.esc(a.name)}</small>`, '', `data-id="${a.id}"`)).join('')}</div>`, 330);
+  const menu = document.querySelector('.vc-popover-references');
+  menu?.addEventListener('keydown', event => {
+    const options = [...menu.querySelectorAll('[data-action="vc-insert-reference"]')], index = options.indexOf(document.activeElement);
+    if (['ArrowDown', 'ArrowUp'].includes(event.key)) { event.preventDefault(); options[(index + (event.key === 'ArrowDown' ? 1 : -1) + options.length) % options.length]?.focus(); }
+  });
 }
 function canGenerate() {
   const images = referenceAssets().filter(a => a.type === 'image');
-  return !locked() && images.length > 0 && images.length <= VIDEO_MODELS.find(m => m.id === state.settings.model).maxImages && Boolean(state.prompt.trim()) && Boolean(state.config?.generationEnabled) && state.quote?.affordable !== false;
+  return !locked() && !hasMissingReferences(state.prompt) && images.every(a => !a.expired && a.url) && images.length > 0 && images.length <= VIDEO_MODELS.find(m => m.id === state.settings.model).maxImages && Boolean(state.prompt.trim()) && Boolean(state.config?.generationEnabled) && state.quote?.affordable !== false;
 }
 function workflowFeedback(ctx) {
   if (state.error) return `<div class="vc-workflow-feedback is-error" id="vc-error" role="alert"><span>${ctx.esc(state.error)}</span>${['director', 'generation'].includes(state.errorKind) && !locked() ? ctx.button('vc-retry-request', '重试', 'vc-outline') : state.errorSource === 'poll' ? ctx.button('vc-refresh', '重新连接', 'vc-outline') : ''}</div>`;
@@ -494,8 +584,8 @@ function editor(ctx) {
   const { esc, icon, button } = ctx, assets = state.session?.assets || [], disabled = locked(), op = pendingOp(), current = VIDEO_SKILLS.find(s => s.id === state.skill), imageCount = assets.filter(a => a.type === 'image').length, latest = latestScript();
   const scriptCards = (state.session?.operations || []).map(o => `<article class="vc-message"><p class="vc-user-message">${esc(o.message)}</p>${o.status === 'completed' && o.result ? `<div class="vc-assistant-message">${o.result.script ? `<div class="vc-script-document" data-script-id="${o.id}" title="点击应用当前脚本" tabindex="0" role="group" aria-label="编导脚本">${promptMarkup(directorDocument(o.result, assets), assets)}</div><div class="vc-script-actions">${button('vc-copy', uiIcon('copy'), 'vc-icon', `data-id="${o.id}" aria-label="复制脚本"`)}${button('vc-apply', '应用脚本 ' + icon('arrow'), 'vc-apply', `data-id="${o.id}" ${disabled || o.skill !== state.skill ? 'disabled' : ''}`)}</div>` : `${markdownText(o.result.text)}${o.result.questions?.length ? `<ul>${o.result.questions.map(q => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}`}${o.result.warnings?.length ? `<details class="vc-warnings"><summary>需要确认</summary>${o.result.warnings.map(w => `<p>${esc(w)}</p>`).join('')}</details>` : ''}</div>` : `<div class="vc-assistant-message ${o.status === 'failed' ? 'vc-error' : 'vc-thinking'}" role="status">${['failed', 'settling'].includes(o.status) ? esc(o.error || '费用待核对，请稍后查看。') : icon('star') + esc(o.progress || '编导处理中…')}</div>`}</article>`).join('');
   const quoteText = state.quote?.unlimited ? '无限积分' : state.quote ? `预计 ${state.quote.points} 积分` : state.quoteError ? '费用暂不可用' : '读取费用…';
-  return `<section class="vc-editor panel" aria-label="AI视频创作编辑区"><header class="vc-editor-heading">${button('vc-skills', `<img class="vc-skill-thumb" src="${SKILL_ART[current.id]}" alt=""><span><strong>${esc(current.name)}</strong><small>${esc(current.description)}</small></span>${icon('chevron')}`, 'skill-trigger', `aria-haspopup="dialog" aria-expanded="false" ${disabled ? 'disabled' : ''}`)}${button('vc-new', '＋ 新建', 'textbutton', state.busy ? 'disabled' : '')}</header><input type="file" id="vc-images" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-characters" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-audio" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" hidden>${workflowFeedback(ctx)}
-  ${state.stage === 'director' ? `<div class="vc-conversation-wrap"><div class="vc-conversation" aria-label="编导对话">${scriptCards || `<div class="vc-empty-director">${emptyDirectorArt()}<h1>你想创作一条什么视频？</h1><div class="vc-hooks">${VIDEO_HOOKS.map(h => button('vc-hook', esc(h), 'vc-hook', `data-value="${esc(h)}"`)).join('')}</div></div>`}</div>${button('vc-scroll-bottom', uiIcon('down'), 'vc-scroll-bottom', 'aria-label="回到对话底部" hidden')}</div><div class="vc-stage-link">${latest && !disabled ? `<div class="vc-next-step"><span>脚本已生成</span>${button('vc-apply', '应用最新脚本 ' + icon('arrow'), 'vc-next-apply', `data-id="${latest.id}"`)}</div>` : ''}${button('vc-stage-generation', '退出编导', 'vc-exit-director', disabled ? 'disabled' : '')}</div><div class="vc-composer">${composerMedia(ctx, assets, disabled)}<label class="sr-only" for="vc-message">编导要求</label><textarea id="vc-message" maxlength="8000" placeholder="${latest ? '补充修改要求，或应用脚本生成视频' : '分析素材，并生成脚本'}" ${state.busy ? 'disabled' : voiceSession ? 'readonly' : ''}>${esc(state.input)}</textarea>${state.uploadLabel ? `<p class="vc-upload-status" role="status">${esc(state.uploadLabel)}</p>` : ''}<div class="vc-composer-bottom">${button('vc-director-settings', `${esc(t(VIDEO_LANGUAGES.find(l => l.id === state.settings.language)?.name))} · ${state.settings.duration}s ${uiIcon('down')}`, 'textbutton', `aria-label="配置脚本语言和视频时长" aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}<span class="vc-consumed" aria-label="编导积分消耗">✦ ${esc(consumedCredits())}</span>${button('vc-voice', composerIcon('mic'), `vc-voice ${voiceSession ? 'is-listening' : ''}`, `aria-label="${voiceSession ? '停止语音输入' : '语音输入'}" aria-pressed="${Boolean(voiceSession)}" ${!voiceSession && (disabled || !speechEngine()) ? 'disabled' : ''}`)}${button('vc-send', op ? icon('clock') : '<span>↑</span>', 'vc-send', `aria-label="${imageCount ? '发送给超级编导' : '请先添加图片'}" ${!canSendDirector() ? 'disabled' : ''}`)}</div>${voiceSession ? '<p class="vc-voice-status" role="status">正在听，点击麦克风停止</p>' : ''}</div>` : `<div class="vc-generation"><div class="vc-generation-top"><span>${referenceAssets().length}/31</span><span>${button('vc-save-prompt', icon('save'), 'vc-icon', 'aria-label="保存当前提示词"')}${button('vc-saved-prompts', icon('list'), 'vc-icon', 'aria-label="我的提示词"')}${button('vc-expand-editor', uiIcon('expand'), 'vc-icon', 'aria-label="展开编辑"')}</span></div><div class="vc-direct-input">${composerMedia(ctx, referenceAssets(), disabled)}<div id="vc-prompt" class="vc-rich-editor" role="textbox" aria-label="视频提示词" aria-multiline="true" contenteditable="${!disabled}" data-placeholder="描述画面、镜头、氛围和声音…">${promptMarkup(state.prompt, referenceAssets())}</div><div class="vc-rich-bottom">${button('vc-stage-director', uiIcon('sparkle') + '超级编导', 'vc-director-link', disabled ? 'disabled' : '')}${button('vc-reference-menu', '@', 'vc-icon', 'aria-label="引用素材"')}<span id="vc-prompt-count">${state.prompt.length}/12000</span>${button('vc-direct-voice', composerIcon('mic'), 'vc-voice', `aria-label="语音输入视频提示词" ${disabled || !speechEngine() ? 'disabled' : ''}`)}</div></div><div class="vc-generation-settings">${button('vc-models', icon('star') + (VIDEO_MODELS.find(m => m.id === state.settings.model)?.name || '') + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}${button('vc-settings', icon('settings') + `${state.settings.ratio} · 720p · ${state.settings.duration}s` + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}</div>${button('vc-generate', `<span>${state.busy ? state.uploadLabel || (state.activity === 'generation' ? '提交中…' : '正在处理…') : currentTask()?.resultUrl ? '再次生成视频' : '立即生成视频'}</span><small>${esc(quoteText)}</small>`, 'primary vc-generate', canGenerate() ? '' : 'disabled')}${state.config?.generationEnabled === false ? '<p class="vc-quote">生成服务暂未连接</p>' : state.quote?.affordable === false ? '<p class="vc-quote vc-error">积分不足</p>' : state.quoteError ? `<p class="vc-quote vc-error">${esc(state.quoteError)}</p>` : ''}</div>`}</section>`;
+  return `<section class="vc-editor panel" aria-label="AI视频创作编辑区"><header class="vc-editor-heading">${button('vc-skills', `<img class="vc-skill-thumb" src="${SKILL_ART[current.id]}" alt=""><span><strong>${esc(current.name)}</strong><small>${esc(current.description)}</small></span>${icon('chevron')}`, 'skill-trigger', `aria-haspopup="dialog" aria-expanded="false" ${disabled ? 'disabled' : ''}`)}${button('vc-new', '＋ 新建', 'textbutton', state.busy ? 'disabled' : '')}</header><input type="file" id="vc-images" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-characters" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-audio" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" hidden>${workflowFeedback(ctx)}<span id="vc-draft-status" class="vc-draft-status" role="status">${state.draftSaveFailed ? '草稿未保存，请保留当前页面' : state.draftId ? '草稿已保存' : ''}</span>
+  ${state.stage === 'director' ? `<div class="vc-conversation-wrap"><div class="vc-conversation" aria-label="编导对话">${scriptCards || `<div class="vc-empty-director">${emptyDirectorArt()}<h1>你想创作一条什么视频？</h1><div class="vc-hooks">${VIDEO_HOOKS.map(h => button('vc-hook', esc(h), 'vc-hook', `data-value="${esc(h)}"`)).join('')}</div></div>`}</div>${button('vc-scroll-bottom', uiIcon('down'), 'vc-scroll-bottom', 'aria-label="回到对话底部" hidden')}</div><div class="vc-stage-link">${latest && !disabled ? `<div class="vc-next-step"><span>脚本已生成</span>${button('vc-apply', '应用最新脚本 ' + icon('arrow'), 'vc-next-apply', `data-id="${latest.id}"`)}</div>` : ''}${button('vc-stage-generation', '退出编导', 'vc-exit-director', disabled ? 'disabled' : '')}</div><div class="vc-composer">${composerMedia(ctx, assets, disabled)}<label class="sr-only" for="vc-message">编导要求</label><div id="vc-message" class="vc-rich-editor vc-director-input" role="textbox" aria-label="编导要求" aria-multiline="true" contenteditable="${!disabled}" data-placeholder="${latest ? '补充修改要求，或应用脚本生成视频' : '分析素材，并生成脚本'}">${promptMarkup(state.input, assets)}</div>${missingReferenceNotice()}${state.uploadLabel ? `<p class="vc-upload-status" role="status">${esc(state.uploadLabel)}</p>` : ''}<div class="vc-composer-bottom">${button('vc-director-settings', `${esc(t(VIDEO_LANGUAGES.find(l => l.id === state.settings.language)?.name))} · ${state.settings.duration}s ${uiIcon('down')}`, 'textbutton', `aria-label="配置脚本语言和视频时长" aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}${button('vc-director-reference', '@', 'vc-icon', `aria-label="在编导中引用素材" ${disabled || !assets.length ? 'disabled' : ''}`)}<span class="vc-consumed" aria-label="编导积分消耗">✦ ${esc(consumedCredits())}</span>${button('vc-voice', composerIcon('mic'), `vc-voice ${voiceSession ? 'is-listening' : ''}`, `aria-label="${voiceSession ? '停止语音输入' : '语音输入'}" aria-pressed="${Boolean(voiceSession)}" ${!voiceSession && (disabled || !speechEngine()) ? 'disabled' : ''}`)}${button('vc-send', op ? icon('clock') : '<span>↑</span>', 'vc-send', `aria-label="${imageCount ? '发送给超级编导' : '请先添加图片'}" ${!canSendDirector() ? 'disabled' : ''}`)}</div>${voiceSession ? '<p class="vc-voice-status" role="status">正在听，点击麦克风停止</p>' : ''}</div>` : `<div class="vc-generation"><div class="vc-generation-top"><span>${referenceAssets().length}/31</span><span>${button('vc-save-prompt', icon('save'), 'vc-icon', `aria-label="保存当前提示词" ${state.prompt.trim() ? '' : 'disabled'}`)}${button('vc-saved-prompts', icon('list'), 'vc-icon', 'aria-label="我的提示词"')}${button('vc-expand-editor', uiIcon('expand'), 'vc-icon', 'aria-label="展开编辑"')}</span></div><div class="vc-direct-input">${composerMedia(ctx, referenceAssets(), disabled)}<div id="vc-prompt" class="vc-rich-editor" role="textbox" aria-label="视频提示词" aria-multiline="true" contenteditable="${!disabled}" data-placeholder="描述画面、镜头、氛围和声音…">${promptMarkup(state.prompt, referenceAssets())}</div><div class="vc-rich-bottom">${button('vc-stage-director', uiIcon('sparkle') + '超级编导', 'vc-director-link', disabled ? 'disabled' : '')}${button('vc-reference-menu', '@', 'vc-icon', 'aria-label="引用素材"')}<span id="vc-prompt-count">${state.prompt.length}/12000</span>${button('vc-direct-voice', composerIcon('mic'), 'vc-voice', `aria-label="语音输入视频提示词" ${disabled || !speechEngine() ? 'disabled' : ''}`)}</div></div>${missingReferenceNotice()}<div class="vc-generation-settings">${button('vc-models', icon('star') + (VIDEO_MODELS.find(m => m.id === state.settings.model)?.name || '') + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}${button('vc-settings', icon('settings') + `${state.settings.ratio} · 720p · ${state.settings.duration}s` + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}</div>${button('vc-generate', `<span>${state.busy ? state.uploadLabel || (state.activity === 'generation' ? '提交中…' : '正在处理…') : currentTask()?.resultUrl ? '再次生成视频' : '立即生成视频'}</span><small>${esc(quoteText)}</small>`, 'primary vc-generate', canGenerate() ? '' : 'disabled')}${state.config?.generationEnabled === false ? '<p class="vc-quote">生成服务暂未连接</p>' : state.quote?.affordable === false ? '<p class="vc-quote vc-error">积分不足</p>' : state.quoteError ? `<p class="vc-quote vc-error">${esc(state.quoteError)}</p>` : ''}</div>`}</section>`;
 }
 function favorites() { return uiRead('favorites', []); }
 function hiddenTasks() { return uiRead('hidden-tasks', []); }
@@ -517,8 +607,8 @@ function preview(ctx) {
 }
 function formatTime(value) { return `${Math.floor(Number(value) / 60)}:${String(Math.floor(Number(value) % 60)).padStart(2, '0')}`; }
 function queue(ctx) {
-  const { esc, button, icon } = ctx, hiddenDrafts = uiRead('hidden-drafts', []), tasks = visibleTasks(), drafts = state.conversations.filter(c => !state.tasks.some(t => t.conversationId === c.id) && c.id !== state.session?.id && !hiddenDrafts.includes(c.id));
-  return `<aside class="vc-queue panel ${state.queue ? '' : 'is-collapsed'}" aria-label="视频任务队列"><header><strong>任务队列</strong><div>${hiddenTasks().length || hiddenDrafts.length ? button('vc-hidden-records', uiIcon('trash'), 'vc-icon', 'aria-label="已移除记录"') : ''}${button('vc-clear-drafts', '清空草稿', 'textbutton', drafts.length ? '' : 'disabled')}${button('vc-queue', uiIcon(state.queue ? 'fold' : 'unfold'), 'vc-icon', `aria-label="${state.queue ? '收起' : '展开'}视频任务队列"`)}</div></header><div class="vc-task-list">${state.session && !tasks.some(t => t.conversationId === state.session.id) ? `<article class="vc-task-row ${!state.selectedTask ? 'active' : ''}">${button('vc-current', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>当前创作</strong><small>${esc(VIDEO_SKILLS.find(s => s.id === state.skill).name)}</small></span>`, 'vc-task', 'title="当前创作"')}</article>` : ''}${tasks.slice(0, 50).map(t => `<article class="vc-task-row ${state.selectedTask === t.id ? 'active' : ''}">${button('vc-select-task', `<span class="vc-task-thumb">${taskThumbnail(t, ctx)}${busyTask(t) ? '<i class="vc-task-pulse"></i>' : ''}</span><span class="vc-task-copy"><strong>${esc(t.title)}</strong><span class="vc-task-status ${t.status === 'failed' ? 'failed' : ''}">${labels[t.status] || '处理中'}</span><small>${esc(new Date(t.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small></span>`, 'vc-task', `data-id="${t.id}" title="${esc(t.title)} · ${labels[t.status]}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-favorite', uiIcon('heart'), `vc-icon ${favorites().includes(t.id) ? 'is-favorite' : ''}`, `data-id="${t.id}" aria-label="${favorites().includes(t.id) ? '取消收藏' : '收藏'} ${esc(t.title)}" aria-pressed="${favorites().includes(t.id)}"`)}${button('vc-hide-task', uiIcon('trash'), 'vc-icon', `data-id="${t.id}" aria-label="移除任务 ${esc(t.title)}" ${busyTask(t) ? 'disabled' : ''}`)}</div></article>`).join('')}${drafts.map(c => `<article class="vc-task-row">${button('vc-open-conversation', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(c.title)}</strong><span class="vc-task-status">脚本草稿</span><small>${new Date(c.updatedAt).toLocaleDateString(uiLocale())}</small></span>`, 'vc-task', `data-id="${c.id}" title="${esc(c.title)}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-hide-draft', uiIcon('trash'), 'vc-icon', `data-id="${c.id}" aria-label="移除草稿 ${esc(c.title)}"`)}</div></article>`).join('')}${!tasks.length && !drafts.length && !state.session ? '<p class="vc-muted">还没有生成记录</p>' : ''}</div></aside>`;
+  const { esc, button, icon } = ctx, hiddenDrafts = uiRead('hidden-drafts', []), tasks = visibleTasks(), drafts = state.conversations.filter(c => !state.tasks.some(t => t.conversationId === c.id) && c.id !== state.session?.id && !hiddenDrafts.includes(c.id) && !localDrafts().some(d => d.conversationId === c.id));
+  return `<aside class="vc-queue panel ${state.queue ? '' : 'is-collapsed'}" aria-label="视频任务队列"><header><strong>任务队列</strong><div>${hiddenTasks().length || hiddenDrafts.length || uiRead('hidden-local-drafts', []).length ? button('vc-hidden-records', uiIcon('trash'), 'vc-icon', 'aria-label="已移除记录"') : ''}${button('vc-clear-drafts', '清空草稿', 'textbutton', drafts.length || localDrafts().some(d => d.id !== state.draftId && meaningfulDraft(d) && !uiRead('hidden-local-drafts', []).includes(d.id)) ? '' : 'disabled')}${button('vc-queue', uiIcon(state.queue ? 'fold' : 'unfold'), 'vc-icon', `aria-label="${state.queue ? '收起' : '展开'}视频任务队列"`)}</div></header><div class="vc-task-list">${localDraftRows(ctx)}${(state.draftId || state.session) && !tasks.some(t => t.conversationId === state.session?.id) ? `<article class="vc-task-row ${!state.selectedTask ? 'active' : ''}">${button('vc-current', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>当前创作</strong><small>${esc(VIDEO_SKILLS.find(s => s.id === state.skill).name)}</small></span>`, 'vc-task', 'title="当前创作"')}</article>` : ''}${tasks.slice(0, 50).map(t => `<article class="vc-task-row ${state.selectedTask === t.id ? 'active' : ''}">${button('vc-select-task', `<span class="vc-task-thumb">${taskThumbnail(t, ctx)}${busyTask(t) ? '<i class="vc-task-pulse"></i>' : ''}</span><span class="vc-task-copy"><strong>${esc(t.title)}</strong><span class="vc-task-status ${t.status === 'failed' ? 'failed' : ''}">${labels[t.status] || '处理中'}</span><small>${esc(new Date(t.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small></span>`, 'vc-task', `data-id="${t.id}" title="${esc(t.title)} · ${labels[t.status]}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-favorite', uiIcon('heart'), `vc-icon ${favorites().includes(t.id) ? 'is-favorite' : ''}`, `data-id="${t.id}" aria-label="${favorites().includes(t.id) ? '取消收藏' : '收藏'} ${esc(t.title)}" aria-pressed="${favorites().includes(t.id)}"`)}${button('vc-hide-task', uiIcon('trash'), 'vc-icon', `data-id="${t.id}" aria-label="移除任务 ${esc(t.title)}" ${busyTask(t) ? 'disabled' : ''}`)}</div></article>`).join('')}${drafts.map(c => `<article class="vc-task-row">${button('vc-open-conversation', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(c.title)}</strong><span class="vc-task-status">脚本草稿</span><small>${new Date(c.updatedAt).toLocaleDateString(uiLocale())}</small></span>`, 'vc-task', `data-id="${c.id}" title="${esc(c.title)}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-hide-draft', uiIcon('trash'), 'vc-icon', `data-id="${c.id}" aria-label="移除草稿 ${esc(c.title)}"`)}</div></article>`).join('')}${!tasks.length && !drafts.length && !state.session && !localDrafts().length ? '<p class="vc-muted">还没有生成记录</p>' : ''}</div></aside>`;
 }
 function videoTool(kind) {
   const task = currentTask(); if (!task?.resultUrl) return;
@@ -588,14 +678,16 @@ export async function useVideoMaterial(file, kind) {
 }
 export function bindVideoCreator(ctx) {
   context = ctx;
-  document.querySelector('#vc-message')?.addEventListener('input', e => { state.input = e.target.value; updateDirectorControls(); });
-  document.querySelector('#vc-message')?.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !locked()) { e.preventDefault(); document.querySelector('[data-action="vc-send"]')?.click(); } });
+  bindRichEditor(document.querySelector('#vc-message'));
+  if (!state.draftRestored) { state.draftRestored = true; const saved = uiRead('active-draft', null); if (saved && localDrafts().some(d => d.id === saved)) void perform(() => openLocalDraft(saved)); }
+
   bindRichEditor(document.querySelector('#vc-prompt'));
   bindPlayer();
   restoreView();
   document.querySelector('#vc-images').onchange = e => { if (e.target.files.length) void upload([...e.target.files]); e.target.value = ''; };
   document.querySelector('#vc-characters').onchange = e => { if (e.target.files.length) void upload([...e.target.files], 'character'); e.target.value = ''; };
   document.querySelector('#vc-audio').onchange = e => { if (e.target.files.length) void upload([...e.target.files], 'voice'); e.target.value = ''; };
+  for (const id of ['#vc-images', '#vc-characters', '#vc-audio']) document.querySelector(id).oncancel = () => { state.replaceUploadId = null; if (state.uploadReturnExpanded) { state.uploadReturnExpanded = false; expandEditor(); } };
   if (!timer) { void load(); timer = setInterval(() => void load(), 3000); }
   const bridge = ctx.configs.video, fingerprint = JSON.stringify({ prompt: bridge.prompt, files: bridge.files, skill: bridge.skill });
   if (state.bridge !== fingerprint) {
@@ -610,9 +702,10 @@ export function bindVideoCreator(ctx) {
 }
 function savedPrompts() { try { return JSON.parse(localStorage.getItem(accountStorageKey('video-creator-prompts')) || '[]').filter(p => typeof p.prompt === 'string').slice(0, 40); } catch { return []; } }
 async function openConversation(id, task) {
+  if (!persistDraft()) return;
   const account = state.owner, data = await request(`/conversations/${id}`); if (state.owner !== account) return; saveSession(data.conversation);
   const previousSettings = task?.settings || data.conversation.settings;
-  state.settings = editableSettings(previousSettings); state.input = ''; state.prompt = task?.prompt || '';
+  state.draftId = null; uiWrite('active-draft', null); state.settings = editableSettings(previousSettings); state.input = ''; state.prompt = task?.prompt || '';
   state.scriptId = task?.scriptId || null; state.referenceImageIds = task?.referenceImageIds || null; state.stage = task ? 'generation' : 'director'; state.selectedTask = task?.id || null; state.preview = 'result'; void quote();
   if (previousSettings.resolution !== state.settings.resolution && data.conversation.operations.some(o => o.result?.script)) replanResolution(previousSettings);
 }
@@ -627,8 +720,8 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-close-reference') document.querySelector('#modal').close();
   else if (action === 'vc-remove-reference') { document.querySelector('#modal').close(); void perform(async () => { saveSession((await request(`/conversations/${state.session.id}/assets/${el.dataset.id}`, { method: 'DELETE' })).conversation); state.scriptId = null; state.referenceImageIds = null; }); }
   else if (action === 'vc-voice') toggleVoice();
-  else if (action === 'vc-hook') { state.input = el.dataset.value; refresh(); }
-  else if (action === 'vc-new') { const config = state.config, tasks = state.tasks, conversations = state.conversations, bridge = state.bridge; reset(); Object.assign(state, { config, tasks, conversations, bridge }); refresh(); void quote(); }
+  else if (action === 'vc-hook') { state.input = el.dataset.value; persistDraft(true); refresh(); }
+  else if (action === 'vc-new') { stopVoice(); if (!persistDraft()) return true; const config = state.config, tasks = state.tasks, conversations = state.conversations, bridge = state.bridge; reset(); Object.assign(state, { config, tasks, conversations, bridge, draftRestored: true }); uiWrite('active-draft', null); refresh(); void quote(); }
   else if (action === 'vc-skills') skillPicker(el);
   else if (action === 'vc-skill') { closePopover(); document.querySelector('#modal').close(); void perform(async () => { const skill = VIDEO_SKILLS.find(s => s.id === el.dataset.value); if (!skill) return; if (state.session) { const data = await request(`/conversations/${state.session.id}`, { ...post({ skill: skill.id, settings: state.settings }), method: 'PATCH' }); saveSession(data.conversation); } state.skill = skill.id; state.scriptId = null; state.pendingScriptRequest = null; state.generationRequest = null; state.stage = 'director'; state.prompt = ''; state.referenceImageIds = null; }); }
   else if (action === 'vc-settings' || action === 'vc-models' || action === 'vc-director-settings') settings(ctx, action === 'vc-models' ? 'models' : action === 'vc-director-settings' ? 'director' : 'generation', el);
@@ -639,6 +732,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-refresh') { state.error = ''; state.errorSource = ''; void load(); }
   else if (action === 'vc-current') { state.selectedTask = null; state.preview = 'result'; refresh(); }
   else if (action === 'vc-select-task') { const task = state.tasks.find(t => t.id === el.dataset.id); if (task) void perform(() => openConversation(task.conversationId, task)); }
+  else if (action === 'vc-open-local-draft') void perform(() => openLocalDraft(el.dataset.id));
   else if (action === 'vc-open-conversation') void perform(() => openConversation(el.dataset.id));
   else if (action === 'vc-remove') void perform(async () => { saveSession((await request(`/conversations/${state.session.id}/assets/${el.dataset.id}`, { method: 'DELETE' })).conversation); state.scriptId = null; });
   else if (action === 'vc-send') {
@@ -694,7 +788,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-use-prompt') void useSavedPrompt(el.dataset.id);
   return true;
 }
-export function disposeVideoCreator() { closePopover(); stopRecording(true); stopVoice(); clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }
+export function disposeVideoCreator() { closePopover(); stopRecording(true); stopVoice(); persistDraft(); clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }
 
 function restoreView() {
   const view = state.view; state.view = null;
@@ -722,25 +816,14 @@ function restoreView() {
 }
 async function useSavedPrompt(id) {
   const item = savedPrompts().find(p => p.id === id); if (!item || locked()) return;
-  document.querySelector('#modal').close();
-  if (item.references?.length) {
-    await perform(async () => {
-      const account = state.owner, files = await Promise.all(item.references.map(async a => ({ file: await fileForAsset(a), purpose: videoAssetPurpose(a), origin: a })));
-      if (state.owner !== account) return;
-      state.session = null; state.selectedTask = null; state.draftRequestId = null;
-      if (VIDEO_MODELS.some(m => m.id === item.settings?.model)) state.settings = editableSettings(item.settings);
-      const conversationId = await ensureSession();
-      for (let i = 0; i < files.length; i++) {
-        if (state.owner !== account) return;
-        state.uploadLabel = `准备参考素材 ${i + 1}/${files.length}`; refresh();
-        const { file, purpose, origin } = files[i], data = await request(`/conversations/${conversationId}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': purpose }, body: file });
-        if (state.owner !== account) return; saveSession(data.conversation); rememberOrigin(state.session.assets.findLast(a => a.name === file.name), origin);
-      }
-      state.prompt = item.prompt; state.stage = 'generation'; state.scriptId = null; state.referenceImageIds = null; state.quote = null; void quote();
-    });
-  } else {
-    state.prompt = item.prompt; state.stage = 'generation'; if (VIDEO_MODELS.some(m => m.id === item.settings?.model)) state.settings = editableSettings(item.settings); state.scriptId = null; state.referenceImageIds = null; state.quote = null; refresh(); void quote();
-  }
+  const reopen = state.returnExpanded; state.returnExpanded = false; document.querySelector('#modal').close();
+  await perform(async () => {
+    if (item.references?.length) await replaceMaterialSet(item.references);
+    state.prompt = item.prompt; state.stage = 'generation'; state.scriptId = null;
+    if (VIDEO_MODELS.some(m => m.id === item.settings?.model)) state.settings = editableSettings(item.settings);
+    state.quote = null; void quote();
+  });
+  if (reopen) expandEditor();
 }
 function confirmListAction(kind, id) {
   const clear = kind === 'drafts';
@@ -748,7 +831,10 @@ function confirmListAction(kind, id) {
 }
 function handleUiAction(action, el, ctx) {
   const { esc, button } = ctx;
-  if (action === 'vc-sidebar') { state.sidebar = !state.sidebar; uiWrite('sidebar', state.sidebar); refresh(); }
+  if (action === 'vc-inline-replace') { const asset = referenceAssets().find(a => a.id === el.dataset.id); if (asset) referencePicker(videoAssetPurpose(asset), ctx, asset.id); }
+  else if (action === 'vc-inline-remove') { if (!locked()) { const reopen = document.querySelector('#modal').classList.contains('vc-expanded-modal'); state.returnExpanded = false; document.querySelector('#modal').close(); void perform(() => replaceMaterialSet(referenceAssets().filter(a => a.id !== el.dataset.id))).then(() => { if (reopen) expandEditor(); }); } }
+  else if (action === 'vc-toggle-materials') { state.expandedMaterials = !state.expandedMaterials; if (document.querySelector('#modal')?.classList.contains('vc-expanded-modal')) expandEditor(); else refresh(); }
+  else if (action === 'vc-sidebar') { state.sidebar = !state.sidebar; uiWrite('sidebar', state.sidebar); refresh(); }
   else if (action === 'vc-close-popover') closePopover();
   else if (action === 'vc-close-dialog') document.querySelector('#modal').close();
   else if (action === 'vc-scroll-bottom') document.querySelector('.vc-conversation')?.scrollTo({ top: document.querySelector('.vc-conversation').scrollHeight, behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
@@ -770,34 +856,39 @@ function handleUiAction(action, el, ctx) {
   }
   else if (action === 'vc-library-more') { state.picker.limit += 24; renderLibraryGrid(); }
   else if (action === 'vc-library-toggle') {
-    const ids = state.picker.ids, max = state.picker.purpose === 'voice' ? 1 : state.picker.purpose === 'character' ? 10 : 30;
+    const ids = state.picker.ids, max = state.picker.replaceId || state.picker.purpose === 'voice' ? 1 : state.picker.purpose === 'character' ? 10 : 30;
     if (ids.has(el.dataset.id)) ids.delete(el.dataset.id); else if (ids.size < max) ids.add(el.dataset.id); else if (max === 1) { ids.clear(); ids.add(el.dataset.id); } else ctx.toast(`最多选择${max}张素材。`);
     renderLibraryGrid();
   }
   else if (action === 'vc-role-category') { state.picker.category = el.dataset.value; renderLibraryGrid(); }
   else if (action === 'vc-create-character') createCharacter();
   else if (action === 'vc-library-upload') {
-    const purpose = state.picker.purpose;
+    const purpose = state.picker.purpose; state.replaceUploadId = state.picker.replaceId; state.uploadReturnExpanded = state.returnExpanded; state.returnExpanded = false;
     document.querySelector('#modal').close(); document.querySelector(({ reference: '#vc-images', character: '#vc-characters', voice: '#vc-audio' })[purpose])?.click();
   }
   else if (action === 'vc-cancel-library') { state.picker = null; document.querySelector('#modal').close(); }
-  else if (action === 'vc-confirm-library') { document.querySelector('#modal').close(); void perform(applyLibrarySelection); }
+  else if (action === 'vc-confirm-library') { const picker = state.picker, reopen = state.returnExpanded; state.returnExpanded = false; document.querySelector('#modal').close(); void perform(() => applyLibrarySelection(picker)).then(() => { if (reopen) expandEditor(); }); }
   else if (action === 'vc-preview-asset') previewAsset(el.dataset.id);
   else if (action === 'vc-lightbox-done') {
-    const old = state.libraryReturn; state.libraryReturn = null; document.querySelector('#modal').close(); if (old) { referencePicker(old.purpose, ctx); state.picker = old; document.querySelector('#vc-library-search').value = old.query; document.querySelectorAll('[data-action="vc-library-tab"]').forEach(b => b.classList.toggle('selected', b.dataset.value === old.tab)); document.querySelectorAll('[data-action="vc-library-source"]').forEach(b => b.classList.toggle('selected', b.dataset.value === old.source)); renderLibraryGrid(); }
+    const old = state.libraryReturn; state.libraryReturn = null; document.querySelector('#modal').close(); if (old) { referencePicker(old.purpose, ctx, old.replaceId); state.picker = old; document.querySelector('#vc-library-search').value = old.query; document.querySelectorAll('[data-action="vc-library-tab"]').forEach(b => b.classList.toggle('selected', b.dataset.value === old.tab)); document.querySelectorAll('[data-action="vc-library-source"]').forEach(b => b.classList.toggle('selected', b.dataset.value === old.source)); renderLibraryGrid(); }
   }
   else if (action === 'vc-zoom') {
     state.zoom = Math.max(0.25, Math.min(4, state.zoom + Number(el.dataset.value))); const image = document.querySelector('#vc-lightbox-image'); if (image) image.style.transform = `scale(${state.zoom})`; document.querySelector('#vc-zoom-label').textContent = Math.round(state.zoom * 100) + '%';
   }
+  else if (action === 'vc-director-reference') referenceMenu(document.querySelector('#vc-message'));
   else if (action === 'vc-reference-menu') referenceMenu(document.querySelector('#vc-expanded-prompt') || document.querySelector('#vc-prompt'));
   else if (action === 'vc-insert-reference') {
-    const root = document.getElementById(state.editorTarget), asset = referenceAssets().find(a => a.id === el.dataset.id); if (!root || !asset) return true;
+    const root = document.getElementById(state.editorTarget), asset = editorAssets(root).find(a => a.id === el.dataset.id); if (!root || !asset) return true;
     root.focus(); const range = state.editorRange;
     if (range && root.contains(range.commonAncestorContainer)) { const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); }
-    const token = asset.type === 'image' ? `@图片${referenceAssets().filter(a => a.type === 'image').indexOf(asset) + 1}` : '@声音1';
+    if (!range || !root.contains(range.commonAncestorContainer)) { const end = document.createRange(); end.selectNodeContents(root); end.collapse(false); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(end); }
+    const token = asset.type === 'image' ? `@图片${editorAssets(root).filter(a => a.type === 'image').indexOf(asset) + 1}` : '@声音1';
     if (range?.startContainer.nodeType === 3 && range.startOffset > 0 && range.startContainer.textContent[range.startOffset - 1] === '@') { range.setStart(range.startContainer, range.startOffset - 1); }
-    insertEditorText(root, token + ' '); closePopover();
-    const value = readPromptEditor(root); root.innerHTML = promptMarkup(value, referenceAssets()); state.prompt = value;
+    const marker = '\uE000'; insertEditorText(root, token + ' ' + marker); closePopover();
+    const marked = readPromptEditor(root), value = marked.replace(marker, ''); root.innerHTML = promptMarkup(marked, editorAssets(root)); state[editorField(root)] = value; persistDraft(true); root.focus();
+    document.querySelectorAll('#vc-prompt-count,#vc-expanded-count').forEach(el => { el.textContent = state.prompt.length + '/12000'; });
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT); let text;
+    while ((text = walker.nextNode())) { const at = text.textContent.indexOf(marker); if (at < 0) continue; text.textContent = text.textContent.replace(marker, ''); const caret = document.createRange(); caret.setStart(text, at); caret.collapse(true); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(caret); break; }
   }
   else if (action === 'vc-edit-prompt') savePromptDialog(el.dataset.id);
   else if (action === 'vc-delete-prompt') {
@@ -806,16 +897,18 @@ function handleUiAction(action, el, ctx) {
   else if (action === 'vc-confirm-delete-prompt') { try { writeUiStore(accountStorageKey('video-creator-prompts'), savedPrompts().filter(p => p.id !== el.dataset.id)); promptLibrary(); } catch { ctx.toast('删除失败，请重试。'); } }
   else if (action === 'vc-favorite') { const ids = favorites(); if (uiWrite('favorites', ids.includes(el.dataset.id) ? ids.filter(id => id !== el.dataset.id) : [...ids, el.dataset.id])) refresh(); }
   else if (action === 'vc-hidden-records') {
+    const locals = localDrafts().filter(d => uiRead('hidden-local-drafts', []).includes(d.id));
     const tasks = state.tasks.filter(t => hiddenTasks().includes(t.id)), drafts = state.conversations.filter(c => uiRead('hidden-drafts', []).includes(c.id));
-    modal('已移除记录', `<div class="vc-removed-list">${tasks.map(t => `<article><span>${esc(t.title)}</span>${button('vc-restore-record','恢复','vc-outline',`data-id="${t.id}" data-kind="task"`)}</article>`).join('')}${drafts.map(c => `<article><span>${esc(c.title)}</span>${button('vc-restore-record','恢复','vc-outline',`data-id="${c.id}" data-kind="draft"`)}</article>`).join('') || (!tasks.length ? '<p>没有已移除记录</p>' : '')}</div>`);
+    modal('已移除记录', `<div class="vc-removed-list">${locals.map(d => `<article><span>${esc(d.title)}</span>${button('vc-restore-record','恢复','vc-outline',`data-id="${esc(d.id)}" data-kind="local"`)}</article>`).join('')}${tasks.map(t => `<article><span>${esc(t.title)}</span>${button('vc-restore-record','恢复','vc-outline',`data-id="${t.id}" data-kind="task"`)}</article>`).join('')}${drafts.map(c => `<article><span>${esc(c.title)}</span>${button('vc-restore-record','恢复','vc-outline',`data-id="${c.id}" data-kind="draft"`)}</article>`).join('') || (!tasks.length && !locals.length ? '<p>没有已移除记录</p>' : '')}</div>`);
   }
   else if (action === 'vc-restore-record') {
-    const key = el.dataset.kind === 'task' ? 'hidden-tasks' : 'hidden-drafts'; uiWrite(key, uiRead(key, []).filter(id => id !== el.dataset.id)); document.querySelector('#modal').close(); refresh();
+    const key = el.dataset.kind === 'task' ? 'hidden-tasks' : el.dataset.kind === 'local' ? 'hidden-local-drafts' : 'hidden-drafts'; uiWrite(key, uiRead(key, []).filter(id => id !== el.dataset.id)); document.querySelector('#modal').close(); refresh();
   }
   else if (action === 'vc-hide-task') confirmListAction('task', el.dataset.id);
   else if (action === 'vc-hide-draft') confirmListAction('draft', el.dataset.id);
   else if (action === 'vc-clear-drafts') confirmListAction('drafts');
   else if (action === 'vc-confirm-hide') {
+    if (el.dataset.kind === 'drafts' && !uiWrite('hidden-local-drafts', localDrafts().filter(d => d.id !== state.draftId).map(d => d.id))) return true;
     if (el.dataset.kind === 'task') { if (!uiWrite('hidden-tasks', [...hiddenTasks(), el.dataset.id])) return true; if (state.selectedTask === el.dataset.id) state.selectedTask = null; }
     else { const ids = uiRead('hidden-drafts', []), next = el.dataset.kind === 'drafts' ? state.conversations.filter(c => c.id !== state.session?.id && !state.tasks.some(t => t.conversationId === c.id)).map(c => c.id) : [el.dataset.id]; if (!uiWrite('hidden-drafts', [...new Set([...ids, ...next])])) return true; }
     document.querySelector('#modal').close(); refresh();
@@ -831,6 +924,12 @@ function handleUiAction(action, el, ctx) {
   return true;
 }
 document.addEventListener('pointerdown', event => {
+  const referenceButton = event.target.closest('[data-action="vc-reference-menu"],[data-action="vc-director-reference"]');
+  if (referenceButton) {
+    const root = referenceButton.dataset.action === 'vc-director-reference' ? document.querySelector('#vc-message') : document.querySelector('#vc-expanded-prompt') || document.querySelector('#vc-prompt');
+    const selection = window.getSelection();
+    if (root && selection?.rangeCount && root.contains(selection.anchorNode)) { state.referenceCaret = { target: root.id, range: selection.getRangeAt(0).cloneRange() }; event.preventDefault(); }
+  }
   if (!state?.popover || event.target.closest('.vc-popover,[data-popover-open]')) return;
   closePopover();
 });
@@ -848,5 +947,7 @@ document.querySelector('#modal')?.addEventListener('close', () => {
   const dialog = document.querySelector('#modal'); if (dialog.open) return;
   const expanded = dialog.classList.contains('vc-expanded-modal');
   stopRecording(true); state && (state.picker = null); dialog.classList.remove('vc-dialog', 'vc-expanded-modal', 'vc-lightbox-modal', 'vc-asset-modal', 'vc-tool-modal');
-  if (expanded) refresh();
+  if (state?.returnExpanded) { state.returnExpanded = false; queueMicrotask(() => { if (context && !dialog.open && document.body.dataset.page === 'video') expandEditor(); }); }
+  if (expanded) { stopVoice(); }
+  if (state?.refreshQueued || expanded) { state.refreshQueued = false; refresh(); }
 });

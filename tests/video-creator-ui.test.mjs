@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as delay } from 'node:timers/promises';
 import { DEFAULT_VIDEO_SETTINGS, VIDEO_MODELS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES } from '../design/video-catalog.js';
+import { accountStorageKey } from '../design/account-storage.js';
 
 async function fixture(t, api) {
   const names = ['document', 'workspaceUser', 'fetch', 'setInterval', 'clearInterval', 'EventSource', 'SpeechRecognition', 'webkitSpeechRecognition', 'FormData', 'localStorage', 'innerWidth', 'innerHeight'];
   const old = Object.fromEntries(names.map(k => [k, globalThis[k]])), nodes = new Map();
   const node = k => {
-    if (!nodes.has(k)) nodes.set(k, { clicks: 0, dataset: {}, style: {}, childNodes: [], classList: {add(){},remove(){},toggle(){}},
+    if (!nodes.has(k)) nodes.set(k, { id: k.startsWith('#') ? k.slice(1) : '', clicks: 0, dataset: {}, style: {}, childNodes: [], classList: {add(){},remove(){},toggle(){},contains(){return false;}},
       click() { this.clicks++; }, close() { this.open=false; }, remove(){}, focus(){}, contains(){return false;},
       setAttribute(){}, getBoundingClientRect(){return {left:10,top:40,bottom:60,height:200,width:300};},
       querySelector(){return null;}, querySelectorAll(){return [];},
@@ -208,6 +209,47 @@ test('changing referenced materials forks the conversation, keeps old scripts in
   assert.equal(data.scriptCalls,0);
 });
 
+test('unsubmitted director and generation drafts survive new creation and reopen with the same settings and references', async t => {
+  const data = composerApi(), f = await fixture(t, data.api);
+  f.node('#vc-images').onchange({target:{files:[new File(['photo'],'门头.jpg',{type:'image/jpeg'})]}}); await delay(25);
+  f.node('#vc-message').input({target:{value:'门头之后展示@图片1'}});
+  f.action('vc-stage-generation'); f.node('#vc-prompt').input({target:{value:'手工调整的镜头 @图片1'}});
+  const key = accountStorageKey('video-creator-ui-drafts');
+  const draft = JSON.parse(localStorage.getItem(key))[0];
+  assert.equal(draft.input,'门头之后展示@图片1'); assert.equal(draft.stage,'generation');
+  f.action('vc-new'); assert.match(f.html(),/打开草稿/);
+  f.action('vc-open-local-draft',{id:draft.id}); await delay(25);
+  assert.match(f.html(),/手工调整的镜头/); assert.match(f.html(),/720p/);
+  f.action('vc-stage-director'); assert.match(f.html(),/门头之后展示/);
+  assert.equal(data.scriptCalls,0);
+});
+
+test('inline removal preserves wording, marks removed references and leaves old conversation intact', async t => {
+  const data = composerApi(), f = await fixture(t, data.api);
+  f.node('#vc-images').onchange({target:{files:['a.jpg','b.jpg'].map(name=>new File(['photo'],name,{type:'image/jpeg'}))}}); await delay(25);
+  const old = data.conversation;
+  f.node('#vc-message').input({target:{value:'先@图片1，再@图片2，保持原计划'}});
+  f.action('vc-inline-remove',{id:old.assets[0].id}); await delay(35);
+  assert.equal(old.assets.length,2); assert.equal(data.conversation.assets.length,1);
+  assert.match(f.html(),/\[已移除图片1\]/); assert.match(f.html(),/保持原计划/);
+  assert.match(f.html(),/data-action="vc-send"[^>]*disabled/);
+  const draft = JSON.parse(localStorage.getItem(accountStorageKey('video-creator-ui-drafts')))[0];
+  assert.equal(draft.input,'先[已移除图片1]，再@图片1，保持原计划');
+});
+
+test('failed material replacement leaves the previous draft and references available', async t => {
+  const data = composerApi(), base = data.api; let fail = false;
+  data.api = (path, options) => fail && options?.method === 'PUT' ? Response.json({error:'上传失败'},{status:500}) : base(path, options);
+  const f = await fixture(t, data.api);
+  f.node('#vc-images').onchange({target:{files:['a.jpg','b.jpg'].map(name=>new File(['photo'],name,{type:'image/jpeg'}))}}); await delay(25);
+  const original = data.conversation;
+  f.node('#vc-message').input({target:{value:'不要丢失 @图片2'}}); fail = true;
+  f.action('vc-inline-remove',{id:original.assets[0].id}); await delay(35);
+  const draft = JSON.parse(localStorage.getItem(accountStorageKey('video-creator-ui-drafts')))[0];
+  assert.equal(draft.conversationId,original.id); assert.equal(draft.input,'不要丢失 @图片2');
+  assert.match(f.html(),/上传失败/); assert.match(f.html(),/预览 a.jpg/); assert.match(f.html(),/预览 b.jpg/);
+});
+
 test('favorites and recoverable task removal are browser presentation changes and never delete server tasks', async t => {
   const data=composerApi(),f=await fixture(t,data.api),task={id:'finished',conversationId:'saved',status:'completed',title:'验收视频',duration:30,createdAt:Date.now(),settings:DEFAULT_VIDEO_SETTINGS,resultUrl:'/result.mp4'};
   data.tasks=[task];await f.poll();
@@ -283,9 +325,9 @@ test('voice input keeps final transcripts exactly once, never submits automatica
   const result = (text, isFinal) => Object.assign([{ transcript: text }], { isFinal });
   engine.onresult({results:[result('增加门店介绍。',true),result('等',false)]});
   engine.onresult({results:[result('增加门店介绍。',true),result('等一下。',true)]});
-  f.action('vc-voice'); assert.match(f.html(), /原要求\n增加门店介绍。等一下。/); assert.doesNotMatch(f.html(), /增加门店介绍。增加/); assert.equal(data.scriptCalls, 0);
+  f.action('vc-voice'); assert.match(f.html(), /原要求<br>增加门店介绍。等一下。/); assert.doesNotMatch(f.html(), /增加门店介绍。增加/); assert.equal(data.scriptCalls, 0);
   f.action('vc-voice'); engines.at(-1).onerror({error:'not-allowed'});
-  assert.match(f.html(), /请允许浏览器使用麦克风/); assert.match(f.html(), /原要求\n增加门店介绍。等一下。/); assert.doesNotMatch(f.html(), /停止语音输入/);
+  assert.match(f.html(), /请允许浏览器使用麦克风/); assert.match(f.html(), /原要求<br>增加门店介绍。等一下。/); assert.doesNotMatch(f.html(), /停止语音输入/);
   f.action('vc-voice'); const old = engines.at(-1); f.action('vc-new'); assert.equal(old.aborted, true);
   old.onresult({results:[result('旧录音不得进入新创作',true)]}); assert.doesNotMatch(f.html(), /旧录音不得进入新创作/);
 });

@@ -30,7 +30,8 @@ export function referenceChip(asset, token, index) {
 
 export function promptMarkup(value, assets = []) {
   const images = assets.filter(a => a.type === 'image'), audio = assets.filter(a => a.type === 'audio');
-  return renderMarkdown(String(value || '')).replace(/(^|>)([^<]*)(?=<|$)/g, (match, before, text) => before + text.replace(/@?(?:图片|image|声音|音频)(\d+)/gi, (token, number) => {
+  return renderMarkdown(String(value || '')).replace(/(^|>)([^<]*)(?=<|$)/g, (match, before, text) => before + text.replace(/\[已移除(?:图片|声音)\d+\]|@?(?:图片|image|声音|音频)(\d+)/gi, (token, number) => {
+    if (!number) return token;
     const list = /图片|image/i.test(token) ? images : audio;
     return referenceChip(list[Number(number) - 1], token, Number(number) - 1);
   }));
