@@ -8,6 +8,7 @@ import { generationPrice, generationPoints } from '../../design/malaysian-prices
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL } from './provider.mjs';
+import { safeVideoError } from './errors.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
@@ -57,6 +58,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
   scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
+  const diagnosticQueries = new Set();
+  const diagnosticSecrets = [config.video?.access, config.video?.secret, config.material?.access, config.material?.secret,
+    config.dashscopeKey, config.falKey, config.signingSecret,
+    ...Object.entries(env).filter(([key]) => /(?:KEY|TOKEN|SECRET|PASSWORD)$/.test(key)).map(([, value]) => value)];
+  const safeMessage = value => safeVideoError(value, diagnosticSecrets);
   const wan3Queue = createWan3Queue({ jobs, save, now });
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
   if (speech === undefined) speech = createSpeechService(env, costMeter.fetch);
@@ -71,6 +77,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   pixverseProvider ||= createPixverseProvider(config,costMeter.fetch);
   wanProvider ||= createWanProvider(config,costMeter.fetch);
   wan3Provider ||= createWan3Provider(config,costMeter.fetch);
+  const providerFor = task => task.model === WAN3_MODEL ? wan3Provider : task.model === WAN_MODEL ? wanProvider
+    : task.model === PIXVERSE_MODEL ? pixverseProvider : task.model === FAL_MODEL ? falProvider : provider;
   const models = MODELS.map(model => ({ ...model, enabled: Boolean(isFalReplacement(model.id)
     ? config.falEnabled && (!credits || costMeter.enabled) : model.id === WAN3_MODEL
       ? config.wan3Enabled : config.enabled) }));
@@ -197,8 +205,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video && video, targetDuration: task.targetDuration, segments: segmentView(task), queue: wan3Queue.view(task), photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
       captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck,
-      error: task.recoveryPolicy ? '' : task.error || '', code: task.recoveryPolicy ? undefined : task.code,
-      recovery: task.recovery && { state: task.recovery.state, message: task.recovery.message, nextAttemptAt: task.recovery.nextAttemptAt },
+      error: safeMessage(task.error), code: task.code,
+      recovery: task.recovery && { state: task.recovery.state, message: safeMessage(task.recovery.message), nextAttemptAt: task.recovery.nextAttemptAt },
       canResume: !expired && task.status === 'waiting' && task.recovery?.resumeStatus !== 'submitting' && !task.lipsync?.submitting
         && !(task.model === WAN3_MODEL && (task.segments || [task]).some(part => wan3Queue.active(part) && !segmentConfirmed(part)))
         && !task.voiceConversion?.submitting && !task.voiceConversion?.failed
@@ -286,6 +294,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     await save(task);
   }
   async function fail(task, message, code) {
+    message = safeMessage(message);
     if (task.recoveryPolicy) {
       const action = /REVIEW_REJECTED|MATERIAL_INVALID|SPEECH_INVALID/.test(code || '') ? 'input'
         : /POINTS|CREDITS|NOT_CONFIGURED|IP_DENIED|PROVIDER_REJECTED/.test(code || '') ? 'account'
@@ -306,7 +315,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           : action === 'limit' ? '自动处理次数已达上限，当前进度已保存。'
             : action === 'confirm' ? '等待确认原生成记录，当前进度已保存。' : '进度已保存，可以继续处理。',
       code: cause.code, at: now() };
-    task.error = cause.message; task.code = cause.code; task.status = 'waiting'; await save(task);
+    task.error = safeMessage(cause.message); task.code = cause.code; task.status = 'waiting'; await save(task);
   }
   async function recover(task, cause) {
     if (['VIDEO_LANGUAGE_UNCERTAIN', 'VIDEO_LOCALIZATION_FAILED', 'VIDEO_LOCALIZATION_UNCERTAIN'].includes(cause.code)) {
@@ -328,7 +337,42 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       nextAttemptAt: now() + Math.min(60_000, 5000 * 2 ** Math.min(attempts - 1, 4)),
       message: task.status === 'preparing' ? '正在整理原视频声音。' : task.status === 'downloading' ? '正在保存已有成片。'
         : '正在确认生成进度，已完成内容已保留。' };
-    task.error = cause.message; task.code = cause.code; await save(task);
+    task.error = safeMessage(cause.message); task.code = cause.code; await save(task);
+  }
+  function generationFailure(result, segment) {
+    const span = segment && Number.isFinite(segment.start) && Number.isFinite(segment.end)
+      ? `（${Number(segment.start.toFixed(2))}–${Number(segment.end.toFixed(2))} 秒）` : '';
+    return `${segment ? `第 ${segment.index + 1} 段${span}` : ''}视频生成失败：${safeMessage(result.error) || '上游未返回具体失败原因。'}`;
+  }
+  function materialFailure(kind, material) {
+    const part = /^segment-(\d+)$/.exec(kind);
+    return `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : part ? `参考视频第 ${Number(part[1]) + 1} 段` : '参考视频'}未通过素材审核：${safeMessage(material.error) || '上游未返回具体拒绝原因。'}`;
+  }
+  // Older tasks discarded provider reasons. Query their existing receipts once; never regenerate.
+  async function restoreFailureReason(task) {
+    if (!['waiting', 'failed'].includes(task.status) || isExpired(task) || task.failureReasonCheckedAt || diagnosticQueries.has(task.id)
+      || !['VIDEO_GENERATION_FAILED', 'VIDEO_REVIEW_REJECTED'].includes(task.code)) return;
+    diagnosticQueries.add(task.id);
+    try {
+      const taskProvider = providerFor(task);
+      if (task.code === 'VIDEO_GENERATION_FAILED') {
+        const segment = task.segments?.find(part => part.failed);
+        const id = segment?.providerId || (!task.segments && task.providerId);
+        if (!id) return;
+        const result = await taskProvider.query(id, segment ? segmentTask(task, segment) : task);
+        if (!result.failed) return;
+        task.error = generationFailure(result, segment);
+        if (segment) segment.error = safeMessage(result.error);
+      } else {
+        const entry = Object.entries(task.materials || {}).find(([, value]) => value.status === 3);
+        if (!entry) return;
+        const [kind, material] = entry, result = await taskProvider.queryMaterial(material.id);
+        if ((typeof result === 'number' ? result : result?.status) !== 3) return;
+        if (typeof result === 'object') Object.assign(material, result);
+        task.error = materialFailure(kind, material);
+      }
+      task.failureReasonCheckedAt = now(); await save(task);
+    } catch { /* Keep the original failure; a diagnostic query must not change recovery or billing. */ }
   }
   function signature(id, kind, expires) {
     return createHmac('sha256', config.signingSecret).update(`${id}:${kind}:${expires}`).digest('hex');
@@ -397,7 +441,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await save(task);
       if (result.completed || result.failed) await finishWan3Cost(task, result);
     }
-    if (result.failed) { await fail(task, '视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。', 'VIDEO_GENERATION_FAILED'); return; }
+    if (result.failed) { task.failureReasonCheckedAt = now(); await fail(task, generationFailure(result), 'VIDEO_GENERATION_FAILED'); return; }
     if (task.billing?.mode==='api_cost' && task.seedanceCostPrepared && (result.completed || result.url)) {
       await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',costCny:task.duration * cnyPerSecond(task),
         ...(task.providerId?{providerRequestId:task.providerId}:{})});
@@ -415,6 +459,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   async function submissionFailed(task, cause, segment) {
     if (fatal) throw cause;
+    const detail = `${segment ? `第 ${segment.index + 1} 段提交失败：` : ''}${safeMessage(cause.message)}`;
     const rejected = cause instanceof VideoError && ['VIDEO_PROVIDER_REJECTED', 'VIDEO_PROVIDER_IP_DENIED'].includes(cause.code);
     if (task.model === WAN3_MODEL && (cause.providerNotDispatched || rejected)) {
       const throttled = cause.code === 'VIDEO_PROVIDER_RATE_LIMITED';
@@ -426,11 +471,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (segment) { segment.providerDispatched = false; task.providerDispatched = task.segments.some(item => item.providerDispatched); }
       else task.providerDispatched = false;
       if (task.recoveryPolicy) task.status = 'reviewing';
-      await fail(task, cause.message, cause.code || 'CREDITS_UNAVAILABLE'); return;
+      await fail(task, detail, cause.code || 'CREDITS_UNAVAILABLE'); return;
     }
     if(task.billing?.mode==='api_cost' && costPrepared(task)) await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,
       receiptId:generationReceipt(task),...(rejected?{costCny:0}:{uncertain:true})}).catch(()=>{});
-    await fail(task, rejected ? cause.message : `${segment ? `第 ${segment.index + 1} 段` : ''}提交未获得确认，未自动重复生成。请核对模型服务记录后再创建任务，预留积分将退回。`,
+    await fail(task, rejected ? detail : `${segment ? `第 ${segment.index + 1} 段` : ''}提交未获得确认，未自动重复生成。具体原因：${safeMessage(cause.message) || '未收到上游响应。'}`,
       rejected ? cause.code : 'VIDEO_SUBMISSION_UNCERTAIN');
   }
   async function submitSegments(task, taskProvider) {
@@ -447,9 +492,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (result.url) segment.resultSource = result.url;
       if (task.model === WAN3_MODEL && result.usage) segment.wan3Usage = wan3Usage(result.usage);
       if (task.model === WAN3_MODEL) wan3Queue.observe(segment, result);
-      if (result.failed) segment.failed = true;
+      if (result.failed) { segment.failed = true; segment.error = safeMessage(result.error); task.failureReasonCheckedAt = now(); }
       await save(task);
-      if (result.failed) { await fail(task, `第 ${segment.index + 1} 段视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。`, 'VIDEO_GENERATION_FAILED'); return; }
+      if (result.failed) { await fail(task, generationFailure(result, segment), 'VIDEO_GENERATION_FAILED'); return; }
       if (!segmentConfirmed(segment)) { await fail(task, `第 ${segment.index + 1} 段未返回任务编号，未自动重试。请核对模型服务记录后再创建任务。`, 'VIDEO_SUBMISSION_UNCERTAIN'); return; }
     }
     if (task.model === WAN3_MODEL) wan3Queue.finish(task);
@@ -459,11 +504,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     task.lastCheckedAt = now();
     for (const segment of task.segments) {
       if (segment.resultSource) continue;
-      const result = await taskProvider.query(segment.providerId, segmentTask(task, segment));
+      let result;
+      try { result = await taskProvider.query(segment.providerId, segmentTask(task, segment)); }
+      catch (cause) { cause.message = `第 ${segment.index + 1} 段查询失败：${safeMessage(cause.message)}`; throw cause; }
       if (task.model === WAN3_MODEL) wan3Queue.observe(segment, result);
       if (task.model === WAN3_MODEL && result.usage) segment.wan3Usage = wan3Usage(result.usage);
-      if (result.failed) { segment.failed = true; await save(task); }
-      if (result.failed) { await fail(task, `第 ${segment.index + 1} 段视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。`, 'VIDEO_GENERATION_FAILED'); return; }
+      if (result.failed) { segment.failed = true; segment.error = safeMessage(result.error); task.failureReasonCheckedAt = now();
+        await fail(task, generationFailure(result, segment), 'VIDEO_GENERATION_FAILED'); return; }
       if (result.url) { segment.resultSource = result.url; await save(task); }
       else if (result.completed) {
         task.error = `第 ${segment.index + 1} 段已返回完成状态，但尚未提供可下载成片，正在重新查询原任务。`; task.code = 'VIDEO_RESULT_PENDING';
@@ -493,7 +540,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   async function processVideoTask(task) {
     if (closing || fatal) return;
     // Retain the provider only to finish tasks submitted before H3 Max was removed.
-    const taskProvider = task.model === WAN3_MODEL ? wan3Provider : task.model === WAN_MODEL ? wanProvider : task.model === PIXVERSE_MODEL ? pixverseProvider : task.model === FAL_MODEL ? falProvider : provider;
+    const taskProvider = providerFor(task);
     if (isExpired(task)) {
       if (task.status !== 'expired') {
         task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; delete task.recovery; await save(task);
@@ -568,21 +615,24 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         }
         const material = task.materials[kind];
         if (material.status !== 2) {
-          try { material.status = await taskProvider.queryMaterial(material.id); }
-          catch {
+          try {
+            const result = await taskProvider.queryMaterial(material.id);
+            if (typeof result === 'number') material.status = result;
+            else Object.assign(material, result);
+          } catch (cause) {
             material.queryFailures = (material.queryFailures || 0) + 1;
             if (material.queryFailures > MATERIAL_QUERY_RETRIES) {
-              await fail(task, `素材审核状态查询已重试 ${MATERIAL_QUERY_RETRIES} 次仍未成功，请稍后新建复刻。`, 'VIDEO_MATERIAL_QUERY_FAILED'); return;
+              await fail(task, `素材审核状态查询已重试 ${MATERIAL_QUERY_RETRIES} 次仍未成功：${safeMessage(cause.message)}`, 'VIDEO_MATERIAL_QUERY_FAILED'); return;
             }
-            task.error = `素材审核状态查询暂时失败，正在重试（${material.queryFailures}/${MATERIAL_QUERY_RETRIES}）。`;
+            task.error = `素材审核状态查询失败，正在重试（${material.queryFailures}/${MATERIAL_QUERY_RETRIES}）：${safeMessage(cause.message)}`;
             task.code = 'VIDEO_MATERIAL_QUERY_RETRYING'; await save(task); return;
           }
           delete material.queryFailures;
           if (task.code === 'VIDEO_MATERIAL_QUERY_RETRYING') { task.error = ''; delete task.code; }
         }
         if (material.status === 3) {
-          const part = /^segment-(\d)$/.exec(kind);
-          await fail(task, `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : part ? `参考视频第 ${Number(part[1]) + 1} 段` : '参考视频'}未通过素材审核，请更换清晰、符合要求的素材。`, 'VIDEO_REVIEW_REJECTED'); return;
+          task.failureReasonCheckedAt = now();
+          await fail(task, materialFailure(kind, material), 'VIDEO_REVIEW_REJECTED'); return;
         }
         await save(task);
       }
@@ -724,6 +774,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
   }
   async function processTask(task) {
+    await restoreFailureReason(task);
     if (task.model === WAN3_MODEL && task.status !== 'running') {
       // Partially submitted, stopped and held tasks can still occupy upstream slots.
       // Query them until terminal; stopping locally is not an upstream cancellation.
@@ -733,17 +784,19 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         try { result = await wan3Provider.query(part.providerId); } catch { continue; }
         wan3Queue.observe(part, result);
         if (result.usage) part.wan3Usage = wan3Usage(result.usage);
-        if (result.failed) part.failed = true;
+        if (result.failed) { part.failed = true; part.error = safeMessage(result.error); }
         if (result.url) part.resultSource = result.url;
         await save(task);
       }
       if (task.status === 'queued' && task.segments?.some(part => part.failed)) {
-        await fail(task, '视频生成失败，请检查参考素材后重新创建任务。', 'VIDEO_GENERATION_FAILED'); return;
+        const part = task.segments.find(part => part.failed); task.failureReasonCheckedAt = now();
+        await fail(task, generationFailure(part, part), 'VIDEO_GENERATION_FAILED'); return;
       }
     }
     if (!isExpired(task) && (task.status === 'waiting' || task.recovery?.nextAttemptAt > now())) return;
     if (task.recoveryPolicy && task.status !== 'queued' && ACTIVE.has(task.status) && now() >= (task.recoveryDeadline || task.startedAt + 30 * 60_000)) {
-      await hold(task, { code: 'VIDEO_RECOVERY_WAITING', recoveryAction: 'resume', message: '本轮等待时间已到，进度已保存。' }); return;
+      await hold(task, { code: task.code || 'VIDEO_RECOVERY_WAITING', recoveryAction: 'resume',
+        message: `自动处理已达到 30 分钟等待上限，任务已暂停。${task.error ? `最近一次错误：${safeMessage(task.error)}` : ''}` }); return;
     }
     if (task.voiceEngine !== 'indextts2' || !task.narration || !ACTIVE.has(task.status) || closing || fatal) return processVideoTask(task);
     const replies = await Promise.allSettled([processVideoTask(task),
@@ -780,15 +833,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (['VIDEO_NARRATION_FAILED', 'VIDEO_NARRATION_UNCERTAIN', 'VIDEO_LIPSYNC_FAILED', 'VIDEO_LIPSYNC_UNCERTAIN'].includes(cause.code)) {
           await fail(task, cause.message, cause.code); return;
         }
-        if (task.status === 'preparing') { await fail(task, cause instanceof VideoError ? cause.message : '素材自动处理未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
-        if (task.status === 'verifying' && !['VIDEO_NARRATION_PENDING', 'VIDEO_LIPSYNC_PENDING'].includes(cause.code)) { await fail(task, cause instanceof VideoError ? cause.message : '成片声音检查未完成，预留积分将退回。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
+        if (task.status === 'preparing') { await fail(task, safeMessage(cause.message) || '素材自动处理未完成，未返回具体原因。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
+        if (task.status === 'verifying' && !['VIDEO_NARRATION_PENDING', 'VIDEO_LIPSYNC_PENDING'].includes(cause.code)) { await fail(task, safeMessage(cause.message) || '成片声音检查未完成，未返回具体原因。', cause.code || 'VIDEO_SPEECH_FAILED'); return; }
         if (task.status === 'reviewing' && cause instanceof VideoError && ['VIDEO_PROVIDER_IP_DENIED', 'VIDEO_PROVIDER_REJECTED', 'VIDEO_MATERIAL_INVALID'].includes(cause.code)) {
           await fail(task, cause.message, cause.code); return;
         }
         // Queries and result downloads can be retried without another paid generation call.
-        task.error = ['VIDEO_NARRATION_PENDING', 'VIDEO_LIPSYNC_PENDING'].includes(cause.code) ? cause.message
-          : task.status === 'downloading' ? '成片正在保存，将自动重试下载。' : '模型服务暂时不可用，正在查询原任务。';
-        task.code = 'VIDEO_QUERY_PENDING'; await save(task);
+        task.error = safeMessage(cause.message) || (task.status === 'downloading' ? '成片下载失败，未返回具体原因，将自动重试。' : '模型查询失败，未返回具体原因，将自动重试。');
+        task.code = cause.code || 'VIDEO_QUERY_PENDING'; await save(task);
       }
       });
       processors.set(task.id, processing);

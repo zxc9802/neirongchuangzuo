@@ -96,7 +96,7 @@ test('Seedance 2.0 connection matches reference project and never returns creden
   });
   assert.deepEqual(await provider.createMaterial('https://workspace.example/signed', 'photo'), { id: 'photo-id', status: 1 });
   await provider.createMaterial('https://workspace.example/signed-video', 'video');
-  assert.equal(await provider.queryMaterial('photo-id'), 2);
+  assert.deepEqual(await provider.queryMaterial('photo-id'), { status: 2 });
   const task = { duration: 4, ratio: '9:16', materials: { photo: { id: 'photo-id' }, video: { id: 'video-id' } } };
   assert.equal((await provider.generate(task)).taskId, 'paid-id'); await provider.query('paid-id');
   assert.equal(requests[0].headers.projectCode, 'project'); assert.equal(requests[0].headers['X-Secret-Key'], 'secret');
@@ -1748,7 +1748,7 @@ test('explicit legacy audio selections remain compatible and reject invalid or v
   assert.equal(app.state.body.payload.params.generateAudio, true);
 });
 
-test('silent direct preparation retries then saves progress without leaking errors or sending original audio', async t => {
+test('silent direct preparation preserves the error while retrying without sending original audio', async t => {
   let clock = Date.now();
   const app = await fixture(t, { now: () => clock, speech: fakeSpeech(),
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 3 }; } });
@@ -1756,11 +1756,11 @@ test('silent direct preparation retries then saves progress without leaking erro
   await app.call(`/tasks/${id}/start`, { body: { sourceAudioMode: 'silent' } });
   for (let attempt = 1; attempt <= 2; attempt++) {
     const retrying = await app.until(id, task => task.recovery?.nextAttemptAt > clock);
-    assert.equal(retrying.error, ''); assert.equal(retrying.code, undefined);
+    assert.match(retrying.error, /参考视频去除原声失败/); assert.equal(retrying.code, 'VIDEO_AUDIO_REMOVE_FAILED');
     clock = retrying.recovery.nextAttemptAt;
   }
   const waiting = await app.until(id, task => task.status === 'waiting');
-  assert.equal(waiting.error, ''); assert.equal(waiting.code, undefined); assert.equal(waiting.canResume, true);
+  assert.match(waiting.error, /参考视频去除原声失败/); assert.equal(waiting.code, 'VIDEO_AUDIO_REMOVE_FAILED'); assert.equal(waiting.canResume, true);
   const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
   assert.equal(saved.code, 'VIDEO_AUDIO_REMOVE_FAILED');
   await app.close(); await app.open();
@@ -1777,7 +1777,7 @@ test('silent direct mode requires source audio before billing and never substitu
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   await app.call(`/tasks/${id}/start`, { body: { sourceAudioMode: 'silent' } });
   const waiting = await app.until(id, task => task.status === 'waiting');
-  assert.equal(waiting.error, ''); assert.equal(waiting.canReplaceSource, true);
+  assert.match(waiting.error, /无原声直配需先识别原视频的人声/); assert.equal(waiting.canReplaceSource, true);
   assert.equal(await app.wallet.reservation('alice', id), null);
   assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
   assert.equal((await readdir(join(app.root, 'video', id))).includes('source-silent.mp4'), false);
@@ -1823,7 +1823,7 @@ test('silent direct waits for source transcription without falling back to parti
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id);
   await app.call(`/tasks/${id}/start`, { body: { sourceAudioMode: 'silent' } });
   const task = await app.until(id, item => item.recovery?.state === 'retrying');
-  assert.equal(task.status, 'preparing'); assert.equal(task.speech, undefined); assert.equal(task.error, '');
+  assert.equal(task.status, 'preparing'); assert.equal(task.speech, undefined); assert.equal(task.error, 'ASR still processing');
   assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
 });
 
@@ -1905,7 +1905,7 @@ test('new tasks complete after restart without ASR, VAD or duration quality gate
   assert.equal(app.state.generations, 1);
 });
 
-async function segmentedReplica(t, { generate, probe, model = PREMIUM_MODEL, duration = 45 } = {}) {
+async function segmentedReplica(t, { generate, query, probe, model = PREMIUM_MODEL, duration = 45 } = {}) {
   const calls = { creates: [], generations: [], cuts: [], joins: [], downloads: [], muxes: [], conversions: 0, finished: new Set(), receiptsReady: true };
   const name = path => path.split(/[\\/]/).at(-1);
   const provider = {
@@ -1917,6 +1917,7 @@ async function segmentedReplica(t, { generate, probe, model = PREMIUM_MODEL, dur
       return generate ? generate(task) : { taskId: `job-${task.materials.video.id}` };
     },
     async query(id) {
+      if (query) return query(id);
       const source = calls.generations.find(item => `job-${item.material}` === id)?.source;
       return calls.finished.has(id) ? { completed: true, url: `https://cdn.example/${id}.mp4`,
         ...(model === WAN3_MODEL && calls.receiptsReady ? { usage: { duration: source * 2, input_video_duration: source, output_video_duration: source, SR: 720 } } : {}) } : {};
@@ -1946,6 +1947,46 @@ async function segmentedDraft(app, model = PREMIUM_MODEL) {
   await app.upload(id); await uploadVoice(app, id);
   return id;
 }
+
+for (const model of [PREMIUM_MODEL, WAN3_MODEL]) test(`${model} exposes a failed part's upstream reason and restores it for old held tasks`, async t => {
+  let queries = 0;
+  const app = await segmentedReplica(t, { model, query: async id => {
+    queries++;
+    return id === 'job-segment-1-id' ? parseGeneration({ success: true, msg: '操作成功！', data: { status: 3, success: false,
+      message: 'The request failed because the output may be related to copyright restrictions. Request id: copyright-2' } }) : {};
+  } });
+  const id = await segmentedDraft(app, model);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const held = await app.until(id, task => task.status === 'waiting');
+  assert.equal(held.code, 'VIDEO_GENERATION_FAILED');
+  assert.match(held.error, /第 2 段（[\d.]+–[\d.]+ 秒）视频生成失败：生成结果可能涉及版权限制/);
+  assert.match(held.error, /copyright-2/); assert.equal(held.resultUrl, null);
+  const generations = app.calls.generations.length;
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.error = '第 2 段视频生成失败，请检查参考素材。'; delete saved.failureReasonCheckedAt; delete saved.segments[1].error;
+  await writeFile(path, JSON.stringify(saved)); await app.open();
+  const restored = await app.until(id, task => task.error.includes('copyright-2'));
+  assert.equal(restored.status, 'waiting'); assert.equal(restored.code, 'VIDEO_GENERATION_FAILED');
+  assert.equal(app.calls.generations.length, generations, 'diagnostics must never submit another paid generation');
+  const after = queries;
+  // Wan may still poll other nonterminal jobs to release concurrency slots.
+  if (model !== WAN3_MODEL) { await delay(60); assert.equal(queries, after); }
+});
+
+test('single-part failure and rejected material return concrete reasons through the task API', async t => {
+  const app = await fixture(t, { query: async () => ({ failed: true, error: 'Output rejected: copyright restrictions' }) });
+  const id = await app.init(); await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  const failed = await app.until(id, task => task.status === 'failed');
+  assert.match(failed.error, /视频生成失败：Output rejected: copyright restrictions/);
+  assert.equal(failed.code, 'VIDEO_GENERATION_FAILED');
+  const materialApp = await fixture(t, { queryMaterial: async () => ({ status: 3, error: 'input image rejected: sensitive content' }) });
+  materialApp.state.review = 1;
+  const materialId = await materialApp.init(); await materialApp.upload(materialId); await materialApp.call(`/tasks/${materialId}/start`, { body: {} });
+  const rejected = await materialApp.until(materialId, task => task.status === 'failed');
+  assert.match(rejected.error, /人物照片未通过素材审核：input image rejected: sensitive content/);
+  assert.equal(materialApp.state.generations, 0);
+});
 
 test('qiya-2.5 generates a 45-second reference as two parts on a scene cut and converts the whole voice once', async t => {
   const app = await segmentedReplica(t), { calls } = app, pointsPerSecond = generationPrice('video', PREMIUM_MODEL).pointsPerSecond;
@@ -2343,12 +2384,12 @@ for (const duration of [3.22, 2.5]) test(`independent narration delivers a gener
   assert.equal(app.state.generations, 1);
 });
 
-test('failed IndexTTS preserves progress without exposing technical errors or substituting another voice', async t => {
+test('failed IndexTTS exposes its failure reason while preserving progress and the selected voice', async t => {
   const app = await fixture(t, { speech: fakeSpeech(), voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     narration: fakeNarration({ advance: async () => { throw new VideoError('配音失败', 502, 'VIDEO_NARRATION_FAILED'); } }), lipsync: fakeLipsync() });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2' } });
   const failed = await app.until(id, task => task.status === 'waiting');
-  assert.equal(failed.code, undefined); assert.equal(failed.error, ''); assert.equal(failed.resultUrl, null);
+  assert.equal(failed.code, 'VIDEO_NARRATION_FAILED'); assert.equal(failed.error, '配音失败'); assert.equal(failed.resultUrl, null);
   assert.equal(failed.canResume, true); assert.equal(failed.canCancel, true);
   const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
   assert.equal(saved.code, 'VIDEO_NARRATION_FAILED');
@@ -2367,7 +2408,7 @@ test('short original references wait before billing and can be replaced in the s
   assert.equal(response.status, 202);
   const waiting = (await response.json()).task;
   assert.equal(waiting.status, 'waiting'); assert.equal(waiting.canReplaceSource, true);
-  assert.equal(waiting.error, ''); assert.equal(waiting.canResume, false);
+  assert.match(waiting.error, /原视频需包含至少 5 秒原声/); assert.equal(waiting.canResume, false);
   assert.equal(await app.wallet.reservation('alice', id), null); assert.equal(app.state.generations, 0);
   duration = 6;
   assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO })).status, 200);
@@ -2392,7 +2433,7 @@ test('recovery resumes after restart with the saved video and narration progress
   await app.until(id, task => task.status === 'verifying');
   clock += 31 * 60_000;
   const waiting = await app.until(id, task => task.status === 'waiting');
-  assert.equal(waiting.canResume, true); assert.equal(waiting.error, ''); assert.equal(waiting.code, undefined);
+  assert.equal(waiting.canResume, true); assert.match(waiting.error, /30 分钟等待上限.*internal provider details/); assert.equal(waiting.code, 'VIDEO_NARRATION_PENDING');
   assert.equal(waiting.resultUrl, null);
   assert.ok((await readFile(join(app.root, 'video', id, 'generated.mp4'))).length);
   await app.close(); available = true; await app.open();

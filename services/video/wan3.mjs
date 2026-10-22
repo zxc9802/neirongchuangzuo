@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { generationBody, WAN3_MODEL, VideoError } from './provider.mjs';
+import { providerFailure, readProviderResponse, safeVideoError } from './errors.mjs';
 
 const base = 'https://dashscope.aliyuncs.com';
 // Beijing standard 720P: the published 30% discount ends after October 31.
@@ -31,26 +32,23 @@ export function createWan3Provider(config, fetchImpl = fetch) {
         headers: { Authorization: `Bearer ${config.dashscopeKey}`, 'Content-Type': 'application/json',
           ...(body ? { 'X-DashScope-Async': 'enable', 'X-DashScope-OssResourceResolve': 'enable' } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(60_000) });
+      const data = await readProviderResponse(response), detail = providerFailure(data, [config.dashscopeKey]);
       if (response.status === 429) {
         const retry = response.headers.get('retry-after');
         const retryAfterMs = retry ? /^\d+(\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now() : 5000;
-        await response.body?.cancel();
-        throw Object.assign(new VideoError('万相生成额度繁忙，正在排队等待。', 429, 'VIDEO_PROVIDER_RATE_LIMITED'),
+        throw Object.assign(new VideoError(`万相请求频率或并发额度受限（HTTP 429）${detail ? `：${detail}` : '，正在排队等待。'}`, 429, 'VIDEO_PROVIDER_RATE_LIMITED'),
           { providerNotDispatched: true, retryAfterMs: Number.isFinite(retryAfterMs) ? Math.max(1000, retryAfterMs) : 5000 });
       }
       if ([400, 401, 402, 403, 404, 422].includes(response.status)) {
-        await response.body?.cancel();
-        throw Object.assign(new VideoError('万相请求被拒绝，请检查阿里云密钥、模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED'), { providerNotDispatched: true });
+        throw Object.assign(new VideoError(`万相请求被拒绝（HTTP ${response.status}）${detail ? `：${detail}` : '，上游未返回具体原因。'}`, 502, 'VIDEO_PROVIDER_REJECTED'), { providerNotDispatched: true });
       }
-      if (!response.ok) { await response.body?.cancel(); throw new Error(); }
-      const chunks = []; let length = 0;
-      for await (const chunk of response.body) { length += chunk.length; if (length > 1024 * 1024) throw new Error(); chunks.push(chunk); }
-      const data = JSON.parse(Buffer.concat(chunks).toString());
-      if (data.code) throw Object.assign(new VideoError('万相请求被拒绝，请检查模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED'), { providerNotDispatched: true });
+      if (!response.ok) throw new VideoError(`万相请求暂未成功（HTTP ${response.status}）${detail ? `：${detail}` : '，上游未返回具体原因。'}`, 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+      if (data.code) throw Object.assign(new VideoError(`万相请求被拒绝：${detail}`, 502, 'VIDEO_PROVIDER_REJECTED'), { providerNotDispatched: true });
       return data;
     } catch (cause) {
       if (cause instanceof VideoError || cause.providerNotDispatched) throw cause;
-      throw new VideoError('万相服务暂时无法确认请求，请查询原任务。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+      const detail = safeVideoError([cause.name, cause.message, cause.cause?.code].filter(Boolean).join('：'), [config.dashscopeKey]);
+      throw new VideoError(`万相请求连接或响应读取失败：${detail}`, 502, 'VIDEO_PROVIDER_UNAVAILABLE');
     }
   }
   return {
@@ -70,7 +68,7 @@ export function createWan3Provider(config, fetchImpl = fetch) {
       form.append('file', new Blob([await readFile(path)], { type: contentType }), name);
       const response = await fetchImpl(host, { method: 'POST', body: form, redirect: 'error', signal: AbortSignal.timeout(120_000) });
       await response.body?.cancel();
-      if (!response.ok) throw new VideoError('万相素材上传暂未完成，将重试上传。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+      if (!response.ok) throw new VideoError(`万相素材上传失败（HTTP ${response.status}），将重试上传。`, 502, 'VIDEO_PROVIDER_UNAVAILABLE');
       return { id: `oss://${object}`, status: 2 };
     },
     async generate(task) {
@@ -80,7 +78,7 @@ export function createWan3Provider(config, fetchImpl = fetch) {
     },
     async query(id) {
       const data = await call(`/api/v1/tasks/${encodeURIComponent(id)}`), output = data.output;
-      if (['FAILED', 'CANCELED'].includes(output?.task_status)) return { taskId: id, failed: true };
+      if (['FAILED', 'CANCELED'].includes(output?.task_status)) return { taskId: id, failed: true, error: providerFailure(data, [config.dashscopeKey]) };
       if (output?.task_status !== 'SUCCEEDED') return { taskId: id };
       let url;
       try { const target = new URL(output.video_url); if (target.protocol === 'https:' && !target.username && !target.password) url = target.href; } catch { /* Retry the original task for its download URL. */ }

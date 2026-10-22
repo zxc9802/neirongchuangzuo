@@ -15,7 +15,7 @@ const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' }
 const LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英语' }, { id: 'ms', name: '马来语' }];
 const languageName = code => LANGUAGES.find(item => item.id === code)?.name || code || '待识别';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务').replace(/Wan\s*3\.0/gi, 'qiya-3.0');
-const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '进度已保存', waiting: '等待继续处理', cancelled: '已停止处理', expired: '已过期' };
+const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成失败', waiting: '处理暂停', cancelled: '已停止处理', expired: '已过期' };
 const taskLabel = task => task.status === 'queued' ? '排队等待生成' : task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
   ? '正在识别原视频语言' : task.languageRouting?.translate && task.status === 'preparing'
   ? '正在翻译台词并生成配音' : task.languageRouting?.translate && task.status === 'verifying'
@@ -73,14 +73,15 @@ function refreshCredits() {
   if (details) details.innerHTML = summary(context);
 }
 function failureMessage(task) {
-  return displayMessage(task?.canRecheck ? task.error?.replace('请核对素材后重新生成。', '请重新检查成片。') : task?.error);
+  const message = displayMessage(task?.canRecheck ? task.error?.replace('请核对素材后重新生成。', '请重新检查成片。') : task?.error);
+  return message ? `${message}${task.code ? `（错误码：${task.code}）` : ''}` : displayMessage(task?.recovery?.message);
 }
 function actionMessage() {
-  if (state.pollError) return '正在重新连接，已有任务进度已保留。';
+  if (state.pollError) return `${displayMessage(state.pollError)} 正在重新连接，已有任务进度已保留。`;
   if (state.error) return displayMessage(state.error);
   if (state.busy) return '';
   if (state.current?.status === 'queued') return '任务已进入队列，轮到后自动生成，无需重复提交。';
-  if (state.current?.recovery) return state.current.recovery.message;
+  if (state.current?.error || state.current?.recovery) return failureMessage(state.current);
   if (state.current?.status === 'verifying') return ['indextts2', 'chatterbox'].includes(state.current.voiceEngine) ? `${taskLabel(state.current)}，请稍候。` : '正在核对已有成片的台词与开口时间，请稍候。';
   if (state.current?.status === 'failed') return failureMessage(state.current);
   return !state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : '';
@@ -133,7 +134,7 @@ function result(ctx) {
   const task = state.current;
   if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p>${generationEstimate()}<span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
-  const message = task.recovery?.message || (task.status === 'failed' ? failureMessage(task) : displayMessage(task.error));
+  const message = failureMessage(task);
   return `<div class="replica-empty ${pending(task) ? 'replica-working' : ''}"><div class="replica-progress-symbol">${ctx.icon(task.status === 'failed' ? 'info' : 'video')}</div><h3>${taskLabel(task)}</h3><p>${ctx.esc(message || (pending(task) ? '任务正在处理，可以离开页面，稍后回来查看。' : task.status === 'draft' ? '素材就绪后，点击一键生成。' : '请重新上传素材创建任务。'))}</p>${pending(task) || task.status === 'draft' ? generationEstimate() : ''}</div>`;
 }
 function progress(ctx) {
@@ -156,7 +157,7 @@ function progress(ctx) {
     <small>任务编号：${ctx.esc(task.id)}</small>`;
 }
 function history(ctx) {
-  return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" ${state.busy ? 'disabled' : ''}><span>${taskLabel(task)}</span><small>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${ctx.esc(new Date(task.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} · ${task.duration || '—'} 秒</small></button>`).join('') : '<p class="replica-muted">你的复刻记录会保存在这里</p>';
+  return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" title="${ctx.esc(failureMessage(task))}" ${state.busy ? 'disabled' : ''}><span>${ctx.esc(['waiting', 'failed'].includes(task.status) && task.error ? failureMessage(task).split('原始原因：')[0] : taskLabel(task))}</span><small>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${ctx.esc(new Date(task.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} · ${task.duration || '—'} 秒</small></button>`).join('') : '<p class="replica-muted">你的复刻记录会保存在这里</p>';
 }
 function summary(ctx) {
   const task = state.current;

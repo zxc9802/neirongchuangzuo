@@ -432,6 +432,20 @@ test('saved progress uses a neutral waiting state and resumes or stops the same 
   assert.deepEqual(calls, ['/api/video-replica/tasks/recovery-task/resume', '/api/video-replica/tasks/recovery-task/cancel']);
 });
 
+test('paused replicas show the specific reason and code instead of the generic recovery message, including polling updates', async t => {
+  const task = { id: 'specific-failure', status: 'waiting', createdAt: Date.now(), code: 'VIDEO_GENERATION_FAILED',
+    error: '第 2 段（14.4–23.5 秒）视频生成失败：生成结果可能涉及版权限制。',
+    recovery: { state: 'waiting', message: '进度已保存，可以继续处理。' }, canResume: true, canCancel: true };
+  const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.message(), /第 2 段.*版权限制.*VIDEO_GENERATION_FAILED/);
+  assert.match(page.html(), /<h3>处理暂停<\/h3><p>第 2 段/);
+  assert.doesNotMatch(page.html(), /进度已保存，可以继续处理/);
+  task.error = '第 2 段生成失败：InsufficientBalance，余额不足。'; await page.poll();
+  assert.match(page.message(), /InsufficientBalance/);
+  assert.match(page.node('#replica-result').innerHTML, /InsufficientBalance/);
+  assert.match(page.node('#replica-history').innerHTML, /InsufficientBalance/);
+});
+
 for (const [width, height] of [[720, 1280], [1280, 720], [720, 720], [720, 960]]) {
   test(`replica preview follows uploaded ${width}x${height} video dimensions`, async t => {
     const task = { id: 'aspect-task', status: 'completed', createdAt: Date.now(), ratio: '16:9',
@@ -699,9 +713,9 @@ test('recheck shows immediate progress and keeps the failure reason next to the 
   assert.match(page.message(), /正在核对已有成片/);
   task = { ...task, status: 'failed', canRecheck: true, error: '台词识别不完整，请核对素材后重新分析。' };
   await page.poll();
-  assert.equal(page.message(), task.error);
+  assert.equal(page.message(), `${task.error}（错误码：VIDEO_SPEECH_INVALID）`);
   await page.poll();
-  assert.equal(page.message(), task.error);
+  assert.equal(page.message(), `${task.error}（错误码：VIDEO_SPEECH_INVALID）`);
 });
 
 test('tasks without recoverable output do not request recheck', async t => {

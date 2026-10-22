@@ -1,3 +1,5 @@
+import { providerFailure, readProviderResponse, safeVideoError } from './errors.mjs';
+
 export const MODEL = 'doubao-seedance-2-0-260128';
 export const PIXVERSE_MODEL = 'fal-ai/pixverse/swap';
 // Retained for recovery and settlement of tasks submitted before removal.
@@ -79,7 +81,7 @@ function nestedVideoUrl(value, key = '', depth = 0) {
     const found = nestedVideoUrl(child, `${key}.${name}`, depth + 1); if (found) return found;
   }
 }
-export function parseGeneration(body) {
+export function parseGeneration(body, secrets = []) {
   const layers = [body, body?.data, body?.data?.result, body?.result].filter(item => item && typeof item === 'object');
   const first = keys => layers.flatMap(layer => keys.map(key => layer[key])).find(value => value !== undefined && value !== null && value !== '');
   const status = String(first(['status', 'state', 'task_status']) ?? '').trim().toLowerCase();
@@ -88,10 +90,12 @@ export function parseGeneration(body) {
   // Seedance queryResult returns the finished media URL in message, including extensionless URLs.
   const url = layers.flatMap(layer => ['videoUrl', 'video_url', 'resultUrl', 'url', 'content', ...(completed ? ['message'] : [])].map(key => layer[key]))
     .find(value => typeof value === 'string' && /^https?:\/\//.test(value)) || nestedVideoUrl(body);
-  return { taskId: taskId == null ? null : String(taskId), url, completed,
-    failed: ['3', '4', 'failed', 'failure', 'error', 'cancelled', 'canceled'].includes(status) };
+  const failed = ['3', '4', 'failed', 'failure', 'error', 'cancelled', 'canceled'].includes(status);
+  return { taskId: taskId == null ? null : String(taskId), url, completed, failed,
+    ...(failed ? { error: providerFailure(body, secrets) } : {}) };
 }
 export function createVideoProvider(config, fetchImpl = fetch) {
+  const secrets = [config.video, config.material].flatMap(value => [value?.access, value?.secret]);
   async function call(kind, path, body) {
     const values = config[kind];
     let response;
@@ -99,35 +103,35 @@ export function createVideoProvider(config, fetchImpl = fetch) {
       response = await fetchImpl(new URL(path, values.base), { method: 'POST', redirect: 'error',
         headers: { 'Content-Type': 'application/json', projectCode: values.project, 'X-Access-Key': values.access, 'X-Secret-Key': values.secret },
         body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
+      const data = await readProviderResponse(response);
+      const detail = providerFailure(data, secrets);
       if (response.status >= 500 || [408, 429].includes(response.status)) {
-        await response.body?.cancel().catch(() => {});
-        throw new VideoError('模型服务暂时无法确认请求，请稍后查询原任务。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+        throw new VideoError(`模型请求暂未成功（HTTP ${response.status}）${detail ? `：${detail}` : '，上游未返回具体原因。'}`, 502, 'VIDEO_PROVIDER_UNAVAILABLE');
       }
-      const chunks = []; let length = 0;
-      for await (const chunk of response.body) { length += chunk.length; if (length > 1024 * 1024) throw new Error(); chunks.push(chunk); }
-      const data = JSON.parse(Buffer.concat(chunks).toString());
       if (!response.ok || data.success === false) {
         if (/白名单|whitelist|allowlist/i.test(String(data.msg || data.message || ''))) throw new VideoError('当前服务器 IP 未获模型服务授权，请管理员配置供应商 IP 白名单。', 502, 'VIDEO_PROVIDER_IP_DENIED');
-        throw new VideoError('模型服务拒绝了请求，请检查模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED');
+        throw new VideoError(`模型服务拒绝请求（HTTP ${response.status}）${detail ? `：${detail}` : '，上游未返回具体原因。'}`, 502, 'VIDEO_PROVIDER_REJECTED');
       }
       return data;
     } catch (error) {
       if (error instanceof VideoError) throw error;
-      throw new VideoError('模型服务暂时无法连接，请稍后查询原任务。', 502, 'VIDEO_PROVIDER_UNAVAILABLE');
+      const detail = safeVideoError([error.name, error.message, error.cause?.code].filter(Boolean).join('：'), secrets);
+      throw new VideoError(`模型请求连接或响应读取失败：${detail}`, 502, 'VIDEO_PROVIDER_UNAVAILABLE');
     }
   }
   return {
     async createMaterial(url, kind) {
       const result = await call('material', '/openApi/material/create', { name: `replica-${kind}`, originalUrl: url, type: 1, fileType: kind === 'photo' ? 1 : kind === 'voice' ? 2 : 3, thirdChannel: 1 });
       if (!result.data?.materialId) throw new VideoError('素材服务未返回素材编号。', 502, 'VIDEO_MATERIAL_INVALID');
-      return { id: String(result.data.materialId), status: Number(result.data.status || 1) };
+      return { id: String(result.data.materialId), status: Number(result.data.status || 1),
+        ...(Number(result.data.status) === 3 ? { error: providerFailure(result.data, secrets) } : {}) };
     },
     async queryMaterial(id) {
       const result = await call('material', '/openApi/material/pageList', { materialId: id, pageNo: 1, pageSize: 10 });
       const item = result.data?.records?.find(record => String(record.materialId) === id);
-      return Number(item?.status || 1);
+      return { status: Number(item?.status || 1), ...(Number(item?.status) === 3 ? { error: providerFailure(item, secrets) } : {}) };
     },
-    async generate(task) { return parseGeneration(await call('video', '/openApi/generate', generationBody(task))); },
-    async query(id) { return parseGeneration(await call('video', '/openApi/queryResult', { taskId: id, abilityType: 'VIDEO' })); },
+    async generate(task) { return parseGeneration(await call('video', '/openApi/generate', generationBody(task)), secrets); },
+    async query(id) { return parseGeneration(await call('video', '/openApi/queryResult', { taskId: id, abilityType: 'VIDEO' }), secrets); },
   };
 }
