@@ -173,18 +173,18 @@ test('draft edition switches persist, reject incompatible downgrades, and lock a
   assert.equal((await app.current(id)).model, PREMIUM_MODEL); assert.equal(app.state.generations, 1);
 });
 
-for (const model of [REPLICA_PRICES[0][0], PREMIUM_MODEL, WAN3_MODEL]) {
-  test(`${model} reports a 39-second reference as a duration error, not a pixel error`, async t => {
+for (const [model, duration, limit] of [[REPLICA_PRICES[0][0], 39.266016, 15], [PREMIUM_MODEL, 39.266016, 30], [WAN3_MODEL, 39.266016, 15]]) {
+  test(`${model} reports a ${Math.round(duration)}-second reference as a duration error, not a pixel error`, async t => {
     const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true },
-      probe: async () => ({ ...META, duration: 39.266016, width: 576, height: 1024 }) });
+      probe: async () => ({ ...META, duration, width: 576, height: 1024 }) });
     const id = randomUUID();
     await app.call('/tasks', { body: { requestId: id, model, voiceEngine: 'seedance' } });
     const response = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
     assert.equal(response.status, 400);
     const body = await response.json();
     assert.equal(body.code, 'VIDEO_DURATION_INVALID');
-    assert.match(body.error, /39\.27 秒/);
-    assert.match(body.error, new RegExp('2–' + (model === PREMIUM_MODEL ? 30 : 15) + ' 秒'));
+    assert.match(body.error, new RegExp(`${Number(duration.toFixed(2))} 秒`));
+    assert.match(body.error, new RegExp('2–' + limit + ' 秒'));
     assert.match(body.error, /截取/);
     assert.doesNotMatch(body.error, /像素|宽高/);
     assert.equal((await app.current(id)).video, undefined);
@@ -759,6 +759,7 @@ test('all four Seedance editions are offered and removed models cannot start or 
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '最多生成15秒视频，1元/秒');
   assert.equal(config.models[1].description, '最多生成30秒视频，1.5元/秒');
+  assert.deepEqual(config.models.map(model => model.extendedDuration), [undefined, 60, undefined, undefined, undefined]);
   assert.equal(config.model, 'doubao-seedance-2-0-260128');
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
   const id = await app.init(); await app.upload(id);
@@ -1902,6 +1903,198 @@ test('new tasks complete after restart without ASR, VAD or duration quality gate
   assert.equal(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()).toString(), 'CONVERTED');
   assert.equal(conversions, 1);
   assert.equal(app.state.generations, 1);
+});
+
+async function segmentedReplica(t, { generate, probe } = {}) {
+  const calls = { creates: [], generations: [], cuts: [], joins: [], downloads: [], muxes: [], conversions: 0, finished: new Set() };
+  const name = path => path.split(/[\\/]/).at(-1);
+  const provider = {
+    async createMaterial(url, kind) { calls.creates.push({ url, kind }); return { id: kind + '-id', status: 2 }; },
+    async queryMaterial() { return 2; },
+    async generate(task) {
+      calls.generations.push({ material: task.materials.video.id, duration: task.duration, source: task.video.duration, body: generationBody(task) });
+      return generate ? generate(task) : { taskId: `job-${task.materials.video.id}` };
+    },
+    async query(id) { return calls.finished.has(id) ? { url: `https://cdn.example/${id}.mp4` } : {}; },
+  };
+  const app = await fixture(t, { costMode: true, provider,
+    speech: fakeSpeech({ detect: async () => [{ start: 0.2, end: 10 }, { start: 10.6, end: 44 }] }),
+    voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
+    probe: probe || (async path => ({ ...META, duration: /segment-\d-result\.tmp$/.test(path) ? 25 : 45 })),
+    scenes: async () => ({ fps: 30, cuts: [21.03] }),
+    cutSegment: async (input, output, start, end) => { calls.cuts.push([name(input), name(output), start, end]); await writeFile(output, VIDEO); },
+    joinSegments: async (inputs, segments, output) => {
+      calls.joins.push({ inputs: inputs.map(name), spans: segments.map(segment => [segment.start, segment.end]), output: name(output) });
+      await writeFile(output, VIDEO); return { ...META, duration: 45, audio: false };
+    },
+    download: async (url, path) => { calls.downloads.push(url); await writeFile(path, VIDEO); },
+    voiceConversion: { enabled: true, advance: async (task, folder, save) => {
+      if (task.voiceConversion?.ready) return;
+      calls.conversions++; task.voiceConversion = { ready: true, duration: 45 };
+      await writeFile(join(folder, 'converted-voice.wav'), 'CONVERTED'); await save();
+    }, mux: async (_video, audio, output, duration) => { calls.muxes.push(duration); await writeFile(output, await readFile(audio)); } } });
+  return Object.assign(app, { calls });
+}
+async function segmentedDraft(app) {
+  const id = randomUUID();
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, targetDuration: 60 } })).status, 201);
+  await app.upload(id); await uploadVoice(app, id);
+  return id;
+}
+
+test('qiya-2.5 generates a 45-second reference as two parts on a scene cut and converts the whole voice once', async t => {
+  const app = await segmentedReplica(t), { calls } = app, pointsPerSecond = generationPrice('video', PREMIUM_MODEL).pointsPerSecond;
+  const id = await segmentedDraft(app);
+  const draft = await app.current(id);
+  assert.equal(draft.duration, 50); assert.equal(draft.estimatedPoints, 50 * pointsPerSecond);
+  assert.deepEqual(draft.segments, { total: 2, boundary: 'scene', seam: 21.033, submitted: 0, completed: 0, downloaded: 0 });
+  assert.equal(draft.video.boundaries, undefined);
+  await app.close(); await app.open();
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal((await app.wallet.reservation('alice', id)).reservedUnits, 50);
+  assert.equal((await app.wallet.snapshot('alice')).held, 50 * pointsPerSecond);
+  assert.deepEqual(running.segments, { total: 2, boundary: 'scene', seam: 21.033, submitted: 2, completed: 0, downloaded: 0 });
+  assert.deepEqual(calls.cuts, [['source.mp4', 'segment-0.mp4', 0, 21.033], ['source.mp4', 'segment-1.mp4', 21.033, 45]]);
+  assert.deepEqual(calls.creates.map(item => item.kind), ['photo', 'segment-0', 'segment-1']);
+  assert.deepEqual(calls.generations.map(item => [item.material, item.duration, item.source]), [['segment-0-id', 25, 21.033], ['segment-1-id', 25, 23.967]]);
+  for (const generation of calls.generations) {
+    assert.equal(generation.body.payload.params.generateAudio, false);
+    assert.ok(generation.body.prompt.includes(`视频1实际时长为${generation.source.toFixed(3)}秒`));
+  }
+  assert.deepEqual(calls.generations[1].body.payload.referVideoUrl, ['asset://segment-1-id']);
+  const signed = new URL(calls.creates[2].url);
+  const served = await fetch(app.base + signed.pathname + signed.search);
+  assert.equal(served.status, 200); assert.deepEqual(Buffer.from(await served.arrayBuffer()), VIDEO);
+  await app.close(); await app.open();
+  calls.finished.add('job-segment-0-id');
+  assert.equal((await app.until(id, task => task.segments.completed === 1)).status, 'running');
+  calls.finished.add('job-segment-1-id');
+  const completed = await app.until(id, task => task.status === 'completed' && task.billing?.status === 'settled');
+  assert.equal(calls.generations.length, 2); assert.equal(calls.conversions, 1);
+  assert.deepEqual(calls.downloads, ['https://cdn.example/job-segment-0-id.mp4', 'https://cdn.example/job-segment-1-id.mp4']);
+  assert.deepEqual(calls.joins, [{ inputs: ['segment-0-result.mp4', 'segment-1-result.mp4'], spans: [[0, 21.033], [21.033, 45]], output: 'generated.mp4' }]);
+  assert.deepEqual(calls.muxes, [45]);
+  assert.equal(completed.actualDuration, 45); assert.equal(completed.duration, 50); assert.equal(completed.segments.downloaded, 2);
+  assert.equal(completed.audioCheck.engine, 'chatterbox');
+  // Billing follows the delivered source length, never the padded provider tiers.
+  assert.equal(completed.billing.chargedPoints, 45 * pointsPerSecond); assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  assert.equal(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()).toString(), 'CONVERTED');
+});
+
+test('a restart between part submissions sends only unsent parts and holds an unconfirmed part', async t => {
+  const app = await segmentedReplica(t), { calls } = app;
+  const id = await segmentedDraft(app);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running');
+  const path = join(app.root, 'video', id, 'task.json');
+  async function interrupt(dispatched) {
+    await app.close();
+    const saved = JSON.parse(await readFile(path, 'utf8'));
+    saved.status = 'submitting'; delete saved.segments[1].providerId; saved.segments[1].providerDispatched = dispatched;
+    await writeFile(path, JSON.stringify(saved)); await app.open();
+  }
+  await interrupt(false);
+  await app.until(id, task => task.status === 'running' && task.segments.submitted === 2);
+  assert.deepEqual(calls.generations.map(item => item.material), ['segment-0-id', 'segment-1-id', 'segment-1-id']);
+  await interrupt(true);
+  const held = await app.until(id, task => task.status === 'waiting');
+  assert.match(held.recovery.message, /等待确认原生成记录/); assert.equal(held.canResume, false);
+  await delay(60);
+  assert.equal(calls.generations.length, 3);
+});
+
+test('a rejected second part waits for the account and resubmits only that part', async t => {
+  let rejections = 0;
+  const app = await segmentedReplica(t, { generate: task => {
+    if (task.materials.video.id === 'segment-1-id' && !rejections++) throw new VideoError('模型服务拒绝了请求，请检查模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED');
+    return { taskId: `job-${task.materials.video.id}` };
+  } });
+  const id = await segmentedDraft(app);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const held = await app.until(id, task => task.status === 'waiting');
+  assert.match(held.recovery.message, /等待账户或额度恢复/); assert.equal(held.canResume, true); assert.equal(held.segments.submitted, 1);
+  assert.equal((await app.call(`/tasks/${id}/resume`, { body: {} })).status, 200);
+  await app.until(id, task => task.status === 'running' && task.segments.submitted === 2);
+  assert.deepEqual(app.calls.generations.map(item => item.material), ['segment-0-id', 'segment-1-id', 'segment-1-id']);
+});
+
+test('a long qiya-2.5 reference requires whole-track voice conversion before any reservation', async t => {
+  const app = await segmentedReplica(t), id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, targetDuration: 60, voiceEngine: 'seedance', sourceAudioMode: 'original' } });
+  await app.upload(id);
+  const response = await app.call(`/tasks/${id}/start`, { body: {} });
+  assert.equal(response.status, 400);
+  const body = await response.json();
+  assert.equal(body.code, 'VIDEO_VOICE_ENGINE_INVALID'); assert.match(body.error, /超过 30 秒/);
+  assert.equal((await app.current(id)).status, 'draft');
+  assert.equal(await app.wallet.reservation('alice', id), null);
+  assert.equal(app.calls.generations.length, 0);
+});
+
+test('a custom duration clips a longer reference to its opening seconds before reserving points', async t => {
+  const app = await segmentedReplica(t, { probe: async path => ({ ...META,
+    duration: /segment-\d-result\.tmp$/.test(path) ? 25 : /upload\.tmp$/.test(path) ? 80 : 45 }) });
+  const { calls } = app, id = randomUUID(), pointsPerSecond = generationPrice('video', PREMIUM_MODEL).pointsPerSecond;
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, targetDuration: 45 } })).status, 201);
+  await app.upload(id); await uploadVoice(app, id);
+  const draft = await app.current(id);
+  assert.equal(draft.targetDuration, 45); assert.equal(draft.video.duration, 80);
+  assert.equal(draft.duration, 50); assert.equal(draft.segments.seam, 21.033);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const running = await app.until(id, task => task.status === 'running');
+  assert.equal(running.video.duration, 45);
+  assert.deepEqual(calls.cuts, [['source.mp4', 'source-clip.mp4', 0, 45],
+    ['source.mp4', 'segment-0.mp4', 0, 21.033], ['source.mp4', 'segment-1.mp4', 21.033, 45]]);
+  assert.equal((await app.wallet.reservation('alice', id)).reservedUnits, 50);
+  calls.finished.add('job-segment-0-id'); calls.finished.add('job-segment-1-id');
+  const completed = await app.until(id, task => task.status === 'completed' && task.billing?.status === 'settled');
+  assert.deepEqual(calls.muxes, [45]); assert.equal(completed.billing.chargedPoints, 45 * pointsPerSecond);
+});
+
+test('a custom duration below one call clips without splitting the generation', async t => {
+  const app = await segmentedReplica(t, { probe: async path => ({ ...META, duration: /upload\.tmp$/.test(path) ? 80 : 12 }) });
+  const { calls } = app, id = randomUUID();
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, targetDuration: 12 } })).status, 201);
+  await app.upload(id); await uploadVoice(app, id);
+  const draft = await app.current(id);
+  assert.equal(draft.duration, 12); assert.equal(draft.segments, undefined);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.deepEqual(calls.cuts, [['source.mp4', 'source-clip.mp4', 0, 12]]);
+  assert.deepEqual(calls.generations.map(item => [item.material, item.duration, item.source]), [['video-id', 12, 12]]);
+});
+
+test('the custom duration is opt-in, validated, and dropped by editions without it', async t => {
+  let duration = 45;
+  const app = await fixture(t, { probe: async () => ({ ...META, duration }), scenes: async () => ({ fps: 30, cuts: [] }) });
+  const id = randomUUID(), base = `/tasks/${id}`;
+  const code = async response => { assert.equal(response.status, 400); return (await response.json()).code; };
+  assert.equal(await code(await app.call('/tasks', { body: { requestId: randomUUID(), targetDuration: 30 } })), 'VIDEO_TARGET_DURATION_INVALID');
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL } })).status, 201);
+  // Off by default: the whole reference must still fit one 30-second call.
+  assert.equal(await code(await fetch(app.base + `/api/video-replica${base}/video`, { method: 'PUT', body: VIDEO })), 'VIDEO_DURATION_INVALID');
+  for (const targetDuration of [61, 1, 30.5, '45']) {
+    assert.equal(await code(await app.call(`${base}/duration`, { body: { targetDuration } })), 'VIDEO_TARGET_DURATION_INVALID');
+  }
+  assert.equal((await app.call(`${base}/duration`, { body: { targetDuration: 40 } })).status, 200);
+  await app.upload(id);
+  let draft = await app.current(id);
+  assert.equal(draft.targetDuration, 40); assert.equal(draft.segments.total, 2); assert.ok(draft.duration >= 40);
+  // Neither turning the option off nor a 15-second edition can hold the saved 45-second reference.
+  assert.equal(await code(await app.call(`${base}/duration`, { body: { targetDuration: null } })), 'VIDEO_DURATION_INVALID');
+  assert.equal(await code(await app.call(`${base}/model`, { body: { model: 'doubao-seedance-2-0-260128' } })), 'VIDEO_DURATION_INVALID');
+  draft = await app.current(id);
+  assert.equal(draft.targetDuration, 40); assert.equal(draft.model, PREMIUM_MODEL);
+  assert.equal((await app.call(`${base}/duration`, { body: { targetDuration: 20 } })).status, 200);
+  draft = await app.current(id);
+  assert.equal(draft.targetDuration, 20); assert.equal(draft.duration, 20); assert.equal(draft.segments, undefined);
+  duration = 10; await app.upload(id);
+  assert.equal((await app.call(`${base}/model`, { body: { model: 'doubao-seedance-2-0-260128' } })).status, 200);
+  draft = await app.current(id);
+  assert.equal(draft.targetDuration, undefined); assert.equal(draft.duration, 10);
+  assert.equal(await code(await app.call(`${base}/duration`, { body: { targetDuration: 12 } })), 'VIDEO_TARGET_DURATION_INVALID');
+  assert.equal((await app.wallet.snapshot('alice')).held, 0); assert.equal(app.state.generations, 0);
 });
 
 for (const message of [

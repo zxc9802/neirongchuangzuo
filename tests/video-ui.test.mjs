@@ -317,6 +317,22 @@ test('saved premium drafts keep their edition and a rejected downgrade retains t
   assert.match(page.cost(), /12300/);
 });
 
+test('a long premium replica shows its seam, part progress and per-part download', async t => {
+  const task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 50, estimatedPoints: 30750,
+    segments: { total: 2, boundary: 'scene', seam: 21.033, submitted: 0, completed: 0, downloaded: 0 } };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /分 2 段生成 · 第 21.03 秒接续（镜头切换处），整条统一换声/);
+  Object.assign(task, { status: 'running', startedAt: Date.now(), segments: { ...task.segments, submitted: 2, completed: 1 } });
+  await page.poll();
+  assert.match(page.html(), /分段生成：已提交 2 \/ 2 段 · 已完成 1 \/ 2 段/);
+  Object.assign(task, { status: 'downloading', downloadProgress: { receivedBytes: 1048576, totalBytes: 2097152, segment: 2, segments: 2 } });
+  await page.poll();
+  assert.match(page.node('#replica-result-summary').innerHTML, /正在保存并拼接两段成片/);
+  assert.match(page.node('#replica-progress').innerHTML, /保存成片（第 2 \/ 2 段）：1.0 MB \/ 2.0 MB/);
+  assert.doesNotMatch(page.node('#replica-progress').innerHTML, /分段生成：已提交/);
+});
+
 test('a shorter local replacement is saved before downgrading a premium draft and is not uploaded twice', async t => {
   let task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 20, estimatedPoints: 12300 }; const calls = [];
   const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
@@ -334,6 +350,59 @@ test('a shorter local replacement is saved before downgrading a premium draft an
   assert.match(page.html(), /单个人物 · 2–15 秒/); assert.match(page.cost(), /4100/);
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls.filter(path => path.endsWith('/video')).length, 1);
+});
+
+test('the custom duration is an opt-in qiya-2.5 setting sent with the new task', async t => {
+  let task; const posts = [];
+  const page = await fixture(t, { apiFetch: (path, options) => {
+    if (!options?.method) return;
+    const body = options.method === 'POST' ? JSON.parse(options.body) : {};
+    if (options.method === 'POST') posts.push({ path, body });
+    if (path.endsWith('/tasks')) task = { id: body.requestId, status: 'draft', model: body.model, targetDuration: body.targetDuration };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll();
+  assert.doesNotMatch(page.html(), /replica-custom-duration/);
+  page.node('#replica-models').onchange({ target: { value: PREMIUM_MODEL } }); await page.settle();
+  assert.match(page.html(), /id="replica-custom-duration"(?![^>]*checked)/);
+  assert.doesNotMatch(page.html(), /replica-target-duration/);
+  assert.match(page.html(), /不开启时按单次上限 30 秒生成；开启后可选 2–60 秒/); assert.match(page.html(), /单个人物 · 2–30 秒/);
+  page.node('#replica-custom-duration').onchange({ target: { checked: true } }); await page.settle();
+  assert.match(page.html(), /id="replica-custom-duration" checked/);
+  assert.match(page.html(), /id="replica-target-duration" min="2" max="60" step="1" value="60"/);
+  assert.match(page.html(), /单个人物 · 截取开头 60 秒/);
+  for (const [value, expected] of [['75', 60], ['', 60], ['45', 45]]) {
+    page.node('#replica-target-duration').onchange({ target: { value } }); await page.settle();
+    assert.match(page.html(), new RegExp(`单个人物 · 截取开头 ${expected} 秒`));
+  }
+  assert.equal(posts.length, 0);
+  for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(posts.find(item => item.path.endsWith('/tasks')).body.targetDuration, 45);
+  page.node('#replica-new').onclick();
+  assert.doesNotMatch(page.html(), /replica-custom-duration/);
+  page.node('#replica-models').onchange({ target: { value: PREMIUM_MODEL } }); await page.settle();
+  assert.match(page.html(), /单个人物 · 2–30 秒/);
+});
+
+test('a saved draft turns the custom duration off only after saving a pending local video', async t => {
+  let task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 50, estimatedPoints: 30750 }; const calls = [];
+  const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
+    if (!options?.method) return;
+    calls.push({ path, body: options.method === 'POST' ? JSON.parse(options.body) : undefined });
+    if (path.endsWith('/video')) task = { ...task, duration: 20, estimatedPoints: 12300 };
+    if (path.endsWith('/duration')) task = { ...task, targetDuration: JSON.parse(options.body).targetDuration ?? undefined };
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  page.node('#replica-custom-duration').onchange({ target: { checked: true } }); await page.settle();
+  assert.deepEqual(calls, [{ path: '/api/video-replica/tasks/editable-task/duration', body: { targetDuration: 60 } }]);
+  assert.match(page.html(), /单个人物 · 截取开头 60 秒/);
+  page.node('#replica-video').onchange({ target: { files: [new File(['shorter'], 'short.mp4')] } });
+  page.node('#replica-custom-duration').onchange({ target: { checked: false } }); await page.settle();
+  assert.deepEqual(calls.slice(1).map(item => [item.path, item.body]), [['/api/video-replica/tasks/editable-task/video', undefined],
+    ['/api/video-replica/tasks/editable-task/duration', { targetDuration: null }]]);
+  assert.match(page.html(), /单个人物 · 2–30 秒/); assert.doesNotMatch(page.html(), /replica-target-duration/);
 });
 
 test('automatic successful polling clears restart errors on first load and after a loaded page', async t => {

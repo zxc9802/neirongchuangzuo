@@ -22,6 +22,7 @@ import { createProviderStorage } from './provider-storage.mjs';
 import { languageRoute } from './languages.mjs';
 import { createLocalizationService } from './localization.mjs';
 import { createHeygenLipsyncService } from './heygen.mjs';
+import { planSegments, speechPauses, detectSceneCuts, cutVideoSegment, joinVideoSegments } from './segments.mjs';
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
@@ -32,7 +33,7 @@ const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const isFalReplacement = model => model === PIXVERSE_MODEL || model === WAN_MODEL;
 const error = (message, status = 400, code) => new VideoError(message, status, code);
 const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' }); res.end(JSON.stringify(value)); };
-export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo|voice|generated|narration|emotion-\d{1,2})$/.test(path);
+export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo|voice|generated|narration|emotion-\d{1,2}|segment-\d)$/.test(path);
 
 async function readBody(req, limit) {
   if (Number(req.headers['content-length']) > limit) throw error('文件过大，请压缩后重试。', 413, 'VIDEO_UPLOAD_TOO_LARGE');
@@ -52,7 +53,8 @@ async function readJSON(req) {
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo, restoreBorders = restoreVideoBorders,
   photo = normalizePhoto, voice = normalizeVoice, speech, captions = createCaptionService(env),
-  narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
+  scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
   if (speech === undefined) speech = createSpeechService(env, costMeter.fetch);
@@ -113,24 +115,54 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       ...(result.failed ? { costCny: 0 } : usage ? { costCny: usage.duration * cnyPerSecond(task) } : { uncertain: true }),
       ...(task.providerId ? { providerRequestId: task.providerId } : {}) });
   }
-  function videoDuration(video, modelId) {
-    const model = models.find(model => model.id === modelId);
-    if (video.duration < 2 || video.duration > model.maxDuration) {
-      const guidance = video.duration > model.maxDuration ? `请截取不超过 ${model.maxDuration} 秒的片段后上传。` : '请上传至少 2 秒的视频。';
-      throw error(`参考视频实际为 ${Number(video.duration.toFixed(2))} 秒，所选 ${model.name} 支持 2–${model.maxDuration} 秒。${guidance}`, 400, 'VIDEO_DURATION_INVALID');
+  // Without a custom duration the whole source must fit the model's own limit, as before.
+  // With one, only that many opening seconds are generated, up to the extended limit.
+  function selectedTargetDuration(value, modelId) {
+    if (value === undefined || value === null) return undefined;
+    const limit = models.find(model => model.id === modelId)?.extendedDuration;
+    if (!limit) throw error('所选生成版本不支持自定义时长。', 400, 'VIDEO_TARGET_DURATION_INVALID');
+    if (!Number.isInteger(value) || value < 2 || value > limit) throw error(`自定义时长需为 2–${limit} 之间的整数秒。`, 400, 'VIDEO_TARGET_DURATION_INVALID');
+    return value;
+  }
+  const targetFor = (task, modelId) => models.find(model => model.id === modelId)?.extendedDuration ? task.targetDuration : undefined;
+  const clip = (video, target) => target && video.duration > target ? { ...video, duration: target } : video;
+  function videoDuration(source, modelId, target) {
+    const model = models.find(model => model.id === modelId), limit = target ? model.extendedDuration : model.maxDuration;
+    const video = clip(source, target);
+    if (video.duration < 2 || video.duration > limit) {
+      const guidance = video.duration > limit ? `请截取不超过 ${limit} 秒的片段后上传。` : '请上传至少 2 秒的视频。';
+      throw error(`参考视频实际为 ${Number(video.duration.toFixed(2))} 秒，所选 ${model.name} 支持 2–${limit} 秒。${guidance}`, 400, 'VIDEO_DURATION_INVALID');
     }
     if (!modelId.startsWith('doubao-seedance-') && (video.width < 300 || video.height < 300)) {
       throw error(`参考视频为 ${video.width}×${video.height} 像素，宽高至少需要 300 像素。`, 400, 'VIDEO_DIMENSIONS_INVALID');
     }
     if (modelId === PIXVERSE_MODEL && Math.max(video.width, video.height) > 1920) throw error('PixVerse 参考视频的长边不能超过 1920 像素，请压缩后上传。');
     if (modelId === WAN3_MODEL) return Math.round(video.duration * 1000) / 1000;
+    const plan = segmentPlan(video, modelId);
+    if (plan) return plan.segments.reduce((total, segment) => total + segment.duration, 0);
     return model.durations.find(value => value >= Math.ceil(video.duration - 0.05)) || model.maxDuration;
   }
+  // Beyond one call's limit the (clipped) source is generated as two parts on its own timeline.
+  function segmentPlan(video, modelId) {
+    const model = models.find(model => model.id === modelId);
+    return model?.extendedDuration ? planSegments(video.duration, { maxSegment: model.maxDuration, durations: model.durations, ...video.boundaries }) : null;
+  }
+  async function segmentBoundaries(path, video, modelId) {
+    const [frames, intervals] = await Promise.all([scenes(path, models.find(model => model.id === modelId).extendedDuration).catch(() => ({ cuts: [] })),
+      video.audio && speech ? speech.detect(path).catch(() => []) : []]);
+    return { ...(frames.fps ? { fps: frames.fps } : {}), cuts: frames.cuts || [], pauses: speechPauses(intervals) };
+  }
+  // Each part is an ordinary generation of its own source span.
+  const segmentTask = (task, segment) => ({ ...task, duration: segment.duration,
+    video: { ...task.video, duration: Math.round((segment.end - segment.start) * 1000) / 1000 },
+    materials: { ...task.materials, video: task.materials[`segment-${segment.index}`] } });
+  const segmentResult = (task, segment) => join(folder(task), `segment-${segment.index}-result.mp4`);
+  const segmentConfirmed = segment => Boolean(segment.providerId || segment.resultSource);
   // Share the existing durable single-writer lock implementation, in a separate directory.
   const instance = createRequestLedger({ storageDir });
   let closing = false, fatal = false, timer, shutdownPromise;
   const folder = task => join(storageDir, task.id);
-  const file = (task, kind) => join(folder(task), kind === 'photo' ? 'photo.jpg' : kind === 'video' ? 'source.mp4' : kind === 'voice' ? 'reference.wav' : 'result.mp4');
+  const file = (task, kind) => join(folder(task), kind === 'photo' ? 'photo.jpg' : kind === 'video' ? 'source.mp4' : kind === 'voice' ? 'reference.wav' : /^segment-\d$/.test(kind) ? `${kind}.mp4` : 'result.mp4');
   const mime = kind => kind === 'photo' ? 'image/jpeg' : kind === 'voice' ? 'audio/wav' : 'video/mp4';
   const isExpired = task => !ACTIVE.has(task.status) && task.expiresAt <= now();
   function serialize(key, action) {
@@ -149,15 +181,28 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       } catch { fatal = true; throw error('任务存储暂时不可用，已暂停新的生成。', 503, 'VIDEO_STORAGE_UNAVAILABLE'); }
     });
   }
+  function segmentView(task) {
+    let plan = task.segments && { boundary: task.segmentBoundary, segments: task.segments };
+    if (!plan && task.status === 'draft' && task.video) {
+      const model = task.model || MODEL;
+      try { plan = segmentPlan(clip(task.video, targetFor(task, model)), model); } catch { /* The upload already rejected this duration. */ }
+    }
+    if (!plan) return undefined;
+    const count = key => plan.segments.filter(segment => segment[key]).length;
+    return { total: plan.segments.length, boundary: plan.boundary, seam: plan.segments[1].start,
+      submitted: count('providerId'), completed: count('resultSource'), downloaded: count('downloaded') };
+  }
   function view(task) {
     const settled = !credits || task.billing?.status === 'settled';
+    // Boundary candidates are internal planning data.
+    const { boundaries, ...video } = task.video || {};
     const expired = isExpired(task);
     const costPricing = task.billing?.mode === 'api_cost' || (!task.billing && costMeter.enabled);
     const pricingKey = task.billing?.pricingKey || task.pricingKey || (!task.billing && task.status === 'draft' ? generationPrice('video', task.model || MODEL)?.key : undefined);
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
-      ratio: task.ratio, video: task.video, photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
+      ratio: task.ratio, video: task.video && video, targetDuration: task.targetDuration, segments: segmentView(task), photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
       captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck, frameBorders: task.frameBorders,
       error: task.recoveryPolicy ? '' : task.error || '', code: task.recoveryPolicy ? undefined : task.code,
       recovery: task.recovery && { state: task.recovery.state, message: task.recovery.message, nextAttemptAt: task.recovery.nextAttemptAt },
@@ -361,6 +406,68 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     await save(task);
   }
+  async function submissionFailed(task, cause, segment) {
+    if (fatal) throw cause;
+    const rejected = cause instanceof VideoError && ['VIDEO_PROVIDER_REJECTED', 'VIDEO_PROVIDER_IP_DENIED'].includes(cause.code);
+    // A rejected part created no job, so resuming submits only the parts still without one.
+    if (cause.providerNotDispatched || segment && rejected) {
+      if (segment) { segment.providerDispatched = false; task.providerDispatched = task.segments.some(item => item.providerDispatched); }
+      else task.providerDispatched = false;
+      if (task.recoveryPolicy) task.status = 'reviewing';
+      await fail(task, cause.message, cause.code || 'CREDITS_UNAVAILABLE'); return;
+    }
+    if(task.billing?.mode==='api_cost' && costPrepared(task)) await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,
+      receiptId:generationReceipt(task),...(rejected?{costCny:0}:{uncertain:true})}).catch(()=>{});
+    await fail(task, rejected ? cause.message : `${segment ? `第 ${segment.index + 1} 段` : ''}提交未获得确认，未自动重复生成。请核对模型服务记录后再创建任务，预留积分将退回。`,
+      rejected ? cause.code : 'VIDEO_SUBMISSION_UNCERTAIN');
+  }
+  async function submitSegments(task, taskProvider) {
+    for (const segment of task.segments) {
+      if (segmentConfirmed(segment)) continue;
+      // Persist each part's dispatch boundary; a restart never replays an unconfirmed part.
+      segment.providerDispatched = true; await save(task);
+      let result;
+      try { result = await taskProvider.generate(segmentTask(task, segment)); }
+      catch (cause) { await submissionFailed(task, cause, segment); return; }
+      if (result.taskId) segment.providerId = result.taskId;
+      if (result.url) segment.resultSource = result.url;
+      await save(task);
+      if (result.failed) { await fail(task, `第 ${segment.index + 1} 段视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。`, 'VIDEO_GENERATION_FAILED'); return; }
+      if (!segmentConfirmed(segment)) { await fail(task, `第 ${segment.index + 1} 段未返回任务编号，未自动重试。请核对模型服务记录后再创建任务。`, 'VIDEO_SUBMISSION_UNCERTAIN'); return; }
+    }
+    task.status = 'running'; task.lastCheckedAt = now(); task.error = ''; delete task.code; await save(task);
+  }
+  async function querySegments(task, taskProvider) {
+    task.lastCheckedAt = now();
+    for (const segment of task.segments) {
+      if (segment.resultSource) continue;
+      const result = await taskProvider.query(segment.providerId, segmentTask(task, segment));
+      if (result.failed) { await fail(task, `第 ${segment.index + 1} 段视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。`, 'VIDEO_GENERATION_FAILED'); return; }
+      if (result.url) { segment.resultSource = result.url; await save(task); }
+      else if (result.completed) {
+        task.error = `第 ${segment.index + 1} 段已返回完成状态，但尚未提供可下载成片，正在重新查询原任务。`; task.code = 'VIDEO_RESULT_PENDING';
+      }
+    }
+    if (task.segments.some(segment => !segment.resultSource)) { await save(task); return; }
+    if (task.billing?.mode === 'api_cost' && task.seedanceCostPrepared) {
+      await credits.finishCostCall({ userId: task.userId, taskId: task.billingTaskId || task.id, receiptId: 'seedance',
+        costCny: task.duration * cnyPerSecond(task), providerRequestId: task.segments[0].providerId });
+    }
+    task.status = 'downloading'; task.error = ''; delete task.code; await save(task);
+  }
+  async function fetchResult(task, source, temporary, part) {
+    let savedAt = 0, progressWrites = Promise.resolve();
+    try {
+      await download(source, temporary, { onProgress: progress => {
+        task.downloadProgress = { receivedBytes: progress.bytes, totalBytes: progress.totalBytes, ...part };
+        if (progress.complete || now() - savedAt >= 1000) {
+          savedAt = now(); progressWrites = progressWrites.then(() => save(task));
+          void progressWrites.catch(() => {});
+        }
+      } });
+    } finally { await progressWrites; }
+    return probe(temporary);
+  }
   async function processVideoTask(task) {
     if (closing || fatal) return;
     // Retain the provider only to finish tasks submitted before H3 Max was removed.
@@ -385,6 +492,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         for (const name of ['conversion-source.wav', 'converted-voice.wav', 'converted-voice.wav.download.json',
           'converted-voice.wav.asr.wav', 'converted-voice.wav.asr.json', 'converted-voice.wav.asr.json.tmp',
           'converted-voice.wav.vad.pcm', 'verification-converted.json']) await rm(join(folder(task), name), { force: true });
+        for (const name of ['source-clip.mp4', 'source-clip.mp4.tmp.mp4', 'generated.mp4.join.mp4', 'result.mp4.join.mp4', ...(task.segments || []).flatMap(({ index }) => [`segment-${index}.mp4`,
+          `segment-${index}.mp4.tmp.mp4`, `segment-${index}-result.mp4`, `segment-${index}-result.tmp`, `segment-${index}-result.tmp.download.json`])]) {
+          await rm(join(folder(task), name), { force: true });
+        }
         task.cleaned = true; await save(task);
       }
       return;
@@ -418,7 +529,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (task.voiceEngine === 'indextts2') return;
     }
     if (task.status === 'reviewing') {
-      for (const kind of ['photo', 'video', ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
+      for (const segment of task.segments || []) {
+        if (segment.cut) continue;
+        await cutSegment(file(task, 'video'), file(task, `segment-${segment.index}`), segment.start, segment.end);
+        segment.cut = true; await save(task);
+      }
+      const videoKinds = task.segments ? task.segments.map(segment => `segment-${segment.index}`) : ['video'];
+      for (const kind of ['photo', ...videoKinds, ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
         if (!task.materials[kind]) {
           task.materials[kind] = task.model === WAN3_MODEL
             ? await wan3Provider.upload(kind === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4') : file(task, kind), mime(kind))
@@ -441,7 +558,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           delete material.queryFailures;
           if (task.code === 'VIDEO_MATERIAL_QUERY_RETRYING') { task.error = ''; delete task.code; }
         }
-        if (material.status === 3) { await fail(task, `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : '参考视频'}未通过素材审核，请更换清晰、符合要求的素材。`, 'VIDEO_REVIEW_REJECTED'); return; }
+        if (material.status === 3) {
+          const part = /^segment-(\d)$/.exec(kind);
+          await fail(task, `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : part ? `参考视频第 ${Number(part[1]) + 1} 段` : '参考视频'}未通过素材审核，请更换清晰、符合要求的素材。`, 'VIDEO_REVIEW_REJECTED'); return;
+        }
         await save(task);
       }
       if (Object.values(task.materials).some(value => value.status !== 2)) return;
@@ -459,35 +579,31 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       // Persist the dispatch boundary before making the paid call. Never replay it after a restart.
       task.status = 'submitting'; task.providerDispatched = true; await save(task);
-      try { await acceptResult(task, await taskProvider.generate(task)); }
-      catch (cause) {
-        if (fatal) throw cause;
-        if (cause.providerNotDispatched) {
-          task.providerDispatched = false;
-          if (task.recoveryPolicy) task.status = 'reviewing';
-          await fail(task, cause.message, cause.code || 'CREDITS_UNAVAILABLE'); return;
-        }
-        if(task.billing?.mode==='api_cost' && costPrepared(task)) await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,
-          receiptId:generationReceipt(task),...(cause.code==='VIDEO_PROVIDER_REJECTED'||cause.code==='VIDEO_PROVIDER_IP_DENIED'?{costCny:0}:{uncertain:true})}).catch(()=>{});
-        const rejected = cause instanceof VideoError && ['VIDEO_PROVIDER_REJECTED', 'VIDEO_PROVIDER_IP_DENIED'].includes(cause.code);
-        await fail(task, rejected ? cause.message : '提交未获得确认，未自动重复生成。请核对模型服务记录后再创建任务，预留积分将退回。', rejected ? cause.code : 'VIDEO_SUBMISSION_UNCERTAIN');
-      }
-    } else if (task.status === 'running') await acceptResult(task, await taskProvider.query(task.providerId, task));
+      if (task.segments) await submitSegments(task, taskProvider);
+      else try { await acceptResult(task, await taskProvider.generate(task)); }
+      catch (cause) { await submissionFailed(task, cause); }
+    } else if (task.status === 'running') {
+      if (task.segments) await querySegments(task, taskProvider);
+      else await acceptResult(task, await taskProvider.query(task.providerId, task));
+    }
     if (task.status === 'downloading') {
-      const temporary = join(folder(task), 'result.tmp');
-      let savedAt = 0;
-      let progressWrites = Promise.resolve();
-      try {
-        await download(task.resultSource, temporary, { onProgress: progress => {
-          task.downloadProgress = { receivedBytes: progress.bytes, totalBytes: progress.totalBytes };
-          if (progress.complete || now() - savedAt >= 1000) {
-            savedAt = now(); progressWrites = progressWrites.then(() => save(task));
-            void progressWrites.catch(() => {});
-          }
-        } });
-      } finally { await progressWrites; }
-      const metadata = await probe(temporary);
-      await rename(temporary, task.voice || task.captions ? join(folder(task), 'generated.mp4') : file(task, 'result'));
+      const target = task.voice || task.captions ? join(folder(task), 'generated.mp4') : file(task, 'result');
+      let metadata;
+      if (task.segments) {
+        for (const segment of task.segments) {
+          if (segment.downloaded) continue;
+          const temporary = join(folder(task), `segment-${segment.index}-result.tmp`);
+          const part = await fetchResult(task, segment.resultSource, temporary, { segment: segment.index + 1, segments: task.segments.length });
+          await rename(temporary, segmentResult(task, segment));
+          segment.downloaded = true; segment.actualDuration = Math.round(part.duration * 1000) / 1000; await save(task);
+        }
+        // Each part is trimmed to its source span, so the joined video keeps the source timeline.
+        metadata = await joinSegments(task.segments.map(segment => segmentResult(task, segment)), task.segments, target);
+      } else {
+        const temporary = join(folder(task), 'result.tmp');
+        metadata = await fetchResult(task, task.resultSource, temporary);
+        await rename(temporary, target);
+      }
       task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
       if (task.voice || task.captions) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
       else { await complete(task); }
@@ -647,7 +763,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (task.voice && task.actualDuration && !task.cleaned) {
         task.rawReady = await stat(join(folder(task), 'generated.mp4')).then(info => info.isFile() && info.size > 0, () => false);
       }
-      if (['reserving', 'submitting'].includes(task.status)) {
+      // Parts that were never sent or already have a job can continue without replaying a paid call.
+      if (task.status === 'submitting' && task.segments?.every(segment => !segment.providerDispatched || segmentConfirmed(segment))) {
+        task.status = 'reviewing'; task.providerDispatched = task.segments.some(segment => segment.providerDispatched); await save(task);
+      } else if (['reserving', 'submitting'].includes(task.status)) {
         await fail(task, '服务重启中断了提交确认，未自动重新生成。预留积分将退回，请核对原任务后重试。', 'VIDEO_INTERRUPTED');
       }
     }
@@ -658,16 +777,16 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     try {
       await ready;
       const url = new URL(req.url, 'http://localhost'), path = url.pathname;
-      const source = /^\/api\/video-replica\/source\/([a-f0-9-]{36})\/(video|photo|voice|generated|narration|emotion-\d{1,2})$/.exec(path);
+      const source = /^\/api\/video-replica\/source\/([a-f0-9-]{36})\/(video|photo|voice|generated|narration|emotion-\d{1,2}|segment-\d)$/.exec(path);
       if (source) {
         const task = jobs.get(source[1]), expires = Number(url.searchParams.get('expires')), supplied = url.searchParams.get('signature') || '';
         const valid = config.signingSecret && /^\d{13}$/.test(url.searchParams.get('expires') || '') && /^[a-f0-9]{64}$/.test(supplied)
           && timingSafeEqual(Buffer.from(supplied), Buffer.from(signature(source[1], source[2], expires)));
         // Keep the original signed URL usable while its generation is still active.
         if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || (expires <= now() && !ACTIVE.has(task.status)) || expires !== task.startedAt + DAY || task.status === 'expired') throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
-        const kind = source[2], emotion = /^emotion-(\d{1,2})$/.exec(kind);
+        const kind = source[2], emotion = /^emotion-(\d{1,2})$/.exec(kind), part = /^segment-(\d)$/.exec(kind);
         if (emotion ? !task.video?.audio || !task.narration?.segments[Number(emotion[1])]
-          : kind === 'generated' ? !task.rawReady : kind === 'narration' ? !task.narration?.ready : !task[kind]) throw error('素材尚未准备好。', 404, 'VIDEO_NOT_FOUND');
+          : part ? !task.segments?.[Number(part[1])]?.cut : kind === 'generated' ? !task.rawReady : kind === 'narration' ? !task.narration?.ready : !task[kind]) throw error('素材尚未准备好。', 404, 'VIDEO_NOT_FOUND');
         const input = emotion ? join(folder(task), 'narration', `${kind}.wav`) : kind === 'generated' ? join(folder(task), 'generated.mp4')
           : kind === 'narration' ? join(folder(task), 'narration.wav') : kind === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4')
           : source[2] === 'video' && task.videoCaptionsRemoved ? join(folder(task), 'source-clean.mp4') : file(task, source[2]);
@@ -701,13 +820,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
           const model = selectedModel(body.model);
           // Keep explicit legacy parameters compatible; new clients convert the source voice.
+          const targetDuration = selectedTargetDuration(body.targetDuration, model);
           const task = { id: body.requestId, userId, model, voiceEngine: selectedVoiceEngine(body.voiceEngine ?? 'chatterbox'),
-            sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model),
+            sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model), ...(targetDuration ? { targetDuration } : {}),
             status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
-      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|language|source-audio|analyze|speech|recheck|start|result|resume|cancel))?$/.exec(path);
+      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|duration|language|source-audio|analyze|speech|recheck|start|result|resume|cancel))?$/.exec(path);
       const task = match && jobs.get(match[1]);
       if (!task || task.userId !== userId) throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
       if (!match[2] && req.method === 'GET') { json(res, 200, { task: view(task) }); return; }
@@ -746,13 +866,31 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const body = await readJSON(req);
           if (task.status !== 'draft') throw error('任务已提交，不能切换生成版本。', 409);
           const model = selectedModel(body.model);
-          const duration = task.video ? videoDuration(task.video, model) : undefined;
+          // A custom duration belongs to editions that support it; others fall back to their own limit.
+          const target = targetFor(task, model);
+          const duration = task.video ? videoDuration(task.video, model, target) : undefined;
           task.model = model;
+          if (!target) delete task.targetDuration;
           if (isFalReplacement(model)) {
             if (task.sourceAudioMode === 'silent' && task.voiceEngine === 'seedance') task.voiceEngine = 'indextts2';
             task.sourceAudioMode = 'original';
           }
           if (task.video) task.duration = duration;
+          await save(task); json(res, 200, { task: view(task) }); return;
+        }
+        if (match[2] === 'duration' && req.method === 'POST') {
+          const body = await readJSON(req);
+          if (task.status !== 'draft') throw error('任务已提交，不能修改生成时长。', 409);
+          const model = task.model || MODEL, target = selectedTargetDuration(body?.targetDuration, model);
+          if (task.video) {
+            videoDuration(task.video, model, target);
+            if (segmentPlan(clip(task.video, target), model) && !task.video.boundaries) {
+              task.video = { ...task.video, boundaries: await segmentBoundaries(file(task, 'video'), task.video, model) };
+            }
+            // The seam, and with it the quoted tiers, depends on the detected boundaries.
+            task.duration = videoDuration(task.video, model, target);
+          }
+          if (target) task.targetDuration = target; else delete task.targetDuration;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'language' && req.method === 'POST') {
@@ -800,13 +938,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             await writeFile(temporary, bytes, { mode: 0o600 });
             let metadata = await probe(temporary);
             const model = selectedModel(models.some(model => model.id === task.model) ? task.model : MODEL);
-            videoDuration(metadata, model);
+            const target = targetFor(task, model);
+            videoDuration(metadata, model, target);
             if (model.startsWith('doubao-seedance-')) metadata = await normalizeSeedanceVideo(temporary, metadata);
-            const duration = videoDuration(metadata, model);
+            if (segmentPlan(clip(metadata, target), model)) metadata = { ...metadata, boundaries: await segmentBoundaries(temporary, metadata, model) };
+            const duration = videoDuration(metadata, model, target);
             task.model = model;
             task.video = metadata;
             delete task.languageRouting; delete task.languageDetection; delete task.localization;
-            delete task.voiceConversion;
+            delete task.voiceConversion; delete task.segments; delete task.segmentBoundary;
             delete task.videoAudioRemoved;
             delete task.videoCaptionsRemoved; delete task.captions; delete task.captionsChecked; delete task.captionCheck;
             delete task.speech;
@@ -887,7 +1027,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (voiceEngine === 'chatterbox' && sourceAudioMode !== 'original') throw error('音色转换需要保留原视频声音。', 400, 'VIDEO_SOURCE_AUDIO_MODE_INVALID');
           if (sourceAudioMode === 'silent' && !task.voice) throw error('请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
           if (isFalReplacement(model) && task.voice && !['indextts2', 'chatterbox'].includes(voiceEngine)) throw error(`${models.find(item => item.id === model).name} 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
-          videoDuration(task.video, model);
+          const target = targetFor(task, model);
+          if (!target) delete task.targetDuration;
+          videoDuration(task.video, model, target);
           if (model.startsWith('doubao-seedance-')) {
             const metadata = await normalizeSeedanceVideo(file(task, 'video'), task.video);
             if (metadata !== task.video) {
@@ -897,7 +1039,27 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
               delete task.materials.video;
             }
           }
-          const duration = videoDuration(task.video, model);
+          if (segmentPlan(clip(task.video, target), model)) {
+            // Whole-track conversion keeps one continuous voice across the joined parts.
+            if (voiceEngine !== 'chatterbox') throw error(`超过 ${models.find(item => item.id === model).maxDuration} 秒的生成时长需使用 Chatterbox 音色转换分段生成。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
+            if (!task.video.boundaries) task.video = { ...task.video, boundaries: await segmentBoundaries(file(task, 'video'), task.video, model) };
+          }
+          if (target && task.video.duration - target > 0.05) {
+            // Only the chosen opening seconds are generated; the clip replaces the draft source.
+            const clipped = join(folder(task), 'source-clip.mp4');
+            try { await cutSegment(file(task, 'video'), clipped, 0, target); }
+            catch { throw error('参考视频截取未完成，尚未扣费或提交生成，请稍后重试。', 502, 'VIDEO_CLIP_FAILED'); }
+            await rename(clipped, file(task, 'video'));
+            const { boundaries } = task.video;
+            task.video = { ...await probe(file(task, 'video')), ...(boundaries ? { boundaries } : {}) };
+            delete task.videoAudioRemoved; delete task.videoCaptionsRemoved; delete task.captions; delete task.captionsChecked; delete task.captionCheck;
+            delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt; delete task.materials.video;
+            await save(task);
+          }
+          const duration = videoDuration(task.video, model, target), plan = segmentPlan(clip(task.video, target), model);
+          for (const kind of Object.keys(task.materials)) if (kind.startsWith('segment-')) delete task.materials[kind];
+          if (plan) { task.segments = plan.segments; task.segmentBoundary = plan.boundary; }
+          else { delete task.segments; delete task.segmentBoundary; }
           task.model = model;
           task.duration = duration;
           task.pricingKey = generationPrice('video', model)?.key;

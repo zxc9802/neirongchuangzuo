@@ -6,7 +6,8 @@ export const WAN3_MODEL = 'wan3.0-video';
 export const DURATIONS = [4, 5, 6, 8, 10, 12, 15];
 export const MODELS = [
   { id: MODEL, name: 'qiya-2.0', description: '最多生成15秒视频，1元/秒', cnyPerSecond: 1, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
-  { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', description: '最多生成30秒视频，1.5元/秒', cnyPerSecond: 1.5, maxDuration: 30, durations: [...DURATIONS, 20, 25, 30], resolution: '720p' },
+  // Opt-in custom duration: up to 60 seconds from the start, generated as two parts beyond one 30-second call.
+  { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', description: '最多生成30秒视频，1.5元/秒', cnyPerSecond: 1.5, maxDuration: 30, extendedDuration: 60, durations: [...DURATIONS, 20, 25, 30], resolution: '720p' },
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', description: '最多生成15秒视频，0.8元/秒', cnyPerSecond: 0.8, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', description: '最多生成15秒视频，0.5元/秒', cnyPerSecond: 0.5, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
   { id: WAN3_MODEL, name: 'qiya-3.0', description: '参考视频最多15秒 · 720P · 输入与输出均计费', cnyPerSecond: 0.6, maxDuration: 15, durations: DURATIONS, resolution: '720p' },
