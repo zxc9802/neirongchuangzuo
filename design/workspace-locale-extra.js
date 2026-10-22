@@ -1,5 +1,9 @@
 // Static interface translations; never sent to an AI service at runtime.
 export const EXTRA_UI_COPY = {
+  "换声服务尚未配置，请联系管理员。": {
+    "en": "The voice conversion service is not configured. Please contact the administrator.",
+    "ms": "Perkhidmatan penukaran suara belum dikonfigurasi. Sila hubungi pentadbir."
+  },
   "，请及时下载。形象与参考声音长期保留。": {
     "en": "Please download it soon. The avatar and reference voice are retained long term.",
     "ms": "Sila muat turun tidak lama lagi. Avatar dan suara rujukan disimpan untuk jangka panjang."
