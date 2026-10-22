@@ -186,6 +186,10 @@ html:not([lang="zh-CN"]) :is(.vc-choice-grid > button, .restaurant-type-card h3,
 [data-theme="dark"] .studio-primary:disabled { background: #26364d; color: #a4b4ca; }
 [data-theme="dark"] :is(.restaurant-primary, .studio-primary) { background: #276ed1; color: #fff; }
 [data-theme="dark"] .mix-material-status small { color: #f0c5a0; }
+[data-theme="dark"] :is(.secondary, .replica-file-button) { background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-border); }
+[data-theme="dark"] :is(.replica-upload, .replica-history-heading, .replica-submit-area) { border-color: var(--ui-border); }
+[data-theme="dark"] :is(.replica-submit-area>p, .replica-progress, .replica-slot-title small) { color: var(--ui-muted); }
+[data-theme="dark"] .replica-error { color: #ffb7af; }
 
 .image-mode-options>div { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 [data-theme="dark"] :is(.image-mode-option.selected, .image-count-options button.selected) { background: #273d57; color: #c1ddff; border-color: #78a8df; }
