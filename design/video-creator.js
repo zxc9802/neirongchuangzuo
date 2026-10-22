@@ -18,13 +18,14 @@ function replanResolution(settings) {
   state.input = '按720p重新输出上一版完整脚本，保留原有分镜、内容和其他设置。';
 }
 function reset() { closePopover(); stopVoice(); stopRecording(true); state = { owner: owner(), skill: VIDEO_SKILLS[0].id, settings: { ...DEFAULT_VIDEO_SETTINGS }, config: null, session: null,
-  tasks: [], conversations: [], input: '', prompt: '', scriptId: null, referenceImageIds: null, stage: 'director', busy: false, error: '', errorSource: '', selectedTask: null,
+  tasks: [], conversations: [], input: '', prompt: '', scriptId: null, referenceImageIds: null, stage: 'director', busy: false, activity: '', actionToken: null, error: '', errorSource: '', errorKind: '', selectedTask: null,
   preview: 'result', sidebar: uiRead('sidebar', typeof innerWidth !== 'number' || innerWidth >= 1180), queue: uiRead('queue', true), popover: null, picker: null, quote: null, quoteError: '', uploadLabel: '', bridge: null }; }
 function refresh() {
   if (!context || document.body.dataset.page !== 'video' || state.owner !== owner()) return;
   if (state.popover) { state.refreshQueued = true; return; }
   const active = document.activeElement, editor = active?.matches('.vc-rich-editor') && active;
-  state.view = { focus: active?.id, start: active?.selectionStart, end: active?.selectionEnd, scroll: document.querySelector('.vc-conversation')?.scrollTop, queueScroll: document.querySelector('.vc-task-list')?.scrollTop, richScroll: document.querySelector('#vc-prompt')?.scrollTop };
+  const conversation = document.querySelector('.vc-conversation');
+  state.view = { focus: active?.id, start: active?.selectionStart, end: active?.selectionEnd, scroll: conversation?.scrollTop, follow: conversation && conversation.scrollHeight - conversation.clientHeight - conversation.scrollTop < 100, queueScroll: document.querySelector('.vc-task-list')?.scrollTop, richScroll: document.querySelector('#vc-prompt')?.scrollTop };
   if (editor) {
     const selection = window.getSelection();
     if (selection?.rangeCount && editor.contains(selection.anchorNode)) { const range = document.createRange(); range.selectNodeContents(editor); range.setEnd(selection.anchorNode, selection.anchorOffset); state.view.caret = range.toString().length; }
@@ -36,6 +37,40 @@ function refresh() {
 function currentTask() { return state.tasks.find(t => t.id === state.selectedTask); }
 function pendingOp() { return state.session?.operations.findLast(o => ['queued', 'running', 'settling'].includes(o.status)); }
 function locked() { return state.busy || Boolean(voiceSession) || Boolean(pendingOp()) || state.session?.tasks.some(busyTask); }
+function latestScript() { return state.session?.operations.findLast(o => o.status === 'completed' && o.skill === state.skill && o.result?.script); }
+function canSendDirector() {
+  return !locked() && state.config?.directorEnabled !== false && state.session?.assets.some(a => a.type === 'image')
+    && (Boolean(state.input.trim()) || !state.session.operations.length);
+}
+function updateDirectorControls() {
+  const send = document.querySelector('[data-action="vc-send"]'); if (send) send.disabled = !canSendDirector();
+}
+function settledSnapshot(previous, incoming) {
+  return previous?.status === 'completed' && ['queued', 'reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'settling'].includes(incoming.status) ? previous : incoming;
+}
+function putOperation(operation) {
+  const previous = state.session.operations.find(o => o.id === operation.id);
+  state.session.operations = [...state.session.operations.filter(o => o.id !== operation.id), settledSnapshot(previous, operation)];
+}
+function acknowledgeRequest(kind) {
+  if (state.activity === kind) { state.busy = false; state.activity = ''; state.actionToken = null; }
+  if (state.errorSource === 'action' && state.errorKind === kind) { state.error = ''; state.errorSource = ''; state.errorKind = ''; }
+}
+function recoverAcceptedRequests() {
+  let changed = false;
+  const pending = state.pendingScriptRequest;
+  if (pending && state.session?.operations.some(o => o.id === pending.body.requestId)) {
+    if (state.input === pending.input) state.input = '';
+    state.pendingScriptRequest = null; acknowledgeRequest('director'); changed = true;
+  }
+  const generation = state.generationRequest;
+  const task = generation && state.tasks.find(t => t.id === generation.id);
+  if (task && state.session?.id === task.conversationId) {
+    state.selectedTask = task.id; state.stage = 'generation'; state.preview = 'result';
+    state.generationRequest = null; acknowledgeRequest('generation'); void refreshWorkspaceCredits(); changed = true;
+  }
+  return changed;
+}
 const speechEngine = () => globalThis.SpeechRecognition || globalThis.webkitSpeechRecognition;
 const composerIcon = name => `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${name === 'person' ? 'M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0 M4 21v-2a8 8 0 0 1 16 0v2' : name === 'voice' ? 'M11 5 6 9H3v6h3l5 4V5 M15 8a6 6 0 0 1 0 8 M18 5a10 10 0 0 1 0 14' : 'M9 5a3 3 0 0 1 6 0v7a3 3 0 0 1-6 0V5 M5 10v2a7 7 0 0 0 14 0v-2 M12 19v3 M8 22h8'}"/></svg>`;
 function stopVoice() {
@@ -74,17 +109,28 @@ function toggleVoice() {
 async function request(path, options = {}) {
   const response = await fetch(API + path, { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.timeout(options.method === 'PUT' ? 120000 : 20000), ...options });
   let data; try { data = await response.json(); } catch { throw new Error('视频服务暂时不可用，请稍后重试。'); }
-  if (!response.ok) throw new Error(data.error || '操作未完成，请稍后重试。'); return data;
+  if (!response.ok) throw Object.assign(new Error(data.error || '操作未完成，请稍后重试。'), { status: response.status, code: data.code }); return data;
 }
 const post = value => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) });
-async function perform(work) {
+async function perform(work, kind = 'general') {
   if (state.busy || voiceSession) return;
-  const account = state.owner; state.busy = true; state.error = ''; state.errorSource = ''; refresh();
+  const account = state.owner, token = Symbol(kind); state.actionToken = token; state.activity = kind; state.busy = true; state.error = ''; state.errorSource = ''; state.errorKind = ''; refresh();
   try { await work(); }
-  catch (cause) { if (state.owner === account) { state.error = cause.message; state.errorSource = 'action'; } }
-  finally { if (state.owner === account) { state.busy = false; state.uploadLabel = ''; refresh(); } }
+  catch (cause) { if (state.owner === account && state.actionToken === token) {
+    state.error = cause.name === 'TimeoutError' ? '请求超时，正在核对任务状态。' : cause.message === 'Failed to fetch' ? '连接中断，正在核对任务状态。' : cause.message;
+    state.errorSource = 'action'; state.errorKind = kind;
+    if (cause.status >= 400 && cause.status < 500) { if (kind === 'director') state.pendingScriptRequest = null; if (kind === 'generation') state.generationRequest = null; }
+  } }
+  finally { if (state.owner === account && state.actionToken === token) { state.busy = false; state.activity = ''; state.actionToken = null; state.uploadLabel = ''; refresh(); } }
 }
-function saveSession(session) { if (state.session?.id === session.id && state.session.version > session.version) return; state.session = session; state.skill = session.skill; rememberAssets(); }
+function saveSession(session) {
+  const previous = state.session?.id === session.id && state.session;
+  if (previous && previous.version > session.version) return;
+  if (previous) session = { ...session,
+    operations: session.operations.map(op => settledSnapshot(previous.operations.find(p => p.id === op.id), op)),
+    tasks: session.tasks.map(task => settledSnapshot(previous.tasks.find(p => p.id === task.id), task)) };
+  state.session = session; state.skill = session.skill; rememberAssets();
+}
 async function ensureSession() {
   if (state.session) return state.session.id;
   const account = state.owner, requestId = state.draftRequestId ||= crypto.randomUUID();
@@ -155,19 +201,31 @@ function load() {
 }
 async function loadOnce() {
   if (loading || !context) return; loading = true; const account = state.owner;
+  const conversationId = state.session?.id;
   try {
-    const [config, tasks, conversations] = await Promise.all([state.config ? Promise.resolve(state.config) : request('/config'), request('/tasks'), request('/conversations')]);
-    if (state.owner !== account) return;
-    let changed = JSON.stringify(state.tasks) !== JSON.stringify(tasks.tasks) || JSON.stringify(state.conversations) !== JSON.stringify(conversations.conversations) || !state.config;
-    state.config = config; state.tasks = tasks.tasks; state.conversations = conversations.conversations;
-    if (state.session) {
-      const id = state.session.id, data = await request(`/conversations/${id}`);
-      if (state.owner !== account || state.session?.id !== id) return;
-      changed ||= JSON.stringify(data.conversation) !== JSON.stringify(state.session);
+    const current = conversationId ? request(`/conversations/${conversationId}`).then(data => {
+      if (state.owner !== account || state.session?.id !== conversationId) return;
+      let changed = JSON.stringify(data.conversation) !== JSON.stringify(state.session);
       saveSession(data.conversation);
-    }
-    if (state.errorSource === 'poll') { state.error = ''; state.errorSource = ''; changed = true; }
-    if (changed) { refresh(); if (state.tasks.some(t => t.status === 'completed') || state.session?.operations.some(o => o.status === 'completed')) void refreshWorkspaceCredits(); }
+      for (const task of state.session.tasks) state.tasks = [settledSnapshot(state.tasks.find(t => t.id === task.id), task), ...state.tasks.filter(t => t.id !== task.id)];
+      changed = recoverAcceptedRequests() || changed;
+      if (changed) refresh();
+    }) : Promise.resolve();
+    const catalog = Promise.all([state.config ? Promise.resolve(state.config) : request('/config'), request('/tasks'), request('/conversations')]).then(([config, tasks, conversations]) => {
+      if (state.owner !== account) return;
+      const previous = state.tasks;
+      const merged = tasks.tasks.map(task => settledSnapshot(previous.find(t => t.id === task.id), task));
+      let changed = JSON.stringify(previous) !== JSON.stringify(merged) || JSON.stringify(state.conversations) !== JSON.stringify(conversations.conversations) || !state.config;
+      state.config = config; state.tasks = merged; state.conversations = conversations.conversations;
+      if (state.session) state.session.tasks = state.session.tasks.map(task => settledSnapshot(task, merged.find(t => t.id === task.id) || task));
+      changed = recoverAcceptedRequests() || changed;
+      if (changed) refresh();
+    });
+    const results = await Promise.allSettled([current, catalog]);
+    if (state.owner !== account) return;
+    const rejected = results.find(result => result.status === 'rejected');
+    if (rejected) throw rejected.reason;
+    if (state.errorSource === 'poll') { state.error = ''; state.errorSource = ''; refresh(); }
     if (!state.quote && !state.quoteError) void quote();
   } catch (cause) { if (state.owner === account && state.errorSource !== 'action') { state.error = cause.name === 'TimeoutError' ? '读取视频任务超时，正在重新连接。' : cause.message; state.errorSource = 'poll'; refresh(); } }
   finally { loading = false; }
@@ -426,12 +484,18 @@ function canGenerate() {
   const images = referenceAssets().filter(a => a.type === 'image');
   return !locked() && images.length > 0 && images.length <= VIDEO_MODELS.find(m => m.id === state.settings.model).maxImages && Boolean(state.prompt.trim()) && Boolean(state.config?.generationEnabled) && state.quote?.affordable !== false;
 }
+function workflowFeedback(ctx) {
+  if (state.error) return `<div class="vc-workflow-feedback is-error" id="vc-error" role="alert"><span>${ctx.esc(state.error)}</span>${['director', 'generation'].includes(state.errorKind) && !locked() ? ctx.button('vc-retry-request', '重试', 'vc-outline') : state.errorSource === 'poll' ? ctx.button('vc-refresh', '重新连接', 'vc-outline') : ''}</div>`;
+  const operation = pendingOp(), task = state.session?.tasks.find(busyTask);
+  const text = state.uploadLabel || (operation ? operation.status === 'settling' ? '脚本已生成，正在核对费用。' : operation.progress || '正在生成脚本…' : state.busy ? state.activity === 'director' ? '正在提交编导…' : state.activity === 'generation' ? '正在提交视频…' : '正在处理…' : task ? `${labels[task.status]}，请在右侧查看进度。` : '');
+  return text ? `<div class="vc-workflow-feedback" role="status"><span class="vc-progress-dot" aria-hidden="true"></span><span>${ctx.esc(text)}</span></div>` : '';
+}
 function editor(ctx) {
-  const { esc, icon, button } = ctx, assets = state.session?.assets || [], disabled = locked(), op = pendingOp(), current = VIDEO_SKILLS.find(s => s.id === state.skill), imageCount = assets.filter(a => a.type === 'image').length;
+  const { esc, icon, button } = ctx, assets = state.session?.assets || [], disabled = locked(), op = pendingOp(), current = VIDEO_SKILLS.find(s => s.id === state.skill), imageCount = assets.filter(a => a.type === 'image').length, latest = latestScript();
   const scriptCards = (state.session?.operations || []).map(o => `<article class="vc-message"><p class="vc-user-message">${esc(o.message)}</p>${o.status === 'completed' && o.result ? `<div class="vc-assistant-message">${o.result.script ? `<div class="vc-script-document" data-script-id="${o.id}" title="点击应用当前脚本" tabindex="0" role="group" aria-label="编导脚本">${promptMarkup(directorDocument(o.result, assets), assets)}</div><div class="vc-script-actions">${button('vc-copy', uiIcon('copy'), 'vc-icon', `data-id="${o.id}" aria-label="复制脚本"`)}${button('vc-apply', '应用脚本 ' + icon('arrow'), 'vc-apply', `data-id="${o.id}" ${disabled || o.skill !== state.skill ? 'disabled' : ''}`)}</div>` : `${markdownText(o.result.text)}${o.result.questions?.length ? `<ul>${o.result.questions.map(q => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}`}${o.result.warnings?.length ? `<details class="vc-warnings"><summary>需要确认</summary>${o.result.warnings.map(w => `<p>${esc(w)}</p>`).join('')}</details>` : ''}</div>` : `<div class="vc-assistant-message ${o.status === 'failed' ? 'vc-error' : 'vc-thinking'}" role="status">${['failed', 'settling'].includes(o.status) ? esc(o.error || '费用待核对，请稍后查看。') : icon('star') + esc(o.progress || '编导处理中…')}</div>`}</article>`).join('');
   const quoteText = state.quote?.unlimited ? '无限积分' : state.quote ? `预计 ${state.quote.points} 积分` : state.quoteError ? '费用暂不可用' : '读取费用…';
-  return `<section class="vc-editor panel" aria-label="AI视频创作编辑区"><header class="vc-editor-heading">${button('vc-skills', `<img class="vc-skill-thumb" src="${SKILL_ART[current.id]}" alt=""><span><strong>${esc(current.name)}</strong><small>${esc(current.description)}</small></span>${icon('chevron')}`, 'skill-trigger', `aria-haspopup="dialog" aria-expanded="false" ${disabled ? 'disabled' : ''}`)}${button('vc-new', '＋ 新建', 'textbutton', state.busy ? 'disabled' : '')}</header><input type="file" id="vc-images" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-characters" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-audio" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" hidden>
-  ${state.stage === 'director' ? `<div class="vc-conversation-wrap"><div class="vc-conversation" aria-label="编导对话">${scriptCards || `<div class="vc-empty-director">${emptyDirectorArt()}<h1>你想创作一条什么视频？</h1><div class="vc-hooks">${VIDEO_HOOKS.map(h => button('vc-hook', esc(h), 'vc-hook', `data-value="${esc(h)}"`)).join('')}</div></div>`}</div>${button('vc-scroll-bottom', uiIcon('down'), 'vc-scroll-bottom', 'aria-label="回到对话底部" hidden')}</div><div class="vc-stage-link">${button('vc-stage-generation', '退出编导', 'vc-exit-director', disabled ? 'disabled' : '')}</div><div class="vc-composer">${composerMedia(ctx, assets, disabled)}<label class="sr-only" for="vc-message">编导要求</label><textarea id="vc-message" maxlength="8000" placeholder="分析素材，并生成脚本" ${state.busy ? 'disabled' : voiceSession ? 'readonly' : ''}>${esc(state.input)}</textarea>${state.uploadLabel ? `<p class="vc-upload-status" role="status">${esc(state.uploadLabel)}</p>` : ''}<div class="vc-composer-bottom">${button('vc-director-settings', `${esc(t(VIDEO_LANGUAGES.find(l => l.id === state.settings.language)?.name))} · ${state.settings.duration}s ${uiIcon('down')}`, 'textbutton', `aria-label="配置脚本语言和视频时长" aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}<span class="vc-consumed" aria-label="编导积分消耗">✦ ${esc(consumedCredits())}</span>${button('vc-voice', composerIcon('mic'), `vc-voice ${voiceSession ? 'is-listening' : ''}`, `aria-label="${voiceSession ? '停止语音输入' : '语音输入'}" aria-pressed="${Boolean(voiceSession)}" ${!voiceSession && (disabled || !speechEngine()) ? 'disabled' : ''}`)}${button('vc-send', op ? icon('clock') : '<span>↑</span>', 'vc-send', `aria-label="${imageCount ? '发送给超级编导' : '请先添加图片'}" ${disabled || !imageCount || state.config?.directorEnabled === false ? 'disabled' : ''}`)}</div>${voiceSession ? '<p class="vc-voice-status" role="status">正在听，点击麦克风停止</p>' : ''}</div>` : `<div class="vc-generation"><div class="vc-generation-top"><span>${referenceAssets().length}/31</span><span>${button('vc-save-prompt', icon('save'), 'vc-icon', 'aria-label="保存当前提示词"')}${button('vc-saved-prompts', icon('list'), 'vc-icon', 'aria-label="我的提示词"')}${button('vc-expand-editor', uiIcon('expand'), 'vc-icon', 'aria-label="展开编辑"')}</span></div><div class="vc-direct-input">${composerMedia(ctx, referenceAssets(), disabled)}<div id="vc-prompt" class="vc-rich-editor" role="textbox" aria-label="视频提示词" aria-multiline="true" contenteditable="${!disabled}" data-placeholder="描述画面、镜头、氛围和声音…">${promptMarkup(state.prompt, referenceAssets())}</div><div class="vc-rich-bottom">${button('vc-stage-director', uiIcon('sparkle') + '超级编导', 'vc-director-link', disabled ? 'disabled' : '')}${button('vc-reference-menu', '@', 'vc-icon', 'aria-label="引用素材"')}<span id="vc-prompt-count">${state.prompt.length}/12000</span>${button('vc-direct-voice', composerIcon('mic'), 'vc-voice', `aria-label="语音输入视频提示词" ${disabled || !speechEngine() ? 'disabled' : ''}`)}</div></div><div class="vc-generation-settings">${button('vc-models', icon('star') + (VIDEO_MODELS.find(m => m.id === state.settings.model)?.name || '') + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}${button('vc-settings', icon('settings') + `${state.settings.ratio} · 720p · ${state.settings.duration}s` + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}</div>${button('vc-generate', `<span>${state.busy ? state.uploadLabel || '提交中…' : currentTask()?.resultUrl ? '再次生成视频' : '立即生成视频'}</span><small>${esc(quoteText)}</small>`, 'primary vc-generate', canGenerate() ? '' : 'disabled')}${state.config?.generationEnabled === false ? '<p class="vc-quote">生成服务暂未连接</p>' : state.quote?.affordable === false ? '<p class="vc-quote vc-error">积分不足</p>' : state.quoteError ? `<p class="vc-quote vc-error">${esc(state.quoteError)}</p>` : ''}</div>`}<p class="vc-error" id="vc-error" role="alert">${esc(state.error)}</p></section>`;
+  return `<section class="vc-editor panel" aria-label="AI视频创作编辑区"><header class="vc-editor-heading">${button('vc-skills', `<img class="vc-skill-thumb" src="${SKILL_ART[current.id]}" alt=""><span><strong>${esc(current.name)}</strong><small>${esc(current.description)}</small></span>${icon('chevron')}`, 'skill-trigger', `aria-haspopup="dialog" aria-expanded="false" ${disabled ? 'disabled' : ''}`)}${button('vc-new', '＋ 新建', 'textbutton', state.busy ? 'disabled' : '')}</header><input type="file" id="vc-images" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-characters" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-audio" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" hidden>${workflowFeedback(ctx)}
+  ${state.stage === 'director' ? `<div class="vc-conversation-wrap"><div class="vc-conversation" aria-label="编导对话">${scriptCards || `<div class="vc-empty-director">${emptyDirectorArt()}<h1>你想创作一条什么视频？</h1><div class="vc-hooks">${VIDEO_HOOKS.map(h => button('vc-hook', esc(h), 'vc-hook', `data-value="${esc(h)}"`)).join('')}</div></div>`}</div>${button('vc-scroll-bottom', uiIcon('down'), 'vc-scroll-bottom', 'aria-label="回到对话底部" hidden')}</div><div class="vc-stage-link">${latest && !disabled ? `<div class="vc-next-step"><span>脚本已生成</span>${button('vc-apply', '应用最新脚本 ' + icon('arrow'), 'vc-next-apply', `data-id="${latest.id}"`)}</div>` : ''}${button('vc-stage-generation', '退出编导', 'vc-exit-director', disabled ? 'disabled' : '')}</div><div class="vc-composer">${composerMedia(ctx, assets, disabled)}<label class="sr-only" for="vc-message">编导要求</label><textarea id="vc-message" maxlength="8000" placeholder="${latest ? '补充修改要求，或应用脚本生成视频' : '分析素材，并生成脚本'}" ${state.busy ? 'disabled' : voiceSession ? 'readonly' : ''}>${esc(state.input)}</textarea>${state.uploadLabel ? `<p class="vc-upload-status" role="status">${esc(state.uploadLabel)}</p>` : ''}<div class="vc-composer-bottom">${button('vc-director-settings', `${esc(t(VIDEO_LANGUAGES.find(l => l.id === state.settings.language)?.name))} · ${state.settings.duration}s ${uiIcon('down')}`, 'textbutton', `aria-label="配置脚本语言和视频时长" aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}<span class="vc-consumed" aria-label="编导积分消耗">✦ ${esc(consumedCredits())}</span>${button('vc-voice', composerIcon('mic'), `vc-voice ${voiceSession ? 'is-listening' : ''}`, `aria-label="${voiceSession ? '停止语音输入' : '语音输入'}" aria-pressed="${Boolean(voiceSession)}" ${!voiceSession && (disabled || !speechEngine()) ? 'disabled' : ''}`)}${button('vc-send', op ? icon('clock') : '<span>↑</span>', 'vc-send', `aria-label="${imageCount ? '发送给超级编导' : '请先添加图片'}" ${!canSendDirector() ? 'disabled' : ''}`)}</div>${voiceSession ? '<p class="vc-voice-status" role="status">正在听，点击麦克风停止</p>' : ''}</div>` : `<div class="vc-generation"><div class="vc-generation-top"><span>${referenceAssets().length}/31</span><span>${button('vc-save-prompt', icon('save'), 'vc-icon', 'aria-label="保存当前提示词"')}${button('vc-saved-prompts', icon('list'), 'vc-icon', 'aria-label="我的提示词"')}${button('vc-expand-editor', uiIcon('expand'), 'vc-icon', 'aria-label="展开编辑"')}</span></div><div class="vc-direct-input">${composerMedia(ctx, referenceAssets(), disabled)}<div id="vc-prompt" class="vc-rich-editor" role="textbox" aria-label="视频提示词" aria-multiline="true" contenteditable="${!disabled}" data-placeholder="描述画面、镜头、氛围和声音…">${promptMarkup(state.prompt, referenceAssets())}</div><div class="vc-rich-bottom">${button('vc-stage-director', uiIcon('sparkle') + '超级编导', 'vc-director-link', disabled ? 'disabled' : '')}${button('vc-reference-menu', '@', 'vc-icon', 'aria-label="引用素材"')}<span id="vc-prompt-count">${state.prompt.length}/12000</span>${button('vc-direct-voice', composerIcon('mic'), 'vc-voice', `aria-label="语音输入视频提示词" ${disabled || !speechEngine() ? 'disabled' : ''}`)}</div></div><div class="vc-generation-settings">${button('vc-models', icon('star') + (VIDEO_MODELS.find(m => m.id === state.settings.model)?.name || '') + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}${button('vc-settings', icon('settings') + `${state.settings.ratio} · 720p · ${state.settings.duration}s` + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}</div>${button('vc-generate', `<span>${state.busy ? state.uploadLabel || (state.activity === 'generation' ? '提交中…' : '正在处理…') : currentTask()?.resultUrl ? '再次生成视频' : '立即生成视频'}</span><small>${esc(quoteText)}</small>`, 'primary vc-generate', canGenerate() ? '' : 'disabled')}${state.config?.generationEnabled === false ? '<p class="vc-quote">生成服务暂未连接</p>' : state.quote?.affordable === false ? '<p class="vc-quote vc-error">积分不足</p>' : state.quoteError ? `<p class="vc-quote vc-error">${esc(state.quoteError)}</p>` : ''}</div>`}</section>`;
 }
 function favorites() { return uiRead('favorites', []); }
 function hiddenTasks() { return uiRead('hidden-tasks', []); }
@@ -524,7 +588,7 @@ export async function useVideoMaterial(file, kind) {
 }
 export function bindVideoCreator(ctx) {
   context = ctx;
-  document.querySelector('#vc-message')?.addEventListener('input', e => { state.input = e.target.value; });
+  document.querySelector('#vc-message')?.addEventListener('input', e => { state.input = e.target.value; updateDirectorControls(); });
   document.querySelector('#vc-message')?.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !locked()) { e.preventDefault(); document.querySelector('[data-action="vc-send"]')?.click(); } });
   bindRichEditor(document.querySelector('#vc-prompt'));
   bindPlayer();
@@ -577,40 +641,53 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-select-task') { const task = state.tasks.find(t => t.id === el.dataset.id); if (task) void perform(() => openConversation(task.conversationId, task)); }
   else if (action === 'vc-open-conversation') void perform(() => openConversation(el.dataset.id));
   else if (action === 'vc-remove') void perform(async () => { saveSession((await request(`/conversations/${state.session.id}/assets/${el.dataset.id}`, { method: 'DELETE' })).conversation); state.scriptId = null; });
-  else if (action === 'vc-send') void perform(async () => {
+  else if (action === 'vc-send') {
+    if (!canSendDirector()) return true;
+    state.followConversation = true; state.scriptId = null; state.referenceImageIds = null;
+    void perform(async () => {
     const id = await ensureSession(), message = state.input.trim() || VIDEO_SKILLS.find(s => s.id === state.skill)?.request || '分析素材，并生成一条适合发布到抖音的同城到店视频脚本';
     const fingerprint = JSON.stringify({ id, message, settings: state.settings });
-    if (state.pendingScriptRequest?.fingerprint !== fingerprint) state.pendingScriptRequest = { fingerprint,
+    if (state.pendingScriptRequest?.fingerprint !== fingerprint) state.pendingScriptRequest = { fingerprint, input: state.input,
       body: { requestId: crypto.randomUUID(), message, settings: { ...state.settings }, expectedScriptId: state.session.operations.findLast(o => o.status === 'completed')?.id || null } };
-    const data = await request(`/conversations/${id}/script`, post(state.pendingScriptRequest.body));
-    state.pendingScriptRequest = null; state.input = ''; state.scriptId = null; state.referenceImageIds = null;
-    state.session.operations = [...state.session.operations.filter(o => o.id !== data.operation.id), data.operation];
+    const account = state.owner, data = await request(`/conversations/${id}/script`, post(state.pendingScriptRequest.body));
+    if (state.owner !== account || state.session?.id !== id) return;
+    putOperation(data.operation); recoverAcceptedRequests(); refresh();
     stream?.close();
     if (typeof EventSource !== 'undefined') {
-      const account = state.owner; stream = new EventSource(API + `/conversations/${id}/operations/${data.operation.id}/stream`);
+      stream = new EventSource(API + `/conversations/${id}/operations/${data.operation.id}/stream`);
       stream.addEventListener('script.snapshot', event => {
         if (state.owner !== account || state.session?.id !== id) return;
         try { const op = JSON.parse(event.data); const old = state.session.operations.find(o => o.id === op.id);
-          if (old && JSON.stringify(old) !== JSON.stringify(op)) { state.session.operations = state.session.operations.map(o => o.id === op.id ? op : o); refresh(); }
+          if (old && JSON.stringify(old) !== JSON.stringify(op)) { putOperation(op); recoverAcceptedRequests(); refresh(); }
           if (!['queued', 'running'].includes(op.status)) { stream?.close(); void refreshWorkspaceCredits(); void load(); }
         } catch { stream?.close(); }
       }); stream.onerror = () => stream?.close();
     }
     void load();
-  });
+    }, 'director');
+  }
   else if (action === 'vc-apply') {
-    const op = state.session.operations.find(o => o.id === el.dataset.id && o.skill === state.skill && o.result?.script); if (!op) return true;
+    if (locked()) return true;
+    const op = state.session?.operations.find(o => o.id === el.dataset.id && o.status === 'completed' && o.skill === state.skill && o.result?.script); if (!op) return true;
     if (op.settings.resolution !== DEFAULT_VIDEO_SETTINGS.resolution) { replanResolution(op.settings); state.quote = null; ctx.toast('当前仅支持720p，请让编导调整旧脚本。'); refresh(); void quote(); return true; }
-    state.prompt = op.result.script.videoPrompt; state.settings = { ...op.settings }; state.scriptId = op.id; state.referenceImageIds = op.result.script.referenceImageIds || null; state.stage = 'generation'; state.quote = null; refresh(); void quote();
+    state.prompt = op.result.script.videoPrompt; state.settings = { ...op.settings }; state.scriptId = op.id; state.referenceImageIds = op.result.script.referenceImageIds || null; state.stage = 'generation'; state.quote = null; state.error = ''; state.errorSource = ''; state.errorKind = ''; refresh(); void quote();
   }
   else if (action === 'vc-copy') { const op = state.session.operations.find(o => o.id === el.dataset.id); if (op?.result?.script) void navigator.clipboard.writeText(op.result.script.videoPrompt).then(() => ctx.toast('脚本已复制。')).catch(() => ctx.toast('复制失败，请手动选择脚本。')); }
-  else if (action === 'vc-generate') void perform(async () => {
+  else if (action === 'vc-generate') {
+    if (!canGenerate()) return true;
+    void perform(async () => {
     const id = await ensureSession(), fingerprint = JSON.stringify({ id, prompt: state.prompt, settings: state.settings, scriptId: state.scriptId, referenceImageIds: state.referenceImageIds });
     if (state.generationRequest?.fingerprint !== fingerprint) state.generationRequest = { fingerprint, id: crypto.randomUUID() };
-    const data = await request(`/conversations/${id}/generate`, post({ requestId: state.generationRequest.id, prompt: state.prompt, settings: state.settings, scriptId: state.scriptId, referenceImageIds: state.referenceImageIds }));
-    state.tasks = [data.task, ...state.tasks.filter(t => t.id !== data.task.id)]; state.session.tasks = [data.task, ...state.session.tasks.filter(t => t.id !== data.task.id)];
+    const account = state.owner, data = await request(`/conversations/${id}/generate`, post({ requestId: state.generationRequest.id, prompt: state.prompt, settings: state.settings, scriptId: state.scriptId, referenceImageIds: state.referenceImageIds }));
+    if (state.owner !== account || state.session?.id !== id) return;
+    const task = settledSnapshot(state.tasks.find(t => t.id === data.task.id), data.task);
+    state.tasks = [task, ...state.tasks.filter(t => t.id !== task.id)]; state.session.tasks = [task, ...state.session.tasks.filter(t => t.id !== task.id)];
     state.selectedTask = data.task.id; state.preview = 'result'; state.generationRequest = null; void refreshWorkspaceCredits();
-  });
+    }, 'generation');
+  }
+  else if (action === 'vc-retry-request') {
+    return handleVideoCreatorAction(state.errorKind === 'generation' ? 'vc-generate' : 'vc-send', el, ctx);
+  }
   else if (action === 'vc-recover') void perform(async () => { const data = await request(`/tasks/${el.dataset.id}/recover`, post({})); state.tasks = state.tasks.map(t => t.id === data.task.id ? data.task : t); });
   else if (action === 'vc-save-prompt') savePromptDialog();
   else if (action === 'vc-saved-prompts') promptLibrary();
@@ -623,7 +700,9 @@ function restoreView() {
   const view = state.view; state.view = null;
   const conversation = document.querySelector('.vc-conversation'), queueList = document.querySelector('.vc-task-list');
   if (conversation) {
-    if (view?.scroll !== undefined) conversation.scrollTop = view.scroll; else if (state.session?.operations.length) conversation.scrollTop = conversation.scrollHeight;
+    if (state.followConversation || view?.follow || view?.scroll === undefined && state.session?.operations.length) conversation.scrollTop = conversation.scrollHeight;
+    else if (view?.scroll !== undefined) conversation.scrollTop = view.scroll;
+    state.followConversation = false;
     const update = () => { const button = document.querySelector('[data-action="vc-scroll-bottom"]'); if (button) button.hidden = conversation.scrollHeight - conversation.clientHeight - conversation.scrollTop < 100; };
     conversation.onscroll = update; update();
   }

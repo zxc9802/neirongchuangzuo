@@ -1,5 +1,17 @@
 // Static interface translations; never sent to an AI service at runtime.
 export const EXTRA_UI_COPY = {
+  "{value0}，请在右侧查看进度。": { "en": "{value0}. See progress on the right.", "ms": "{value0}. Lihat kemajuan di sebelah kanan." },
+  "补充修改要求，或应用脚本生成视频": { "en": "Add changes, or apply the script to create a video", "ms": "Tambah perubahan, atau gunakan skrip untuk menjana video" },
+  "脚本已生成": { "en": "Script ready", "ms": "Skrip tersedia" },
+  "脚本已生成，正在核对费用。": { "en": "Script ready. Checking usage charges.", "ms": "Skrip tersedia. Sedang menyemak caj penggunaan." },
+  "连接中断，正在核对任务状态。": { "en": "Connection lost. Checking the task status.", "ms": "Sambungan terputus. Sedang menyemak status tugas." },
+  "请求超时，正在核对任务状态。": { "en": "Request timed out. Checking the task status.", "ms": "Permintaan tamat masa. Sedang menyemak status tugas." },
+  "应用最新脚本": { "en": "Apply latest script", "ms": "Gunakan skrip terkini" },
+  "正在处理…": { "en": "Processing…", "ms": "Sedang memproses…" },
+  "正在生成脚本…": { "en": "Writing the script…", "ms": "Sedang menulis skrip…" },
+  "正在提交编导…": { "en": "Submitting the director request…", "ms": "Menghantar permintaan pengarahan…" },
+  "正在提交视频…": { "en": "Submitting the video…", "ms": "Sedang menghantar video…" },
+  "重新连接": { "en": "Reconnect", "ms": "Sambung semula" },
   "换声服务尚未配置，请联系管理员。": {
     "en": "The voice conversion service is not configured. Please contact the administrator.",
     "ms": "Perkhidmatan penukaran suara belum dikonfigurasi. Sila hubungi pentadbir."

@@ -52,6 +52,88 @@ function composerApi() {
   return data;
 }
 
+test('a completed director script disables empty resubmission and stays applied through polling', async t => {
+  const data = composerApi(), base = data.api; let submissions = 0;
+  data.api = async (path, options) => {
+    if (path.endsWith('/script')) {
+      submissions++; const body = JSON.parse(options.body);
+      const operation = { id: body.requestId, skill: data.conversation.skill, status: 'completed', settings: body.settings, message: body.message,
+        result: { script: { title: '一品厨', videoPrompt: '本轮门店视频', shots: [] } } };
+      data.conversation.operations.push(operation); data.conversation.version++;
+      return Response.json({ operation });
+    }
+    return base(path, options);
+  };
+  const f = await fixture(t, data.api);
+  await f.useMaterial(new File(['photo'], '门店.jpg', { type: 'image/jpeg' }), 'photo');
+  f.action('vc-send'); await delay(20);
+  assert.equal(submissions, 1);
+  assert.match(f.html(), /data-action="vc-send"[^>]*disabled/);
+  assert.match(f.html(), /应用最新脚本/);
+  f.action('vc-send'); await delay(10); assert.equal(submissions, 1);
+  f.action('vc-apply', { id: data.conversation.operations[0].id }); await f.poll();
+  assert.match(f.html(), /视频提示词/); assert.match(f.html(), /本轮门店视频/);
+  f.action('vc-stage-director'); f.node('#vc-message').input({ target: { value: '口播更自然' } });
+  assert.equal(f.node('[data-action="vc-send"]').disabled, false);
+  f.action('vc-send'); await delay(20); assert.equal(submissions, 2);
+});
+
+test('current director completion is not blocked by a slow history list and late queued replies never rewind the editor', async t => {
+  const data = composerApi(), base = data.api; let releasePost, releaseHistory, stallHistory = false, operation;
+  data.api = async (path, options) => {
+    if (path.endsWith('/tasks') && stallHistory) return new Promise(resolve => { releaseHistory = () => resolve(Response.json({ tasks: [] })); });
+    if (path.endsWith('/script')) {
+      const body = JSON.parse(options.body);
+      operation = { id: body.requestId, skill: data.conversation.skill, status: 'queued', message: body.message, settings: body.settings };
+      data.conversation.operations.push(operation); data.conversation.version++;
+      const queued = structuredClone(operation);
+      return new Promise(resolve => { releasePost = () => resolve(Response.json({ operation: queued })); });
+    }
+    return base(path, options);
+  };
+  const f = await fixture(t, data.api);
+  await f.useMaterial(new File(['photo'], '门店.jpg', { type: 'image/jpeg' }), 'photo');
+  f.action('vc-send'); await delay(10);
+  Object.assign(operation, { status: 'completed', completedAt: Date.now(), result: { script: { title: '新脚本', videoPrompt: '已完成的分镜', shots: [] } } }); data.conversation.version++;
+  stallHistory = true; const polling = f.poll(); await delay(15);
+  assert.match(f.html(), /应用最新脚本/);
+  f.action('vc-apply', { id: operation.id }); assert.match(f.html(), /已完成的分镜/);
+  releasePost(); await delay(15); assert.match(f.html(), /视频提示词/); assert.doesNotMatch(f.html(), /正在分析素材/);
+  releaseHistory(); await polling;
+});
+
+test('a lost accepted video response recovers the matching task without a second generation request', async t => {
+  const data = composerApi(), base = data.api; let operation, generationCalls = 0;
+  data.api = async (path, options) => {
+    if (path.endsWith('/script')) {
+      const body = JSON.parse(options.body);
+      operation = { id: body.requestId, skill: data.conversation.skill, status: 'completed', settings: body.settings, message: body.message,
+        result: { script: { title: '一品厨', videoPrompt: '顾客到店介绍', shots: [] } } };
+      data.conversation.operations.push(operation); return Response.json({ operation });
+    }
+    if (path.endsWith('/generate')) {
+      generationCalls++; const body = JSON.parse(options.body);
+      const task = { id: body.requestId, conversationId: data.conversation.id, status: 'running', title: '一品厨', createdAt: Date.now(), settings: body.settings, prompt: body.prompt };
+      data.tasks = [task]; data.conversation.tasks = [task]; throw new TypeError('Failed to fetch');
+    }
+    return base(path, options);
+  };
+  const f = await fixture(t, data.api);
+  await f.useMaterial(new File(['photo'], '门店.jpg', { type: 'image/jpeg' }), 'photo');
+  f.action('vc-send'); await delay(15); f.action('vc-apply', { id: operation.id }); await delay(10);
+  f.action('vc-generate'); await delay(15); await f.poll();
+  assert.equal(generationCalls, 1); assert.match(f.html(), /生成中/); assert.doesNotMatch(f.html(), /Failed to fetch/);
+});
+
+test('server expiry replaces a completed cached task instead of retaining an expired video', async t => {
+  const data = composerApi();
+  data.tasks = [{ id: crypto.randomUUID(), conversationId: crypto.randomUUID(), status: 'completed', title: '到期测试', createdAt: Date.now(), settings: DEFAULT_VIDEO_SETTINGS, resultUrl: '/result.mp4' }];
+  const f = await fixture(t, data.api);
+  assert.match(f.html(), /title="到期测试 · 已完成"/);
+  data.tasks[0] = { ...data.tasks[0], status: 'expired', resultUrl: null };
+  await f.poll(); assert.match(f.html(), /title="到期测试 · 已过期"/);
+});
+
 test('a full history and favorites do not preload completed video streams', async t => {
   const data = composerApi();
   data.tasks = Array.from({ length: 50 }, (_, i) => ({
@@ -211,7 +293,7 @@ test('voice input keeps final transcripts exactly once, never submits automatica
 test('lost director response retries identical operation and original expected revision after polling receives completed script', async t => {
   let conversation, calls = [], first = true;
   const f = await fixture(t, async (path, options) => {
-    const body = options?.body ? JSON.parse(options.body) : null;
+    const body = options?.body && options.method !== 'PUT' ? JSON.parse(options.body) : null;
     if (path.endsWith('/config')) return Response.json({ directorEnabled: true, generationEnabled: true });
     if (path.endsWith('/quote')) return Response.json({ points: 1000, unlimited: true, affordable: true });
     if (path.endsWith('/tasks')) return Response.json({ tasks: [] });
@@ -228,9 +310,9 @@ test('lost director response retries identical operation and original expected r
   });
   f.node('#vc-images').onchange({ target: { files: [new File(['test'], '实拍.jpg', { type: 'image/jpeg' })] } }); await delay(20);
   f.node('#vc-message').input({ target: { value: '介绍门店' } }); f.action('vc-send'); await delay(20);
-  assert.match(f.html(), /Connection lost/); await f.poll();
+  assert.match(f.html(), /Connection lost/);
   f.action('vc-send'); await delay(20);
-  assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]); assert.equal(calls[1].expectedScriptId, null);
+  await f.poll(); assert.equal(calls.length, 2); assert.deepEqual(calls[1], calls[0]); assert.equal(calls[1].expectedScriptId, null);
   f.action('vc-apply', { id: calls[0].requestId });
   assert.match(f.html(), /视频提示词/); assert.match(f.html(), /真实素材/); assert.match(f.html(), /video-max/);
   assert.equal(f.action('vc-send', {}, { ...f.ctx, mode: 'replica' }), false);
@@ -239,7 +321,7 @@ test('lost director response retries identical operation and original expected r
 test('each module uses its own initial request, and switching direction prevents applying another module script', async t => {
   let conversation, sent = [];
   const f = await fixture(t, async (path, options) => {
-    const body = options?.body ? JSON.parse(options.body) : null;
+    const body = options?.body && options.method !== 'PUT' ? JSON.parse(options.body) : null;
     if (path.endsWith('/config')) return Response.json({ directorEnabled: true, generationEnabled: true });
     if (path.endsWith('/quote')) return Response.json({ unlimited: true, affordable: true });
     if (path.endsWith('/tasks')) return Response.json({ tasks: [] });
@@ -270,17 +352,19 @@ test('each module uses its own initial request, and switching direction prevents
 test('successful polling clears a recovered connection error without clearing a user action error', async t => {
   let failPoll = false, conversation;
   const f = await fixture(t, async (path, options) => {
-    const body = options?.body ? JSON.parse(options.body) : null;
+    const body = options?.body && options.method !== 'PUT' ? JSON.parse(options.body) : null;
     if (path.endsWith('/config')) return Response.json({ directorEnabled: true, generationEnabled: true });
     if (path.endsWith('/quote')) return Response.json({ unlimited: true, affordable: true });
     if (path.endsWith('/tasks')) { if (failPoll) throw new Error('Temporary connection failure'); return Response.json({ tasks: [] }); }
     if (path.endsWith('/conversations') && body) { conversation = { id: body.requestId, version: 1, skill: body.skill, settings: body.settings, operations: [], tasks: [], assets: [] }; return Response.json({ conversation }); }
     if (path.endsWith('/conversations')) return Response.json({ conversations: [] });
+    if (options?.method === 'PUT') { conversation.assets.push({ id: crypto.randomUUID(), name: '实拍.jpg', type: 'image', url: '/photo' }); return Response.json({ conversation }); }
     if (path.endsWith('/script')) return Response.json({ error: '请确认主推产品。' }, { status: 400 });
     return Response.json({ conversation });
   });
   failPoll = true; await f.poll(); assert.match(f.html(), /Temporary connection failure/);
   failPoll = false; await f.poll(); assert.doesNotMatch(f.html(), /Temporary connection failure/);
+  await f.useMaterial(new File(['photo'], '实拍.jpg', { type: 'image/jpeg' }), 'photo');
   f.action('vc-send'); await delay(20); assert.match(f.html(), /请确认主推产品/);
   failPoll = true; await f.poll(); assert.match(f.html(), /请确认主推产品/); assert.doesNotMatch(f.html(), /Temporary connection failure/);
   failPoll = false; await f.poll(); assert.match(f.html(), /请确认主推产品/);

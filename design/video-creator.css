@@ -39,7 +39,19 @@ body[data-page="video"] .workbar{display:none}
 .vc-hooks{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px 10px;max-width:440px;width:100%}
 .vc-hook{border:1px solid #e3e3e8;border-radius:11px;font-size:12px;line-height:1.5;padding:10px 6px;min-height:39px;white-space:nowrap;background:#f8f8fa}
 .vc-hook:hover{background:#ededf2;border-color:#cdced6}
-.vc-stage-link{text-align:right;padding:8px 0 12px;flex-shrink:0}
+.vc-stage-link{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:8px 0 12px;flex-shrink:0}
+.vc-next-step{display:flex;align-items:center;gap:10px;min-width:0;margin-right:auto}
+.vc-next-step>span{font-size:11px;color:#85858f;white-space:nowrap}
+.vc-next-apply{display:flex;align-items:center;gap:5px;border:1px solid #dadade;background:#fff;border-radius:8px;padding:6px 9px;font-size:12px;white-space:nowrap}
+.vc-next-apply:hover{background:#ededf2}.vc-next-apply>.icon{width:13px;height:13px}
+.vc-workflow-feedback{display:flex;align-items:center;gap:9px;flex-shrink:0;margin:9px 0 0;padding:9px 10px;border:1px solid #e2e2e9;border-radius:9px;background:#f0f0f5;font-size:12px;line-height:1.6;overflow-wrap:anywhere}
+.vc-workflow-feedback>span:last-of-type{flex:1;min-width:0;max-height:72px;overflow:auto;white-space:pre-wrap}
+.vc-workflow-feedback.is-error{background:#fff3f0;color:#9b4538;border-color:#eed9d3}
+.vc-workflow-feedback .vc-outline{flex-shrink:0;background:transparent;min-height:30px}
+.vc-progress-dot{flex-shrink:0;width:7px;height:7px;border-radius:50%;background:#8d8da7;animation:vc-pulse 1.5s infinite}
+@media(prefers-reduced-motion:reduce){.vc-progress-dot{animation:none}}
+html[data-theme="dark"] .vc-workflow-feedback,html[data-theme="dark"] .vc-next-apply{background:#26292f;border-color:#42464f;color:#e4e4e8}
+html[data-theme="dark"] .vc-workflow-feedback.is-error{background:#3a2927;color:#ffc2b4;border-color:#68463f}
 .vc-exit-director{padding:5px 9px;background:#18181b;color:#fff;font-size:11px;line-height:1.4;border-radius:8px}
 .vc-exit-director:hover{background:#35353a}
 .vc-composer{padding:10px 12px 9px;border:1px solid #e4e4ea;border-radius:16px;background:#fbfbfc;box-shadow:0 5px 20px #1c233307;flex-shrink:0}
