@@ -21,7 +21,7 @@ type AllowedRemote = {
 function configuredReferenceUrls(): Set<string> {
   const config = getAppConfig();
   return new Set(
-    [config.indexttsSpeakerAudioUrl, config.indexttsEmotionAudioUrl]
+    [config.indexttsSpeakerAudioUrl, config.indexttsEmotionAudioUrl, config.zonos2ReferenceAudioUrl]
       .filter(Boolean)
       .map((value) => {
         try {

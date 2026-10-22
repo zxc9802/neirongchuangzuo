@@ -221,6 +221,12 @@ async function runPipeline(taskId: string, sessionToken?: string): Promise<void>
       apiKey: speechLanguage === "zh" ? config.indexttsFalApiKey : config.falApiKey,
       speakerAudioUrl: speakerUrl,
       emotionAudioUrl: emotionAudioUrl,
+      englishReferenceAudioUrl: speechLanguage === "en" && config.zonos2ReferenceAudioUrl
+        ? await externalizeReference(config.zonos2ReferenceAudioUrl, "english-reference.wav", true) : undefined,
+      englishReferenceAudioPath: config.zonos2ReferenceAudioPath,
+      qwenTtsApiKey: config.qwenTtsApiKey,
+      qwenTtsBaseUrl: config.qwenTtsBaseUrl,
+      qwenMalayVoiceId: config.qwenMalayVoiceId,
       emotionIntensity: task.inputs.emotionIntensity,
       toneProfile: task.inputs.toneProfile,
       outDir: jobDir,

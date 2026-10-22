@@ -9,6 +9,11 @@ export interface AppConfig {
   indexttsSpeakerAudioUrl: string;
   indexttsEmotionAudioPath: string;
   indexttsEmotionAudioUrl: string;
+  zonos2ReferenceAudioUrl: string;
+  zonos2ReferenceAudioPath: string;
+  qwenTtsApiKey: string;
+  qwenTtsBaseUrl: string;
+  qwenMalayVoiceId: string;
   doubaoTtsApiKey: string;
   doubaoTtsVoiceMap: Record<string, string>;
   heygenApiKey: string;
@@ -52,6 +57,11 @@ const DEFAULT_CONFIG: AppConfig = {
     process.env.INDEXTTS_EMOTION_AUDIO_PATH || "",
   indexttsEmotionAudioUrl:
     process.env.INDEXTTS_EMOTION_AUDIO_URL || "",
+  zonos2ReferenceAudioUrl: process.env.ZONOS2_REFERENCE_AUDIO_URL || "",
+  zonos2ReferenceAudioPath: process.env.ZONOS2_REFERENCE_AUDIO_PATH || "",
+  qwenTtsApiKey: process.env.QWEN_TTS_API_KEY || process.env.DASHSCOPE_API_KEY || "",
+  qwenTtsBaseUrl: process.env.QWEN_TTS_BASE_URL || "https://dashscope.aliyuncs.com",
+  qwenMalayVoiceId: process.env.QWEN_MALAY_VOICE_ID || "",
   doubaoTtsApiKey: process.env.DOUBAO_TTS_API_KEY || "",
   doubaoTtsVoiceMap: JSON.parse(process.env.DOUBAO_TTS_VOICE_MAP || "{}"),
   heygenApiKey:

@@ -9,12 +9,11 @@ import { splitSpeechText, stitchSpeechSegments } from "./speech-stitch";
 
 const TTS_CONCURRENCY = 3;
 const FAL_ENDPOINT = "https://queue.fal.run/fal-ai/index-tts-2/text-to-speech";
-const CHATTERBOX_ENDPOINT = "https://queue.fal.run/fal-ai/chatterbox/text-to-speech/multilingual";
 
-function falQueueUrl(value: string, chatterbox = false): string {
+function falQueueUrl(value: string): string {
   const url = new URL(value);
   if (url.origin !== "https://queue.fal.run" || url.username || url.password ||
-    !(chatterbox ? /^\/fal-ai\/chatterbox(?:\/|$)/ : /^\/fal-ai\/index-tts-2(?:\/|$)/).test(url.pathname)) {
+    !/^\/fal-ai\/index-tts-2(?:\/|$)/.test(url.pathname)) {
     throw new Error("fal 配音返回的任务地址无效");
   }
   return url.href;
@@ -66,6 +65,11 @@ export interface IndexTTSOptions {
   apiKey: string;
   speakerAudioUrl: string;
   emotionAudioUrl?: string;
+  englishReferenceAudioUrl?: string;
+  englishReferenceAudioPath?: string;
+  qwenTtsApiKey?: string;
+  qwenTtsBaseUrl?: string;
+  qwenMalayVoiceId?: string;
   emotionIntensity?: number;
   toneProfile?: "low" | "high";
   outDir: string;
@@ -137,13 +141,13 @@ export async function generateChatterboxTTS(
   options: IndexTTSOptions,
 ): Promise<IndexTTSResult> {
   // English/Malay must never fall back to the Chinese-only voice route.
-  return generatePrimarySpeech(text, options, language);
+  const { generateLocalizedSpeech } = await import("./localized-speech");
+  return generateLocalizedSpeech(text, language, options);
 }
 
 async function generatePrimarySpeech(
   text: string,
   options: IndexTTSOptions,
-  language?: "en" | "ms",
 ): Promise<IndexTTSResult> {
   const {
     apiKey,
@@ -155,7 +159,7 @@ async function generatePrimarySpeech(
     onLog = () => {},
     cacheScope = "local",
   } = options;
-  const modelName = language ? "Chatterbox" : "IndexTTS-2";
+  const modelName = "IndexTTS-2";
 
   if (!apiKey) {
     throw new Error(`fal ${modelName} 配音密钥未配置（FAL_KEY / FAL_API_KEY / VIDEO_FAL_KEY）`);
@@ -179,7 +183,7 @@ async function generatePrimarySpeech(
     toneProfile,
     cacheScope
   );
-  const cacheKey = language ? crypto.createHash("sha256").update(`chatterbox-v1|${language}|${primaryCacheKey}`).digest("hex") : primaryCacheKey;
+  const cacheKey = primaryCacheKey;
 
   const globalCacheDir = path.join(process.cwd(), ".runtime", "tts-cache", cacheKey);
 
@@ -219,7 +223,7 @@ async function generatePrimarySpeech(
   }
 
   // 2. Cache Miss: Synthesize short sentences and join them before applying the final speech rate.
-  const segments = splitSpeechText(text, language);
+  const segments = splitSpeechText(text);
   let audioUrl: string | null = null;
   if (segments.length > 1) {
     onLog(`文案已分为 ${segments.length} 段，最多 ${TTS_CONCURRENCY} 段同时合成，完成后按原顺序拼接...`);
@@ -239,7 +243,7 @@ async function generatePrimarySpeech(
               if (failure) throw failure;
               onLog(`[第 ${index + 1}/${segments.length} 段] ${message}`);
             },
-          }, language);
+          });
           parts[index] = { text: segments[index], audioPath: part.rawWavPath };
         } catch (error) {
           failure ||= error;
@@ -255,27 +259,23 @@ async function generatePrimarySpeech(
       options.checkActive?.();
       onLog(`正在向 fal.ai 提交 ${modelName} 语音合成请求...`);
 
-      const payload: Record<string, any> = language ? {
-        text: text.trim(), voice: speakerAudioUrl,
-        custom_audio_language: language === "ms" ? "malay" : "english",
-        cfg_scale: 0, exaggeration: 0.5, temperature: 0.7,
-      } : {
+      const payload: Record<string, any> = {
         prompt: text.trim(),
         audio_url: speakerAudioUrl,
         strength: Math.min(Math.max(emotionIntensity, 0), 0.85),
         should_use_prompt_for_emotion: false,
       };
 
-      if (!language && emotionAudioUrl && emotionAudioUrl.startsWith("http")) {
+      if (emotionAudioUrl && emotionAudioUrl.startsWith("http")) {
         payload.emotional_audio_url = emotionAudioUrl;
-      } else if (!language) {
+      } else {
         payload.emotional_strengths = { calm: 1.0 };
       }
 
       onLog(`[TTS] 👤 发音人音色克隆: ${speakerAudioUrl}`);
-      if (!language) onLog(`[TTS] 🎭 语气与情绪参考音频: ${payload.emotional_audio_url || "基准"} (情绪强度: ${payload.strength})`);
+      onLog(`[TTS] 🎭 语气与情绪参考音频: ${payload.emotional_audio_url || "基准"} (情绪强度: ${payload.strength})`);
 
-      const createResp = await fetch(language ? CHATTERBOX_ENDPOINT : FAL_ENDPOINT, {
+      const createResp = await fetch(FAL_ENDPOINT, {
         method: "POST",
         redirect: "error",
         headers: {
@@ -296,8 +296,8 @@ async function generatePrimarySpeech(
       if (!taskId || !createJson.status_url || !createJson.response_url) {
         throw new Error(`fal ${modelName} 未返回完整任务编号，未自动重新提交`);
       }
-      const statusUrl = falQueueUrl(createJson.status_url, Boolean(language));
-      const resultUrl = falQueueUrl(createJson.response_url, Boolean(language));
+      const statusUrl = falQueueUrl(createJson.status_url);
+      const resultUrl = falQueueUrl(createJson.response_url);
 
       // Poll for completion. Long scripts need more than the old 5-minute cap.
       const ttsTimeoutMs = Math.min(

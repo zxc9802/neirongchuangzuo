@@ -1,8 +1,24 @@
 # 数字人对口型智能工作台 (Digital Human Lip-sync Web Studio)
 
-基于 **Next.js** 全栈技术栈、**IndexTTS-2** 中文克隆配音引擎与 **HeyGen Precision MCP 客户端** 构建的现代化数字人对口型 Web 平台。
+基于 **Next.js**、fal 配音与对口型引擎构建的数字人口播 Web 平台。
 
 独立 Electron 客户端（Windows / macOS）及邮箱注册登录的使用、打包和部署方式见 [独立桌面客户端说明](docs/独立桌面客户端.md)。
+
+## 英语与马来语配音
+
+数字人口播和独立 MP3 配音共用以下服务端路由。fal 部分复用 `FAL_KEY` / `FAL_API_KEY` / `VIDEO_FAL_KEY`：
+
+- 英语：`fal-ai/zonos2` 使用本地人英语参考，再经 `fal-ai/chatterbox/speech-to-speech` 转为用户选择的音色。保持 1 倍原词语速度，不做保调变速。
+- 马来语：百炼 `qwen-audio-3.0-tts-plus` 使用马来西亚真人参考创建的基础音色，再经同一 fal Chatterbox 转音色，最后只应用一次 1.2 倍速，再送入口型或导出。
+- 中文：继续使用 fal IndexTTS-2 和现有中文备用路线。
+
+部署时配置 `ZONOS2_REFERENCE_AUDIO_URL`（可被 fal 读取的 HTTPS 地址），或挂载私有 WAV 并配置 `ZONOS2_REFERENCE_AUDIO_PATH`，二选一。路径方式会把参考音频作为 data URI 直接提交给 fal，无需公开托管。参考录音不要提交到 Git。
+
+马来语配置 `QWEN_TTS_API_KEY`、`QWEN_TTS_BASE_URL`（仅 API Host，不含路径）、`QWEN_MALAY_VOICE_ID`。新加坡使用该区创建的 Key 和 `https://dashscope-intl.aliyuncs.com` 或该区工作空间专属 API Host。默认北京地址为 `https://dashscope.aliyuncs.com`，未单独配置 Key 时复用 Wan 3.0 的 `DASHSCOPE_API_KEY`。Key、音色及接口地域必须一致，切区需重新创建基础音色，创建时目标模型为 `qwen-audio-3.0-tts-plus`。正常配音只复用音色，不重复创建。Qwen 配音独立配置，不改变 Wan 3.0 的北京区配置。
+
+自然段会合并成最多 600 字符的调用，避免逐句转音色。每段生成和转换的请求编号、结果、供应商回传计费单位保存在任务目录 `localized-speech/` 下；Qwen 另保留 `usage.characters` 和原始 WAV，下载完成后以内联音频送 fal。恢复任务复用原结果，提交结果不明时不会自动重发。缓存包含模型、语言、用户、目标音色、发音参考和语速，马来语另包含百炼接口地域，不复用旧 MiniMax 缓存。
+
+此次模型接入保留既有积分规则，不自动启用成本三倍定价；供应商用量回执供后续核算使用。
 
 ## ✨ 核心特性
 
@@ -15,7 +31,7 @@
   - 支持工具发现与调试：`heygen_create_lipsync`、`heygen_get_lipsync`、`heygen_list_lipsyncs`。
   - 严格契约约束：固定 `precision` 模式、关闭背景乐/水印/动态时长，保障口型精细度与任务幂等防重复扣费。
 - **🎙️ IndexTTS-2 语音克隆与音轨无损重混**：
-  - 基于 302.AI IndexTTS-2 生成高质量中文定制配音。
+  - 基于 fal IndexTTS-2 生成中文定制配音；英语与马来语使用上述独立路线。
   - 嘴部同步完成后，自动用原始生成的 IndexTTS-2 WAV 重新封装，保证交付成片音质纯正。
 - **📊 左右分屏对比与证据链交付**：
   - 原视频 vs 对口型成片左右分屏同步播放。

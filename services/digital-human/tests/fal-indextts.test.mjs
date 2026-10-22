@@ -37,6 +37,7 @@ async function harness(run) {
       'sine=frequency=440:sample_rate=24000:duration=0.3', fixture]);
     const {generateIndexTTS, generateChatterboxTTS} = load('../src/lib/engine/indextts.ts', {fs, path, crypto,
       './ffmpeg': media, './speech-stitch': stitch,
+      './localized-speech': {generateLocalizedSpeech: async (text, language, options) => ({text, language, options})},
       '../server/safe-log': {logServerError() {}},
       '../server/outbound-url-policy': {providerUrlPolicy: provider => {
         assert.equal(provider, 'fal'); return {allowedHosts: ['fal.media']};
@@ -173,51 +174,15 @@ test('definitive TTS query rejection stops without replaying synthesis', async (
   });
 });
 
-const chatterEndpoint = 'https://queue.fal.run/fal-ai/chatterbox/text-to-speech/multilingual';
-const chatterJob = {request_id: 'test', status_url: 'https://queue.fal.run/fal-ai/chatterbox/requests/test/status',
-  response_url: 'https://queue.fal.run/fal-ai/chatterbox/requests/test'};
-const chatterResponse = url => Response.json(url === chatterEndpoint ? chatterJob :
-  url === chatterJob.status_url ? {status: 'COMPLETED'} : {audio: {url: 'https://fal.media/audio.mp3'}});
-
-for (const language of ['en', 'ms']) test(`${language} Chatterbox uses the selected reference and preserves text through WAV export and cache reuse`, async () => {
+test('English/Malay entry delegates to the localized fal chain with the selected voice and references', async () => {
   await harness(async h => {
-    h.respond(chatterResponse);
-    const text = language === 'en' ? 'Welcome everyone, our price is RM 25.' : 'Selamat datang semua, harga kami RM 25.';
-    const result = await h.chatterbox(text, language, {toneProfile: 'high'});
-    const body = JSON.parse(h.calls[0].init.body);
-    assert.deepEqual(body, {text, voice: h.options.speakerAudioUrl, custom_audio_language: language === 'ms' ? 'malay' : 'english',
-      cfg_scale: 0, exaggeration: .5, temperature: .7});
-    assert.ok(h.calls.every(call => call.init.redirect === 'error' && call.init.headers.Authorization === 'Key fal-test'));
-    assert.equal(result.rate, 1.2); assert.ok(result.selectedDuration > 0);
-    assert.equal(fs.readFileSync(result.finalWavPath).toString('ascii', 0, 4), 'RIFF');
-    assert.equal((await h.chatterbox(text, language, {toneProfile: 'high'})).fromCache, true);
-    assert.equal(h.calls.filter(call => call.init.method === 'POST').length, 1);
-  });
-});
-
-test('Chatterbox cache is isolated by language and long scripts preserve all words within 300-character requests', async () => {
-  await harness(async h => {
-    h.respond(chatterResponse);
-    for (const language of ['en', 'ms']) await h.chatterbox('Hotel.', language);
-    assert.equal(h.calls.filter(call => call.init.method === 'POST').length, 2);
-    const text = 'Welcome to our new hotel with comfortable rooms and friendly staff '.repeat(10).trim() + '.';
-    const chunks = stitch.splitSpeechText(text, 'en');
-    assert.ok(chunks.length > 1 && chunks.every(chunk => chunk.length <= 300));
-    assert.equal(chunks.join(' ').replace(/\s+/g, ' '), text);
-    h.calls.length = 0;
-    await h.chatterbox(text, 'en');
-    assert.deepEqual(h.calls.filter(call => call.init.method === 'POST').map(call => JSON.parse(call.init.body).text), chunks);
-    assert.throws(() => stitch.splitSpeechText('a'.repeat(301), 'en'), /300/);
-  });
-});
-
-test('Chatterbox failure never falls through to the Chinese voice and never forwards credentials to foreign jobs', async () => {
-  await harness(async h => {
-    for (const badUrl of [false, true]) {
-      h.calls.length = 0;
-      h.respond(() => badUrl ? Response.json({...chatterJob, status_url: 'https://other.example/status'}) : new Response('denied', {status: 401}));
-      await assert.rejects(h.chatterbox('Selamat datang semua.', 'ms', {fallback: {apiKey: 'doubao-key', speakerId: 'speaker'}}));
-      assert.deepEqual(h.calls.map(call => call.url), [chatterEndpoint]);
+    for (const language of ['en', 'ms']) {
+      const result = await h.chatterbox('Hotel.', language, {englishReferenceAudioUrl: 'https://reference.example/native.wav', qwenMalayVoiceId: 'native-ms'});
+      assert.equal(result.text, 'Hotel.'); assert.equal(result.language, language);
+      assert.equal(result.options.speakerAudioUrl, h.options.speakerAudioUrl);
+      assert.equal(result.options.qwenMalayVoiceId, 'native-ms');
+      assert.equal(result.options.englishReferenceAudioUrl, 'https://reference.example/native.wav');
     }
+    assert.equal(h.calls.length, 0);
   });
 });
