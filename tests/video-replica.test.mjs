@@ -2480,6 +2480,112 @@ test('Wan is enabled with its own credentials and validates its 15-second refere
   assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), model: WAN3_MODEL } })).status, 503);
 });
 
+test('Wan queue is shared across users, survives restart and retains stopped upstream slots', async t => {
+  let at = Date.now(); const sent = [], finished = new Set(), owners = new Map();
+  const app = await fixture(t, { credits: null, config: { ...CONFIG, wan3Enabled: true }, now: () => at,
+    wan3Provider: {
+      upload: async () => ({ id: 'oss://test/material', status: 2 }),
+      generate: async task => {
+        const saved = JSON.parse(await readFile(join(app.root, 'video', task.id, 'task.json'), 'utf8'));
+        assert.equal(saved.providerDispatched, true); assert.equal(saved.wan3Queue.state, 'active');
+        sent.push(task.id); return { taskId: task.id };
+      },
+      query: async id => finished.has(id) ? { failed: true } : {},
+    } });
+  const call = (id, action = '', body) => app.call(`/tasks/${id}${action}`, { owner: owners.get(id), body });
+  async function until(id, status) {
+    for (let i = 0; i < 300; i++) {
+      const task = (await (await call(id)).json()).task;
+      if (task.status === status) return task;
+      await delay(10);
+    }
+    assert.fail(JSON.stringify((await (await call(id)).json()).task));
+  }
+  const ids = [];
+  for (let i = 0; i < 8; i++) {
+    const id = randomUUID(), owner = `user-${i}`; ids.push(id); owners.set(id, owner);
+    assert.equal((await app.call('/tasks', { owner, body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } })).status, 201);
+    for (const kind of ['video', 'photo']) assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/${kind}`,
+      { method: 'PUT', body: VIDEO, headers: { 'x-test-owner': owner } })).status, 200);
+    assert.equal((await call(id, '/start', {})).status, 202);
+    await until(id, i < 5 ? 'running' : 'queued');
+  }
+  assert.equal(sent.length, 5);
+  assert.equal((await until(ids[7], 'queued')).queue.position, 3);
+  await call(ids[6], '/cancel', {});
+  await call(ids[0], '/cancel', {});
+  await app.close();
+  const path = join(app.root, 'video', ids[5], 'task.json');
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.recoveryPolicy = 1; saved.recoveryDeadline = at + 30 * 60_000;
+  await writeFile(path, JSON.stringify(saved));
+  await app.open(); at += 31 * 60_000;
+  assert.equal((await until(ids[7], 'queued')).queue.position, 2);
+  await delay(80); assert.equal(sent.length, 5, 'local stop must not free an upstream slot');
+  finished.add(ids[0]); await until(ids[5], 'running');
+  assert.deepEqual(sent, [...ids.slice(0, 5), ids[5]]);
+  assert.equal((await until(ids[0], 'cancelled')).status, 'cancelled');
+  finished.add(ids[1]); await until(ids[7], 'running');
+  assert.deepEqual(sent, [...ids.slice(0, 5), ids[5], ids[7]]);
+  assert.equal(new Set(sent).size, sent.length);
+});
+
+for (const confirmed of [true, false]) test(`Wan restores a dispatch saved while queued without replay (confirmed=${confirmed})`, async t => {
+  let submissions = 0;
+  const app = await fixture(t, { credits: null, config: { ...CONFIG, wan3Enabled: true },
+    wan3Provider: { upload: async () => ({ id: 'oss://test/material', status: 2 }),
+      generate: async () => { submissions++; return { taskId: 'existing-wan' }; }, query: async () => ({}) } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } }); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), task = JSON.parse(await readFile(path, 'utf8'));
+  task.status = 'queued'; task.recoveryPolicy = 1;
+  if (!confirmed) delete task.providerId;
+  await writeFile(path, JSON.stringify(task));
+  await app.open(); const restored = await app.until(id, task => task.status === (confirmed ? 'running' : 'waiting'));
+  if (!confirmed) assert.equal(restored.canResume, false);
+  assert.equal(submissions, 1);
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).wan3Queue.state, 'active');
+});
+
+test('Wan throttled generation stays queued and resumes automatically after restart', async t => {
+  let at = Date.now(), attempts = 0;
+  const app = await fixture(t, { credits: null, config: { ...CONFIG, wan3Enabled: true }, now: () => at,
+    wan3Provider: {
+      upload: async () => ({ id: 'oss://test/material', status: 2 }),
+      generate: async () => {
+        if (++attempts === 1) throw Object.assign(new VideoError('limited', 429, 'VIDEO_PROVIDER_RATE_LIMITED'), { providerNotDispatched: true, retryAfterMs: 7000 });
+        return { taskId: 'accepted' };
+      }, query: async () => ({}),
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } }); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'queued' && attempts === 1);
+  await app.close(); await app.open(); at += 6999;
+  await delay(80); assert.equal(attempts, 1);
+  at++; await app.until(id, task => task.status === 'running');
+  assert.equal(attempts, 2);
+});
+
+test('Wan partially queued long videos query finished parts and continue without deadlock', async t => {
+  const app = await segmentedReplica(t, { model: WAN3_MODEL, duration: 60 }), { calls } = app;
+  const first = await segmentedDraft(app, WAN3_MODEL), second = await segmentedDraft(app, WAN3_MODEL);
+  await app.call(`/tasks/${first}/start`, { body: {} }); await app.until(first, task => task.status === 'running');
+  await app.call(`/tasks/${second}/start`, { body: {} });
+  await app.until(second, task => task.status === 'queued' && task.segments.submitted === 1);
+  assert.equal(calls.generations.length, 5);
+  await app.close(); await app.open();
+  calls.finished.add('job-segment-0-id');
+  await app.until(second, task => task.status === 'queued' && task.segments.submitted === 3);
+  assert.equal(calls.generations.length, 7);
+  for (let i = 0; i < 4; i++) calls.finished.add(`job-segment-${i}-id`);
+  await app.until(first, task => task.status === 'completed');
+  await app.until(second, task => task.status === 'completed');
+  assert.equal(calls.generations.length, 8); assert.equal(calls.conversions, 2); assert.equal(calls.joins.length, 2);
+});
+
 for (const outcome of ['completed', 'failed', 'uncertain']) test(`Wan ${outcome} keeps one dispatch and the model price after restart`, async t => {
   let submissions = 0, uploads = 0, ready = false;
   const app = await fixture(t, { costMode: true, config: { wan3Enabled: true },

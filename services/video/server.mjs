@@ -14,6 +14,7 @@ import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createPixverseProvider } from './pixverse.mjs';
 import { createWanProvider } from './wan.mjs';
 import { createWan3Provider, wan3Price, wan3Usage } from './wan3.mjs';
+import { createWan3Queue } from './wan3-queue.mjs';
 import { createCaptionService, captionSpeech } from './captions.mjs';
 import { createNarrationService } from './narration.mjs';
 import { createVoiceConversionService } from './voice-conversion.mjs';
@@ -28,7 +29,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
 const DAY = 86400_000;
 const MATERIAL_QUERY_RETRIES = 5;
-const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'verifying']);
+const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'queued', 'submitting', 'running', 'downloading', 'verifying']);
 const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const isFalReplacement = model => model === PIXVERSE_MODEL || model === WAN_MODEL;
 const error = (message, status = 400, code) => new VideoError(message, status, code);
@@ -56,6 +57,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
   scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
+  const wan3Queue = createWan3Queue({ jobs, save, now });
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
   if (speech === undefined) speech = createSpeechService(env, costMeter.fetch);
   if (narration === undefined) narration = createNarrationService(env, { fetchImpl: costMeter.fetch, recoverReceipt: costMeter.recoverFalRequest, now });
@@ -204,11 +206,12 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
-      ratio: task.ratio, video: task.video && video, targetDuration: task.targetDuration, segments: segmentView(task), photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
+      ratio: task.ratio, video: task.video && video, targetDuration: task.targetDuration, segments: segmentView(task), queue: wan3Queue.view(task), photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
       captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck,
       error: task.recoveryPolicy ? '' : task.error || '', code: task.recoveryPolicy ? undefined : task.code,
       recovery: task.recovery && { state: task.recovery.state, message: task.recovery.message, nextAttemptAt: task.recovery.nextAttemptAt },
       canResume: !expired && task.status === 'waiting' && task.recovery?.resumeStatus !== 'submitting' && !task.lipsync?.submitting
+        && !(task.model === WAN3_MODEL && (task.segments || [task]).some(part => wan3Queue.active(part) && !segmentConfirmed(part)))
         && !task.voiceConversion?.submitting && !task.voiceConversion?.failed
         && !task.languageDetection?.pending
         && !task.localization?.failed && !task.localization?.translating && !task.localization?.segments?.some(segment => segment.status === 'submitting')
@@ -249,12 +252,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           for (const segment of task.segments) {
             if (segment.wan3Usage || segment.failed || !segment.providerId) continue;
             const result = await wan3Provider.query(segment.providerId);
+            wan3Queue.observe(segment, result);
             if (result.usage) segment.wan3Usage = wan3Usage(result.usage);
             if (result.failed) segment.failed = true;
           }
           await save(task); await finishWan3Cost(task, {}); record = await credits.reservation(task.userId, taskId);
         } else if (task.providerId) {
           const result = task.wan3Usage ? { completed: true, usage: task.wan3Usage } : await wan3Provider.query(task.providerId);
+          wan3Queue.observe(task, result);
           if (result.completed || result.failed) { await finishWan3Cost(task, result); record = await credits.reservation(task.userId, taskId); }
         }
       }
@@ -398,6 +403,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (result.taskId) task.providerId = result.taskId;
     if (task.model === WAN3_MODEL) {
       // Save the paid receipt before settlement; restarting must only query this job.
+      wan3Queue.observe(task, result);
       if (result.usage) task.wan3Usage = wan3Usage(result.usage);
       await save(task);
       if (result.completed || result.failed) await finishWan3Cost(task, result);
@@ -421,6 +427,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   async function submissionFailed(task, cause, segment) {
     if (fatal) throw cause;
     const rejected = cause instanceof VideoError && ['VIDEO_PROVIDER_REJECTED', 'VIDEO_PROVIDER_IP_DENIED'].includes(cause.code);
+    if (task.model === WAN3_MODEL && (cause.providerNotDispatched || rejected)) {
+      const throttled = cause.code === 'VIDEO_PROVIDER_RATE_LIMITED';
+      await wan3Queue.rejected(task, segment || task, { throttled, retryAfterMs: cause.retryAfterMs });
+      if (throttled) { task.status = 'queued'; task.error = ''; delete task.code; await save(task); return; }
+    }
     // A rejected part created no job, so resuming submits only the parts still without one.
     if (cause.providerNotDispatched || segment && rejected) {
       if (segment) { segment.providerDispatched = false; task.providerDispatched = task.segments.some(item => item.providerDispatched); }
@@ -437,18 +448,22 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     for (const segment of task.segments) {
       if (segmentConfirmed(segment)) continue;
       // Persist each part's dispatch boundary; a restart never replays an unconfirmed part.
-      segment.providerDispatched = true; await save(task);
+      if (task.model === WAN3_MODEL) {
+        if (!await wan3Queue.admit(task, segment)) return;
+      } else { segment.providerDispatched = true; await save(task); }
       let result;
       try { result = await taskProvider.generate(segmentTask(task, segment)); }
       catch (cause) { await submissionFailed(task, cause, segment); return; }
       if (result.taskId) segment.providerId = result.taskId;
       if (result.url) segment.resultSource = result.url;
       if (task.model === WAN3_MODEL && result.usage) segment.wan3Usage = wan3Usage(result.usage);
+      if (task.model === WAN3_MODEL) wan3Queue.observe(segment, result);
       if (result.failed) segment.failed = true;
       await save(task);
       if (result.failed) { await fail(task, `第 ${segment.index + 1} 段视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。`, 'VIDEO_GENERATION_FAILED'); return; }
       if (!segmentConfirmed(segment)) { await fail(task, `第 ${segment.index + 1} 段未返回任务编号，未自动重试。请核对模型服务记录后再创建任务。`, 'VIDEO_SUBMISSION_UNCERTAIN'); return; }
     }
+    if (task.model === WAN3_MODEL) wan3Queue.finish(task);
     task.status = 'running'; task.lastCheckedAt = now(); task.error = ''; delete task.code; await save(task);
   }
   async function querySegments(task, taskProvider) {
@@ -456,6 +471,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     for (const segment of task.segments) {
       if (segment.resultSource) continue;
       const result = await taskProvider.query(segment.providerId, segmentTask(task, segment));
+      if (task.model === WAN3_MODEL) wan3Queue.observe(segment, result);
       if (task.model === WAN3_MODEL && result.usage) segment.wan3Usage = wan3Usage(result.usage);
       if (result.failed) { segment.failed = true; await save(task); }
       if (result.failed) { await fail(task, `第 ${segment.index + 1} 段视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。`, 'VIDEO_GENERATION_FAILED'); return; }
@@ -594,14 +610,26 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         task.cnyPerSecond = price;
         await save(task);
       }
-      // Persist the dispatch boundary before making the paid call. Never replay it after a restart.
-      task.status = 'submitting'; task.providerDispatched = true; await save(task);
-      if (task.segments) await submitSegments(task, taskProvider);
-      else try { await acceptResult(task, await taskProvider.generate(task)); }
-      catch (cause) { await submissionFailed(task, cause); }
+      if (task.model === WAN3_MODEL) await wan3Queue.enqueue(task);
+      else {
+        // Persist the dispatch boundary before making the paid call. Never replay it after a restart.
+        task.status = 'submitting'; task.providerDispatched = true; await save(task);
+        if (task.segments) await submitSegments(task, taskProvider);
+        else try { await acceptResult(task, await taskProvider.generate(task)); }
+        catch (cause) { await submissionFailed(task, cause); }
+      }
     } else if (task.status === 'running') {
       if (task.segments) await querySegments(task, taskProvider);
       else await acceptResult(task, await taskProvider.query(task.providerId, task));
+    }
+    if (task.status === 'queued' && task.model === WAN3_MODEL) {
+      if (task.segments) await submitSegments(task, taskProvider);
+      else if (await wan3Queue.admit(task)) {
+        try {
+          const result = await taskProvider.generate(task);
+          wan3Queue.finish(task); await acceptResult(task, result);
+        } catch (cause) { await submissionFailed(task, cause); }
+      }
     }
     if (task.status === 'downloading') {
       const target = task.voice || task.captions ? join(folder(task), 'generated.mp4') : file(task, 'result');
@@ -707,8 +735,25 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
   }
   async function processTask(task) {
+    if (task.model === WAN3_MODEL && task.status !== 'running') {
+      // Partially submitted, stopped and held tasks can still occupy upstream slots.
+      // Query them until terminal; stopping locally is not an upstream cancellation.
+      for (const part of task.segments || [task]) {
+        if (!wan3Queue.active(part) || !part.providerId) continue;
+        let result;
+        try { result = await wan3Provider.query(part.providerId); } catch { continue; }
+        wan3Queue.observe(part, result);
+        if (result.usage) part.wan3Usage = wan3Usage(result.usage);
+        if (result.failed) part.failed = true;
+        if (result.url) part.resultSource = result.url;
+        await save(task);
+      }
+      if (task.status === 'queued' && task.segments?.some(part => part.failed)) {
+        await fail(task, '视频生成失败，请检查参考素材后重新创建任务。', 'VIDEO_GENERATION_FAILED'); return;
+      }
+    }
     if (!isExpired(task) && (task.status === 'waiting' || task.recovery?.nextAttemptAt > now())) return;
-    if (task.recoveryPolicy && ACTIVE.has(task.status) && now() >= (task.recoveryDeadline || task.startedAt + 30 * 60_000)) {
+    if (task.recoveryPolicy && task.status !== 'queued' && ACTIVE.has(task.status) && now() >= (task.recoveryDeadline || task.startedAt + 30 * 60_000)) {
       await hold(task, { code: 'VIDEO_RECOVERY_WAITING', recoveryAction: 'resume', message: '本轮等待时间已到，进度已保存。' }); return;
     }
     if (task.voiceEngine !== 'indextts2' || !task.narration || !ACTIVE.has(task.status) || closing || fatal) return processVideoTask(task);
@@ -780,12 +825,19 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         task.rawReady = await stat(join(folder(task), 'generated.mp4')).then(info => info.isFile() && info.size > 0, () => false);
       }
       // Parts that were never sent or already have a job can continue without replaying a paid call.
-      if (task.status === 'submitting' && task.segments?.every(segment => !segment.providerDispatched || segmentConfirmed(segment))) {
+      if (task.model === WAN3_MODEL && task.status === 'queued') {
+        if ((task.segments || [task]).some(part => part.providerDispatched && !segmentConfirmed(part))) {
+          await fail(task, '服务重启中断了提交确认，未自动重新生成。请核对原任务。', 'VIDEO_INTERRUPTED');
+        } else if (!task.segments && task.providerId) {
+          wan3Queue.finish(task); task.status = 'running'; await save(task);
+        }
+      } else if (task.status === 'submitting' && task.segments?.every(segment => !segment.providerDispatched || segmentConfirmed(segment))) {
         task.status = 'reviewing'; task.providerDispatched = task.segments.some(segment => segment.providerDispatched); await save(task);
       } else if (['reserving', 'submitting'].includes(task.status)) {
         await fail(task, '服务重启中断了提交确认，未自动重新生成。预留积分将退回，请核对原任务后重试。', 'VIDEO_INTERRUPTED');
       }
     }
+    await wan3Queue.restore();
     timer = setInterval(() => { void tick().catch(() => { fatal = true; }); }, pollIntervalMs); timer.unref();
   })();
   ready.catch(() => { fatal = true; });

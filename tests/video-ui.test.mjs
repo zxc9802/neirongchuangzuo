@@ -28,6 +28,19 @@ test('replica keeps the source language without a selector or target in requests
   }
 });
 
+test('queued replicas display their position, segment progress and automatic start message', async t => {
+  const task = { id: 'queued-preview', model: 'wan3.0-video', status: 'queued', createdAt: Date.now() - 31 * 60_000,
+    queue: { position: 3, pending: 3 }, segments: { total: 4, submitted: 1, completed: 0 } };
+  const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /排队等待生成/);
+  assert.match(page.html(), /排队第 3 位/);
+  assert.match(page.html(), /已提交 1 \/ 4 段/);
+  assert.match(page.html(), /轮到后自动生成，无需重复提交/);
+  assert.doesNotMatch(page.html(), /等待时间较长，仍在查询原任务/);
+  task.queue.position = 1; await page.poll();
+  assert.match(page.node('#replica-progress').innerHTML, /排队第 1 位/);
+});
+
 test('legacy translation progress remains visible without restoring a language selector', async t => {
   const task = { id: 'language-preview', status: 'preparing', voiceEngine: 'chatterbox', targetLanguage: 'ms', createdAt: Date.now() };
   const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id);

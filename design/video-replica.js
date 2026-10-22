@@ -16,7 +16,7 @@ const LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英语' }, {
 const languageName = code => LANGUAGES.find(item => item.id === code)?.name || code || '待识别';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务').replace(/Wan\s*3\.0/gi, 'qiya-3.0');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '进度已保存', waiting: '等待继续处理', cancelled: '已停止处理', expired: '已过期' };
-const taskLabel = task => task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
+const taskLabel = task => task.status === 'queued' ? '排队等待生成' : task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
   ? '正在识别原视频语言' : task.languageRouting?.translate && task.status === 'preparing'
   ? '正在翻译台词并生成配音' : task.languageRouting?.translate && task.status === 'verifying'
   ? '正在按译后配音同步口型' : task.voiceEngine === 'chatterbox' && task.status === 'preparing'
@@ -79,6 +79,7 @@ function actionMessage() {
   if (state.pollError) return '正在重新连接，已有任务进度已保留。';
   if (state.error) return displayMessage(state.error);
   if (state.busy) return '';
+  if (state.current?.status === 'queued') return '任务已进入队列，轮到后自动生成，无需重复提交。';
   if (state.current?.recovery) return state.current.recovery.message;
   if (state.current?.status === 'verifying') return ['indextts2', 'chatterbox'].includes(state.current.voiceEngine) ? `${taskLabel(state.current)}，请稍候。` : '正在核对已有成片的台词与开口时间，请稍候。';
   if (state.current?.status === 'failed') return failureMessage(state.current);
@@ -156,12 +157,13 @@ function progress(ctx) {
   const size = total > 0 ? ` / ${mb(total)}` : '';
   // Whole sentences, so the interface localizer can match each one.
   const saving = task.downloadProgress?.segments ? `保存第 ${task.downloadProgress.segment} / ${task.downloadProgress.segments} 段成片：${mb(received)}${size}` : `保存成片：${mb(received)}${size}`;
-  const segments = task.segments && ['submitting', 'running'].includes(task.status) ? `<p>分段生成：已提交 ${task.segments.submitted} / ${task.segments.total} 段 · 已完成 ${task.segments.completed} / ${task.segments.total} 段</p>` : '';
+  const segments = task.segments && ['queued', 'submitting', 'running'].includes(task.status) ? `<p>分段生成：已提交 ${task.segments.submitted} / ${task.segments.total} 段 · 已完成 ${task.segments.completed} / ${task.segments.total} 段</p>` : '';
+  const queue = task.queue?.position > 0 ? `<p>排队第 ${task.queue.position} 位，轮到后自动开始。</p>` : '';
   const download = Number.isFinite(received) && received >= 0 ? `<p>${saving}</p>${total > 0 ? `<progress aria-label="成片保存进度" max="${total}" value="${Math.min(received, total)}"></progress>` : ''}` : '';
   const voiceProgress = task.localizationProgress || task.narrationProgress;
   const narration = voiceProgress ? `<p>配音已完成 ${voiceProgress.completed} / ${voiceProgress.total} 段</p>` : '';
-  return `${narration}${segments}<p>已等待 ${duration(elapsed)} · ${task.status === 'waiting' ? '进度已保存' : task.lastCheckedAt ? `最近收到模型回复：${duration(now - task.lastCheckedAt)}前` : '等待模型回复'}</p>${download}
-    ${state.pollError ? '<p>正在重新连接，已有任务进度已保留。</p>' : pending(task) && elapsed >= 600_000 ? '<p>等待时间较长，仍在查询原任务，请勿重复提交。</p>' : ''}
+  return queue + `${narration}${segments}<p>已等待 ${duration(elapsed)} · ${task.status === 'queued' ? '排队等待生成' : task.status === 'waiting' ? '进度已保存' : task.lastCheckedAt ? `最近收到模型回复：${duration(now - task.lastCheckedAt)}前` : '等待模型回复'}</p>${download}
+    ${state.pollError ? '<p>正在重新连接，已有任务进度已保留。</p>' : task.status !== 'queued' && pending(task) && elapsed >= 600_000 ? '<p>等待时间较长，仍在查询原任务，请勿重复提交。</p>' : ''}
     <small>任务编号：${ctx.esc(task.id)}</small>`;
 }
 function history(ctx) {

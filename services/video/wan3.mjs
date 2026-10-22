@@ -31,15 +31,22 @@ export function createWan3Provider(config, fetchImpl = fetch) {
         headers: { Authorization: `Bearer ${config.dashscopeKey}`, 'Content-Type': 'application/json',
           ...(body ? { 'X-DashScope-Async': 'enable', 'X-DashScope-OssResourceResolve': 'enable' } : {}) },
         ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(60_000) });
+      if (response.status === 429) {
+        const retry = response.headers.get('retry-after');
+        const retryAfterMs = retry ? /^\d+(\.\d+)?$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now() : 5000;
+        await response.body?.cancel();
+        throw Object.assign(new VideoError('万相生成额度繁忙，正在排队等待。', 429, 'VIDEO_PROVIDER_RATE_LIMITED'),
+          { providerNotDispatched: true, retryAfterMs: Number.isFinite(retryAfterMs) ? Math.max(1000, retryAfterMs) : 5000 });
+      }
       if ([400, 401, 402, 403, 404, 422].includes(response.status)) {
         await response.body?.cancel();
-        throw new VideoError('万相请求被拒绝，请检查阿里云密钥、模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED');
+        throw Object.assign(new VideoError('万相请求被拒绝，请检查阿里云密钥、模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED'), { providerNotDispatched: true });
       }
       if (!response.ok) { await response.body?.cancel(); throw new Error(); }
       const chunks = []; let length = 0;
       for await (const chunk of response.body) { length += chunk.length; if (length > 1024 * 1024) throw new Error(); chunks.push(chunk); }
       const data = JSON.parse(Buffer.concat(chunks).toString());
-      if (data.code) throw new VideoError('万相请求被拒绝，请检查模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED');
+      if (data.code) throw Object.assign(new VideoError('万相请求被拒绝，请检查模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED'), { providerNotDispatched: true });
       return data;
     } catch (cause) {
       if (cause instanceof VideoError || cause.providerNotDispatched) throw cause;

@@ -8836,6 +8836,18 @@ export const EXTRA_UI_COPY = {
     "en": "Saving and joining the video parts",
     "ms": "Sedang menyimpan dan menyambung bahagian video"
   },
+  "排队等待生成": {
+    "en": "Queued for generation",
+    "ms": "Beratur untuk penjanaan"
+  },
+  "任务已进入队列，轮到后自动生成，无需重复提交。": {
+    "en": "Your task is queued and will start automatically. No need to submit it again.",
+    "ms": "Tugas anda dalam barisan dan akan bermula secara automatik. Tidak perlu menghantar semula."
+  },
+  "排队第 {value0} 位，轮到后自动开始。": {
+    "en": "Queue position: {value0}. Generation will start automatically.",
+    "ms": "Kedudukan dalam barisan: {value0}. Penjanaan akan bermula secara automatik."
+  },
   "保存第 {value0} / {value1} 段成片：{value2}{value3}": {
     "en": "Save finished video part {value0} / {value1}: {value2}{value3}",
     "ms": "Simpan bahagian video siap {value0} / {value1}: {value2}{value3}"

@@ -65,7 +65,7 @@ test('Wan configuration is independent of Seedance and uses the server-only work
 });
 
 test('Wan distinguishes rejection, uncertain dispatch, failed jobs and missing usage', async () => {
-  for (const [status, code] of [[401, 'VIDEO_PROVIDER_REJECTED'], [429, 'VIDEO_PROVIDER_UNAVAILABLE'], [503, 'VIDEO_PROVIDER_UNAVAILABLE']]) {
+  for (const [status, code] of [[401, 'VIDEO_PROVIDER_REJECTED'], [429, 'VIDEO_PROVIDER_RATE_LIMITED'], [503, 'VIDEO_PROVIDER_UNAVAILABLE']]) {
     let calls = 0;
     const provider = createWan3Provider({ dashscopeKey: 'test' }, async () => { calls++; return new Response('error', { status }); });
     await assert.rejects(provider.generate(task), { code }); assert.equal(calls, 1);
@@ -76,6 +76,16 @@ test('Wan distinguishes rejection, uncertain dispatch, failed jobs and missing u
   const missing = await provider({ task_status: 'SUCCEEDED', video_url: 'https://result.example/video.mp4' }).query('id');
   assert.equal(missing.completed, true); assert.equal(missing.usage, undefined);
   for (const value of [undefined, { ...usage, duration: 14.58 }, { ...usage, duration: '29.15' }, { ...usage, SR: 1080 }]) assert.equal(wan3Usage(value), undefined);
+});
+
+test('Wan throttling is a confirmed non-dispatch and respects Retry-After', async () => {
+  for (const [retry, expected] of [['7', 7000], ['invalid', 5000], [null, 5000]]) {
+    const provider = createWan3Provider({ dashscopeKey: 'test' }, async () => new Response('',
+      { status: 429, headers: retry ? { 'Retry-After': retry } : {} }));
+    await assert.rejects(provider.generate(task), { code: 'VIDEO_PROVIDER_RATE_LIMITED', providerNotDispatched: true, retryAfterMs: expected });
+  }
+  const provider = createWan3Provider({ dashscopeKey: 'test' }, async () => { throw new Error('connection lost'); });
+  await assert.rejects(provider.generate(task), cause => cause.code === 'VIDEO_PROVIDER_UNAVAILABLE' && !cause.providerNotDispatched);
 });
 
 test('Wan discount ends at Beijing midnight and input seconds are retained in usage', () => {
