@@ -27,8 +27,14 @@ const taskLabel = task => task.status === 'preparing' && ['en', 'ms'].includes(t
   : task.voiceEngine === 'indextts2' && task.status === 'running' && !task.narrationProgress?.ready
     ? '正在替换人物并生成参考配音' : task.segments && task.status === 'downloading'
     ? '正在保存并拼接两段成片' : labels[task.status] || '正在处理';
-const SEAMS = { scene: '镜头切换处', pause: '说话停顿处', duration: '按生成时长切分' };
-const segmentText = task => task.segments ? `分 ${task.segments.total} 段生成 · 第 ${Number(Number(task.segments.seam).toFixed(2))} 秒接续（${SEAMS[task.segments.boundary] || '自动选择'}），整条统一换声` : '';
+// One whole sentence per seam reason, so each is localized as a unit.
+function segmentText(task) {
+  if (!task.segments) return '';
+  const total = task.segments.total, seam = Number(Number(task.segments.seam).toFixed(2));
+  if (task.segments.boundary === 'scene') return `分 ${total} 段生成 · 第 ${seam} 秒接续（镜头切换处），整条统一换声`;
+  if (task.segments.boundary === 'pause') return `分 ${total} 段生成 · 第 ${seam} 秒接续（说话停顿处），整条统一换声`;
+  return `分 ${total} 段生成 · 第 ${seam} 秒接续（按生成时长切分），整条统一换声`;
+}
 const pending = task => task && !['draft', 'completed', 'failed', 'expired', 'waiting', 'cancelled'].includes(task.status);
 let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, targetDuration: null, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
 let context, timer, polling = false, unsubscribeCredits;
@@ -123,7 +129,7 @@ function slot(kind, ctx) {
   return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title"><span>${video ? '01' : voice ? '03' : '02'}</span><h3>${t(title)}${voice ? `<small>${t(voiceRequired ? '必填' : '选填')} · ${t('更换音色')}</small>` : ''}</h3></div>
     ${voice ? voiceHint() : ''}<div class="replica-input-preview">${preview}</div>
     <strong class="replica-file-name">${ctx.esc(selected?.name || (saved?.assetId ? '已存入资产，长期保留' : saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : '上传你想替换成的人物'))}</strong>
-    <p>${video ? `单个人物 · ${targetDuration() ? `截取开头 ${targetDuration()} 秒` : `2–${selectedModel().maxDuration} 秒`} · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
+    <p>${video ? targetDuration() ? `单个人物 · 截取开头 ${targetDuration()} 秒 · MP4 / MOV · 最大 50 MB` : `单个人物 · 2–${selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="${t('上传')} ${t(title)}">
     <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${t(selected || saved ? '更换' : '选择')} ${t(title)}</label>${!video ? `<a href="#assets" class="replica-asset-link">${t(voice ? '从资产选择声音' : '从资产选择形象')}</a>` : ''}</section>`;
 }
@@ -146,9 +152,11 @@ function progress(ctx) {
   const duration = ms => { const seconds = Math.max(0, Math.floor(ms / 1000)); return seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`; };
   const received = Number(task.downloadProgress?.receivedBytes), total = Number(task.downloadProgress?.totalBytes);
   const mb = bytes => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  const part = task.downloadProgress?.segments ? `（第 ${task.downloadProgress.segment} / ${task.downloadProgress.segments} 段）` : '';
+  const size = total > 0 ? ` / ${mb(total)}` : '';
+  // Whole sentences, so the interface localizer can match each one.
+  const saving = task.downloadProgress?.segments ? `保存第 ${task.downloadProgress.segment} / ${task.downloadProgress.segments} 段成片：${mb(received)}${size}` : `保存成片：${mb(received)}${size}`;
   const segments = task.segments && ['submitting', 'running'].includes(task.status) ? `<p>分段生成：已提交 ${task.segments.submitted} / ${task.segments.total} 段 · 已完成 ${task.segments.completed} / ${task.segments.total} 段</p>` : '';
-  const download = Number.isFinite(received) && received >= 0 ? `<p>保存成片${part}：${mb(received)}${total > 0 ? ` / ${mb(total)}` : ''}</p>${total > 0 ? `<progress aria-label="成片保存进度" max="${total}" value="${Math.min(received, total)}"></progress>` : ''}` : '';
+  const download = Number.isFinite(received) && received >= 0 ? `<p>${saving}</p>${total > 0 ? `<progress aria-label="成片保存进度" max="${total}" value="${Math.min(received, total)}"></progress>` : ''}` : '';
   const voiceProgress = task.localizationProgress || task.narrationProgress;
   const narration = voiceProgress ? `<p>配音已完成 ${voiceProgress.completed} / ${voiceProgress.total} 段</p>` : '';
   return `${narration}${segments}<p>已等待 ${duration(elapsed)} · ${task.status === 'waiting' ? '进度已保存' : task.lastCheckedAt ? `最近收到模型回复：${duration(now - task.lastCheckedAt)}前` : '等待模型回复'}</p>${download}

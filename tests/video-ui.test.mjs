@@ -329,7 +329,7 @@ test('a long premium replica shows its seam, part progress and per-part download
   Object.assign(task, { status: 'downloading', downloadProgress: { receivedBytes: 1048576, totalBytes: 2097152, segment: 2, segments: 2 } });
   await page.poll();
   assert.match(page.node('#replica-result-summary').innerHTML, /正在保存并拼接两段成片/);
-  assert.match(page.node('#replica-progress').innerHTML, /保存成片（第 2 \/ 2 段）：1.0 MB \/ 2.0 MB/);
+  assert.match(page.node('#replica-progress').innerHTML, /保存第 2 \/ 2 段成片：1.0 MB \/ 2.0 MB/);
   assert.doesNotMatch(page.node('#replica-progress').innerHTML, /分段生成：已提交/);
 });
 
