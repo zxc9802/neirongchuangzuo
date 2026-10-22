@@ -328,9 +328,18 @@ test('a long premium replica shows its seam, part progress and per-part download
   assert.match(page.html(), /分段生成：已提交 2 \/ 2 段 · 已完成 1 \/ 2 段/);
   Object.assign(task, { status: 'downloading', downloadProgress: { receivedBytes: 1048576, totalBytes: 2097152, segment: 2, segments: 2 } });
   await page.poll();
-  assert.match(page.node('#replica-result-summary').innerHTML, /正在保存并拼接两段成片/);
+  assert.match(page.node('#replica-result-summary').innerHTML, /正在保存并拼接分段成片/);
   assert.match(page.node('#replica-progress').innerHTML, /保存第 2 \/ 2 段成片：1.0 MB \/ 2.0 MB/);
   assert.doesNotMatch(page.node('#replica-progress').innerHTML, /分段生成：已提交/);
+});
+
+test('four-part replicas show their real count without claiming a single seam', async t => {
+  const task = { id: 'four-parts', model: 'wan3.0-video', status: 'running', duration: 60, targetDuration: 60,
+    segments: { total: 4, boundary: 'scene', seam: 15, submitted: 4, completed: 2 } };
+  const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /分 4 段生成，整条统一换声/);
+  assert.match(page.html(), /分段生成：已提交 4 \/ 4 段 · 已完成 2 \/ 4 段/);
+  assert.doesNotMatch(page.html(), /第 15 秒接续/);
 });
 
 test('a shorter local replacement is saved before downgrading a premium draft and is not uploaded twice', async t => {
@@ -352,7 +361,8 @@ test('a shorter local replacement is saved before downgrading a premium draft an
   assert.equal(calls.filter(path => path.endsWith('/video')).length, 1);
 });
 
-test('the custom duration is an opt-in qiya-2.5 setting sent with the new task', async t => {
+for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan3.0-video']) test(`custom duration is opt-in and submitted for ${model}`, async t => {
+  const maxDuration = model === PREMIUM_MODEL ? 30 : 15;
   let task; const posts = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
@@ -362,11 +372,11 @@ test('the custom duration is an opt-in qiya-2.5 setting sent with the new task',
     return Response.json({ task });
   } });
   page.recover(); await page.poll();
-  assert.doesNotMatch(page.html(), /replica-custom-duration/);
-  page.node('#replica-models').onchange({ target: { value: PREMIUM_MODEL } }); await page.settle();
+  assert.match(page.html(), /id="replica-custom-duration"(?![^>]*checked)/);
+  page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
   assert.match(page.html(), /id="replica-custom-duration"(?![^>]*checked)/);
   assert.doesNotMatch(page.html(), /replica-target-duration/);
-  assert.match(page.html(), /不开启时按单次上限 30 秒生成；开启后可选 2–60 秒/); assert.match(page.html(), /单个人物 · 2–30 秒/);
+  assert.match(page.html(), new RegExp(`不开启时按单次上限 ${maxDuration} 秒生成；开启后可选 2–60 秒`)); assert.match(page.html(), new RegExp(`单个人物 · 2–${maxDuration} 秒`));
   page.node('#replica-custom-duration').onchange({ target: { checked: true } }); await page.settle();
   assert.match(page.html(), /id="replica-custom-duration" checked/);
   assert.match(page.html(), /id="replica-target-duration" min="2" max="60" step="1" value="60"/);
@@ -379,10 +389,11 @@ test('the custom duration is an opt-in qiya-2.5 setting sent with the new task',
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(posts.find(item => item.path.endsWith('/tasks')).body.targetDuration, 45);
+  assert.equal(posts.find(item => item.path.endsWith('/tasks')).body.model, model);
   page.node('#replica-new').onclick();
-  assert.doesNotMatch(page.html(), /replica-custom-duration/);
-  page.node('#replica-models').onchange({ target: { value: PREMIUM_MODEL } }); await page.settle();
-  assert.match(page.html(), /单个人物 · 2–30 秒/);
+  assert.match(page.html(), /id="replica-custom-duration"(?![^>]*checked)/);
+  page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
+  assert.match(page.html(), new RegExp(`单个人物 · 2–${maxDuration} 秒`));
 });
 
 test('a saved draft turns the custom duration off only after saving a pending local video', async t => {

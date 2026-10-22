@@ -5,11 +5,11 @@ import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malay
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
 const MODELS = [
-  { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15 },
+  { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15, extendedDuration: 60 },
   { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, extendedDuration: 60 },
-  { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15 },
-  { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15 },
-  { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15 },
+  { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, extendedDuration: 60 },
+  { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, extendedDuration: 60 },
+  { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, extendedDuration: 60 },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
 const LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英语' }, { id: 'ms', name: '马来语' }];
@@ -26,11 +26,12 @@ const taskLabel = task => task.status === 'preparing' && ['en', 'ms'].includes(t
   ? task.narrationProgress?.ready ? '正在同步口型与参考配音' : '正在完成参考声音配音'
   : task.voiceEngine === 'indextts2' && task.status === 'running' && !task.narrationProgress?.ready
     ? '正在替换人物并生成参考配音' : task.segments && task.status === 'downloading'
-    ? '正在保存并拼接两段成片' : labels[task.status] || '正在处理';
+    ? '正在保存并拼接分段成片' : labels[task.status] || '正在处理';
 // One whole sentence per seam reason, so each is localized as a unit.
 function segmentText(task) {
   if (!task.segments) return '';
   const total = task.segments.total, seam = Number(Number(task.segments.seam).toFixed(2));
+  if (total > 2) return `分 ${total} 段生成，整条统一换声`;
   if (task.segments.boundary === 'scene') return `分 ${total} 段生成 · 第 ${seam} 秒接续（镜头切换处），整条统一换声`;
   if (task.segments.boundary === 'pause') return `分 ${total} 段生成 · 第 ${seam} 秒接续（说话停顿处），整条统一换声`;
   return `分 ${total} 段生成 · 第 ${seam} 秒接续（按生成时长切分），整条统一换声`;
@@ -104,7 +105,7 @@ function durationSetting(ctx) {
   if (!model.extendedDuration) return '';
   const locked = state.busy || state.current && state.current.status !== 'draft' || !state.config?.enabled;
   return `<div class="replica-duration-setting"><label class="replica-duration-toggle"><input type="checkbox" id="replica-custom-duration" ${target ? 'checked' : ''} ${locked ? 'disabled' : ''}>自定义生成时长</label>${target ? `<label class="replica-duration-value">生成开头 <input type="number" id="replica-target-duration" min="2" max="${model.extendedDuration}" step="1" value="${target}" ${locked ? 'disabled' : ''} aria-label="生成时长（秒）"> 秒</label>` : ''}
-    <p class="replica-model-description">${ctx.esc(target ? `从参考视频开头截取，最长 ${model.extendedDuration} 秒；视频较短时按实际时长生成。超过 ${model.maxDuration} 秒分两段生成，整条统一换声。` : `不开启时按单次上限 ${model.maxDuration} 秒生成；开启后可选 2–${model.extendedDuration} 秒。`)}</p></div>`;
+    <p class="replica-model-description">${ctx.esc(target ? `从参考视频开头截取，最长 ${model.extendedDuration} 秒；视频较短时按实际时长生成。超过 ${model.maxDuration} 秒自动分段生成，整条统一换声。` : `不开启时按单次上限 ${model.maxDuration} 秒生成；开启后可选 2–${model.extendedDuration} 秒。`)}</p></div>`;
 }
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';

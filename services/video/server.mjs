@@ -110,9 +110,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   async function finishWan3Cost(task, result) {
     if (result.usage) task.wan3Usage = wan3Usage(result.usage);
     if (task.billing?.mode !== 'api_cost' || !task.wan3CostPrepared) return;
-    const usage = task.wan3Usage;
+    const terminal = ['failed', 'cancelled', 'expired'].includes(task.status);
+    const usage = task.segments ? task.segments.every(segment => segment.wan3Usage || segment.failed || terminal && !segment.providerDispatched)
+      ? { duration: task.segments.reduce((sum, segment) => sum + (segment.wan3Usage?.duration || 0), 0) } : undefined : task.wan3Usage;
     await credits.finishCostCall({ userId: task.userId, taskId: task.billingTaskId || task.id, receiptId: 'wan3',
-      ...(result.failed ? { costCny: 0 } : usage ? { costCny: usage.duration * cnyPerSecond(task) } : { uncertain: true }),
+      ...(result.failed && !task.segments ? { costCny: 0 } : usage ? { costCny: usage.duration * cnyPerSecond(task) } : { uncertain: true }),
       ...(task.providerId ? { providerRequestId: task.providerId } : {}) });
   }
   // Without a custom duration the whole source must fit the model's own limit, as before.
@@ -142,7 +144,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (plan) return plan.segments.reduce((total, segment) => total + segment.duration, 0);
     return model.durations.find(value => value >= Math.ceil(video.duration - 0.05)) || model.maxDuration;
   }
-  // Beyond one call's limit the (clipped) source is generated as two parts on its own timeline.
+  // Beyond one call's limit the (clipped) source is generated in parts on its own timeline.
   function segmentPlan(video, modelId) {
     const model = models.find(model => model.id === modelId);
     return model?.extendedDuration ? planSegments(video.duration, { maxSegment: model.maxDuration, durations: model.durations, ...video.boundaries }) : null;
@@ -242,9 +244,19 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     try {
       const taskId = task.billingTaskId || task.id;
       let record = await credits.reservation(task.userId, taskId);
-      if (task.model === WAN3_MODEL && record?.status === 'reserved' && ['pending', 'uncertain'].includes(record.costItems?.wan3?.status) && task.providerId) {
-        const result = task.wan3Usage ? { completed: true, usage: task.wan3Usage } : await wan3Provider.query(task.providerId);
-        if (result.completed || result.failed) { await finishWan3Cost(task, result); record = await credits.reservation(task.userId, taskId); }
+      if (task.model === WAN3_MODEL && record?.status === 'reserved' && ['pending', 'uncertain'].includes(record.costItems?.wan3?.status)) {
+        if (task.segments) {
+          for (const segment of task.segments) {
+            if (segment.wan3Usage || segment.failed || !segment.providerId) continue;
+            const result = await wan3Provider.query(segment.providerId);
+            if (result.usage) segment.wan3Usage = wan3Usage(result.usage);
+            if (result.failed) segment.failed = true;
+          }
+          await save(task); await finishWan3Cost(task, {}); record = await credits.reservation(task.userId, taskId);
+        } else if (task.providerId) {
+          const result = task.wan3Usage ? { completed: true, usage: task.wan3Usage } : await wan3Provider.query(task.providerId);
+          if (result.completed || result.failed) { await finishWan3Cost(task, result); record = await credits.reservation(task.userId, taskId); }
+        }
       }
       if ((isFalReplacement(task.model) || task.voiceEngine === 'chatterbox') && record?.kind === 'api-cost' && record.status === 'reserved') {
         // A playable result can arrive before its usage header. Re-read only saved receipts.
@@ -431,6 +443,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       catch (cause) { await submissionFailed(task, cause, segment); return; }
       if (result.taskId) segment.providerId = result.taskId;
       if (result.url) segment.resultSource = result.url;
+      if (task.model === WAN3_MODEL && result.usage) segment.wan3Usage = wan3Usage(result.usage);
+      if (result.failed) segment.failed = true;
       await save(task);
       if (result.failed) { await fail(task, `第 ${segment.index + 1} 段视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。`, 'VIDEO_GENERATION_FAILED'); return; }
       if (!segmentConfirmed(segment)) { await fail(task, `第 ${segment.index + 1} 段未返回任务编号，未自动重试。请核对模型服务记录后再创建任务。`, 'VIDEO_SUBMISSION_UNCERTAIN'); return; }
@@ -442,6 +456,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     for (const segment of task.segments) {
       if (segment.resultSource) continue;
       const result = await taskProvider.query(segment.providerId, segmentTask(task, segment));
+      if (task.model === WAN3_MODEL && result.usage) segment.wan3Usage = wan3Usage(result.usage);
+      if (result.failed) { segment.failed = true; await save(task); }
       if (result.failed) { await fail(task, `第 ${segment.index + 1} 段视频生成失败，预留积分将退回。请检查参考素材后重新创建任务。`, 'VIDEO_GENERATION_FAILED'); return; }
       if (result.url) { segment.resultSource = result.url; await save(task); }
       else if (result.completed) {
@@ -449,6 +465,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
     }
     if (task.segments.some(segment => !segment.resultSource)) { await save(task); return; }
+    if (task.model === WAN3_MODEL) await finishWan3Cost(task, {});
     if (task.billing?.mode === 'api_cost' && task.seedanceCostPrepared) {
       await credits.finishCostCall({ userId: task.userId, taskId: task.billingTaskId || task.id, receiptId: 'seedance',
         costCny: task.duration * cnyPerSecond(task), providerRequestId: task.segments[0].providerId });

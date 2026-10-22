@@ -42,13 +42,48 @@ test('without a usable cut the seam sits in the longest cheapest speech pause, c
   assert.deepEqual(spans(edge), [[0, 15, 15], [15, 45, 30]]);
 });
 
-test('a reference longer than two generations is rejected before any work', () => {
-  assert.throws(() => planSegments(61, PREMIUM), error => error.code === 'VIDEO_DURATION_INVALID' && /4–30 秒/.test(error.message));
+test('a reference beyond the custom duration limit is rejected before any work', () => {
+  assert.throws(() => planSegments(61, PREMIUM), error => error.code === 'VIDEO_DURATION_INVALID' && /60 秒/.test(error.message));
+});
+
+test('15-second models cover 16–60 seconds continuously in up to four valid parts', () => {
+  const options = { maxSegment: 15, durations: [4, 5, 6, 8, 10, 12, 15], fps: 30 };
+  assert.deepEqual(spans(planSegments(60, options)), [[0, 15, 15], [15, 30, 15], [30, 45, 15], [45, 60, 15]]);
+  for (const cuts of [[], [9.3, 24.9, 38.2, 49.1]]) for (const duration of [15.06, 16, 29.9, 30, 30.04, 31, 39.2, 45, 45.04, 59.9, 60]) {
+    const plan = planSegments(duration, { ...options, cuts, pauses: [{ start: 10, end: 10.5 }, { start: 22, end: 23 }] });
+    assert.equal(plan.segments.length, Math.ceil(duration / 15));
+    assert.equal(plan.segments[0].start, 0); assert.equal(plan.segments.at(-1).end, duration);
+    for (const [index, segment] of plan.segments.entries()) {
+      const length = segment.end - segment.start;
+      assert.ok(length >= 4 - 0.001 && length <= 15 + 0.001, JSON.stringify(segment));
+      assert.ok(segment.duration >= length - 0.05 && segment.duration <= 15);
+      assert.equal(segment.index, index);
+      if (index) assert.equal(segment.start, plan.segments[index - 1].end);
+    }
+  }
 });
 
 test('speech pauses ignore short breaths and unordered or invalid intervals', () => {
   assert.deepEqual(speechPauses([{ start: 5, end: 9 }, { start: 0.2, end: 2 }, { start: 2.1, end: 4.8 }, { start: 3, end: 3 }, null]), []);
   assert.deepEqual(speechPauses([{ start: 0, end: 2 }, { start: 2.5, end: 4 }, { start: 4.1, end: 6 }]), [{ start: 2, end: 2.5 }]);
+});
+
+test('ffmpeg cuts a 60-second reference into four 15-second inputs and rejoins the full timeline', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'video-four-segments-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const source = join(root, 'source.mp4'), output = join(root, 'result.mp4');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=red:s=320x480:r=30:d=60',
+    '-f', 'lavfi', '-i', 'sine=frequency=220:duration=60', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', source]);
+  const { segments } = planSegments(60, { maxSegment: 15, durations: [4, 5, 6, 8, 10, 12, 15], fps: 30 });
+  const inputs = [];
+  for (const segment of segments) {
+    const input = join(root, `segment-${segment.index}.mp4`);
+    const metadata = await cutVideoSegment(source, input, segment.start, segment.end);
+    assert.ok(metadata.duration <= 15, `Provider input duration: ${metadata.duration}`);
+    assert.equal(metadata.audio, true); inputs.push(input);
+  }
+  const result = await joinVideoSegments(inputs, segments, output);
+  assert.equal(result.duration, 60); assert.equal(result.width, 320); assert.equal(result.height, 480);
 });
 
 test('ffmpeg finds hard cuts, cuts an exact source span and joins parts back onto the source timeline', async t => {

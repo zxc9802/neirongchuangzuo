@@ -8808,9 +8808,9 @@ export const EXTRA_UI_COPY = {
     "en": "When off, up to the single-generation limit of {value0} seconds. When on, choose 2–{value1} seconds.",
     "ms": "Apabila dimatikan, sehingga had satu penjanaan {value0} saat. Apabila dihidupkan, pilih 2–{value1} saat."
   },
-  "从参考视频开头截取，最长 {value0} 秒；视频较短时按实际时长生成。超过 {value1} 秒分两段生成，整条统一换声。": {
-    "en": "Taken from the start of the reference video, up to {value0} seconds; a shorter video uses its full length. Beyond {value1} seconds it is generated in two parts with one converted voice track.",
-    "ms": "Diambil dari permulaan video rujukan, sehingga {value0} saat; video yang lebih pendek menggunakan tempoh penuhnya. Melebihi {value1} saat, ia dijana dalam dua bahagian dengan satu trek suara yang ditukar."
+  "从参考视频开头截取，最长 {value0} 秒；视频较短时按实际时长生成。超过 {value1} 秒自动分段生成，整条统一换声。": {
+    "en": "Taken from the start of the reference video, up to {value0} seconds; a shorter video uses its full length. Beyond {value1} seconds it is generated in parts with one converted voice track.",
+    "ms": "Diambil dari permulaan video rujukan, sehingga {value0} saat; video yang lebih pendek menggunakan tempoh penuhnya. Melebihi {value1} saat, ia dijana dalam beberapa bahagian dengan satu trek suara yang ditukar."
   },
   "分 {value0} 段生成 · 第 {value1} 秒接续（镜头切换处），整条统一换声": {
     "en": "Generated in {value0} parts · joined at {value1} sec (scene cut) · one converted voice track",
@@ -8824,13 +8824,17 @@ export const EXTRA_UI_COPY = {
     "en": "Generated in {value0} parts · joined at {value1} sec (split by generation length) · one converted voice track",
     "ms": "Dijana dalam {value0} bahagian · disambung pada saat {value1} (dibahagi mengikut tempoh penjanaan) · satu trek suara yang ditukar"
   },
+  "分 {value0} 段生成，整条统一换声": {
+    "en": "Generated in {value0} parts with one converted voice track",
+    "ms": "Dijana dalam {value0} bahagian dengan satu trek suara yang ditukar"
+  },
   "分段生成：已提交 {value0} / {value1} 段 · 已完成 {value2} / {value3} 段": {
     "en": "Parts: {value0} / {value1} submitted · {value2} / {value3} completed",
     "ms": "Bahagian: {value0} / {value1} dihantar · {value2} / {value3} selesai"
   },
-  "正在保存并拼接两段成片": {
-    "en": "Saving and joining the two parts",
-    "ms": "Sedang menyimpan dan menyambung dua bahagian"
+  "正在保存并拼接分段成片": {
+    "en": "Saving and joining the video parts",
+    "ms": "Sedang menyimpan dan menyambung bahagian video"
   },
   "保存第 {value0} / {value1} 段成片：{value2}{value3}": {
     "en": "Save finished video part {value0} / {value1}: {value2}{value3}",

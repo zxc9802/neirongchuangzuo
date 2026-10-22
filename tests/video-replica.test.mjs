@@ -12,6 +12,7 @@ import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
 import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL } from '../services/video/provider.mjs';
 import { wan3GenerationBody } from '../services/video/wan3.mjs';
+import { planSegments } from '../services/video/segments.mjs';
 import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
 import { createCreditsLedger } from '../services/credits/store.mjs';
@@ -758,7 +759,7 @@ test('all four Seedance editions are offered and removed models cannot start or 
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '最多生成15秒视频，1元/秒');
   assert.equal(config.models[1].description, '最多生成30秒视频，1.5元/秒');
-  assert.deepEqual(config.models.map(model => model.extendedDuration), [undefined, 60, undefined, undefined, undefined]);
+  assert.deepEqual(config.models.map(model => model.extendedDuration), [60, 60, 60, 60, 60]);
   assert.equal(config.model, 'doubao-seedance-2-0-260128');
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
   const id = await app.init(); await app.upload(id);
@@ -1904,39 +1905,44 @@ test('new tasks complete after restart without ASR, VAD or duration quality gate
   assert.equal(app.state.generations, 1);
 });
 
-async function segmentedReplica(t, { generate, probe } = {}) {
-  const calls = { creates: [], generations: [], cuts: [], joins: [], downloads: [], muxes: [], conversions: 0, finished: new Set() };
+async function segmentedReplica(t, { generate, probe, model = PREMIUM_MODEL, duration = 45 } = {}) {
+  const calls = { creates: [], generations: [], cuts: [], joins: [], downloads: [], muxes: [], conversions: 0, finished: new Set(), receiptsReady: true };
   const name = path => path.split(/[\\/]/).at(-1);
   const provider = {
+    async upload(path, mime) { const kind = name(path).replace(/\.(mp4|jpg)$/, ''); calls.creates.push({ path, kind, mime }); return { id: kind + '-id', status: 2 }; },
     async createMaterial(url, kind) { calls.creates.push({ url, kind }); return { id: kind + '-id', status: 2 }; },
     async queryMaterial() { return 2; },
     async generate(task) {
-      calls.generations.push({ material: task.materials.video.id, duration: task.duration, source: task.video.duration, body: generationBody(task) });
+      calls.generations.push({ material: task.materials.video.id, duration: task.duration, source: task.video.duration, body: model === WAN3_MODEL ? wan3GenerationBody(task) : generationBody(task) });
       return generate ? generate(task) : { taskId: `job-${task.materials.video.id}` };
     },
-    async query(id) { return calls.finished.has(id) ? { url: `https://cdn.example/${id}.mp4` } : {}; },
+    async query(id) {
+      const source = calls.generations.find(item => `job-${item.material}` === id)?.source;
+      return calls.finished.has(id) ? { completed: true, url: `https://cdn.example/${id}.mp4`,
+        ...(model === WAN3_MODEL && calls.receiptsReady ? { usage: { duration: source * 2, input_video_duration: source, output_video_duration: source, SR: 720 } } : {}) } : {};
+    },
   };
-  const app = await fixture(t, { costMode: true, provider,
+  const app = await fixture(t, { costMode: true, provider, wan3Provider: provider, config: { ...CONFIG, wan3Enabled: true },
     speech: fakeSpeech({ detect: async () => [{ start: 0.2, end: 10 }, { start: 10.6, end: 44 }] }),
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
-    probe: probe || (async path => ({ ...META, duration: /segment-\d-result\.tmp$/.test(path) ? 25 : 45 })),
+    probe: probe || (async path => ({ ...META, duration: /segment-\d-result\.tmp$/.test(path) ? model === PREMIUM_MODEL ? 25 : 15 : duration })),
     scenes: async () => ({ fps: 30, cuts: [21.03] }),
     cutSegment: async (input, output, start, end) => { calls.cuts.push([name(input), name(output), start, end]); await writeFile(output, VIDEO); },
     joinSegments: async (inputs, segments, output) => {
       calls.joins.push({ inputs: inputs.map(name), spans: segments.map(segment => [segment.start, segment.end]), output: name(output) });
-      await writeFile(output, VIDEO); return { ...META, duration: 45, audio: false };
+      await writeFile(output, VIDEO); return { ...META, duration, audio: false };
     },
     download: async (url, path) => { calls.downloads.push(url); await writeFile(path, VIDEO); },
     voiceConversion: { enabled: true, advance: async (task, folder, save) => {
       if (task.voiceConversion?.ready) return;
-      calls.conversions++; task.voiceConversion = { ready: true, duration: 45 };
+      calls.conversions++; task.voiceConversion = { ready: true, duration };
       await writeFile(join(folder, 'converted-voice.wav'), 'CONVERTED'); await save();
     }, mux: async (_video, audio, output, duration) => { calls.muxes.push(duration); await writeFile(output, await readFile(audio)); } } });
   return Object.assign(app, { calls });
 }
-async function segmentedDraft(app) {
+async function segmentedDraft(app, model = PREMIUM_MODEL) {
   const id = randomUUID();
-  assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL, targetDuration: 60 } })).status, 201);
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model, targetDuration: 60 } })).status, 201);
   await app.upload(id); await uploadVoice(app, id);
   return id;
 }
@@ -1981,6 +1987,68 @@ test('qiya-2.5 generates a 45-second reference as two parts on a scene cut and c
   assert.equal(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()).toString(), 'CONVERTED');
 });
 
+for (const model of ['doubao-seedance-2-0-260128', FAST_MODEL, MINI_MODEL, WAN3_MODEL]) for (const duration of [39, 60])
+test(`${model} completes ${duration} seconds in valid parts and resumes without duplicate generation`, async t => {
+  const app = await segmentedReplica(t, { model, duration }), { calls } = app;
+  const id = await segmentedDraft(app, model), total = Math.ceil(duration / 15);
+  assert.equal((await app.current(id)).segments.total, total);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.equal(calls.generations.length, total); assert.equal(calls.creates.length, total + 1);
+  for (const [index, generation] of calls.generations.entries()) {
+    assert.ok(generation.source <= 15); assert.ok(generation.duration <= 15);
+    assert.equal(generation.material, `segment-${index}-id`);
+    if (model === WAN3_MODEL) {
+      assert.equal(generation.body.input.media[1].url, generation.material);
+      assert.equal(generation.body.parameters.duration, -1); assert.equal(generation.body.parameters.audio, false);
+    } else {
+      assert.equal(generation.body.modelId, model);
+      assert.equal(generation.body.payload.params.generateAudio, false);
+    }
+  }
+  assert.equal(calls.cuts[0][2], 0); assert.equal(calls.cuts.at(-1)[3], duration);
+  for (let index = 1; index < total; index++) assert.equal(calls.cuts[index][2], calls.cuts[index - 1][3]);
+  await app.close(); await app.open();
+  calls.finished.add(`job-segment-${total - 1}-id`);
+  await app.until(id, task => task.segments.completed === 1);
+  for (let index = 0; index < total; index++) calls.finished.add(`job-segment-${index}-id`);
+  const done = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(calls.generations.length, total); assert.equal(calls.conversions, 1);
+  assert.equal(calls.joins.length, 1); assert.equal(calls.joins[0].inputs.length, total);
+  assert.deepEqual(calls.muxes, [duration]); assert.equal(done.actualDuration, duration);
+  assert.equal(done.billing.chargedPoints, generationPrice('video', model).pointsPerSecond * duration);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+  assert.equal(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()).toString(), 'CONVERTED');
+  if (model === WAN3_MODEL) {
+    const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+    assert.equal(saved.segments.reduce((sum, segment) => sum + segment.wan3Usage.duration, 0), 2 * duration);
+  }
+});
+
+test('Wan segmented API-cost recovery sums every receipt, including usage arriving after the video', async t => {
+  const app = await segmentedReplica(t, { model: WAN3_MODEL, duration: 60 }), { calls } = app;
+  const id = await segmentedDraft(app, WAN3_MODEL), path = join(app.root, 'video', id, 'task.json');
+  await app.close();
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  const record = await app.wallet.reserveCost({ userId: 'alice', taskId: id });
+  Object.assign(saved, { status: 'reviewing', startedAt: Date.now(), cnyPerSecond: .42,
+    segments: planSegments(60, { maxSegment: 15, durations: [4, 5, 6, 8, 10, 12, 15] }).segments,
+    voiceConversion: { ready: true }, billing: { mode: 'api_cost', status: record.status } });
+  await writeFile(path, JSON.stringify(saved));
+  await writeFile(join(app.root, 'video', id, 'converted-voice.wav'), 'CONVERTED');
+  calls.receiptsReady = false;
+  await app.open(); await app.until(id, task => task.status === 'running');
+  for (let index = 0; index < 4; index++) calls.finished.add(`job-segment-${index}-id`);
+  await app.until(id, task => task.status === 'settling');
+  assert.equal((await app.wallet.reservation('alice', id)).costItems.wan3.status, 'uncertain');
+  await app.close(); calls.receiptsReady = true; await app.open();
+  const done = await app.until(id, task => task.status === 'completed');
+  const disk = JSON.parse(await readFile(path, 'utf8')), bill = await app.wallet.reservation('alice', id);
+  assert.equal(bill.costItems.wan3.costMicros, Math.round(120 * disk.cnyPerSecond * 1e6));
+  assert.equal(done.billing.status, 'settled'); assert.equal(calls.generations.length, 4);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
+
 test('a restart between part submissions sends only unsent parts and holds an unconfirmed part', async t => {
   const app = await segmentedReplica(t), { calls } = app;
   const id = await segmentedDraft(app);
@@ -2003,19 +2071,19 @@ test('a restart between part submissions sends only unsent parts and holds an un
   assert.equal(calls.generations.length, 3);
 });
 
-test('a rejected second part waits for the account and resubmits only that part', async t => {
+for (const model of [PREMIUM_MODEL, WAN3_MODEL]) test(`${model} retries only a rejected part after account recovery`, async t => {
   let rejections = 0;
-  const app = await segmentedReplica(t, { generate: task => {
+  const app = await segmentedReplica(t, { model, generate: task => {
     if (task.materials.video.id === 'segment-1-id' && !rejections++) throw new VideoError('模型服务拒绝了请求，请检查模型权限、余额或素材要求。', 502, 'VIDEO_PROVIDER_REJECTED');
     return { taskId: `job-${task.materials.video.id}` };
   } });
-  const id = await segmentedDraft(app);
+  const id = await segmentedDraft(app, model);
   await app.call(`/tasks/${id}/start`, { body: {} });
   const held = await app.until(id, task => task.status === 'waiting');
   assert.match(held.recovery.message, /等待账户或额度恢复/); assert.equal(held.canResume, true); assert.equal(held.segments.submitted, 1);
   assert.equal((await app.call(`/tasks/${id}/resume`, { body: {} })).status, 200);
-  await app.until(id, task => task.status === 'running' && task.segments.submitted === 2);
-  assert.deepEqual(app.calls.generations.map(item => item.material), ['segment-0-id', 'segment-1-id', 'segment-1-id']);
+  await app.until(id, task => task.status === 'running' && task.segments.submitted === (model === WAN3_MODEL ? 3 : 2));
+  assert.deepEqual(app.calls.generations.map(item => item.material), ['segment-0-id', 'segment-1-id', 'segment-1-id', ...(model === WAN3_MODEL ? ['segment-2-id'] : [])]);
 });
 
 test('a long qiya-2.5 reference requires whole-track voice conversion before any reservation', async t => {
@@ -2064,12 +2132,12 @@ test('a custom duration below one call clips without splitting the generation', 
   assert.deepEqual(calls.generations.map(item => [item.material, item.duration, item.source]), [['video-id', 12, 12]]);
 });
 
-test('the custom duration is opt-in, validated, and dropped by editions without it', async t => {
+test('the custom duration is opt-in, validated, and retained across qiya editions', async t => {
   let duration = 45;
   const app = await fixture(t, { probe: async () => ({ ...META, duration }), scenes: async () => ({ fps: 30, cuts: [] }) });
   const id = randomUUID(), base = `/tasks/${id}`;
   const code = async response => { assert.equal(response.status, 400); return (await response.json()).code; };
-  assert.equal(await code(await app.call('/tasks', { body: { requestId: randomUUID(), targetDuration: 30 } })), 'VIDEO_TARGET_DURATION_INVALID');
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), targetDuration: 30 } })).status, 201);
   assert.equal((await app.call('/tasks', { body: { requestId: id, model: PREMIUM_MODEL } })).status, 201);
   // Off by default: the whole reference must still fit one 30-second call.
   assert.equal(await code(await fetch(app.base + `/api/video-replica${base}/video`, { method: 'PUT', body: VIDEO })), 'VIDEO_DURATION_INVALID');
@@ -2080,19 +2148,23 @@ test('the custom duration is opt-in, validated, and dropped by editions without 
   await app.upload(id);
   let draft = await app.current(id);
   assert.equal(draft.targetDuration, 40); assert.equal(draft.segments.total, 2); assert.ok(draft.duration >= 40);
-  // Neither turning the option off nor a 15-second edition can hold the saved 45-second reference.
+  // Turning the option off still requires a source within the single-call limit.
   assert.equal(await code(await app.call(`${base}/duration`, { body: { targetDuration: null } })), 'VIDEO_DURATION_INVALID');
-  assert.equal(await code(await app.call(`${base}/model`, { body: { model: 'doubao-seedance-2-0-260128' } })), 'VIDEO_DURATION_INVALID');
+  assert.equal((await app.call(`${base}/model`, { body: { model: 'doubao-seedance-2-0-260128' } })).status, 200);
+  assert.equal((await app.current(id)).segments.total, 3);
   draft = await app.current(id);
-  assert.equal(draft.targetDuration, 40); assert.equal(draft.model, PREMIUM_MODEL);
+  assert.equal(draft.targetDuration, 40); assert.equal(draft.model, 'doubao-seedance-2-0-260128');
+  assert.equal((await app.call(`${base}/model`, { body: { model: PREMIUM_MODEL } })).status, 200);
   assert.equal((await app.call(`${base}/duration`, { body: { targetDuration: 20 } })).status, 200);
   draft = await app.current(id);
   assert.equal(draft.targetDuration, 20); assert.equal(draft.duration, 20); assert.equal(draft.segments, undefined);
   duration = 10; await app.upload(id);
   assert.equal((await app.call(`${base}/model`, { body: { model: 'doubao-seedance-2-0-260128' } })).status, 200);
   draft = await app.current(id);
-  assert.equal(draft.targetDuration, undefined); assert.equal(draft.duration, 10);
-  assert.equal(await code(await app.call(`${base}/duration`, { body: { targetDuration: 12 } })), 'VIDEO_TARGET_DURATION_INVALID');
+  assert.equal(draft.targetDuration, 20); assert.equal(draft.duration, 10);
+  assert.equal((await app.call(`${base}/duration`, { body: { targetDuration: 12 } })).status, 200);
+  assert.equal((await app.call(`${base}/duration`, { body: { targetDuration: null } })).status, 200);
+  assert.equal((await app.current(id)).targetDuration, undefined);
   assert.equal((await app.wallet.snapshot('alice')).held, 0); assert.equal(app.state.generations, 0);
 });
 

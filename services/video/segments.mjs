@@ -5,7 +5,7 @@ import { probeVideo } from './media.mjs';
 import { VideoError } from './provider.mjs';
 
 const run = promisify(execFile);
-// Each part is still a full Seedance reference video.
+// Each part is still a full reference video within the provider's limit.
 export const SEGMENT_MIN = 4;
 const PAUSE_MIN = 0.25, BOUNDARY_LIMIT = 200;
 const round = value => Math.round(value * 1000) / 1000;
@@ -21,29 +21,39 @@ export function speechPauses(intervals = []) {
   return pauses.slice(0, BOUNDARY_LIMIT);
 }
 
-// Two independent generations always differ slightly. Put the seam on a hard
+// Independent generations always differ slightly. Put each seam on a hard
 // cut, else in a speech pause, else where the provider duration tiers waste least.
 export function planSegments(duration, { maxSegment, durations, fps, cuts = [], pauses = [] }) {
   // Same tolerance as a single generation's duration tier.
   if (!(Math.ceil(duration - 0.05) > maxSegment)) return null;
-  const low = Math.max(SEGMENT_MIN, duration - maxSegment), high = Math.min(maxSegment, duration - SEGMENT_MIN);
-  if (low > high) throw new VideoError(`参考视频时长无法拆成两段 ${SEGMENT_MIN}–${maxSegment} 秒的片段。`, 400, 'VIDEO_DURATION_INVALID');
-  const inside = at => at >= low && at <= high;
-  // Keep the seam on a source frame when that frame is still inside the window.
-  const snap = at => { const frame = fps > 0 ? Math.round(at * fps) / fps : at; return inside(frame) ? frame : at; };
-  const waste = at => segmentTier(at, durations) + segmentTier(duration - at, durations) - duration;
-  const middle = duration / 2;
-  const best = (options, ...tieBreaks) => options.sort((a, b) => waste(a.at) - waste(b.at)
-    || tieBreaks.reduce((order, compare) => order || compare(a, b), 0) || Math.abs(a.at - middle) - Math.abs(b.at - middle))[0];
-  const scene = best(cuts.filter(inside).map(at => ({ at: snap(at), boundary: 'scene' })));
-  const pause = !scene && best(pauses.filter(item => item.end > low && item.start < high).map(item => ({
-    at: snap(Math.min(high, Math.max(low, (item.start + item.end) / 2))), boundary: 'pause', length: item.end - item.start })),
-  (a, b) => b.length - a.length);
-  const fixed = !scene && !pause && best([high, ...durations.flatMap(tier => [tier, duration - tier])].filter(inside)
-    .map(at => ({ at: snap(at), boundary: 'duration' })));
-  const { at, boundary } = scene || pause || fixed;
-  const end = round(duration), seam = round(at);
-  return { boundary, segments: [{ start: 0, end: seam }, { start: seam, end }].map((segment, index) => ({ index, ...segment,
+  if (duration > 60) throw new VideoError('分段生成最长支持 60 秒。', 400, 'VIDEO_DURATION_INVALID');
+  const count = Math.ceil(duration / maxSegment), segments = [];
+  // Possible paid tier totals let each cut leave an economical, valid tail.
+  const totals = [[0]];
+  for (let parts = 1; parts < count; parts++) totals.push([...new Set(totals[parts - 1].flatMap(total => durations.map(tier => total + tier)))].sort((a, b) => a - b));
+  let start = 0, boundary;
+  for (let remaining = count; remaining > 1; remaining--) {
+    const low = Math.max(start + SEGMENT_MIN, duration - (remaining - 1) * maxSegment);
+    const high = Math.min(start + maxSegment, duration - (remaining - 1) * SEGMENT_MIN);
+    const inside = at => at >= low && at <= high;
+    // Keep the seam on a source frame when that frame is still inside the window.
+    const snap = at => { const frame = fps > 0 ? Math.round(at * fps) / fps : at; return inside(frame) ? frame : at; };
+    const waste = at => segmentTier(at - start, durations) + segmentTier(duration - at, totals[remaining - 1]) - (duration - start);
+    const middle = start + (duration - start) / remaining;
+    const best = (options, ...tieBreaks) => options.sort((a, b) => waste(a.at) - waste(b.at)
+      || tieBreaks.reduce((order, compare) => order || compare(a, b), 0) || Math.abs(a.at - middle) - Math.abs(b.at - middle))[0];
+    const scene = best(cuts.filter(inside).map(at => ({ at: snap(at), boundary: 'scene' })));
+    const pause = !scene && best(pauses.filter(item => item.end > low && item.start < high).map(item => ({
+      at: snap(Math.min(high, Math.max(low, (item.start + item.end) / 2))), boundary: 'pause', length: item.end - item.start })),
+    (a, b) => b.length - a.length);
+    const fixed = !scene && !pause && best([high, ...durations.map(tier => start + tier), ...totals[remaining - 1].map(total => duration - total)].filter(inside)
+      .map(at => ({ at: snap(at), boundary: 'duration' })));
+    const chosen = scene || pause || fixed, seam = round(chosen.at);
+    boundary ||= chosen.boundary;
+    segments.push({ start, end: seam }); start = seam;
+  }
+  segments.push({ start, end: round(duration) });
+  return { boundary, segments: segments.map((segment, index) => ({ index, ...segment,
     duration: segmentTier(segment.end - segment.start, durations) })) };
 }
 
