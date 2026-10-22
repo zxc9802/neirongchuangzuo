@@ -24,8 +24,8 @@ export function speechPauses(intervals = []) {
 // Independent generations always differ slightly. Put each seam on a hard
 // cut, else in a speech pause, else where the provider duration tiers waste least.
 export function planSegments(duration, { maxSegment, durations, fps, cuts = [], pauses = [] }) {
-  // Same tolerance as a single generation's duration tier.
-  if (!(Math.ceil(duration - 0.05) > maxSegment)) return null;
+  // Source inputs must fit the provider limit even when they exceed it by a frame.
+  if (!(duration > maxSegment)) return null;
   if (duration > 60) throw new VideoError('分段生成最长支持 60 秒。', 400, 'VIDEO_DURATION_INVALID');
   const count = Math.ceil(duration / maxSegment), segments = [];
   // Possible paid tier totals let each cut leave an economical, valid tail.

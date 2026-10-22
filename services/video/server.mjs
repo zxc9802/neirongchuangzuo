@@ -119,20 +119,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       ...(result.failed && !task.segments ? { costCny: 0 } : usage ? { costCny: usage.duration * cnyPerSecond(task) } : { uncertain: true }),
       ...(task.providerId ? { providerRequestId: task.providerId } : {}) });
   }
-  // Without a custom duration the whole source must fit the model's own limit, as before.
-  // With one, only that many opening seconds are generated, up to the extended limit.
-  function selectedTargetDuration(value, modelId) {
-    if (value === undefined || value === null) return undefined;
-    const limit = models.find(model => model.id === modelId)?.extendedDuration;
-    if (!limit) throw error('所选生成版本不支持自定义时长。', 400, 'VIDEO_TARGET_DURATION_INVALID');
-    if (!Number.isInteger(value) || value < 2 || value > limit) throw error(`自定义时长需为 2–${limit} 之间的整数秒。`, 400, 'VIDEO_TARGET_DURATION_INVALID');
-    return value;
-  }
-  const targetFor = (task, modelId) => models.find(model => model.id === modelId)?.extendedDuration ? task.targetDuration : undefined;
-  const clip = (video, target) => target && video.duration > target ? { ...video, duration: target } : video;
-  function videoDuration(source, modelId, target) {
-    const model = models.find(model => model.id === modelId), limit = target ? model.extendedDuration : model.maxDuration;
-    const video = clip(source, target);
+  // Validate the whole source; the provider's per-call limit only determines splitting.
+  function videoDuration(video, modelId) {
+    const model = models.find(model => model.id === modelId), limit = model.extendedDuration || model.maxDuration;
     if (video.duration < 2 || video.duration > limit) {
       const guidance = video.duration > limit ? `请截取不超过 ${limit} 秒的片段后上传。` : '请上传至少 2 秒的视频。';
       throw error(`参考视频实际为 ${Number(video.duration.toFixed(2))} 秒，所选 ${model.name} 支持 2–${limit} 秒。${guidance}`, 400, 'VIDEO_DURATION_INVALID');
@@ -146,7 +135,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (plan) return plan.segments.reduce((total, segment) => total + segment.duration, 0);
     return model.durations.find(value => value >= Math.ceil(video.duration - 0.05)) || model.maxDuration;
   }
-  // Beyond one call's limit the (clipped) source is generated in parts on its own timeline.
+  // Beyond one call's limit the entire source is generated in parts on its own timeline.
   function segmentPlan(video, modelId) {
     const model = models.find(model => model.id === modelId);
     return model?.extendedDuration ? planSegments(video.duration, { maxSegment: model.maxDuration, durations: model.durations, ...video.boundaries }) : null;
@@ -189,7 +178,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     let plan = task.segments && { boundary: task.segmentBoundary, segments: task.segments };
     if (!plan && task.status === 'draft' && task.video) {
       const model = task.model || MODEL;
-      try { plan = segmentPlan(clip(task.video, targetFor(task, model)), model); } catch { /* The upload already rejected this duration. */ }
+      try { plan = segmentPlan(task.video, model); } catch { /* A legacy draft may exceed the current total limit. */ }
     }
     if (!plan) return undefined;
     const count = key => plan.segments.filter(segment => segment[key]).length;
@@ -813,6 +802,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const task = JSON.parse(await readFile(join(storageDir, entry.name, 'task.json'), 'utf8'));
       if (task.id !== entry.name || typeof task.userId !== 'string') throw new Error('Invalid video task');
       jobs.set(task.id, task);
+      // Old draft choices must not silently crop a video after the duration control is removed.
+      if (task.status === 'draft' && task.targetDuration !== undefined) {
+        delete task.targetDuration;
+        if (task.video) {
+          try { task.duration = videoDuration(task.video, task.model || MODEL); }
+          catch { delete task.duration; }
+        }
+        await save(task);
+      }
       // Retired quality checks must not leave already-generated audio permanently held.
       if (task.status === 'waiting' && task.code === 'VIDEO_CONVERSION_FAILED' && task.voiceConversion
         && /^(换声后识别的台词与原声差异较大|换声时长与原声相差超过|换人视频短于原声)/.test(task.error || '')) {
@@ -888,9 +886,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
           const model = selectedModel(body.model);
           // Keep explicit legacy parameters compatible; new clients convert the source voice.
-          const targetDuration = selectedTargetDuration(body.targetDuration, model);
           const task = { id: body.requestId, userId, model, voiceEngine: selectedVoiceEngine(body.voiceEngine ?? 'chatterbox'),
-            sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model), ...(targetDuration ? { targetDuration } : {}),
+            sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model),
             status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
@@ -934,11 +931,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const body = await readJSON(req);
           if (task.status !== 'draft') throw error('任务已提交，不能切换生成版本。', 409);
           const model = selectedModel(body.model);
-          // A custom duration belongs to editions that support it; others fall back to their own limit.
-          const target = targetFor(task, model);
-          const duration = task.video ? videoDuration(task.video, model, target) : undefined;
+          if (task.video) {
+            videoDuration(task.video, model);
+            if (segmentPlan(task.video, model) && !task.video.boundaries) {
+              task.video = { ...task.video, boundaries: await segmentBoundaries(file(task, 'video'), task.video, model) };
+            }
+          }
+          const duration = task.video ? videoDuration(task.video, model) : undefined;
           task.model = model;
-          if (!target) delete task.targetDuration;
+          delete task.targetDuration;
           if (isFalReplacement(model)) {
             if (task.sourceAudioMode === 'silent' && task.voiceEngine === 'seedance') task.voiceEngine = 'indextts2';
             task.sourceAudioMode = 'original';
@@ -947,19 +948,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           await save(task); json(res, 200, { task: view(task) }); return;
         }
         if (match[2] === 'duration' && req.method === 'POST') {
-          const body = await readJSON(req);
-          if (task.status !== 'draft') throw error('任务已提交，不能修改生成时长。', 409);
-          const model = task.model || MODEL, target = selectedTargetDuration(body?.targetDuration, model);
-          if (task.video) {
-            videoDuration(task.video, model, target);
-            if (segmentPlan(clip(task.video, target), model) && !task.video.boundaries) {
-              task.video = { ...task.video, boundaries: await segmentBoundaries(file(task, 'video'), task.video, model) };
-            }
-            // The seam, and with it the quoted tiers, depends on the detected boundaries.
-            task.duration = videoDuration(task.video, model, target);
-          }
-          if (target) task.targetDuration = target; else delete task.targetDuration;
-          await save(task); json(res, 200, { task: view(task) }); return;
+          await readJSON(req);
+          throw error('生成时长已改为按原视频自动识别，请刷新页面后继续。', 410, 'VIDEO_DURATION_SELECTION_REMOVED');
         }
         if (match[2] === 'language' && req.method === 'POST') {
           await readJSON(req);
@@ -1006,13 +996,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             await writeFile(temporary, bytes, { mode: 0o600 });
             let metadata = await probe(temporary);
             const model = selectedModel(models.some(model => model.id === task.model) ? task.model : MODEL);
-            const target = targetFor(task, model);
-            videoDuration(metadata, model, target);
+            videoDuration(metadata, model);
             if (model.startsWith('doubao-seedance-')) metadata = await normalizeSeedanceVideo(temporary, metadata);
-            if (segmentPlan(clip(metadata, target), model)) metadata = { ...metadata, boundaries: await segmentBoundaries(temporary, metadata, model) };
-            const duration = videoDuration(metadata, model, target);
+            if (segmentPlan(metadata, model)) metadata = { ...metadata, boundaries: await segmentBoundaries(temporary, metadata, model) };
+            const duration = videoDuration(metadata, model);
             task.model = model;
             task.video = metadata;
+            delete task.targetDuration;
             delete task.languageRouting; delete task.languageDetection; delete task.localization;
             delete task.voiceConversion; delete task.segments; delete task.segmentBoundary;
             delete task.videoAudioRemoved;
@@ -1095,9 +1085,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (voiceEngine === 'chatterbox' && sourceAudioMode !== 'original') throw error('音色转换需要保留原视频声音。', 400, 'VIDEO_SOURCE_AUDIO_MODE_INVALID');
           if (sourceAudioMode === 'silent' && !task.voice) throw error('请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
           if (isFalReplacement(model) && task.voice && !['indextts2', 'chatterbox'].includes(voiceEngine)) throw error(`${models.find(item => item.id === model).name} 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
-          const target = targetFor(task, model);
-          if (!target) delete task.targetDuration;
-          videoDuration(task.video, model, target);
+          delete task.targetDuration;
+          videoDuration(task.video, model);
           if (model.startsWith('doubao-seedance-')) {
             const metadata = await normalizeSeedanceVideo(file(task, 'video'), task.video);
             if (metadata !== task.video) {
@@ -1107,24 +1096,12 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
               delete task.materials.video;
             }
           }
-          if (segmentPlan(clip(task.video, target), model)) {
+          if (segmentPlan(task.video, model)) {
             // Whole-track conversion keeps one continuous voice across the joined parts.
             if (voiceEngine !== 'chatterbox') throw error(`超过 ${models.find(item => item.id === model).maxDuration} 秒的生成时长需使用 Chatterbox 音色转换分段生成。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
             if (!task.video.boundaries) task.video = { ...task.video, boundaries: await segmentBoundaries(file(task, 'video'), task.video, model) };
           }
-          if (target && task.video.duration - target > 0.05) {
-            // Only the chosen opening seconds are generated; the clip replaces the draft source.
-            const clipped = join(folder(task), 'source-clip.mp4');
-            try { await cutSegment(file(task, 'video'), clipped, 0, target); }
-            catch { throw error('参考视频截取未完成，尚未扣费或提交生成，请稍后重试。', 502, 'VIDEO_CLIP_FAILED'); }
-            await rename(clipped, file(task, 'video'));
-            const { boundaries } = task.video;
-            task.video = { ...await probe(file(task, 'video')), ...(boundaries ? { boundaries } : {}) };
-            delete task.videoAudioRemoved; delete task.videoCaptionsRemoved; delete task.captions; delete task.captionsChecked; delete task.captionCheck;
-            delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt; delete task.materials.video;
-            await save(task);
-          }
-          const duration = videoDuration(task.video, model, target), plan = segmentPlan(clip(task.video, target), model);
+          const duration = videoDuration(task.video, model), plan = segmentPlan(task.video, model);
           for (const kind of Object.keys(task.materials)) if (kind.startsWith('segment-')) delete task.materials[kind];
           if (plan) { task.segments = plan.segments; task.segmentBoundary = plan.boundary; }
           else { delete task.segments; delete task.segmentBoundary; }

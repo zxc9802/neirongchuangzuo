@@ -8788,29 +8788,13 @@ export const EXTRA_UI_COPY = {
     "en": "Rename avatar",
     "ms": "Namakan semula avatar"
   },
-  "自定义生成时长": {
-    "en": "Custom generation length",
-    "ms": "Tempoh penjanaan tersuai"
+  "单段最多 {value0} 秒，RM {value1}/秒（{value2} 积分/秒）": {
+    "en": "Up to {value0} seconds per segment, RM {value1}/sec ({value2} credits/sec)",
+    "ms": "Sehingga {value0} saat setiap segmen, RM {value1}/saat ({value2} kredit/saat)"
   },
-  "生成开头": {
-    "en": "Generate the first",
-    "ms": "Jana bahagian awal"
-  },
-  "生成时长（秒）": {
-    "en": "Generation length (seconds)",
-    "ms": "Tempoh penjanaan (saat)"
-  },
-  "单个人物 · 截取开头 {value0} 秒 · MP4 / MOV · 最大 50 MB": {
-    "en": "One person · first {value0} sec used · MP4 / MOV · max 50 MB",
-    "ms": "Seorang · {value0} saat pertama digunakan · MP4 / MOV · maksimum 50 MB"
-  },
-  "不开启时按单次上限 {value0} 秒生成；开启后可选 2–{value1} 秒。": {
-    "en": "When off, up to the single-generation limit of {value0} seconds. When on, choose 2–{value1} seconds.",
-    "ms": "Apabila dimatikan, sehingga had satu penjanaan {value0} saat. Apabila dihidupkan, pilih 2–{value1} saat."
-  },
-  "从参考视频开头截取，最长 {value0} 秒；视频较短时按实际时长生成。超过 {value1} 秒自动分段生成，整条统一换声。": {
-    "en": "Taken from the start of the reference video, up to {value0} seconds; a shorter video uses its full length. Beyond {value1} seconds it is generated in parts with one converted voice track.",
-    "ms": "Diambil dari permulaan video rujukan, sehingga {value0} saat; video yang lebih pendek menggunakan tempoh penuhnya. Melebihi {value1} saat, ia dijana dalam beberapa bahagian dengan satu trek suara yang ditukar."
+  "自动识别原视频时长，超过 {value0} 秒自动分段，支持整条最长 {value1} 秒。": {
+    "en": "The source duration is detected automatically. Videos longer than {value0} seconds are split into segments, up to {value1} seconds in total.",
+    "ms": "Tempoh video asal dikesan secara automatik. Video melebihi {value0} saat dibahagi kepada segmen, sehingga {value1} saat keseluruhannya."
   },
   "分 {value0} 段生成 · 第 {value1} 秒接续（镜头切换处），整条统一换声": {
     "en": "Generated in {value0} parts · joined at {value1} sec (scene cut) · one converted voice track",

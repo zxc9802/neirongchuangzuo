@@ -37,13 +37,13 @@ function segmentText(task) {
   return `分 ${total} 段生成 · 第 ${seam} 秒接续（按生成时长切分），整条统一换声`;
 }
 const pending = task => task && !['draft', 'completed', 'failed', 'expired', 'waiting', 'cancelled'].includes(task.status);
-let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, targetDuration: null, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
+let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
 let context, timer, polling = false, unsubscribeCredits;
 let selectedMaterials = {};
 function resetFiles() { for (const url of Object.values(state.urls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; selectedMaterials = {}; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
-  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, targetDuration: null, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
+  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
 }
 async function request(path, options = {}) {
   const signal = AbortSignal.timeout(options.method === 'PUT' ? 180_000 : options.method ? 60_000 : 15_000);
@@ -96,27 +96,16 @@ function selectedModel() {
       ? { id: state.current.model, name: 'PixVerse Swap', maxDuration: 30 } : MODELS[0]);
 }
 function modelName(task) { return (task.model === 'fal-ai/pixverse/swap' ? 'PixVerse Swap' : MODELS.find(model => model.id === (task.model || DEFAULT_MODEL))?.name) || ''; }
-// Saved tasks own their custom duration; before creation it is a local choice.
-function targetDuration() {
-  if (!selectedModel().extendedDuration) return null;
-  return (state.current ? state.current.targetDuration : state.targetDuration) || null;
-}
-function durationSetting(ctx) {
-  const model = selectedModel(), target = targetDuration();
-  if (!model.extendedDuration) return '';
-  const locked = state.busy || state.current && state.current.status !== 'draft' || !state.config?.enabled;
-  return `<div class="replica-duration-setting"><label class="replica-duration-toggle"><input type="checkbox" id="replica-custom-duration" ${target ? 'checked' : ''} ${locked ? 'disabled' : ''}>自定义生成时长</label>${target ? `<label class="replica-duration-value">生成开头 <input type="number" id="replica-target-duration" min="2" max="${model.extendedDuration}" step="1" value="${target}" ${locked ? 'disabled' : ''} aria-label="生成时长（秒）"> 秒</label>` : ''}
-    <p class="replica-model-description">${ctx.esc(target ? `从参考视频开头截取，最长 ${model.extendedDuration} 秒；视频较短时按实际时长生成。超过 ${model.maxDuration} 秒自动分段生成，整条统一换声。` : `不开启时按单次上限 ${model.maxDuration} 秒生成；开启后可选 2–${model.extendedDuration} 秒。`)}</p></div>`;
-}
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
   const price = generationPrice('video', selected.id);
-  const description = price ? `最多生成${selected.maxDuration}秒视频，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
+  const description = price ? `单段最多 ${selected.maxDuration} 秒，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
+  const automatic = selected.extendedDuration ? `<p class="replica-model-description">${ctx.esc(`自动识别原视频时长，超过 ${selected.maxDuration} 秒自动分段，支持整条最长 ${selected.extendedDuration} 秒。`)}</p>` : '';
   return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.map(model => {
     const configured = state.config?.models?.find(item => item.id === model.id);
     const unavailable = !state.config?.enabled || configured?.enabled === false || model.id === 'wan3.0-video' && !configured?.enabled;
     return `<option value="${model.id}" ${selected.id === model.id ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
-  }).join('')}</select><p id="replica-model-description" class="replica-model-description" title="${ctx.esc(MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p>${durationSetting(ctx)}</div>`;
+  }).join('')}</select><p id="replica-model-description" class="replica-model-description" title="${ctx.esc(MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p>${automatic}</div>`;
 }
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind] || selectedMaterials[kind];
@@ -131,7 +120,7 @@ function slot(kind, ctx) {
   return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title"><span>${video ? '01' : voice ? '03' : '02'}</span><h3>${t(title)}${voice ? `<small>${t(voiceRequired ? '必填' : '选填')} · ${t('更换音色')}</small>` : ''}</h3></div>
     ${voice ? voiceHint() : ''}<div class="replica-input-preview">${preview}</div>
     <strong class="replica-file-name">${ctx.esc(selected?.name || (saved?.assetId ? '已存入资产，长期保留' : saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : '上传你想替换成的人物'))}</strong>
-    <p>${video ? targetDuration() ? `单个人物 · 截取开头 ${targetDuration()} 秒 · MP4 / MOV · 最大 50 MB` : `单个人物 · 2–${selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
+    <p>${video ? `单个人物 · 2–${selectedModel().extendedDuration || selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="${t('上传')} ${t(title)}">
     <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${t(selected || saved ? '更换' : '选择')} ${t(title)}</label>${!video ? `<a href="#assets" class="replica-asset-link">${t(voice ? '从资产选择声音' : '从资产选择形象')}</a>` : ''}</section>`;
 }
@@ -223,33 +212,12 @@ async function selectModel(id) {
   }
   state.busy = true; state.error = ''; refresh();
   try {
-    const limit = targetDuration() ? selectedModel().extendedDuration : selectedModel().maxDuration;
-    if (state.files.video && MODELS.find(model => model.id === id).maxDuration < limit) {
+    if (state.files.video) {
       const video = state.files.video;
       remember((await request(`/tasks/${state.current.id}/video`, { method: 'PUT', headers: { 'Content-Type': video.type || 'application/octet-stream' }, body: video })).task);
       delete state.files.video;
     }
     remember((await request(`/tasks/${state.current.id}/model`, jsonPost({ model: id }))).task);
-  }
-  catch (cause) { state.error = cause.message; }
-  finally { state.busy = false; refresh(); }
-}
-async function selectTargetDuration(value) {
-  const model = selectedModel();
-  if (state.busy || state.current && state.current.status !== 'draft' || !model.extendedDuration || !state.config?.enabled) return;
-  const seconds = Math.round(Number.parseFloat(value));
-  const target = value === null ? null : Number.isFinite(seconds) ? Math.min(model.extendedDuration, Math.max(2, seconds)) : targetDuration();
-  if (target === targetDuration()) { refresh(); return; }
-  if (!state.current) { state.targetDuration = target; state.error = ''; refresh(); return; }
-  state.busy = true; state.error = ''; refresh();
-  try {
-    // Turning the option off restores the edition limit, so save a newly chosen video before the saved one is checked.
-    if (!target && state.files.video) {
-      const video = state.files.video;
-      remember((await request(`/tasks/${state.current.id}/video`, { method: 'PUT', headers: { 'Content-Type': video.type || 'application/octet-stream' }, body: video })).task);
-      delete state.files.video;
-    }
-    remember((await request(`/tasks/${state.current.id}/duration`, jsonPost({ targetDuration: target }))).task);
   }
   catch (cause) { state.error = cause.message; }
   finally { state.busy = false; refresh(); }
@@ -277,11 +245,10 @@ async function submit() {
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
-    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DEFAULT_VOICE, target = targetDuration();
-    const custom = target ? { targetDuration: target } : {};
+    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DEFAULT_VOICE;
     // Keep the request ID before networking so an uncertain response can be retried safely.
-    if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now(), model, ...custom };
-    remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode, ...custom }))).task);
+    if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now(), model };
+    remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode }))).task);
     if (state.current.status === 'draft') {
       for (const kind of ['video', 'photo', 'voice']) {
         if (selectedMaterials[kind]) {
@@ -368,16 +335,12 @@ export function bindVideoReplica(ctx) {
   context = ctx;
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
   document.querySelector('#replica-models').onchange = event => { void selectModel(event.target.value); };
-  const custom = document.querySelector('#replica-custom-duration');
-  if (custom) custom.onchange = event => { void selectTargetDuration(event.target.checked ? selectedModel().extendedDuration : null); };
-  const seconds = document.querySelector('#replica-target-duration');
-  if (seconds) seconds.onchange = event => { void selectTargetDuration(event.target.value); };
   for (const kind of ['video', 'photo', 'voice']) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
   const resume = document.querySelector('#replica-resume'); if (resume) resume.onclick = () => { void recoverTask('resume'); };
   const cancel = document.querySelector('#replica-cancel'); if (cancel) cancel.onclick = () => { void recoverTask('cancel'); };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
-  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; state.targetDuration = null; state.error = ''; refresh(); };
+  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };
   document.querySelector('#replica-history').onclick = event => {
     const button = event.target.closest('[data-replica-task]'); if (!button || state.busy) return;

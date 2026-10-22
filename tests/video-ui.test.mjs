@@ -207,17 +207,17 @@ test('edition dropdown stays below voice reference and updates its description a
   assert.doesNotMatch(page.html(), /Wan 2\.2|wan\/v2\.2-14b|PixVerse Swap|fal-ai\/pixverse\/swap/);
   for (const [model, price, points] of [[FAST_MODEL, '1.8', 369], [MINI_MODEL, '1', 205], [STANDARD_MODEL, '2', 410]]) {
     page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
-    assert.ok(page.html().includes(`最多生成15秒视频，RM ${price}/秒（${points} 积分/秒）`));
+    assert.ok(page.html().includes(`单段最多 15 秒，RM ${price}/秒（${points} 积分/秒）`));
   }
   assert.doesNotMatch(page.html(), /标准版|至臻版/);
   assert.match(page.html(), /option value="doubao-seedance-2-0-260128"[^>]* selected/);
   page.node('#replica-models').onchange({ target: { value: PREMIUM_MODEL } });
   await page.settle();
   assert.match(page.html(), /option value="doubao-seedance-2-5-260628"[^>]* selected/);
-  assert.match(page.html(), /单个人物 · 2–30 秒/);
-  assert.match(page.html(), /最多生成30秒视频，RM 3\/秒（615 积分\/秒）/);
+  assert.match(page.html(), /单个人物 · 2–60 秒/);
+  assert.match(page.html(), /单段最多 30 秒，RM 3\/秒（615 积分\/秒）/);
   page.node('#replica-new').onclick();
-  assert.match(page.html(), /单个人物 · 2–15 秒/);
+  assert.match(page.html(), /单个人物 · 2–60 秒/);
 });
 
 for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan3.0-video']) test(`${model} uses voice conversion during task creation and start`, async t => {
@@ -238,7 +238,7 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan
   const estimate = `生成时间约为 ${model === 'wan3.0-video' ? '13–17' : '5–10'} 分钟`;
   assert.ok(page.html().includes(estimate), 'the empty preview follows the selected model');
   if (model === 'wan3.0-video') {
-    assert.match(page.html(), /最多生成15秒视频，RM 2.4\/秒（492 积分\/秒）/);
+    assert.match(page.html(), /单段最多 15 秒，RM 2.4\/秒（492 积分\/秒）/);
     assert.doesNotMatch(page.html(), /0.42元\/秒/);
   }
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
@@ -317,16 +317,16 @@ test('PixVerse can no longer be selected for a new task but its historical resul
   assert.doesNotMatch(page.html(), /无原声直配（试用）|data-source-audio/);
 });
 
-test('saved premium drafts keep their edition and a rejected downgrade retains the original quote', async t => {
+test('a failed draft model change retains its edition and original quote', async t => {
   const task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 20, estimatedPoints: 12300 }, calls = [];
   const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
-    if (options?.method === 'POST') { calls.push(path); return Response.json({ error: '参考视频需为 2–15 秒，宽高至少 300 像素。' }, { status: 400 }); }
+    if (options?.method === 'POST') { calls.push(path); return Response.json({ error: '视频服务暂时不可用，请稍后重试。' }, { status: 503 }); }
   } });
   page.recover(); await page.poll(); page.select(task.id);
-  assert.match(page.html(), /单个人物 · 2–30 秒/);
+  assert.match(page.html(), /单个人物 · 2–60 秒/);
   page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/model']);
-  assert.match(page.message(), /2–15 秒/); assert.match(page.html(), /单个人物 · 2–30 秒/);
+  assert.match(page.message(), /视频服务暂时不可用/); assert.match(page.html(), /单个人物 · 2–60 秒/);
   assert.match(page.cost(), /12300/);
 });
 
@@ -369,64 +369,32 @@ test('a shorter local replacement is saved before downgrading a premium draft an
   page.node('#replica-video').onchange({ target: { files: [new File(['shorter'], 'short.mp4')] } });
   page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.deepEqual(calls, ['/api/video-replica/tasks/editable-task/video', '/api/video-replica/tasks/editable-task/model']);
-  assert.match(page.html(), /单个人物 · 2–15 秒/); assert.match(page.cost(), /4100/);
+  assert.match(page.html(), /单个人物 · 2–60 秒/); assert.match(page.cost(), /4100/);
   page.node('#replica-submit').onclick(); await page.settle();
   assert.equal(calls.filter(path => path.endsWith('/video')).length, 1);
 });
 
-for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan3.0-video']) test(`custom duration is opt-in and submitted for ${model}`, async t => {
-  const maxDuration = model === PREMIUM_MODEL ? 30 : 15;
+for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan3.0-video']) test(`automatic source duration needs no selection for ${model}`, async t => {
   let task; const posts = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
     if (!options?.method) return;
     const body = options.method === 'POST' ? JSON.parse(options.body) : {};
     if (options.method === 'POST') posts.push({ path, body });
-    if (path.endsWith('/tasks')) task = { id: body.requestId, status: 'draft', model: body.model, targetDuration: body.targetDuration };
+    if (path.endsWith('/tasks')) task = { id: body.requestId, status: 'draft', model: body.model };
     return Response.json({ task });
   } });
   page.recover(); await page.poll();
-  assert.match(page.html(), /id="replica-custom-duration"(?![^>]*checked)/);
   page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
-  assert.match(page.html(), /id="replica-custom-duration"(?![^>]*checked)/);
-  assert.doesNotMatch(page.html(), /replica-target-duration/);
-  assert.match(page.html(), new RegExp(`不开启时按单次上限 ${maxDuration} 秒生成；开启后可选 2–60 秒`)); assert.match(page.html(), new RegExp(`单个人物 · 2–${maxDuration} 秒`));
-  page.node('#replica-custom-duration').onchange({ target: { checked: true } }); await page.settle();
-  assert.match(page.html(), /id="replica-custom-duration" checked/);
-  assert.match(page.html(), /id="replica-target-duration" min="2" max="60" step="1" value="60"/);
-  assert.match(page.html(), /单个人物 · 截取开头 60 秒/);
-  for (const [value, expected] of [['75', 60], ['', 60], ['45', 45]]) {
-    page.node('#replica-target-duration').onchange({ target: { value } }); await page.settle();
-    assert.match(page.html(), new RegExp(`单个人物 · 截取开头 ${expected} 秒`));
-  }
-  assert.equal(posts.length, 0);
+  assert.doesNotMatch(page.html(), /replica-custom-duration|replica-target-duration|自定义生成时长|截取开头/);
+  assert.match(page.html(), /单个人物 · 2–60 秒/);
+  assert.ok(page.html().includes(`超过 ${model === PREMIUM_MODEL ? 30 : 15} 秒自动分段`));
   for (const kind of ['video', 'photo', 'voice']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(posts.find(item => item.path.endsWith('/tasks')).body.targetDuration, 45);
   assert.equal(posts.find(item => item.path.endsWith('/tasks')).body.model, model);
+  assert.ok(posts.every(item => !Object.hasOwn(item.body, 'targetDuration')));
+  assert.ok(posts.every(item => !item.path.endsWith('/duration')));
   page.node('#replica-new').onclick();
-  assert.match(page.html(), /id="replica-custom-duration"(?![^>]*checked)/);
-  page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
-  assert.match(page.html(), new RegExp(`单个人物 · 2–${maxDuration} 秒`));
-});
-
-test('a saved draft turns the custom duration off only after saving a pending local video', async t => {
-  let task = { ...speechDraft(), model: PREMIUM_MODEL, duration: 50, estimatedPoints: 30750 }; const calls = [];
-  const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
-    if (!options?.method) return;
-    calls.push({ path, body: options.method === 'POST' ? JSON.parse(options.body) : undefined });
-    if (path.endsWith('/video')) task = { ...task, duration: 20, estimatedPoints: 12300 };
-    if (path.endsWith('/duration')) task = { ...task, targetDuration: JSON.parse(options.body).targetDuration ?? undefined };
-    return Response.json({ task });
-  } });
-  page.recover(); await page.poll(); page.select(task.id);
-  page.node('#replica-custom-duration').onchange({ target: { checked: true } }); await page.settle();
-  assert.deepEqual(calls, [{ path: '/api/video-replica/tasks/editable-task/duration', body: { targetDuration: 60 } }]);
-  assert.match(page.html(), /单个人物 · 截取开头 60 秒/);
-  page.node('#replica-video').onchange({ target: { files: [new File(['shorter'], 'short.mp4')] } });
-  page.node('#replica-custom-duration').onchange({ target: { checked: false } }); await page.settle();
-  assert.deepEqual(calls.slice(1).map(item => [item.path, item.body]), [['/api/video-replica/tasks/editable-task/video', undefined],
-    ['/api/video-replica/tasks/editable-task/duration', { targetDuration: null }]]);
-  assert.match(page.html(), /单个人物 · 2–30 秒/); assert.doesNotMatch(page.html(), /replica-target-duration/);
+  assert.doesNotMatch(page.html(), /replica-custom-duration|replica-target-duration/);
 });
 
 test('automatic successful polling clears restart errors on first load and after a loaded page', async t => {

@@ -11,7 +11,9 @@ const PREMIUM = { maxSegment: 30, durations: [4, 5, 6, 8, 10, 12, 15, 20, 25, 30
 const spans = plan => plan.segments.map(segment => [segment.start, segment.end, segment.duration]);
 
 test('a reference within one generation tier is not split', () => {
-  for (const duration of [4, 29.9, 30, 30.04]) assert.equal(planSegments(duration, PREMIUM), null);
+  for (const duration of [4, 29.9, 30]) assert.equal(planSegments(duration, PREMIUM), null);
+  assert.ok(planSegments(30.01, PREMIUM));
+  assert.ok(planSegments(30.04, PREMIUM));
   assert.ok(planSegments(30.06, PREMIUM));
 });
 
