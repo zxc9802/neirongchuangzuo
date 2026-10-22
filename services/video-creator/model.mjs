@@ -1,5 +1,7 @@
+import { OBSERVATION_SYSTEM, validateObservations, GROUNDING_RULES, validateGrounding, narrationRepairRequest, applyNarrationRepair, QUALITY_SYSTEM, validateQuality } from './director-quality.mjs';
 import { readFile } from 'node:fs/promises';
 import sharp from 'sharp';
+import { setTimeout as delay } from 'node:timers/promises';
 import { VIDEO_SKILLS, VIDEO_LANGUAGES, videoAssetPurpose } from '../../design/video-catalog.js';
 import { parseDirectorOutput } from './director-structured-output.mjs';
 import { DIRECTOR_OUTPUT_TOKENS, readDirectorResponse, directorFailure, redactDirectorValue } from './director-response.mjs';
@@ -130,11 +132,40 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
       const bytes = await sharp(await readFile(images[index].path)).rotate().resize({ width: 960, height: 960, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
       content.push({ type: 'text', text: `图片${index + 1}，ID=${images[index].id}` }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + bytes.toString('base64'), detail: 'high' } });
     }
+    let sequence = 0, observations;
+    const auxiliary = async (stage, system, userContent, validate = value => value) => {
+      const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
+      const entry = { attempt: ++sequence, stage, startedAt: Date.now(), status:'started', phase:'request', model:stage==='observation' ? config.videoObservationModel || 'gpt-6-luna' : config.imageTextModel || config.chatModel, maxOutputTokens:stage==='observation'?maxOutputTokens:Math.min(maxOutputTokens,4096), inputImageCount: stage==='observation'?images.length:0 };
+      const publish=()=>onAttempt?.(redactDirectorValue(entry,[config.apiKey])); await publish();
+      onProgress?.(({observation:'正在识别实拍内容',narration_repair:'正在精简旁白',quality:'正在检查素材依据与宣传内容'})[stage]);
+      try {
+        const response=await fetchImpl(config.baseUrl+'/chat/completions',{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${config.apiKey}`,'Content-Type':'application/json'},
+          body:JSON.stringify({model:entry.model,messages:[{role:'system',content:system},{role:'user',content:userContent}],stream:true,stream_options:{include_usage:true},response_format:{type:'json_object'},max_tokens:entry.maxOutputTokens,temperature:.2}),signal:callSignal});
+        entry.httpStatus=response.status;entry.phase='response';entry.providerRequestId=response.headers.get('x-api-request-id')||response.headers.get('x-request-id');
+        Object.assign(entry,await readDirectorResponse(response));const payload=entry.payload;delete entry.payload;entry.parsedResponse=payload;
+        entry.finishReason=payload?.choices?.[0]?.finish_reason;entry.usage=payload?.usage;
+        if(!response.ok)throw creatorError('编导检查接口返回错误，请稍后重试。',502,'DIRECTOR_PROVIDER_ERROR');
+        entry.phase='parse';const parsed=parseDirectorOutput(payload);entry.phase='validate';const result=validate(parsed.value);
+        entry.status='completed';entry.phase='complete';entry.completedAt=Date.now();await publish();return result;
+      } catch(cause) {
+        for(const key of ['rawResponse','rawBytes','streamComplete'])if(cause[key]!==undefined)entry[key]=cause[key];
+        entry.status='failed';entry.completedAt=Date.now();entry.error=directorFailure(cause,entry.phase,callSignal);await publish();
+        throw Object.assign(creatorError(entry.error.message,502,entry.error.code),{outputIssue:entry.error.issue,validationIssue:entry.error.detail,providerStatus:entry.httpStatus});
+      }
+    };
+    if(input.groundingVersion===1) {
+      const observationContent=[{type:'text',text:JSON.stringify({task:'识别下面随消息附带的真实图片，按图片ID返回观察结果。不要编排脚本。',assets:input.assets.map(a=>({id:a.id,type:a.type,purpose:videoAssetPurpose(a)}))})},...content.slice(1)];
+      observations=await auxiliary('observation',OBSERVATION_SYSTEM,observationContent,value=>validateObservations(value,input));
+    }
+    const indexedObservations = observations?.map(o=>({...o,facts:o.facts.map((fact,index)=>({index,text:fact}))}));
+    const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}] : content;
+    const groundingSystem = observations ? '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n'+GROUNDING_RULES : '';
+    const system = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。每镜旁白宁短勿长，3秒镜头目标6—9字，允许空旁白，不把画面说明照搬为台词。' : directorSystem(input.skill);
     let budget = maxOutputTokens, correction = '';
     for (let attempt = 1; attempt <= 2; attempt++) {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
-      const record = { attempt, startedAt: Date.now(), status: 'started', phase: 'request', model: config.imageTextModel || config.chatModel,
-        maxOutputTokens: budget, inputImageCount: images.length, historyMessageCount: input.history.slice(-10).length, finishReason: null };
+      const record = { attempt: ++sequence, stage:'planning', startedAt: Date.now(), status: 'started', phase: 'request', model: config.imageTextModel || config.chatModel,
+        maxOutputTokens: budget, inputImageCount: observations ? 0 : images.length, sourceImageCount: images.length, observationModel: observations ? config.videoObservationModel || 'gpt-6-luna' : undefined, historyMessageCount: input.history.slice(-10).length, finishReason: null };
       const publish = async () => { if (onAttempt) await onAttempt(redactDirectorValue(record, [config.apiKey])); };
       await publish();
       onProgress?.(attempt === 1 ? '正在分析素材并编排分镜' : '正在重新生成完整脚本');
@@ -142,7 +173,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
       try {
         response = await fetchImpl(config.baseUrl + '/chat/completions', { method: 'POST', redirect: 'error',
           headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: directorSystem(input.skill) }, { role: 'user', content: correction ? [...content, { type: 'text', text: correction }] : content }],
+          body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: system }, { role: 'user', content: correction ? [...planningContent, { type: 'text', text: correction }] : planningContent }],
             stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: budget, temperature: .45 }), signal: callSignal });
         record.phase = 'response'; record.httpStatus = response.status; record.contentType = response.headers.get('content-type') || '';
         record.providerRequestId = response.headers.get('x-api-request-id') || response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || null;
@@ -153,7 +184,41 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
         record.finishReason = payload?.choices?.[0]?.finish_reason || null; record.usage = payload?.usage;
         record.responseContent = payload?.choices?.[0]?.message?.content ?? '';
         const parsed = parseDirectorOutput(payload); record.formatRepair = parsed.repair; record.phase = 'validate';
-        const result = validateDirectorResult(parsed.value, input);
+        let candidate=parsed.value, result;
+        if(observations)validateGrounding(candidate,observations);
+        try { result=validateDirectorResult(candidate,input); }
+        catch(cause) {
+          if(cause.outputIssue!=='invalid_voice_timing')throw cause;
+          const request=narrationRepairRequest(candidate,input);let feedback;
+          for(let repairAttempt=0;repairAttempt<2;repairAttempt++) {
+            try {
+              candidate=await auxiliary('narration_repair','你是视频旁白编辑。遵守每镜maximumUnits，只返回要求的JSON，不改写事实。短句可以只写一个重点，不必每镜都说话。中文按去标点后的字符计数，9字预算可以写“白桌青椅，进来坐坐”。不得原样保留超长旁白。',JSON.stringify({...request,...(feedback?{validationFeedback:feedback}:{})}),value=>applyNarrationRepair(candidate,value,input));
+              break;
+            } catch(repairError) {
+              if(repairAttempt===1||repairError.outputIssue!=='invalid_voice_repair')throw repairError;
+              feedback=repairError.validationIssue;
+            }
+          }
+          result=validateDirectorResult(candidate,input); result.narrationRepaired=true;
+        }
+        if(observations && result.kind==='script') {
+          validateGrounding(candidate,observations);
+          for(let reviewAttempt=0;reviewAttempt<2;reviewAttempt++) {
+            try {
+              result.quality=await auxiliary('quality',QUALITY_SYSTEM,JSON.stringify({observations:indexedObservations,request:input.message,script:candidate.script,assets:candidate.assets}),validateQuality);
+              break;
+            } catch(reviewError) {
+              const transient=['DIRECTOR_NETWORK_ERROR','DIRECTOR_TIMEOUT','DIRECTOR_STREAM_INCOMPLETE'].includes(reviewError.code)
+                || ['PROVIDER_ERROR','DIRECTOR_PROVIDER_ERROR'].includes(reviewError.code)&&([429,500,502,503,504].includes(reviewError.providerStatus)||/timed?\s*out|timeout|temporarily|overloaded/i.test(reviewError.validationIssue||''));
+              if(reviewAttempt===1||!transient||signal?.aborted)throw reviewError;
+              onProgress?.('审核连接中断，正在重试审核');await delay(500,undefined,{signal});
+            }
+          }
+          result.observations=observations;
+          result.script.shots.forEach((shot,index)=>{shot.evidence=candidate.script.shots[index].evidence;});
+          result.script.videoPrompt+='\n\n素材使用边界：'+observations.filter(o=>result.script.referenceImageIds?.includes(o.id)).map(o=>`图片${result.script.referenceImageIds.indexOf(o.id)+1}：${o.facts.join('；')}。${o.kinds.includes('poster')&&!o.kinds.includes('food')?'仅展示原有海报/菜单图案，不将印刷食物变成实物。':''}`).join('\n');
+          if(result.script.videoPrompt.length>12000)throw invalidOutput('完整脚本超过长度限制。','invalid_schema',{field:'videoPrompt'});
+        }
         record.status = 'completed'; record.phase = 'complete'; record.completedAt = Date.now(); await publish();
         return { ...result, usage: payload.usage };
       } catch (cause) {
@@ -166,7 +231,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
         delete record.payload;
         record.status = 'failed'; record.completedAt = Date.now(); record.error = directorFailure(cause, record.phase, callSignal);
         await publish();
-        const retryable = record.streamComplete === true && (['truncated', 'empty', 'invalid_json', 'transport_json', 'invalid_schema', 'invalid_sse_json'].includes(record.error.issue)
+        const retryable = !['invalid_voice_repair','DIRECTOR_NETWORK_ERROR','DIRECTOR_TIMEOUT','DIRECTOR_INTERRUPTED','DIRECTOR_STREAM_INCOMPLETE'].includes(cause.outputIssue || cause.code) && record.streamComplete === true && (['truncated', 'empty', 'invalid_json', 'transport_json', 'invalid_schema', 'invalid_sse_json'].includes(record.error.issue)
           || cause.code === 'DIRECTOR_INVALID_OUTPUT' || [429, 500, 502, 503, 504].includes(record.httpStatus) && cause.code === 'DIRECTOR_PROVIDER_ERROR');
         if (attempt === 1 && retryable && !signal?.aborted) {
           if (record.error.issue === 'truncated') budget = Math.min(65536, budget * 2);

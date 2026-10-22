@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { createDirectorModel, validateDirectorResult } from '../services/video-creator/model.mjs';
-import { readDirectorResponse, directorAttemptSummary } from '../services/video-creator/director-response.mjs';
+import { readDirectorResponse, directorAttemptSummary, directorFailure } from '../services/video-creator/director-response.mjs';
 
 const config = { apiKey: 'sk-private-test-key', baseUrl: 'https://model.example/v1', imageTextModel: 'claude-opus-5-5' };
 async function setup(t) {
@@ -26,6 +26,13 @@ function sse(payload) {
   return 'data: ' + JSON.stringify({ ...payload, choices: [{ index: 0, delta: { content: choice.message.content }, finish_reason: choice.finish_reason }] }) + '\n\ndata: [DONE]\n\n';
 }
 const streamResponse = payload => new Response(sse(payload), { headers: { 'content-type': 'text/event-stream', 'x-api-request-id': 'outer-receipt-id' } });
+
+test('a request timer expiring during later validation cannot relabel a quality rejection as network timeout',()=>{
+  const signal=AbortSignal.abort(new DOMException('Timeout','TimeoutError'));
+  const cause=Object.assign(new Error('脚本依据不符'),{code:'DIRECTOR_INVALID_OUTPUT',outputIssue:'quality_rejected'});
+  assert.equal(directorFailure(cause,'validate',signal).code,'DIRECTOR_INVALID_OUTPUT');
+  assert.equal(directorFailure(new Error('read failed'),'response',signal).code,'DIRECTOR_TIMEOUT');
+});
 
 test('a terminal SSE event completes even if the gateway leaves the HTTP connection open', async () => {
   let cancelled = false;

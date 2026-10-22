@@ -20,6 +20,44 @@ import { collectGeneratedAssets } from '../design/generated-assets.js';
 const settings = { ...DEFAULT_VIDEO_SETTINGS, duration: 4 };
 const CONFIG = { enabled: true, publicOrigin: 'https://workspace.example', signingSecret: 'test-signing' };
 const MP4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from('ftypisom'), Buffer.alloc(100)]);
+
+test('authenticated workspace API persists account data and rejects conflicts and cross-origin writes',async t=>{
+  const f=await fixture(t),id=randomUUID(),change={collection:'drafts',id,revision:0,value:{id,input:'门店宣传',prompt:'',skill:'store-discovery'}};
+  assert.equal((await f.call('/workspace',{owner:'none'})).status,401);
+  assert.equal((await f.call('/workspace',{method:'PATCH',body:{changes:[change]},headers:{origin:'https://evil.example'}})).status,403);
+  const res=await f.call('/workspace',{method:'PATCH',body:{changes:[change]}});assert.equal(res.status,200);
+  assert.equal((await (await f.call('/workspace',{owner:'bob'})).json()).revision,0);
+  assert.equal((await f.call('/workspace',{method:'PATCH',body:{changes:[{...change,value:{...change.value,input:'过期页面覆盖'}}]}})).status,409);
+  await f.close();await f.open();assert.equal((await (await f.call('/workspace')).json()).entries['drafts/'+id].value.input,'门店宣传');
+});
+
+test('library exposes actual dimensions, real provider review status and expiry without other accounts',async t=>{
+  const f=await fixture(t),id=await f.init(),photo=await f.upload(id);
+  const library=async()=> (await (await f.call('/library')).json()).assets;
+  let assets=await library();assert.equal(assets[0].width,256);assert.equal(assets[0].height,320);assert.equal(assets[0].review.status,'not_submitted');
+  assert.deepEqual((await (await f.call('/library',{owner:'bob'})).json()).assets,[]);
+  f.state.review=1;await f.generate(id);await f.until(async()=> (await library())[0]?.review.status==='pending');
+  f.state.review=3;await f.until(async()=> (await library())[0]?.review.status==='rejected');
+  f.advance(4*86400000);assets=await library();assert.equal(assets[0].id,photo);assert.equal(assets[0].status,'expired');assert.equal(assets[0].url,null);
+});
+test('reusing identical media in another draft keeps one library identity without merging character and scene purposes',async t=>{
+  const f=await fixture(t),a=await f.init(),first=await f.upload(a),b=await f.init();await f.upload(b);await f.upload(b,randomUUID(),'character');
+  const rows=(await (await f.call('/library')).json()).assets;
+  assert.equal(rows.length,2);assert.ok(rows.some(r=>r.id===first));assert.equal(new Set(rows.map(r=>r.purpose)).size,2);
+  assert.equal((await f.current(b)).assets.find(r=>r.purpose==='reference').originKey,first);
+});
+
+test('phase timings and connection recovery survive restart without duplicate generation',async t=>{
+  const f=await fixture(t),id=await f.init();await f.upload(id);f.state.review=1;
+  await f.generate(id);await f.until(async()=> (await f.current(id)).tasks[0]?.status==='reviewing');f.advance(5000);f.state.review=2;
+  await f.until(async()=> (await f.current(id)).tasks[0]?.status==='running');f.state.queryFailed=true;
+  await f.until(async()=> (await f.current(id)).tasks[0]?.events.some(e=>e.action==='query_retry'));
+  await f.close();await f.open();f.advance(12000);f.state.queryFailed=false;f.state.done=true;
+  const task=await f.until(async()=>{const task=(await f.current(id)).tasks[0];return task.status==='completed'&&task;});
+  assert.equal(f.state.generates,1);assert.ok(task.events.some(e=>e.action==='server_resumed'));assert.ok(task.events.some(e=>e.action==='reconnected'));
+  assert.ok(task.timeline.find(p=>p.phase==='reviewing').elapsedMs>=5000);assert.ok(task.timeline.find(p=>p.phase==='running').elapsedMs>=12000);
+  assert.ok(task.timeline.some(p=>p.phase==='downloading'));assert.ok(task.settlement.completedAt);assert.equal(task.error,'');
+});
 function script(input) {
   return { kind: 'script', text: '完成编排', assets: [], warnings: [], script: { title: '真实门店', summary: '店铺与产品', videoPrompt: '图片1慢推展示真实门店，保留原本装修。',
     shots: [{ start: 0, end: input.settings.duration, visual: '真实门店慢推', referenceIds: [input.assets[0].id], voiceover: '', caption: '', camera: '慢推' }] } };
@@ -31,7 +69,7 @@ async function fixture(t, options = {}) {
   const provider = { async createMaterial(url) { state.materialCreates++; state.source = url; state.sources.push(url); if (options.createMaterial) return options.createMaterial(url); return { id: 'material-' + state.materialCreates, status: state.review }; },
     async queryMaterial() { return state.review; }, async generateCreative(input) { state.generates++; state.input = input;
       if (state.uncertain) throw new Error('Connection reset'); return { taskId: 'provider-task' }; },
-    async query() { return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; } };
+    async query() { if (state.queryFailed) throw Object.assign(new Error('连接中断'),{code:'TEST_CONNECTION_RESET'}); return state.failed ? { failed: true } : state.done ? { url: 'https://cdn.example/result.mp4' } : {}; } };
   let handler, app, base, clock = Date.now();
   async function open() {
     handler = createVideoCreatorHandler({ storageDir: join(root, 'creator'), config: CONFIG, provider, credits: wallet,

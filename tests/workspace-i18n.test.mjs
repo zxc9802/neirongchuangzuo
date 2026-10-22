@@ -76,3 +76,20 @@ test('dynamic counters translate without changing their numeric values or identi
   f.language('zh-CN');
   assert.equal(p.textContent, '已选 3/30');
 });
+
+test('material controls and composite counters round-trip while preserving file names and editor tokens', t => {
+  const f = fixture(t, '<p>无限积分 · 6 张</p><button aria-label="替换 一品厨门头.jpg">图片1</button><div contenteditable="true">@图片1 保留门头</div><span class="vc-task-copy"><strong>一品厨门店</strong></span>');
+  const button = f.document.querySelector('button');
+  assert.equal(f.document.querySelector('p').textContent, 'Unlimited · 6 images');
+  assert.equal(button.textContent, 'Image 1');
+  assert.equal(button.getAttribute('aria-label'), 'Replace 一品厨门头.jpg');
+  f.language('ms');
+  assert.equal(button.textContent, 'Imej 1');
+  assert.equal(button.getAttribute('aria-label'), 'Gantikan 一品厨门头.jpg');
+  assert.equal(f.document.querySelector('[contenteditable]').textContent, '@图片1 保留门头');
+  assert.equal(f.document.querySelector('strong').textContent, '一品厨门店');
+  f.language('zh-CN');
+  assert.equal(button.textContent, '图片1');
+  assert.equal(button.getAttribute('aria-label'), '替换 一品厨门头.jpg');
+  assert.equal(f.document.querySelector('p').textContent, '无限积分 · 6 张');
+});

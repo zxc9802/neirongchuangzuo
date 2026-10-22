@@ -63,8 +63,9 @@ export function directorFailure(cause, phase, signal) {
   const issue = cause.streamIssue || cause.outputIssue;
   let pair = ISSUES[issue];
   if (!pair && cause.code === 'MODEL_STREAM_INCOMPLETE') pair = ['DIRECTOR_STREAM_INCOMPLETE', '编导响应提前断开，未取得完整脚本，请稍后重试。'];
-  if (!pair && (cause.name === 'TimeoutError' || signal?.reason?.name === 'TimeoutError')) pair = ['DIRECTOR_TIMEOUT', '编导等待超过时限，未取得完整脚本，请稍后重试。'];
-  if (!pair && (cause.name === 'AbortError' || signal?.aborted)) pair = ['DIRECTOR_INTERRUPTED', '编导请求已中断，请重新发起。'];
+  const transport = phase === 'request' || phase === 'response';
+  if (!pair && (cause.name === 'TimeoutError' || transport && signal?.reason?.name === 'TimeoutError')) pair = ['DIRECTOR_TIMEOUT', '编导等待超过时限，未取得完整脚本，请稍后重试。'];
+  if (!pair && (cause.name === 'AbortError' || transport && signal?.aborted)) pair = ['DIRECTOR_INTERRUPTED', '编导请求已中断，请重新发起。'];
   if (!pair && phase === 'request' && !cause.status) pair = ['DIRECTOR_NETWORK_ERROR', '编导接口连接中断，未取得完整脚本，请稍后重试。'];
   const code = pair?.[0] || cause.code || 'DIRECTOR_INVALID_OUTPUT';
   const message = pair?.[1] || (/[\u3400-\u9fff]/.test(cause.message || '') ? cause.message : '编导未返回可用脚本，请重试。');

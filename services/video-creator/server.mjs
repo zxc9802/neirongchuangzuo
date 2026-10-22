@@ -1,3 +1,5 @@
+import { observeTask, recordTaskError, taskTimeline } from './timeline.mjs';
+import { safeVideoError } from '../video/errors.mjs';
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { createHash, createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
@@ -36,9 +38,9 @@ async function bytes(req, limit, message = '文件过大，请压缩后重试。
   try { for await (const chunk of req) { total += chunk.length; if (total > limit) throw creatorError(message, 413, 'CREATOR_UPLOAD_TOO_LARGE'); chunks.push(chunk); } return Buffer.concat(chunks); }
   finally { clearTimeout(timer); }
 }
-async function body(req) {
+async function body(req, limit = 96 * 1024) {
   if (!String(req.headers['content-type']).startsWith('application/json')) throw creatorError('请求格式无效。', 415);
-  try { return JSON.parse((await bytes(req, 96 * 1024)).toString()); }
+  try { return JSON.parse((await bytes(req, limit)).toString()); }
   catch (cause) { if (cause.status) throw cause; throw creatorError('请求内容无法读取。'); }
 }
 
@@ -54,7 +56,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   if (!Number.isFinite(cnyPerSecond) || cnyPerSecond <= 0) throw creatorError('视频计费配置无效。', 503, 'CREATOR_PRICING_INVALID');
   let closing = false, ticking = false, timer, shutdown;
   const record = id => store.records.get(id);
-  const save = c => { c.updatedAt = now(); c.version = (c.version || 0) + 1; return store.save(c); };
+  const save = c => { for (const task of c.tasks) observeTask(task, now()); c.updatedAt = now(); c.version = (c.version || 0) + 1; return store.save(c); };
   const lock = (id, work) => { const job = (locks.get(id) || Promise.resolve()).catch(() => {}).then(work); locks.set(id, job); job.finally(() => { if (locks.get(id) === job) locks.delete(id); }).catch(() => {}); return job; };
   const owned = (id, userId) => { const c = record(id); if (!c || c.userId !== userId) throw creatorError('任务不存在。', 404, 'CREATOR_NOT_FOUND'); return c; };
   const active = c => c.operations.some(scriptPending) || c.tasks.some(pending);
@@ -68,6 +70,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       skill: task.skill, title: task.title, settings: task.settings, duration: task.settings.duration, actualDuration: task.actualDuration,
       createdAt: task.createdAt, startedAt: task.startedAt, completedAt: task.completedAt, expiresAt: task.expiresAt,
       error: task.error || '', code: task.code, warning: task.warning, billing: task.billing, estimatedPoints: points(task.settings.duration),
+      timeline: taskTimeline(task, now()), timelineCoverage: task.timelineCoverage, events: task.events || [], settlement: task.settlement || null,
       materialProgress: { total: task.assetIds?.length || 0, prepared: Object.keys(task.materials || {}).length, approved: Object.values(task.materials || {}).filter(m => m.status === 2).length },
       canRecover: task.status === 'failed' && paid && Boolean(task.resultSource) && !expired,
       prompt: task.prompt, scriptId: task.scriptId || null, referenceImageIds: task.assetIds?.filter(id => c.assets.find(a => a.id === id)?.type === 'image'),
@@ -76,19 +79,21 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   function operationView(op) { return { id: op.id, skill: op.skill, settings: op.settings, status: op.status, message: op.message, createdAt: op.createdAt,
     startedAt: op.startedAt, completedAt: op.completedAt, diagnostics: op.diagnostics,
     progress: op.progress, result: op.status === 'completed' ? op.result : undefined, error: op.error, code: op.code, billing: op.billing }; }
+  const assetView = (c, a) => ({ id: a.id, originKey: a.libraryId || a.id, name: a.name, type: a.type, purpose: videoAssetPurpose(a), size: a.size, duration: a.duration, width: a.width, height: a.height, uploadedAt: a.uploadedAt,
+    expired: now() >= c.mediaExpiresAt, url: now() < c.mediaExpiresAt ? `${PREFIX}/conversations/${c.id}/assets/${a.id}` : null });
   const sessionView = c => ({ id: c.id, version: c.version, skill: c.skill, settings: c.settings, mediaExpiresAt: c.mediaExpiresAt,
-    assets: c.assets.map(a => ({ id: a.id, name: a.name, type: a.type, purpose: videoAssetPurpose(a), size: a.size, duration: a.duration,
-      expired: now() >= c.mediaExpiresAt, url: now() < c.mediaExpiresAt ? `${PREFIX}/conversations/${c.id}/assets/${a.id}` : null })),
-    operations: c.operations.map(operationView), tasks: c.tasks.map(t => taskView(c, t)) });
+    assets: c.assets.map(a => assetView(c, a)), operations: c.operations.map(operationView), tasks: c.tasks.map(t => taskView(c, t)) });
   async function settle(scope, op) {
     if (!credits || !op.billing) return;
+    op.settlement ||= { startedAt: now(), attempts: 0 }; op.settlement.attempts++;
     try {
       if (meter.enabled) await meter.reconcile(scope);
       const value = meter.enabled ? await credits.settleCost(scope)
         : op.status === 'completed' ? await credits.settle({ ...scope, units: Math.min(op.settings.duration, op.actualDuration || op.settings.duration) }) : await credits.release(scope);
+      op.settlement.completedAt = now(); delete op.settlement.error;
       op.billing = { status: value.status, reservedPoints: value.reservedPoints, chargedPoints: value.chargedPoints,
         exempt: value.exempt, ...(meter.enabled ? { mode: 'api_cost' } : {}) };
-    } catch { op.billing = { ...op.billing, status: 'pending' }; }
+    } catch (cause) { op.settlement.error = safe(cause); op.billing = { ...op.billing, status: 'pending' }; }
   }
   function launch(key, work) {
     if (workers.has(key)) return;
@@ -111,7 +116,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
     try {
       if (meter.enabled) { const hold = await credits.reserveCost(scope); op.billing = { status: hold.status, exempt: hold.exempt, mode: 'api_cost' }; }
       op.status = 'running'; op.startedAt = now(); op.progress = '正在分析素材并编排分镜'; op.dispatched = true; await save(c);
-      const result = await meter.run(scope, () => director.generate({ planningVersion: op.planningVersion || 1, skill: op.skill, settings: op.settings, message: op.message,
+      const result = await meter.run(scope, () => director.generate({ groundingVersion: 1, planningVersion: op.planningVersion || 1, skill: op.skill, settings: op.settings, message: op.message,
         assets: op.assetIds.map(id => ({ ...c.assets.find(a => a.id === id) })),
         history: c.operations.filter(o => o.skill === op.skill && o.status === 'completed' && o.result)
           .flatMap(o => [{ role: 'user', content: o.message }, { role: 'assistant', content: JSON.stringify(o.result) }]).slice(-10) }, { signal: controller.signal, onAttempt,
@@ -136,15 +141,17 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
     if (meter.enabled && task.costPrepared) await credits.finishCostCall({ ...costScope(c, costId('video', task.id)), receiptId: 'render', ...detail });
   }
   async function failTask(c, task, cause, uncertain = false) {
-    const issue = safe(cause); task.status = uncertain ? 'uncertain' : 'failed'; task.error = issue.error; task.code = issue.code;
+    recordTaskError(task, cause, now(), 'failed');
+    const issue = safe(cause); task.completedAt = now(); task.status = uncertain ? 'uncertain' : 'failed'; task.error = issue.error; task.code = issue.code;
     if (!task.dispatched) await finishProviderCost(c, task, { costCny: 0 });
     await settle(costScope(c, costId('video', task.id)), task); await save(c);
   }
   async function accept(c, task, result) {
     if (result.failed) {
       await finishProviderCost(c, task, { costCny: 0 });
-      await failTask(c, task, creatorError('视频未生成成功，请调整素材或脚本后重试。', 502, 'VIDEO_GENERATION_FAILED')); return;
+      await failTask(c, task, creatorError(result.error ? '视频生成失败：' + safeVideoError(result.error) : '视频未生成成功，请调整素材或脚本后重试。', 502, 'VIDEO_GENERATION_FAILED')); return;
     }
+    if (task.error) { task.events ||= []; task.events.push({ at: now(), action: 'reconnected', phase: task.status }); task.error = ''; }
     if (result.taskId) task.providerId = result.taskId;
     if (result.url) {
       task.resultSource = result.url; task.status = 'downloading';
@@ -169,10 +176,11 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
               if (!material) {
                 if (!asset.sourceUrl && provider.uploadSource) { asset.sourceUrl = await provider.uploadSource(asset); await save(c); }
                 material = await provider.createMaterial(asset.sourceUrl || sourceUrl(c, asset), asset.type === 'image' ? 'photo' : 'voice'); task.materials[assetId] = material;
-              } else if (material.status !== 2) material.status = await provider.queryMaterial(material.id);
+              } else if (material.status !== 2 && material.status !== 3) material.status = await provider.queryMaterial(material.id);
+              material.checkedAt = now();
               await save(c);
               if (material.status === 3) throw creatorError('部分素材未通过视频服务审核，请换一组清晰的实拍。', 422, 'VIDEO_MATERIAL_REJECTED');
-            } catch (cause) { failures.push(cause); }
+            } catch (cause) { recordTaskError(task, cause, now(), 'material'); failures.push(cause); }
           }
         }));
         if (failures.length) throw failures[0];
@@ -197,17 +205,19 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         try {
           await download(task.resultSource, temporary, controller.signal); const metadata = await probe(temporary);
           await rename(temporary, result); task.status = 'completed'; task.completedAt = now(); task.expiresAt = now() + 3 * DAY;
-          task.actualDuration = metadata.duration;
+          observeTask(task, now()); task.actualDuration = metadata.duration;
           if (task.settings.generateAudio && !metadata.audio) task.warning = '成片没有音轨，请预览确认。';
           task.error = ''; delete task.code;
           await settle(costScope(c, costId('video', task.id)), task); await save(c);
         } catch (cause) {
           if (closing) return;
-          task.downloadAttempts = (task.downloadAttempts || 0) + 1;
+          recordTaskError(task, cause, now(), 'download_retry'); task.downloadAttempts = (task.downloadAttempts || 0) + 1; await save(c);
           if (task.downloadAttempts >= 3) await failTask(c, task, creatorError('视频已生成，保存成片失败。可恢复下载，无需重新生成。', 502, 'VIDEO_DOWNLOAD_FAILED'));
         }
       }
     } catch (cause) {
+      if (closing) return;
+      recordTaskError(task, cause, now(), 'query_retry');
       if (task.dispatched && task.providerId) { task.error = '原任务查询暂时中断，正在重试查询。'; await save(c); }
       else await failTask(c, task, cause, Boolean(task.dispatched));
     } finally { controllers.delete(task.id); }
@@ -241,6 +251,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   const ready = (async () => {
     await store.ready;
     for (const c of store.records.values()) {
+      for (const task of c.tasks.filter(pending)) { task.events ||= []; task.events.push({ at: now(), action: 'server_resumed', phase: task.status }); }
       for (const op of c.operations.filter(o => ['queued', 'running'].includes(o.status))) { op.status = 'failed'; op.error = '编导请求在服务重启时中断，请核对后再发起。'; op.code = 'DIRECTOR_INTERRUPTED'; await settle(costScope(c, costId('director', op.id)), op); }
       for (const task of c.tasks.filter(t => t.status === 'reserving')) {
         const scope = costScope(c, costId('video', task.id));
@@ -275,6 +286,20 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       if (req.headers['sec-fetch-site'] === 'cross-site') throw creatorError('请求来源无效。', 403, 'CREATOR_ORIGIN_DENIED');
       if (req.headers.origin && ![config.publicOrigin, publicOrigin, `http://${req.headers.host}`, `https://${req.headers.host}`].includes(req.headers.origin)) throw creatorError('请求来源无效。', 403, 'CREATOR_ORIGIN_DENIED');
       if (!['GET', 'HEAD'].includes(req.method) && closing) throw creatorError('服务正在重启，尚未发起生成。', 503, 'SERVICE_CLOSING');
+      if (route[0] === 'workspace' && route.length === 1) {
+        if (req.method === 'GET') { const { userId: _, ...workspace } = await store.readWorkspace(userId); json(res, 200, workspace); return; }
+        if (req.method === 'PATCH') { const input = await body(req, 512 * 1024); const { userId: _, ...workspace } = await store.updateWorkspace(userId, input.changes, now()); json(res, 200, workspace); return; }
+      }
+      if (route[0] === 'library' && req.method === 'GET') {
+        const assets = [...store.records.values()].filter(c => c.userId === userId).flatMap(c => c.assets.map(a => {
+          const latest = c.tasks.filter(t => t.materials?.[a.id]).sort((a, b) => b.createdAt - a.createdAt)[0]?.materials[a.id];
+          return { ...assetView(c, a), conversationId: c.id, createdAt: a.uploadedAt || c.createdAt,
+            expiresAt: c.mediaExpiresAt, source: 'uploaded', status: now() >= c.mediaExpiresAt ? 'expired' : 'uploaded',
+            review: latest ? { status: latest.status === 2 ? 'approved' : latest.status === 3 ? 'rejected' : 'pending', checkedAt: latest.checkedAt } : { status: 'not_submitted' } };
+        })).sort((a,b) => b.createdAt-a.createdAt);
+        const unique = new Map(); for (const asset of assets) if (!unique.has(asset.originKey || asset.id)) unique.set(asset.originKey || asset.id, {...asset, id:asset.originKey || asset.id});
+        json(res, 200, { assets: [...unique.values()] }); return;
+      }
       if (route[0] === 'config' && req.method === 'GET') { json(res, 200, { skills: VIDEO_SKILLS.map(({ focus, ...s }) => s), models: VIDEO_MODELS, directorEnabled: director.enabled,
         generationEnabled: Boolean(config.enabled), limits: { images: 30, characters: 10, audio: 1, imageBytes: VIDEO_IMAGE_MAX_BYTES - 1, audioBytes: VIDEO_AUDIO_MAX_BYTES }, costMode: meter.enabled, cnyPerSecond }); return; }
       if (route[0] === 'quote' && req.method === 'POST') {
@@ -341,11 +366,13 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
             if (image) {
               try { const img = sharp(data, { limitInputPixels: 40000000, animated: false }), info = await img.metadata();
                 if (!['jpeg', 'png', 'webp'].includes(info.format) || info.pages > 1 || info.width < 128 || info.height < 128) throw new Error();
-                await writeFile(path, await img.rotate().resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 93 }).toBuffer(), { mode: 0o600 });
+                const output = await img.rotate().resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 93 }).toBuffer({ resolveWithObject: true });
+                metadata = { width: output.info.width, height: output.info.height }; await writeFile(path, output.data, { mode: 0o600 });
               } catch { throw creatorError('图片无法读取，请上传清晰的 JPG、PNG 或 WebP 图片。'); }
             } else { const input = await store.path(c.id, id + '.upload'); try { await writeFile(input, data, { mode: 0o600 }); metadata = await voice(input, path); } finally { await rm(input, { force: true }); } }
             let name = ''; try { name = decodeURIComponent(req.headers['x-file-name'] || ''); } catch {}
-            c.assets.push({ id, path, type: image ? 'image' : 'audio', purpose, name: name.replace(/[\u0000-\u001f]/g, '').slice(0, 100) || (image ? '实拍图片' : '声音参考'), size: data.length, checksum, ...metadata });
+            const origin = [...store.records.values()].filter(other => other.userId === userId).flatMap(other => other.assets).find(a => a.checksum === checksum && videoAssetPurpose(a) === purpose);
+            c.assets.push({ id, libraryId: origin?.libraryId || origin?.id || id, path, type: image ? 'image' : 'audio', purpose, name: name.replace(/[\u0000-\u001f]/g, '').slice(0, 100) || (image ? '实拍图片' : '声音参考'), size: data.length, checksum, uploadedAt: now(), ...metadata });
             await save(c);
           }); json(res, 200, { conversation: sessionView(c) }); return;
         }

@@ -89,3 +89,106 @@ html:not([lang="zh-CN"]) :is(.vc-choice-grid > button, .restaurant-type-card h3,
 @media (max-width: 600px) {
   body[data-auth-page] .auth-brand strong { display: none; }
 }
+
+/* Module surfaces share the same palette; media and generated images keep their own colours. */
+[data-theme="dark"] :is(.restaurant-workspace, .special-workspace) {
+  --rest-ink: var(--ui-text); --rest-muted: var(--ui-muted); --rest-line: var(--ui-border);
+  --studio-ink: var(--ui-text); --studio-muted: var(--ui-muted); --studio-line: var(--ui-border);
+  --studio-blue: #83b8ff;
+  color: var(--ui-text);
+}
+[data-theme="dark"] :is(.agent-chat-main, .special-workspace, .video-replica-workspace) { background: var(--ui-bg); }
+[data-theme="dark"] :is(.restaurant-creation, .restaurant-content-type, .restaurant-history-item, .restaurant-draft-preview,
+  .dh-generator, .dh-library-card, .studio-layout, .studio-inspector, .studio-inspector-footer, .studio-timeline,
+  .replica-form, .replica-output, .replica-history-item, .agent-assistant-bubble, .material-assets-empty,
+  .vc-popover, .vc-queue:not(.is-collapsed), .image-preset-card, .workspace.queue-expanded .queue) {
+  background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-border);
+}
+[data-theme="dark"] :is(.image-mode-switch, .restaurant-upload-picker, .restaurant-history-placeholder,
+  .restaurant-file-placeholder, .restaurant-notice, .restaurant-expired, .restaurant-progress, .restaurant-storyboard,
+  .dh-script-box, .dh-voice-field, .dh-avatar-upload, .dh-card-placeholder, .dh-card-media, .dh-library-empty,
+  .dh-generator-type, .dh-script-ideas>button, .studio-preview, .studio-empty-track, .mix-setting-value,
+  .mix-job-card, .studio-add-material, .studio-track-add, .studio-avatar-script, .studio-voice-select,
+  .replica-input-preview, .replica-player, .replica-models, .replica-badge, .replica-slot-title span,
+  .agent-user-bubble, .agent-new-chat, .agent-add-image, .agent-brief-start, .agent-service-icon,
+  .agent-attachment, .agent-missing-image, .generated-asset-cover, .generated-assets-policy, .generated-assets-empty,
+  .generated-preview-audio, .business-entry, .business-materials, .business-material-note, .business-plan-heading,
+  .business-preview-caption, .image-task-message, .image-task-state, .generation-summary,
+  .image-preset-example, .image-preset-prompt p, .image-upload-progress, .account-credit-section,
+  .vc-task-row, .vc-task-actions, .vc-prompt-library header>span) {
+  background: var(--ui-raised); color: var(--ui-text); border-color: var(--ui-border);
+}
+[data-theme="dark"] :is(.restaurant-content-type.selected, .restaurant-direction.selected, .restaurant-upload-picker:focus-within,
+  .image-mode-option.selected, .image-count-options button.selected, .image-preset-shortcuts>button.selected,
+  .agent-history-row.active, .agent-history-row:hover, .vc-task-row.active, .replica-history-item.active,
+  .mix-job-card.selected, .studio-media-item.selected, .generated-assets-filters button.selected) {
+  background: #273d57; color: #c1ddff; border-color: #78a8df;
+}
+[data-theme="dark"] :is(.restaurant-secondary, .restaurant-remove, .restaurant-history-delete,
+  .image-mode-option, .image-single-count, .image-count-options button, .image-mode-switch>button.active,
+  .studio-quiet-button, .studio-ratio-button, .studio-preview-chip, .dh-outline-button, .dh-refresh-button,
+  .dh-add-voice, .agent-transfer, .agent-inline-action, .agent-remove-attachment,
+  .generated-assets-heading .secondary, .business-materials li, .restaurant-storyboard li) {
+  background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-border);
+}
+[data-theme="dark"] :is(.agent-history-heading h2, .agent-chat-header strong, .agent-welcome h1,
+  .dh-generator-heading h2, .dh-library-heading h2, .dh-task-detail h3, .dh-card-copy>strong,
+  .generated-assets-heading h1, .generated-asset-copy h2, .material-assets-heading h2,
+  .generated-assets-empty h2, .replica-empty h3, .studio-material-empty strong, .studio-switch-row span strong,
+  .studio-setting-link strong, .business-form, .business-plan, .restaurant-draft-copy h4, .vc-task-copy>strong) { color: var(--ui-text); }
+[data-theme="dark"] :is(.restaurant-workspace, .special-workspace, .agent-workspace, .video-replica-workspace,
+  .generated-assets-workspace, .business-form, .business-plan) :is(label, legend) { color: var(--ui-text); }
+[data-theme="dark"] :is(.restaurant-content-type small, .restaurant-field>span, .restaurant-check,
+  .restaurant-profile-optional summary, .restaurant-count, .restaurant-text, .restaurant-analysis>summary,
+  .restaurant-direction>p, .restaurant-direction-reason, .restaurant-direction>small, .restaurant-body-copy,
+  .restaurant-tag-copy, .restaurant-output-settings, .restaurant-history-item small, .restaurant-status,
+  .restaurant-steps li, .restaurant-steps li.done, .restaurant-draft-copy ol, .restaurant-review .restaurant-draft-copy p,
+  .restaurant-storyboard>p, .restaurant-storyboard header span,
+  .agent-chat-header>div>span, .agent-chat-header>small, .agent-history-entry strong, .agent-history-entry small,
+  .agent-welcome>p, .agent-message-meta, .agent-composer-footer>span, .agent-composer-hint, .agent-tool,
+  .agent-service-state, .agent-service-state strong, .agent-service-state p, .agent-service-state small,
+  .agent-history-note, .agent-history-empty, .agent-answer-state, .agent-attachment-note,
+  .dh-field-heading label, .dh-field-heading>span, .dh-voice-hint, .dh-upload-note, .dh-service-state,
+  .dh-selected-avatar-copy>strong, .dh-selected-avatar-copy>small, .dh-avatar-guidance strong, .dh-avatar-guidance p,
+  .dh-script-ideas>span, .dh-script-box>div, .dh-engine-section>label, .dh-advanced summary, .dh-emotion-label,
+  .dh-range-labels, .dh-card-copy>small, .dh-library-heading p, .dh-library-tabs button, .dh-library-message,
+  .dh-library-empty strong, .dh-library-empty p, .dh-model-label, .dh-card-copy>.dh-model-label,
+  .dh-library-voice strong, .dh-library-voice span, .dh-confirm-copy, .dh-modal-script, #dh-generate-hint,
+  .studio-heading p, .studio-text-button, .studio-field, .studio-section-tab>span, .studio-section-tab>small,
+  .studio-material-empty>p, .studio-material-empty small, .studio-material-footer, .studio-preview-heading h2,
+  .studio-preview-caption, .studio-setting-link, .studio-inspector-footer>span, .studio-track-note,
+  .studio-char-count, .mix-material-status, .mix-job-card strong, .mix-job-card small, .mix-job-empty,
+  .replica-heading p, .replica-note, .replica-upload p, .replica-empty p, .replica-empty>span,
+  .replica-model-description, .replica-output-title span, .replica-result-summary span, .replica-muted,
+  .replica-history-item small, .generated-assets-heading p, .generated-assets-policy strong,
+  .generated-assets-filters button, .generated-asset-copy time, .generated-asset-expiry,
+  .generated-asset-deadline, .generated-asset-model, .material-assets-heading span,
+  .image-quota-estimate, .image-mode-description, .image-advanced>summary, .image-advanced>summary>small,
+  .image-generation-options legend, .image-count-options, .image-service-note, .image-service-note .textbutton,
+  .image-preset-shortcuts span>small, .image-result-prompt, .image-result-prompt p,
+  .vc-task-copy small, .vc-task-status, .vc-popover h3, .vc-popover>header small,
+  .vc-prompt-library article>small, .vc-prompt-library article>p, .credit-estimate, .account-credit-section p) { color: var(--ui-muted); }
+[data-theme="dark"] :is(.dh-link-button, .dh-card-use, .dh-card-icon, .dh-small-upload, .dh-browse-button,
+  .dh-download-link, .generated-asset-download, .material-permanent, .generated-asset-footer .secondary,
+  .replica-asset-link, .replica-empty .replica-time-estimate, .business-link, .vc-director-link) { color: #9ac5ff; }
+[data-theme="dark"] :is(.restaurant-error, .restaurant-review.blocked, .dh-inline-error, .dh-task-status.is-failed,
+  .image-generation-error, .image-task-state.failed, .agent-answer-error, .business-form-message) { background: #3b2629; color: #ffb7af; border-color: #805052; }
+[data-theme="dark"] :is(.restaurant-review, .restaurant-facts, .restaurant-sparse, .image-partial-notice,
+  .generated-assets-errors) { background: #352e20; color: #f0d2a0; border-color: #78623d; }
+[data-theme="dark"] :is(.restaurant-review p, .restaurant-review ul, .restaurant-facts>p, .restaurant-risk-details,
+  .restaurant-status.failed, .dh-card-failure, .dh-form-error) { color: #f0c5a0; }
+[data-theme="dark"] :is(.dh-card-status.completed, .restaurant-status.completed, .image-task-state.completed) { color: #a5dec2; background: #213b32; }
+[data-theme="dark"] :is(.dh-card-status, .dh-card-kind, .dh-card-progress, .dh-library-tabs button>span,
+  .dh-task-status, .restaurant-steps li>span, .business-steps b) { background: var(--ui-raised); color: var(--ui-muted); }
+[data-theme="dark"] .agent-assistant-bubble .markdown-body { color: var(--ui-text); }
+[data-theme="dark"] .markdown-body :is(th, td) { border-color: var(--ui-border); }
+[data-theme="dark"] .markdown-body :is(th, blockquote, pre, code) { background: var(--ui-raised); color: var(--ui-text); }
+[data-theme="dark"] .studio-primary:disabled { background: #26364d; color: #a4b4ca; }
+[data-theme="dark"] :is(.restaurant-primary, .studio-primary) { background: #276ed1; color: #fff; }
+[data-theme="dark"] .mix-material-status small { color: #f0c5a0; }
+
+.image-mode-options>div { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+[data-theme="dark"] :is(.image-mode-option.selected, .image-count-options button.selected) { background: #273d57; color: #c1ddff; border-color: #78a8df; }
+.image-mode-option { min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.45; height: auto; min-height: 40px; }
+html:not([lang="zh-CN"]) :is(.restaurant-primary, .restaurant-secondary, .studio-quiet-button,
+  .studio-text-button, .vc-result-tool, .dh-outline-button, .dh-add-voice) { white-space: normal; overflow-wrap: anywhere; }

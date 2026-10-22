@@ -1,3 +1,4 @@
+import { CLOUD_COLLECTIONS, createWorkspaceSync } from './video-creator-sync.js';
 import { uiLocale, t } from './workspace-preferences.js';
 import { markdownText } from './markdown.js';
 import { collectGeneratedAssets } from './generated-assets.js';
@@ -11,7 +12,19 @@ const API = '/api/video-creator';
 const labels = { reserving: '预留积分', preparing: '准备素材', reviewing: '素材审核', submitting: '提交生成', running: '生成中', downloading: '保存成片', completed: '已完成', failed: '未完成', uncertain: '结果待核对', settling: '费用待核对', expired: '已过期' };
 const busyTask = task => ['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'settling'].includes(task.status);
 let context, timer, stream, voiceSession, loading = false, loadPromise, quoteVersion = 0;
-let state;
+let state, cloud, cloudOwner;
+function ensureCloud() {
+  if (cloudOwner === owner() && cloud) return cloud;
+  cloud?.close(); const account = owner(); cloudOwner = account;
+  if (!readUiStore(uiKey('prompts'), null)) writeUiStore(uiKey('prompts'), readUiStore(accountStorageKey('video-creator-prompts'), []));
+  const keys = Object.fromEntries([...CLOUD_COLLECTIONS, 'cloud-cache','cloud-pending','cloud-migrated'].map(k => [k,uiKey(k)]));
+  cloud = createWorkspaceSync({ read:(key,fallback)=>readUiStore(keys[key],fallback), write:(key,value)=>writeUiStore(keys[key],value), request:(...args)=>{if(owner()!==account)throw new Error('账号已切换');return request(...args);},
+    protect:()=>state?.owner===account ? state.draftId : null,
+    changed:()=>{ if(state?.owner===account) { const label=document.querySelector('#vc-draft-status'); if(label) label.textContent=syncLabel(); } },
+    conflict:(collection,oldId,newId)=>{ if(state?.owner!==account)return; if(collection==='drafts' && state.draftId===oldId && newId) state.draftId=newId; context?.toast(newId ? '其他页面已修改，已保留两个版本。' : '其他页面已修改，请刷新确认最新记录。'); } });
+  return cloud;
+}
+function syncLabel() { return state?.draftSaveFailed ? '草稿未保存，请保留当前页面' : ({synced:'已同步',syncing:'同步中…',pending:'待同步',offline:'已存本机，联网后同步',rejected:'云端未保存，请检查记录容量'})[cloud?.status] || '已存本机'; }
 function owner() { return globalThis.workspaceUser?.id || 'local-dev'; }
 const editableSettings = settings => ({ ...DEFAULT_VIDEO_SETTINGS, ...settings, resolution: DEFAULT_VIDEO_SETTINGS.resolution });
 function replanResolution(settings) {
@@ -47,7 +60,7 @@ function persistDraft(force = false) {
   const saved = { ...snapshot, fingerprint, updatedAt: Date.now() };
   if (!uiWrite('drafts', [saved, ...drafts.filter(d => d.id !== saved.id)])) { state.draftSaveFailed = true; const label = document.querySelector('#vc-draft-status'); if (label) label.textContent = '草稿未保存，请保留当前页面'; return false; }
   state.draftSaveFailed = false; uiWrite('active-draft', saved.id);
-  const label = document.querySelector('#vc-draft-status'); if (label) label.textContent = '草稿已保存';
+  const label = document.querySelector('#vc-draft-status'); if (label) label.textContent = syncLabel();
   return true;
 }
 async function openLocalDraft(id) {
@@ -184,6 +197,7 @@ async function ensureSession() {
 }
 async function upload(files, purpose) {
   const reopen = state.uploadReturnExpanded; state.uploadReturnExpanded = false;
+  const uploadFolderId = state.uploadFolderId; state.uploadFolderId = null;
   const replaceId = state.replaceUploadId; state.replaceUploadId = null;
   if (replaceId) {
     const file = files[0], before = referenceAssets(), old = before.find(a => a.id === replaceId);
@@ -218,8 +232,10 @@ async function upload(files, purpose) {
       if (state.session.assets.filter(a => a.type === (image ? 'image' : 'audio')).length >= (image ? 30 : 1)) throw new Error(image ? '最多添加30张图片。' : '最多选择一段声音参考。');
       if (assetPurpose === 'character' && state.session.assets.filter(a => videoAssetPurpose(a) === 'character').length >= 10) throw new Error('最多添加10张角色参考图。');
       state.uploadLabel = `上传素材 ${index + 1}/${files.length}`; refresh();
-      const data = await request(`/conversations/${id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': assetPurpose }, body: file });
+      let data; try { data = await request(`/conversations/${id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': assetPurpose }, body: file }); }
+      catch(cause) { throw Object.assign(new Error(`${file.name} 上传未完成：${cause.message}。已成功上传的素材会保留。`),{status:cause.status,code:cause.code}); }
       if (state.owner !== account) return; saveSession(data.conversation);
+      if(uploadFolderId && uiRead('folders',[]).some(f=>f.id===uploadFolderId)) { const asset=data.conversation.assets.at(-1), key=asset.originKey||asset.id; uiWrite('asset-meta',[...uiRead('asset-meta',[]).filter(a=>a.id!==key),{id:key,folderId:uploadFolderId}]); }
     }
     state.scriptId = null; state.referenceImageIds = null; state.quote = null; void quote();
     state.expandedMaterials = true;
@@ -249,6 +265,7 @@ function load() {
 async function loadOnce() {
   if (loading || !context) return; loading = true; const account = state.owner;
   const conversationId = state.session?.id;
+  const workspaceBefore=JSON.stringify(CLOUD_COLLECTIONS.map(key=>uiRead(key,[])));
   try {
     const current = conversationId ? request(`/conversations/${conversationId}`).then(data => {
       if (state.owner !== account || state.session?.id !== conversationId) return;
@@ -268,8 +285,9 @@ async function loadOnce() {
       changed = recoverAcceptedRequests() || changed;
       if (changed) refresh();
     });
-    const results = await Promise.allSettled([current, catalog]);
+    const results = await Promise.allSettled([current, catalog, ensureCloud().sync(), request('/library').then(data => { if (state.owner === account) state.cloudAssets = data.assets; })]);
     if (state.owner !== account) return;
+    if(workspaceBefore!==JSON.stringify(CLOUD_COLLECTIONS.map(key=>uiRead(key,[])))) { refresh(); if(state.picker&&document.querySelector('#vc-library-grid'))renderLibraryGrid(); }
     const rejected = results.find(result => result.status === 'rejected');
     if (rejected) throw rejected.reason;
     if (state.errorSource === 'poll') { state.error = ''; state.errorSource = ''; refresh(); }
@@ -279,7 +297,7 @@ async function loadOnce() {
 }
 function uiKey(suffix) { return accountStorageKey('video-creator-ui-' + suffix); }
 function uiRead(suffix, fallback) { return readUiStore(uiKey(suffix), fallback); }
-function uiWrite(suffix, value) { try { writeUiStore(uiKey(suffix), value); return true; } catch { context?.toast('浏览器存储空间不足，请清理后重试。'); return false; } }
+function uiWrite(suffix, value) { try { if (CLOUD_COLLECTIONS.includes(suffix)) ensureCloud().set(suffix,value); else writeUiStore(uiKey(suffix), value); return true; } catch { context?.toast('浏览器存储空间不足，请清理后重试。'); return false; } }
 function referenceAssets() {
   const assets = state.session?.assets || [], images = state.stage === 'generation' && state.referenceImageIds ? state.referenceImageIds.map(id => assets.find(a => a.id === id)).filter(Boolean) : assets.filter(a => a.type === 'image');
   return images.concat(assets.filter(a => a.type === 'audio'));
@@ -293,7 +311,9 @@ function assetLibrary() {
   const stored = uiRead('assets', []), map = new Map(stored.filter(a => mediaUrl(a.url) && (!a.expiresAt || a.expiresAt > Date.now())).map(a => [a.originKey || a.id, a]));
   for (const a of state.session?.assets || []) if (a.url && !a.expired) { const merged = { ...stored.find(item => item.id === a.id), ...a }; map.set(merged.originKey || a.id, merged); }
   for (const a of context.assets || []) if (a.type === 'image' && mediaUrl(a.url)) map.set('workspace-' + a.id, { ...a, id: 'workspace-' + a.id, purpose: 'reference', source: 'uploaded' });
-  return [...map.values()];
+  for (const a of state.cloudAssets || []) map.set(a.originKey || a.id, {...map.get(a.originKey || a.id),...a});
+  const metadata=new Map(uiRead('asset-meta',[]).map(a=>[a.id,a]));
+  return [...map.values()].map(a=>({...a, folderId:metadata.get(a.originKey || a.id)?.folderId || null}));
 }
 function rememberOrigin(asset, origin) {
   if (!asset || !origin) return;
@@ -358,27 +378,64 @@ function filteredLibrary() {
     if (picker.tab === 'faces' && a.libraryKind !== 'faces' || picker.tab === 'roles' && a.libraryKind === 'faces') return false;
     if (picker.tab !== 'assets' && picker.category && !['all','mine'].includes(picker.category) && a.category !== picker.category) return false;
     if (picker.filetype && picker.filetype !== 'all' && !a.name.toLowerCase().endsWith('.' + picker.filetype)) return false;
+    if (picker.folderId !== undefined && picker.folderId !== 'all' && (a.folderId || '') !== picker.folderId) return false;
     if (picker.query && !a.name.toLowerCase().includes(picker.query.toLowerCase())) return false;
     if (picker.source !== 'all' && a.source !== picker.source) return false;
     return true;
   });
 }
+function assetStatus(a) {
+  if (a.expired || a.expiresAt && a.expiresAt <= Date.now()) return '已过期';
+  const review=({approved:'审核通过',rejected:'审核未通过',pending:'待审核',not_submitted:'尚未提交审核'})[a.review?.status] || '尚未提交审核';
+  return `${a.width && a.height ? `${a.width} × ${a.height} · ` : ''}${a.source==='generated'?'已生成':'已上传'} · ${review}`;
+}
+function folderOptions(selected, includeAll = true) {
+  const folders=uiRead('folders',[]), esc=context.esc;
+  const path=(f,seen=new Set())=>{ if(!f || seen.has(f.id)) return ''; seen.add(f.id); return (f.parentId ? path(folders.find(x=>x.id===f.parentId),seen)+' / ' : '')+f.name; };
+  return [...(includeAll?[['all','全部素材']]:[]),['','根目录'],...folders.map(f=>[f.id,path(f)])].map(([id,name])=>`<option value="${esc(id)}" ${id===selected?'selected':''}>${esc(name)}</option>`).join('');
+}
+function renderFolders() { const node=document.querySelector('#vc-folder-select'); if(node) node.innerHTML=folderOptions(state.picker?.folderId || ''); }
+function folderAction(action,el) {
+  const picker=state.picker;if(!picker)return;
+  const folders=uiRead('folders',[]), folder=folders.find(f=>f.id===picker.folderId);
+  const reopen=()=>{referencePicker(picker.purpose,context,picker.replaceId);state.picker.folderId=picker.folderId;renderLibraryGrid();};
+  if(action==='vc-folder-delete') {
+    if(!folder){context.toast('请先选择文件夹。');return;}
+    if(folders.some(f=>f.parentId===folder.id) || uiRead('asset-meta',[]).some(a=>a.folderId===folder.id)){context.toast('请先移出素材和子文件夹。');return;}
+    uiWrite('folders',folders.filter(f=>f.id!==folder.id));picker.folderId='';renderLibraryGrid();return;
+  }
+  if(action==='vc-folder-move') {
+    modal('移动素材',`<form id="vc-folder-form"><label>选择目录<select name="folder" aria-label="选择目录">${folderOptions('',false)}</select></label><footer class="modal-actions"><button type="submit" class="primary">移动</button></footer></form>`);
+    document.querySelector('#vc-folder-form').onsubmit=e=>{e.preventDefault();const value=e.target.elements.folder.value;const entries=uiRead('asset-meta',[]);uiWrite('asset-meta',[...entries.filter(a=>a.id!==el.dataset.id),{id:el.dataset.id,folderId:value||null}]);reopen();};return;
+  }
+  if(action==='vc-folder-rename'&&!folder){context.toast('请先选择文件夹。');return;}
+  modal(action==='vc-folder-new'?'新建文件夹':'重命名文件夹',`<form id="vc-folder-form"><label>名称<input name="name" required maxlength="60" value="${context.esc(action==='vc-folder-rename'?folder.name:'')}"></label><footer class="modal-actions"><button type="submit" class="primary">保存</button></footer></form>`);
+  document.querySelector('#vc-folder-form').onsubmit=e=>{e.preventDefault();const name=e.target.elements.name.value.trim();if(!name)return;
+    const value=action==='vc-folder-new'?{id:crypto.randomUUID(),name,parentId:folder?.id||null}:{...folder,name};
+    if(folders.some(f=>f.id!==value.id&&f.parentId===value.parentId&&f.name===name)){context.toast('此目录已有同名文件夹。');return;}
+    uiWrite('folders',[...folders.filter(f=>f.id!==value.id),value]);reopen();};
+}
+function phaseSummary(task,esc) {
+  const phases=task.timeline||[];if(!phases.length)return '';
+  const seconds=ms=>`${Math.round(ms/1000)}秒`;
+  return `<details class="vc-phase-summary"><summary>处理耗时</summary>${task.timelineCoverage==='partial'?'<p>仅记录本次服务恢复后的耗时</p>':''}<ol>${phases.map(p=>`<li>${esc(labels[p.phase]||p.phase)}：${seconds(p.elapsedMs)}${p.endedAt?'':'（进行中）'}</li>`).join('')}${task.settlement?`<li>积分结算：${seconds((task.settlement.completedAt||Date.now())-task.settlement.startedAt)}</li>`:''}</ol>${task.events?.length?`<p>恢复与异常记录 ${task.events.length} 条</p><ul>${task.events.map(e=>`<li>${esc(new Date(e.at).toLocaleTimeString())} · ${esc(({query_retry:'查询中断，自动重连',download_retry:'保存重试',server_resumed:'服务恢复',reconnected:'已恢复连接',failed:'任务未完成',material:'素材处理异常'})[e.action]||e.action)}${e.code?' · '+esc(e.code):''}</li>`).join('')}</ul>`:''}</details>`;
+}
 function renderLibraryGrid() {
   const { esc, button, icon } = context, picker = state.picker, assets = filteredLibrary(), max = picker.replaceId || picker.purpose === 'voice' ? 1 : picker.purpose === 'character' ? 10 : 30;
   const grid = document.querySelector('#vc-library-grid'); if (!grid) return;
-  grid.innerHTML = `<button type="button" data-action="vc-library-upload" class="vc-library-upload">${icon('plus')}<span>上传文件</span><small>${picker.purpose === 'voice' ? 'MP3、WAV · 最大15MB' : 'JPG、PNG、WebP · 单张小于50MB'}</small></button>${assets.slice(0, picker.limit).map(a => `<article class="vc-library-item ${picker.ids.has(a.id) ? 'selected' : ''}"><button type="button" data-action="vc-library-toggle" data-id="${esc(a.id)}" aria-pressed="${picker.ids.has(a.id)}" aria-label="选择 ${esc(a.name)}"><span class="vc-library-image">${a.type === 'image' ? `<img src="${esc(mediaUrl(a.url))}" alt="" loading="lazy">` : composerIcon('voice')}<span class="vc-library-check">${picker.ids.has(a.id) ? uiIcon('check') : ''}</span></span><strong title="${esc(a.name)}">${esc(a.name)}</strong><small>${a.createdAt ? new Date(a.createdAt).toLocaleDateString(uiLocale()) : a.purpose === 'character' ? '角色参考' : '上传素材'}</small></button><div class="vc-library-item-actions">${button('vc-preview-asset', a.type === 'audio' ? '试听' : '预览', 'textbutton', `data-id="${esc(a.id)}"`)}</div></article>`).join('')}${!assets.length ? '<p class="vc-library-empty">上传素材后，在这里选择使用</p>' : ''}`;
+  grid.innerHTML = `<button type="button" data-action="vc-library-upload" class="vc-library-upload">${icon('plus')}<span>上传文件</span><small>${picker.purpose === 'voice' ? 'MP3、WAV · 最大15MB' : 'JPG、PNG、WebP · 单张小于50MB'}</small></button>${assets.slice(0, picker.limit).map(a => `<article class="vc-library-item ${picker.ids.has(a.id) ? 'selected' : ''}"><button type="button" data-action="vc-library-toggle" data-id="${esc(a.id)}" aria-pressed="${picker.ids.has(a.id)}" ${a.expired ? 'disabled' : ''} aria-label="选择 ${esc(a.name)}"><span class="vc-library-image">${a.type === 'image' ? `<img src="${esc(mediaUrl(a.url))}" alt="" loading="lazy">` : composerIcon('voice')}<span class="vc-library-check">${picker.ids.has(a.id) ? uiIcon('check') : ''}</span></span><strong title="${esc(a.name)}">${esc(a.name)}</strong><small>${esc(assetStatus(a))}</small></button><div class="vc-library-item-actions">${button('vc-preview-asset', a.type === 'audio' ? '试听' : '预览', 'textbutton', `data-id="${esc(a.id)}" ${a.expired ? 'disabled' : ''}`)}${button('vc-folder-move','移动','textbutton',`data-id="${esc(a.id)}"`)}</div></article>`).join('')}${!assets.length ? '<p class="vc-library-empty">上传素材后，在这里选择使用</p>' : ''}`;
   document.querySelector('#vc-library-confirm').disabled = Boolean(picker.replaceId && picker.ids.size !== 1);
   document.querySelector('#vc-library-count').textContent = `已选 ${picker.ids.size}/${max}`;
   document.querySelector('#vc-library-confirm').textContent = `确认选择（${picker.ids.size}/${max}）`;
   const more = document.querySelector('#vc-library-more'); if (more) more.hidden = assets.length <= picker.limit;
   const all = document.querySelector('#vc-library-all'); if (all) { all.checked = assets.length > 0 && assets.every(a => picker.ids.has(a.id)); all.indeterminate = !all.checked && assets.some(a => picker.ids.has(a.id)); }
-  renderRoleCategories();
+  renderRoleCategories(); renderFolders();
   const account = state.owner;
   grid.querySelectorAll('.vc-library-image img').forEach(image => {
     const show = () => {
       if (state.owner !== account || !image.naturalWidth) return;
       const card = image.closest('.vc-library-item'), id = card.querySelector('[data-action="vc-library-toggle"]').dataset.id;
-      const info = card.querySelector('small'); if (info) info.textContent = `${image.naturalWidth} × ${image.naturalHeight}`;
+      const info = card.querySelector('small'); if (info) info.textContent = assetStatus({...assetLibrary().find(a=>a.id===id),width:image.naturalWidth,height:image.naturalHeight});
     };
     image.onload = show; if (image.complete) show();
   });
@@ -410,14 +467,16 @@ function createCharacter() {
 function referencePicker(purpose, ctx, replaceId = null) {
   state.replaceUploadId = null;
   if (locked()) return;
-  state.picker = { purpose, replaceId, tab: purpose === 'character' ? 'roles' : 'assets', query: '', source: 'all', limit: 24, ids: new Set(replaceId ? [] : referenceAssets().filter(a => videoAssetPurpose(a) === purpose).map(a => a.id)) };
-  modal(replaceId ? '替换素材' : purpose === 'voice' ? '选择声音' : '选择素材', `<div class="vc-library-tabs">${[['assets', '我的资产'], ['roles', '角色库'], ['faces', '人脸库']].filter(([key]) => purpose !== 'voice' || key === 'assets').map(([key, label]) => ctx.button('vc-library-tab', label, state.picker.tab === key ? 'selected' : '', `data-value="${key}"`)).join('')}<span id="vc-library-count"></span></div><div class="vc-library-toolbar"><span>我的素材库 ${uiIcon('down')}</span><div class="vc-search">${ctx.icon('search')}<input id="vc-library-search" type="search" placeholder="搜索文件名称" aria-label="搜索素材"></div><select id="vc-library-type" aria-label="文件类型"><option value="all">全部类型</option>${(purpose === 'voice' ? ['mp3','wav'] : ['jpg','jpeg','png','webp']).map(type=>`<option value="${type}">${type.toUpperCase()}</option>`).join('')}</select>${purpose === 'voice' ? ctx.button('vc-record', composerIcon('mic') + '录音', 'vc-outline', typeof MediaRecorder === 'undefined' ? 'disabled title="当前浏览器不支持录音"' : '') : ctx.button('vc-create-character', uiIcon('plus') + '创建角色', 'vc-outline')}</div><div class="vc-library-sources">${[['all', '全部'], ['uploaded', '我上传的'], ['generated', 'AI生成的']].map(([id, label]) => ctx.button('vc-library-source', label, id === 'all' ? 'selected' : '', `data-value="${id}"`)).join('')}</div><div id="vc-library-grid" class="vc-library-grid"></div><button type="button" class="vc-library-more" id="vc-library-more" data-action="vc-library-more">加载更多</button><footer class="modal-actions"><label class="vc-select-all"><input id="vc-library-all" type="checkbox">全选</label>${ctx.button('vc-cancel-library', '取消', 'secondary')}${ctx.button('vc-confirm-library', '确认选择', 'primary', 'id="vc-library-confirm"')}</footer>`, true);
+  state.picker = { purpose, replaceId, tab: purpose === 'character' ? 'roles' : 'assets', query: '', source: 'all', folderId:'all', limit: 24, ids: new Set(replaceId ? [] : referenceAssets().filter(a => videoAssetPurpose(a) === purpose).map(a => a.id)) };
+  modal(replaceId ? '替换素材' : purpose === 'voice' ? '选择声音' : '选择素材', `<div class="vc-library-tabs">${[['assets', '我的资产'], ['roles', '角色库'], ['faces', '人脸库']].filter(([key]) => purpose !== 'voice' || key === 'assets').map(([key, label]) => ctx.button('vc-library-tab', label, state.picker.tab === key ? 'selected' : '', `data-value="${key}"`)).join('')}<span id="vc-library-count"></span></div><div class="vc-library-toolbar"><select id="vc-folder-select" aria-label="素材文件夹"></select>${ctx.button('vc-folder-new','新建文件夹','textbutton')}${ctx.button('vc-folder-rename','重命名','textbutton')}${ctx.button('vc-folder-delete','删除空文件夹','textbutton')}<div class="vc-search">${ctx.icon('search')}<input id="vc-library-search" type="search" placeholder="搜索文件名称" aria-label="搜索素材"></div><select id="vc-library-type" aria-label="文件类型"><option value="all">全部类型</option>${(purpose === 'voice' ? ['mp3','wav'] : ['jpg','jpeg','png','webp']).map(type=>`<option value="${type}">${type.toUpperCase()}</option>`).join('')}</select>${purpose === 'voice' ? ctx.button('vc-record', composerIcon('mic') + '录音', 'vc-outline', typeof MediaRecorder === 'undefined' ? 'disabled title="当前浏览器不支持录音"' : '') : ctx.button('vc-create-character', uiIcon('plus') + '创建角色', 'vc-outline')}</div><div class="vc-library-sources">${[['all', '全部'], ['uploaded', '我上传的'], ['generated', 'AI生成的']].map(([id, label]) => ctx.button('vc-library-source', label, id === 'all' ? 'selected' : '', `data-value="${id}"`)).join('')}</div><div id="vc-library-grid" class="vc-library-grid"></div><button type="button" class="vc-library-more" id="vc-library-more" data-action="vc-library-more">加载更多</button><footer class="modal-actions"><label class="vc-select-all"><input id="vc-library-all" type="checkbox">全选</label>${ctx.button('vc-cancel-library', '取消', 'secondary')}${ctx.button('vc-confirm-library', '确认选择', 'primary', 'id="vc-library-confirm"')}</footer>`, true);
   document.querySelector('#modal').classList.add('vc-asset-modal');
+  renderFolders();
+  document.querySelector('#vc-folder-select').onchange=e=>{state.picker.folderId=e.target.value;renderLibraryGrid();};
   document.querySelector('#vc-library-type').onchange = e => { state.picker.filetype = e.target.value; renderLibraryGrid(); };
   document.querySelector('#vc-library-search').oninput = e => { state.picker.query = e.target.value; renderLibraryGrid(); };
   document.querySelector('#vc-library-all').onchange = e => {
     const max = replaceId || purpose === 'voice' ? 1 : purpose === 'character' ? 10 : 30;
-    state.picker.ids = new Set(e.target.checked ? filteredLibrary().slice(0, max).map(a => a.id) : []); renderLibraryGrid();
+    state.picker.ids = new Set(e.target.checked ? filteredLibrary().filter(a=>!a.expired).slice(0, max).map(a => a.id) : []); renderLibraryGrid();
   };
   renderLibraryGrid();
   if (purpose !== 'voice') void loadGeneratedLibrary();
@@ -526,7 +585,7 @@ function savePromptDialog(id) {
   document.querySelector('#vc-save-form').onsubmit = e => {
     e.preventDefault(); const data = new FormData(e.target), saved = { id: existing?.id || crypto.randomUUID(), title: String(data.get('title')).trim(), prompt: String(data.get('prompt')).trim(), settings: { ...(existing?.settings || state.settings) }, createdAt: existing?.createdAt || Date.now(), references: data.has('references') ? (existing?.references || referenceAssets()).map(({ id, name, type, purpose, url, expiresAt, file }) => ({ id, name, type, purpose, url: mediaUrl(url), expiresAt })) : [] };
     if (!saved.title || !saved.prompt) return;
-    try { writeUiStore(accountStorageKey('video-creator-prompts'), [saved, ...savedPrompts().filter(p => p.id !== saved.id)].slice(0, 40)); document.querySelector('#modal').close(); context.toast('提示词已保存。'); } catch { context.toast('保存失败，请复制提示词保留。'); }
+    try { uiWrite('prompts', [saved, ...savedPrompts().filter(p => p.id !== saved.id)].slice(0, 40)); document.querySelector('#modal').close(); context.toast('提示词已保存。'); } catch { context.toast('保存失败，请复制提示词保留。'); }
   };
 }
 function promptLibrary() {
@@ -584,7 +643,7 @@ function editor(ctx) {
   const { esc, icon, button } = ctx, assets = state.session?.assets || [], disabled = locked(), op = pendingOp(), current = VIDEO_SKILLS.find(s => s.id === state.skill), imageCount = assets.filter(a => a.type === 'image').length, latest = latestScript();
   const scriptCards = (state.session?.operations || []).map(o => `<article class="vc-message"><p class="vc-user-message">${esc(o.message)}</p>${o.status === 'completed' && o.result ? `<div class="vc-assistant-message">${o.result.script ? `<div class="vc-script-document" data-script-id="${o.id}" title="点击应用当前脚本" tabindex="0" role="group" aria-label="编导脚本">${promptMarkup(directorDocument(o.result, assets), assets)}</div><div class="vc-script-actions">${button('vc-copy', uiIcon('copy'), 'vc-icon', `data-id="${o.id}" aria-label="复制脚本"`)}${button('vc-apply', '应用脚本 ' + icon('arrow'), 'vc-apply', `data-id="${o.id}" ${disabled || o.skill !== state.skill ? 'disabled' : ''}`)}</div>` : `${markdownText(o.result.text)}${o.result.questions?.length ? `<ul>${o.result.questions.map(q => `<li>${esc(q)}</li>`).join('')}</ul>` : ''}`}${o.result.warnings?.length ? `<details class="vc-warnings"><summary>需要确认</summary>${o.result.warnings.map(w => `<p>${esc(w)}</p>`).join('')}</details>` : ''}</div>` : `<div class="vc-assistant-message ${o.status === 'failed' ? 'vc-error' : 'vc-thinking'}" role="status">${['failed', 'settling'].includes(o.status) ? esc(o.error || '费用待核对，请稍后查看。') : icon('star') + esc(o.progress || '编导处理中…')}</div>`}</article>`).join('');
   const quoteText = state.quote?.unlimited ? '无限积分' : state.quote ? `预计 ${state.quote.points} 积分` : state.quoteError ? '费用暂不可用' : '读取费用…';
-  return `<section class="vc-editor panel" aria-label="AI视频创作编辑区"><header class="vc-editor-heading">${button('vc-skills', `<img class="vc-skill-thumb" src="${SKILL_ART[current.id]}" alt=""><span><strong>${esc(current.name)}</strong><small>${esc(current.description)}</small></span>${icon('chevron')}`, 'skill-trigger', `aria-haspopup="dialog" aria-expanded="false" ${disabled ? 'disabled' : ''}`)}${button('vc-new', '＋ 新建', 'textbutton', state.busy ? 'disabled' : '')}</header><input type="file" id="vc-images" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-characters" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-audio" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" hidden>${workflowFeedback(ctx)}<span id="vc-draft-status" class="vc-draft-status" role="status">${state.draftSaveFailed ? '草稿未保存，请保留当前页面' : state.draftId ? '草稿已保存' : ''}</span>
+  return `<section class="vc-editor panel" aria-label="AI视频创作编辑区"><header class="vc-editor-heading">${button('vc-skills', `<img class="vc-skill-thumb" src="${SKILL_ART[current.id]}" alt=""><span><strong>${esc(current.name)}</strong><small>${esc(current.description)}</small></span>${icon('chevron')}`, 'skill-trigger', `aria-haspopup="dialog" aria-expanded="false" ${disabled ? 'disabled' : ''}`)}${button('vc-new', '＋ 新建', 'textbutton', state.busy ? 'disabled' : '')}</header><input type="file" id="vc-images" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-characters" accept="image/jpeg,image/png,image/webp" multiple hidden><input type="file" id="vc-audio" accept="audio/mpeg,audio/wav,audio/x-wav,.mp3,.wav" hidden>${workflowFeedback(ctx)}<span id="vc-draft-status" class="vc-draft-status" role="status">${state.draftSaveFailed ? '草稿未保存，请保留当前页面' : state.draftId ? syncLabel() : ''}</span>
   ${state.stage === 'director' ? `<div class="vc-conversation-wrap"><div class="vc-conversation" aria-label="编导对话">${scriptCards || `<div class="vc-empty-director">${emptyDirectorArt()}<h1>你想创作一条什么视频？</h1><div class="vc-hooks">${VIDEO_HOOKS.map(h => button('vc-hook', esc(h), 'vc-hook', `data-value="${esc(h)}"`)).join('')}</div></div>`}</div>${button('vc-scroll-bottom', uiIcon('down'), 'vc-scroll-bottom', 'aria-label="回到对话底部" hidden')}</div><div class="vc-stage-link">${latest && !disabled ? `<div class="vc-next-step"><span>脚本已生成</span>${button('vc-apply', '应用最新脚本 ' + icon('arrow'), 'vc-next-apply', `data-id="${latest.id}"`)}</div>` : ''}${button('vc-stage-generation', '退出编导', 'vc-exit-director', disabled ? 'disabled' : '')}</div><div class="vc-composer">${composerMedia(ctx, assets, disabled)}<label class="sr-only" for="vc-message">编导要求</label><div id="vc-message" class="vc-rich-editor vc-director-input" role="textbox" aria-label="编导要求" aria-multiline="true" contenteditable="${!disabled}" data-placeholder="${latest ? '补充修改要求，或应用脚本生成视频' : '分析素材，并生成脚本'}">${promptMarkup(state.input, assets)}</div>${missingReferenceNotice()}${state.uploadLabel ? `<p class="vc-upload-status" role="status">${esc(state.uploadLabel)}</p>` : ''}<div class="vc-composer-bottom">${button('vc-director-settings', `${esc(t(VIDEO_LANGUAGES.find(l => l.id === state.settings.language)?.name))} · ${state.settings.duration}s ${uiIcon('down')}`, 'textbutton', `aria-label="配置脚本语言和视频时长" aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}${button('vc-director-reference', '@', 'vc-icon', `aria-label="在编导中引用素材" ${disabled || !assets.length ? 'disabled' : ''}`)}<span class="vc-consumed" aria-label="编导积分消耗">✦ ${esc(consumedCredits())}</span>${button('vc-voice', composerIcon('mic'), `vc-voice ${voiceSession ? 'is-listening' : ''}`, `aria-label="${voiceSession ? '停止语音输入' : '语音输入'}" aria-pressed="${Boolean(voiceSession)}" ${!voiceSession && (disabled || !speechEngine()) ? 'disabled' : ''}`)}${button('vc-send', op ? icon('clock') : '<span>↑</span>', 'vc-send', `aria-label="${imageCount ? '发送给超级编导' : '请先添加图片'}" ${!canSendDirector() ? 'disabled' : ''}`)}</div>${voiceSession ? '<p class="vc-voice-status" role="status">正在听，点击麦克风停止</p>' : ''}</div>` : `<div class="vc-generation"><div class="vc-generation-top"><span>${referenceAssets().length}/31</span><span>${button('vc-save-prompt', icon('save'), 'vc-icon', `aria-label="保存当前提示词" ${state.prompt.trim() ? '' : 'disabled'}`)}${button('vc-saved-prompts', icon('list'), 'vc-icon', 'aria-label="我的提示词"')}${button('vc-expand-editor', uiIcon('expand'), 'vc-icon', 'aria-label="展开编辑"')}</span></div><div class="vc-direct-input">${composerMedia(ctx, referenceAssets(), disabled)}<div id="vc-prompt" class="vc-rich-editor" role="textbox" aria-label="视频提示词" aria-multiline="true" contenteditable="${!disabled}" data-placeholder="描述画面、镜头、氛围和声音…">${promptMarkup(state.prompt, referenceAssets())}</div><div class="vc-rich-bottom">${button('vc-stage-director', uiIcon('sparkle') + '超级编导', 'vc-director-link', disabled ? 'disabled' : '')}${button('vc-reference-menu', '@', 'vc-icon', 'aria-label="引用素材"')}<span id="vc-prompt-count">${state.prompt.length}/12000</span>${button('vc-direct-voice', composerIcon('mic'), 'vc-voice', `aria-label="语音输入视频提示词" ${disabled || !speechEngine() ? 'disabled' : ''}`)}</div></div>${missingReferenceNotice()}<div class="vc-generation-settings">${button('vc-models', icon('star') + (VIDEO_MODELS.find(m => m.id === state.settings.model)?.name || '') + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}${button('vc-settings', icon('settings') + `${state.settings.ratio} · 720p · ${state.settings.duration}s` + uiIcon('down'), 'setting-button', `aria-haspopup="dialog" ${disabled ? 'disabled' : ''}`)}</div>${button('vc-generate', `<span>${state.busy ? state.uploadLabel || (state.activity === 'generation' ? '提交中…' : '正在处理…') : currentTask()?.resultUrl ? '再次生成视频' : '立即生成视频'}</span><small>${esc(quoteText)}</small>`, 'primary vc-generate', canGenerate() ? '' : 'disabled')}${state.config?.generationEnabled === false ? '<p class="vc-quote">生成服务暂未连接</p>' : state.quote?.affordable === false ? '<p class="vc-quote vc-error">积分不足</p>' : state.quoteError ? `<p class="vc-quote vc-error">${esc(state.quoteError)}</p>` : ''}</div>`}</section>`;
 }
 function favorites() { return uiRead('favorites', []); }
@@ -601,14 +660,14 @@ function preview(ctx) {
   if (state.preview === 'favorites') {
     const saved = state.tasks.filter(t => favorites().includes(t.id) && !hiddenTasks().includes(t.id));
     content = saved.length ? `<div class="vc-favorites-grid">${saved.map(t => `<article>${button('vc-select-task', `<div>${taskThumbnail(t, ctx)}${uiIcon('play')}</div><strong>${esc(t.title)}</strong><small>${t.duration}s · ${labels[t.status]}</small>`, '', `data-id="${t.id}"`)}${button('vc-favorite', uiIcon('heart'), 'vc-favorite is-favorite', `data-id="${t.id}" aria-label="取消收藏 ${esc(t.title)}" aria-pressed="true"`)}</article>`).join('')}</div>` : `<div class="vc-blank">${uiIcon('heart')}<h2>还没有收藏的视频</h2><p>收藏的视频会显示在这里</p></div>`;
-  } else if (task) content = task.resultUrl ? `<div class="vc-result"><div class="vc-result-toolbar">${[['edit', '视频编辑', 'edit'], ['enhance', '画质增强', 'sparkle'], ['subtitle', '字幕擦除', 'edit'], ['watermark', '水印擦除', 'edit']].map(([value, label, symbol]) => button('vc-video-tool', uiIcon(symbol) + label, 'vc-result-tool', `data-value="${value}"`)).join('')}<a class="vc-result-tool" href="${esc(task.resultUrl)}?download=1" download="qiya-video.mp4">${uiIcon('download')}下载</a>${button('vc-favorite', uiIcon('heart'), `vc-icon ${favorites().includes(task.id) ? 'is-favorite' : ''}`, `data-id="${task.id}" aria-label="${favorites().includes(task.id) ? '取消收藏视频' : '收藏视频'}" aria-pressed="${favorites().includes(task.id)}"`)}</div><div class="vc-player" id="vc-player"><video id="vc-result-video" playsinline preload="metadata" src="${esc(task.resultUrl)}" aria-label="AI视频成片"></video>${button('vc-player-play', uiIcon('play'), 'vc-player-big', 'aria-label="播放视频"')}<div class="vc-player-controls">${button('vc-player-play', uiIcon('play'), 'vc-icon', 'aria-label="播放或暂停视频"')}<span id="vc-play-time">0:00 / ${formatTime(task.actualDuration || task.duration)}</span><input id="vc-seek" type="range" min="0" max="1000" value="0" aria-label="视频播放进度">${button('vc-player-mute', uiIcon('sound'), 'vc-icon', 'aria-label="静音视频"')}${button('vc-player-fullscreen', uiIcon('expand'), 'vc-icon', 'aria-label="全屏播放"')}</div></div><div class="vc-video-metadata"><span>尺寸 <strong id="vc-video-size">—</strong></span><span>格式 <strong>MP4</strong></span><span>分辨率 <strong>${esc(task.settings?.resolution || '720p')}</strong></span><span>比例 <strong>${esc(task.settings?.ratio || '—')}</strong></span><span>大小 <strong id="vc-video-bytes">—</strong></span></div><p class="vc-retention">成片保留3天，请及时下载。</p>${task.warning ? `<p class="vc-warning">${esc(task.warning)}</p>` : ''}</div>` : `<div class="vc-preview-empty ${busyTask(task) ? 'vc-working' : ''}">${icon(busyTask(task) ? 'clock' : 'video')}<h2>${labels[task.status] || '处理中'}</h2><p>${esc(task.error || (task.status === 'preparing' ? `参考素材 ${task.materialProgress?.prepared || 0}/${task.materialProgress?.total || 0}` : task.status === 'reviewing' ? `审核通过 ${task.materialProgress?.approved || 0}/${task.materialProgress?.total || 0}` : busyTask(task) ? '可以离开页面，稍后回来查看' : ''))}</p>${task.canRecover ? button('vc-recover', '恢复下载', 'secondary', `data-id="${task.id}" ${state.busy ? 'disabled' : ''}`) : ''}</div>`;
+  } else if (task) content = task.resultUrl ? `<div class="vc-result"><div class="vc-result-toolbar">${[['edit', '视频编辑', 'edit'], ['enhance', '画质增强', 'sparkle'], ['subtitle', '字幕擦除', 'edit'], ['watermark', '水印擦除', 'edit']].map(([value, label, symbol]) => button('vc-video-tool', uiIcon(symbol) + label, 'vc-result-tool', `data-value="${value}"`)).join('')}<a class="vc-result-tool" href="${esc(task.resultUrl)}?download=1" download="qiya-video.mp4">${uiIcon('download')}下载</a>${button('vc-favorite', uiIcon('heart'), `vc-icon ${favorites().includes(task.id) ? 'is-favorite' : ''}`, `data-id="${task.id}" aria-label="${favorites().includes(task.id) ? '取消收藏视频' : '收藏视频'}" aria-pressed="${favorites().includes(task.id)}"`)}</div><div class="vc-player" id="vc-player"><video id="vc-result-video" playsinline preload="metadata" src="${esc(task.resultUrl)}" aria-label="AI视频成片"></video>${button('vc-player-play', uiIcon('play'), 'vc-player-big', 'aria-label="播放视频"')}<div class="vc-player-controls">${button('vc-player-play', uiIcon('play'), 'vc-icon', 'aria-label="播放或暂停视频"')}<span id="vc-play-time">0:00 / ${formatTime(task.actualDuration || task.duration)}</span><input id="vc-seek" type="range" min="0" max="1000" value="0" aria-label="视频播放进度">${button('vc-player-mute', uiIcon('sound'), 'vc-icon', 'aria-label="静音视频"')}${button('vc-player-fullscreen', uiIcon('expand'), 'vc-icon', 'aria-label="全屏播放"')}</div></div><div class="vc-video-metadata"><span>尺寸 <strong id="vc-video-size">—</strong></span><span>格式 <strong>MP4</strong></span><span>分辨率 <strong>${esc(task.settings?.resolution || '720p')}</strong></span><span>比例 <strong>${esc(task.settings?.ratio || '—')}</strong></span><span>大小 <strong id="vc-video-bytes">—</strong></span></div><p class="vc-retention">成片保留3天，请及时下载。</p>${phaseSummary(task,esc)}${task.warning ? `<p class="vc-warning">${esc(task.warning)}</p>` : ''}</div>` : `<div class="vc-preview-empty ${busyTask(task) ? 'vc-working' : ''}">${icon(busyTask(task) ? 'clock' : 'video')}<h2>${labels[task.status] || '处理中'}</h2>${phaseSummary(task,esc)}<p>${esc(task.error || (task.status === 'preparing' ? `参考素材 ${task.materialProgress?.prepared || 0}/${task.materialProgress?.total || 0}` : task.status === 'reviewing' ? `审核通过 ${task.materialProgress?.approved || 0}/${task.materialProgress?.total || 0}` : busyTask(task) ? '可以离开页面，稍后回来查看' : ''))}</p>${task.canRecover ? button('vc-recover', '恢复下载', 'secondary', `data-id="${task.id}" ${state.busy ? 'disabled' : ''}`) : ''}</div>`;
   else content = `<div class="vc-preview-empty">${previewArtwork()}<h2>视频创作</h2><p>上传素材，用「超级编导」一键成片</p></div>`;
   return `<section class="vc-preview panel" aria-label="AI视频预览"><header class="preview-tabs" role="tablist" aria-label="视频预览内容">${button('vc-preview', task ? '预览' : '参考示例', state.preview === 'result' ? 'active' : '', `data-value="result" role="tab" aria-selected="${state.preview === 'result'}"`)}${button('vc-preview', '我的收藏', state.preview === 'favorites' ? 'active' : '', `data-value="favorites" role="tab" aria-selected="${state.preview === 'favorites'}"`)}<span></span>${button('vc-queue', uiIcon('fold'), 'vc-icon vc-mobile-queue-toggle', 'aria-label="显示或收起任务列表"')}${!state.sidebar ? button('vc-sidebar', uiIcon('unfold'), 'vc-icon vc-mobile-skill-toggle', 'aria-label="展开技能导航"') : ''}</header><div class="vc-preview-body">${content}</div></section>`;
 }
 function formatTime(value) { return `${Math.floor(Number(value) / 60)}:${String(Math.floor(Number(value) % 60)).padStart(2, '0')}`; }
 function queue(ctx) {
   const { esc, button, icon } = ctx, hiddenDrafts = uiRead('hidden-drafts', []), tasks = visibleTasks(), drafts = state.conversations.filter(c => !state.tasks.some(t => t.conversationId === c.id) && c.id !== state.session?.id && !hiddenDrafts.includes(c.id) && !localDrafts().some(d => d.conversationId === c.id));
-  return `<aside class="vc-queue panel ${state.queue ? '' : 'is-collapsed'}" aria-label="视频任务队列"><header><strong>任务队列</strong><div>${hiddenTasks().length || hiddenDrafts.length || uiRead('hidden-local-drafts', []).length ? button('vc-hidden-records', uiIcon('trash'), 'vc-icon', 'aria-label="已移除记录"') : ''}${button('vc-clear-drafts', '清空草稿', 'textbutton', drafts.length || localDrafts().some(d => d.id !== state.draftId && meaningfulDraft(d) && !uiRead('hidden-local-drafts', []).includes(d.id)) ? '' : 'disabled')}${button('vc-queue', uiIcon(state.queue ? 'fold' : 'unfold'), 'vc-icon', `aria-label="${state.queue ? '收起' : '展开'}视频任务队列"`)}</div></header><div class="vc-task-list">${localDraftRows(ctx)}${(state.draftId || state.session) && !tasks.some(t => t.conversationId === state.session?.id) ? `<article class="vc-task-row ${!state.selectedTask ? 'active' : ''}">${button('vc-current', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>当前创作</strong><small>${esc(VIDEO_SKILLS.find(s => s.id === state.skill).name)}</small></span>`, 'vc-task', 'title="当前创作"')}</article>` : ''}${tasks.slice(0, 50).map(t => `<article class="vc-task-row ${state.selectedTask === t.id ? 'active' : ''}">${button('vc-select-task', `<span class="vc-task-thumb">${taskThumbnail(t, ctx)}${busyTask(t) ? '<i class="vc-task-pulse"></i>' : ''}</span><span class="vc-task-copy"><strong>${esc(t.title)}</strong><span class="vc-task-status ${t.status === 'failed' ? 'failed' : ''}">${labels[t.status] || '处理中'}</span><small>${esc(new Date(t.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small></span>`, 'vc-task', `data-id="${t.id}" title="${esc(t.title)} · ${labels[t.status]}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-favorite', uiIcon('heart'), `vc-icon ${favorites().includes(t.id) ? 'is-favorite' : ''}`, `data-id="${t.id}" aria-label="${favorites().includes(t.id) ? '取消收藏' : '收藏'} ${esc(t.title)}" aria-pressed="${favorites().includes(t.id)}"`)}${button('vc-hide-task', uiIcon('trash'), 'vc-icon', `data-id="${t.id}" aria-label="移除任务 ${esc(t.title)}" ${busyTask(t) ? 'disabled' : ''}`)}</div></article>`).join('')}${drafts.map(c => `<article class="vc-task-row">${button('vc-open-conversation', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(c.title)}</strong><span class="vc-task-status">脚本草稿</span><small>${new Date(c.updatedAt).toLocaleDateString(uiLocale())}</small></span>`, 'vc-task', `data-id="${c.id}" title="${esc(c.title)}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-hide-draft', uiIcon('trash'), 'vc-icon', `data-id="${c.id}" aria-label="移除草稿 ${esc(c.title)}"`)}</div></article>`).join('')}${!tasks.length && !drafts.length && !state.session && !localDrafts().length ? '<p class="vc-muted">还没有生成记录</p>' : ''}</div></aside>`;
+  return `<aside class="vc-queue panel ${state.queue ? '' : 'is-collapsed'}" aria-label="视频任务队列"><header><strong>任务队列</strong><div>${hiddenTasks().length || hiddenDrafts.length || uiRead('hidden-local-drafts', []).length ? button('vc-hidden-records', uiIcon('trash'), 'vc-icon', 'aria-label="已移除记录"') : ''}${button('vc-clear-drafts', '清空草稿', 'textbutton', drafts.length || localDrafts().some(d => d.id !== state.draftId && meaningfulDraft(d) && !uiRead('hidden-local-drafts', []).includes(d.id)) ? '' : 'disabled')}${button('vc-queue', uiIcon(state.queue ? 'fold' : 'unfold'), 'vc-icon', `aria-label="${state.queue ? '收起' : '展开'}视频任务队列"`)}</div></header><div class="vc-task-list">${localDraftRows(ctx)}${(state.draftId || state.session) && !tasks.some(t => t.conversationId === state.session?.id) ? `<article class="vc-task-row ${!state.selectedTask ? 'active' : ''}">${button('vc-current', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(t('当前创作'))}</strong><small>${esc(VIDEO_SKILLS.find(s => s.id === state.skill).name)}</small></span>`, 'vc-task', 'title="当前创作"')}</article>` : ''}${tasks.slice(0, 50).map(t => `<article class="vc-task-row ${state.selectedTask === t.id ? 'active' : ''}">${button('vc-select-task', `<span class="vc-task-thumb">${taskThumbnail(t, ctx)}${busyTask(t) ? '<i class="vc-task-pulse"></i>' : ''}</span><span class="vc-task-copy"><strong>${esc(t.title)}</strong><span class="vc-task-status ${t.status === 'failed' ? 'failed' : ''}">${labels[t.status] || '处理中'}</span><small>${esc(new Date(t.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small></span>`, 'vc-task', `data-id="${t.id}" title="${esc(t.title)} · ${labels[t.status]}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-favorite', uiIcon('heart'), `vc-icon ${favorites().includes(t.id) ? 'is-favorite' : ''}`, `data-id="${t.id}" aria-label="${favorites().includes(t.id) ? '取消收藏' : '收藏'} ${esc(t.title)}" aria-pressed="${favorites().includes(t.id)}"`)}${button('vc-hide-task', uiIcon('trash'), 'vc-icon', `data-id="${t.id}" aria-label="移除任务 ${esc(t.title)}" ${busyTask(t) ? 'disabled' : ''}`)}</div></article>`).join('')}${drafts.map(c => `<article class="vc-task-row">${button('vc-open-conversation', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(c.title)}</strong><span class="vc-task-status">脚本草稿</span><small>${new Date(c.updatedAt).toLocaleDateString(uiLocale())}</small></span>`, 'vc-task', `data-id="${c.id}" title="${esc(c.title)}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-hide-draft', uiIcon('trash'), 'vc-icon', `data-id="${c.id}" aria-label="移除草稿 ${esc(c.title)}"`)}</div></article>`).join('')}${!tasks.length && !drafts.length && !state.session && !localDrafts().length ? '<p class="vc-muted">还没有生成记录</p>' : ''}</div></aside>`;
 }
 function videoTool(kind) {
   const task = currentTask(); if (!task?.resultUrl) return;
@@ -700,7 +759,7 @@ export function bindVideoCreator(ctx) {
     }
   }
 }
-function savedPrompts() { try { return JSON.parse(localStorage.getItem(accountStorageKey('video-creator-prompts')) || '[]').filter(p => typeof p.prompt === 'string').slice(0, 40); } catch { return []; } }
+function savedPrompts() { return uiRead('prompts', readUiStore(accountStorageKey('video-creator-prompts'), [])).filter(p => typeof p.prompt === 'string').slice(0,40); }
 async function openConversation(id, task) {
   if (!persistDraft()) return;
   const account = state.owner, data = await request(`/conversations/${id}`); if (state.owner !== account) return; saveSession(data.conversation);
@@ -788,7 +847,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-use-prompt') void useSavedPrompt(el.dataset.id);
   return true;
 }
-export function disposeVideoCreator() { closePopover(); stopRecording(true); stopVoice(); persistDraft(); clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }
+export function disposeVideoCreator() { closePopover(); stopRecording(true); stopVoice(); persistDraft(); cloud?.close(); cloud=null; cloudOwner=null; clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }
 
 function restoreView() {
   const view = state.view; state.view = null;
@@ -846,6 +905,7 @@ function handleUiAction(action, el, ctx) {
     if (!['language', 'model', 'ratio', 'generateAudio'].includes(field)) return true;
     applySettings({ ...state.settings, [field]: value });
   }
+  else if (action.startsWith('vc-folder-')) folderAction(action,el);
   else if (action === 'vc-library-tab') {
     state.picker.tab = el.dataset.value; state.picker.limit = 24;
     document.querySelectorAll('[data-action="vc-library-tab"]').forEach(b => b.classList.toggle('selected', b === el)); renderLibraryGrid();
@@ -857,13 +917,14 @@ function handleUiAction(action, el, ctx) {
   else if (action === 'vc-library-more') { state.picker.limit += 24; renderLibraryGrid(); }
   else if (action === 'vc-library-toggle') {
     const ids = state.picker.ids, max = state.picker.replaceId || state.picker.purpose === 'voice' ? 1 : state.picker.purpose === 'character' ? 10 : 30;
+    if (assetLibrary().find(a=>a.id===el.dataset.id)?.expired) return true;
     if (ids.has(el.dataset.id)) ids.delete(el.dataset.id); else if (ids.size < max) ids.add(el.dataset.id); else if (max === 1) { ids.clear(); ids.add(el.dataset.id); } else ctx.toast(`最多选择${max}张素材。`);
     renderLibraryGrid();
   }
   else if (action === 'vc-role-category') { state.picker.category = el.dataset.value; renderLibraryGrid(); }
   else if (action === 'vc-create-character') createCharacter();
   else if (action === 'vc-library-upload') {
-    const purpose = state.picker.purpose; state.replaceUploadId = state.picker.replaceId; state.uploadReturnExpanded = state.returnExpanded; state.returnExpanded = false;
+    const purpose = state.picker.purpose; state.uploadFolderId = state.picker.folderId; state.replaceUploadId = state.picker.replaceId; state.uploadReturnExpanded = state.returnExpanded; state.returnExpanded = false;
     document.querySelector('#modal').close(); document.querySelector(({ reference: '#vc-images', character: '#vc-characters', voice: '#vc-audio' })[purpose])?.click();
   }
   else if (action === 'vc-cancel-library') { state.picker = null; document.querySelector('#modal').close(); }
@@ -894,7 +955,7 @@ function handleUiAction(action, el, ctx) {
   else if (action === 'vc-delete-prompt') {
     modal('删除提示词', `<p>删除这份保存的提示词？</p><footer class="modal-actions">${button('vc-close-dialog', '取消', 'secondary')}${button('vc-confirm-delete-prompt', '删除', 'primary', `data-id="${el.dataset.id}"`)}</footer>`);
   }
-  else if (action === 'vc-confirm-delete-prompt') { try { writeUiStore(accountStorageKey('video-creator-prompts'), savedPrompts().filter(p => p.id !== el.dataset.id)); promptLibrary(); } catch { ctx.toast('删除失败，请重试。'); } }
+  else if (action === 'vc-confirm-delete-prompt') { try { uiWrite('prompts', savedPrompts().filter(p => p.id !== el.dataset.id)); promptLibrary(); } catch { ctx.toast('删除失败，请重试。'); } }
   else if (action === 'vc-favorite') { const ids = favorites(); if (uiWrite('favorites', ids.includes(el.dataset.id) ? ids.filter(id => id !== el.dataset.id) : [...ids, el.dataset.id])) refresh(); }
   else if (action === 'vc-hidden-records') {
     const locals = localDrafts().filter(d => uiRead('hidden-local-drafts', []).includes(d.id));

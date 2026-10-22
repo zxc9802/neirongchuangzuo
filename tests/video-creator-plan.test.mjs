@@ -113,29 +113,110 @@ test('narration redistributes spare time without another model call, dropping re
   assert.match(result.script.videoPrompt,/提前一天预约/);
 });
 
-test('new plan is generated in one call; only invalid structured output gets one bounded corrective retry', async t => {
+test('legacy plan keeps its one-call path and invalid plans get one bounded corrective retry', async t => {
   const root = await mkdtemp(join(tmpdir(), 'director-plan-')); t.after(() => rm(root, { recursive:true, force:true }));
   const path = join(root,'photo.jpg'); await sharp({ create:{ width:80, height:80, channels:3, background:'#625342' } }).jpeg().toFile(path);
   const { input, output } = sample(); input.assets.forEach(a => { a.path = path; a.name = a.id; });
   const config = { apiKey:'test', baseUrl:'https://model.example/v1', imageTextModel:'claude-opus-5-5' };
-  for (const broken of [null, 'plan', 'voice', 'escaping']) {
+  for (const broken of [null, 'plan', 'escaping']) {
     const sent = [], attempts = [];
     const model = createDirectorModel({ config, fetchImpl: async (_url, opts) => {
       sent.push(JSON.parse(opts.body)); const value = structuredClone(output);
       if (broken === 'plan' && sent.length === 1) delete value.script.plan.storyArc;
-      if (broken === 'voice' && sent.length === 1) value.script.shots[0].voiceover = '把整套的套餐规则和使用条件都挤在这里读完，这一段很长的旁白不可能用四秒钟说得清楚。';
       if (broken === 'escaping') value.text='店名"锦湘烤"';
       const serialized=JSON.stringify(value);
       return Response.json({ choices:[{ message:{ content:broken==='escaping'?serialized.replace('\\"锦湘烤\\"','"锦湘烤"'):serialized }, finish_reason:'stop' }], usage:{ prompt_tokens:5, completion_tokens:5 } });
     } });
     const result = await model.generate(input, { onAttempt: entry => attempts.push(entry) });
-    assert.equal(sent.length, ['plan','voice'].includes(broken) ? 2 : 1); assert.equal(result.script.plan.cast.length, 1);
+    assert.equal(sent.length, broken === 'plan' ? 2 : 1); assert.equal(result.script.plan.cast.length, 1);
     const meta = JSON.parse(sent[0].messages[1].content[0].text); assert.equal(meta.planningVersion, 2);
     assert.match(sent[0].messages[0].content, /合理演示动作/);
     if (broken === 'escaping') { assert.equal(result.text,'店名"锦湘烤"'); assert.equal(attempts.at(-1).formatRepair.type,'json_escaping'); }
     else if (broken) {
-      assert.match(sent[1].messages[1].content.at(-1).text, broken === 'plan' ? /invalid_plan.*plan.storyArc/ : /invalid_voice_timing.*minimumDuration/);
+      assert.match(sent[1].messages[1].content.at(-1).text, /invalid_plan.*plan.storyArc/);
       assert.equal(attempts.filter(a => a.status === 'failed').length, 1);
     }
   }
+});
+
+test('overlong narration repairs only voiceovers and leaves every visual, reference and scene plan intact',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'director-narration-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#625342'}}).jpeg().toFile(path);
+  const {input,output}=sample();input.assets.forEach(a=>{a.path=path;a.name=a.id;});
+  output.script.shots[0].voiceover='这一段很长很长的旁白不可能在四秒钟内读完，我们要把店内每一个具体区域的细节都讲出来。';
+  const sent=[],attempts=[];
+  const model=createDirectorModel({config:{apiKey:'test',baseUrl:'https://model.example/v1',imageTextModel:'claude'},fetchImpl:async(_u,opts)=>{
+    sent.push(JSON.parse(opts.body));return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(sent.length===1?output:{voiceovers:['木桌暖灯，坐坐吧','']})}}]});
+  }});
+  const result=await model.generate(input,{onAttempt:e=>attempts.push(e)});
+  assert.equal(sent.length,2);assert.equal(typeof sent[1].messages[1].content,'string');assert.ok(!sent[1].messages[1].content.includes('data:image'));
+  assert.equal(result.narrationRepaired,true);assert.equal(result.script.shots[0].visual,output.script.shots[0].visual);
+  assert.deepEqual(result.script.shots[0].referenceIds,output.script.shots[0].referenceIds);assert.ok(attempts.some(a=>a.stage==='narration_repair'));
+});
+
+test('grounded director runs observation before planning and repairs a rejected promotional draft once',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'director-grounding-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#625342'}}).jpeg().toFile(path);
+  const {input,output}=sample();input.groundingVersion=1;input.assets.forEach(a=>{a.path=path;a.name=a.id;});
+  const observations=input.assets.map(a=>({id:a.id,kinds:[a.type==='audio'?'voice':a.purpose==='character'?'character':'scene'],facts:[a.type==='audio'?'音色参考':a.purpose==='character'?'人物肖像':'木桌暖灯'],uncertain:[]}));
+  output.script.shots.forEach(s=>{s.evidence=s.referenceIds.map(id=>({assetId:id,factIndexes:[0],use:id==='actor'?'character':'scene'}));});
+  const replies=[{observations},output,{passed:false,issues:[{shot:2,reason:'与前一镜头重复，需用餐位细节展示具体特点'}]},output,{passed:true,issues:[]}],sent=[],attempts=[];
+  const model=createDirectorModel({config:{apiKey:'test',baseUrl:'https://model.example/v1',imageTextModel:'claude-opus-5-5'},fetchImpl:async(_u,opts)=>{sent.push(JSON.parse(opts.body));return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(replies.shift())}}]});}});
+  const result=await model.generate(input,{onAttempt:e=>attempts.push(e)});
+  assert.equal(sent.length,5);assert.deepEqual(result.observations,observations);assert.equal(result.quality.passed,true);
+  assert.match(sent[3].messages[1].content.at(-1).text,/quality_rejected/);
+  assert.equal(attempts.filter(a=>a.stage==='observation'&&a.status==='completed').length,1);
+  assert.equal(sent[0].model,'gpt-6-luna');
+  assert.equal(sent[0].messages[1].content.filter(p=>p.type==='image_url').length,3);
+  assert.deepEqual(JSON.parse(sent[1].messages[1].content[1].text).observations[0].facts,[{index:0,text:observations[0].facts[0]}]);
+  for(const body of sent.slice(1)) {
+    assert.equal(body.model,'claude-opus-5-5');
+    assert.doesNotMatch(JSON.stringify(body),/data:image/);
+    assert.match(JSON.stringify(body),/木桌暖灯/);
+  }
+  assert.ok(attempts.some(a=>a.stage==='planning'&&a.inputImageCount===0&&a.sourceImageCount===3));
+});
+
+test('unavailable vision does not proceed to Claude planning and records the actual vision model',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'director-vision-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#625342'}}).jpeg().toFile(path);
+  const input={groundingVersion:1,skill:'store-discovery',settings:DEFAULT_VIDEO_SETTINGS,history:[],message:'门店介绍',assets:[{id:'a',type:'image',purpose:'reference',path}]};
+  const calls=[],attempts=[];
+  const model=createDirectorModel({config:{apiKey:'test',baseUrl:'https://model.example/v1',imageTextModel:'claude-opus-5-5',videoObservationModel:'configured-vision'},fetchImpl:async(_url,opts)=>{
+    calls.push(JSON.parse(opts.body));return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify({observations:[{id:'a',kinds:['unknown'],facts:['未收到图片'],uncertain:[]}]})}}]});
+  }});
+  await assert.rejects(model.generate(input,{onAttempt:e=>attempts.push(e)}),e=>e.code==='DIRECTOR_VISION_UNAVAILABLE');
+  assert.equal(calls.length,1);assert.equal(calls[0].model,'configured-vision');assert.equal(attempts.at(-1).model,'configured-vision');
+});
+
+test('narration correction receives exact overruns and preserves visuals without rerunning planning',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'director-voice-budget-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#625342'}}).jpeg().toFile(path);
+  const {input,output}=sample();input.assets.forEach(a=>{a.path=path;});
+  output.script.shots[0].voiceover='这一段很长很长的旁白不可能在四秒钟内读完，我们要把店内每一个具体区域的细节都讲出来。';
+  const responses=[output,{voiceovers:[output.script.shots[0].voiceover,'']},{voiceovers:['木桌暖灯，进来坐坐','']}],sent=[];
+  const model=createDirectorModel({config:{apiKey:'test',baseUrl:'https://model.example/v1',imageTextModel:'claude'},fetchImpl:async(_u,o)=>{
+    sent.push(JSON.parse(o.body));return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(responses.shift())}}]});
+  }});
+  const result=await model.generate(input);
+  assert.equal(sent.length,3);assert.match(sent[2].messages[1].content,/validationFeedback.*maximum.*actual/);
+  assert.equal(result.script.shots[0].visual,output.script.shots[0].visual);assert.equal(result.script.shots[0].voiceover,'木桌暖灯，进来坐坐');
+});
+
+test('HTTP 200 audit stream with upstream timeout retries only audit, preserving the approved vision and plan',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'director-audit-network-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#625342'}}).jpeg().toFile(path);
+  const {input,output}=sample();input.groundingVersion=1;input.assets.forEach(a=>{a.path=path;});
+  const observations=input.assets.map(a=>({id:a.id,kinds:[a.type==='audio'?'voice':a.purpose==='character'?'character':'scene'],facts:['可见素材事实'],uncertain:[]}));
+  output.script.shots.forEach(s=>{s.evidence=s.referenceIds.map(id=>({assetId:id,factIndexes:[0],use:id==='actor'?'character':'scene'}));});
+  const sent=[],attempts=[];
+  const model=createDirectorModel({config:{apiKey:'test',baseUrl:'https://model.example/v1',imageTextModel:'claude'},fetchImpl:async(_u,o)=>{
+    sent.push(JSON.parse(o.body));
+    if(sent.length===3)return new Response('data: {"error":{"message":"The upstream service timed out. Please try again later."}}\n\ndata: [DONE]\n\n',{headers:{'Content-Type':'text/event-stream'}});
+    return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(sent.length===1?{observations}:sent.length===2?output:{passed:true,issues:[]})}}]});
+  }});
+  const result=await model.generate(input,{onAttempt:a=>attempts.push(a)});
+  assert.equal(sent.length,4);assert.deepEqual(sent[2],sent[3]);assert.equal(sent[2].max_tokens,4096);
+  assert.equal(new Set(attempts.filter(a=>a.stage==='planning').map(a=>a.attempt)).size,1);
+  assert.equal(result.quality.passed,true);assert.equal(result.script.shots[0].visual,output.script.shots[0].visual);
 });

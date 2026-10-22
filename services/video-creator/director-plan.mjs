@@ -1,3 +1,4 @@
+import { narrationBudget, narrationUnits } from './narration-budget.mjs';
 export const DIRECTOR_PLAN_VERSION = 2;
 
 const bounded = (value, max) => typeof value === 'string' && value.trim().length <= max ? value.trim() : '';
@@ -56,11 +57,11 @@ export function compileDirectorPlan(plan, roles, images, voiceAssets, remap) {
 }
 
 export function balanceNarrationTiming(shots, input, fail) {
-  if (input.planningVersion !== DIRECTOR_PLAN_VERSION || !input.settings.generateAudio || input.settings.language !== 'zh') return shots;
+  if (input.planningVersion !== DIRECTOR_PLAN_VERSION || !input.settings.generateAudio) return shots;
   const timing = shots.map(shot => {
     const duration = shot.end - shot.start;
-    const units = [...(shot.voiceover || '').replace(/[\p{P}\p{S}\s]/gu, '')].length;
-    return { duration, minimum: Math.max(Math.min(duration, 2), units / 4) };
+    const units = narrationUnits(shot.voiceover, input.settings.language);
+    return { duration, minimum: Math.max(Math.min(duration, 2), units / narrationBudget(input.settings.language).rate) };
   });
   const needed = timing.reduce((sum, t) => sum + Math.max(0, t.minimum - t.duration), 0);
   if (needed < .01) return shots;
