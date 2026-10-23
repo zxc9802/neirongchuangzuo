@@ -483,13 +483,13 @@ test('an applied 15-second director script can switch provider models without by
   const planned = { ...settings, duration: 15 }, opId = randomUUID();
   assert.equal((await f.call(`/conversations/${id}/script`, { body: { requestId: opId, message: '15秒门店', settings: planned } })).status, 202);
   await f.until(async () => (await f.current(id)).operations.find(o => o.id === opId && o.status === 'completed'));
-  for (const model of VIDEO_MODELS) {
-    const taskId = randomUUID(), selected = { ...planned, model: model.id };
+  for (const model of VIDEO_MODELS) for (const resolution of ['480p', '720p']) {
+    const taskId = randomUUID(), selected = { ...planned, model: model.id, resolution };
     assert.equal((await f.generate(id, taskId, { settings: selected, scriptId: opId })).status, 202);
     await f.until(async () => (await f.current(id)).tasks.find(t => t.id === taskId && t.status === 'completed'));
-    assert.equal(f.state.input.model, model.id); assert.equal(f.state.input.duration, 15);
+    assert.equal(f.state.input.resolution, resolution); assert.equal(f.state.input.model, model.id); assert.equal(f.state.input.duration, 15);
   }
-  for (const change of [{ duration: 10 }, { language: 'en' }, { ratio: '16:9' }, { generateAudio: false }, { resolution: '480p' }]) {
+  for (const change of [{ duration: 10 }, { language: 'en' }, { ratio: '16:9' }, { generateAudio: false }]) {
     const res = await f.generate(id, randomUUID(), { settings: { ...planned, ...change }, scriptId: opId });
     assert.equal(res.status, 409); assert.equal((await res.json()).code, 'SCRIPT_SETTINGS_CHANGED');
   }

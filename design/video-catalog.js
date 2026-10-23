@@ -17,4 +17,4 @@ export const VIDEO_MODELS = VIDEO_PROVIDER_MODELS.map(model => ({ ...model, reso
 export const VIDEO_RATIOS = ['9:16', '16:9', '3:4', '4:3', '1:1', '21:9'];
 export const VIDEO_LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英文' }, { id: 'th', name: '泰语' }, { id: 'ms', name: '马来语' }, { id: 'pt', name: '葡萄牙语' }];
 export const DEFAULT_VIDEO_SETTINGS = { model: VIDEO_MODELS[2].id, duration: 25, ratio: '9:16', resolution: '720p', language: 'zh', generateAudio: true };
-export const sameVideoScriptSettings = (before, after) => ['duration', 'ratio', 'resolution', 'language', 'generateAudio'].every(key => before?.[key] === after?.[key]);
+export const sameVideoScriptSettings = (before, after) => ['duration', 'ratio', 'language', 'generateAudio'].every(key => before?.[key] === after?.[key]);

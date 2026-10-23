@@ -480,7 +480,7 @@ test('applying and reopening a video keeps the exact planned images in the edito
 });
 
 
-test('switching compatible models retains a 15-second applied script and its references', async t => {
+test('switching compatible models and resolutions retains a 15-second applied script and its references', async t => {
   const data = composerApi(), f = await fixture(t, data.api), notices = [];
   f.ctx.toast = text => notices.push(text);
   await f.useMaterial(new File(['photo'], '门店.jpg', { type: 'image/jpeg' }), 'photo');
@@ -493,6 +493,16 @@ test('switching compatible models retains a 15-second applied script and its ref
     const draft = JSON.parse(localStorage.getItem(accountStorageKey('video-creator-ui-drafts')))[0];
     assert.equal(draft.scriptId, op.id); assert.equal(draft.settings.model, model.id);
     assert.deepEqual(draft.referenceImageIds, op.result.script.referenceImageIds);
+  }
+  for (const resolution of ['480p', '720p']) {
+    f.action('vc-setting-choice', { field: 'resolution', value: resolution });
+    assert.match(f.html(), /视频提示词/); assert.match(f.html(), /保留完整15秒分镜/);
+    assert.ok(f.html().includes(`${resolution} · 15s`));
+    const draft = JSON.parse(localStorage.getItem(accountStorageKey('video-creator-ui-drafts')))[0];
+    assert.equal(draft.stage, 'generation'); assert.equal(draft.scriptId, op.id);
+    assert.equal(draft.settings.resolution, resolution);
+    assert.deepEqual(draft.referenceImageIds, op.result.script.referenceImageIds);
+    await f.poll(); assert.match(f.html(), /视频提示词/);
   }
   assert.equal(notices.includes('设置已更改，请让编导调整脚本。'), false);
   assert.equal(data.scriptCalls, 0);
