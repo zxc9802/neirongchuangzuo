@@ -79,6 +79,28 @@ test('a completed director script disables empty resubmission and stays applied 
   f.action('vc-send'); await delay(20); assert.equal(submissions, 2);
 });
 
+test('director displays metered usage for unlimited accounts and charged points for regular accounts', async t => {
+  const data = composerApi(), base = data.api;
+  data.api = async (path, options) => {
+    if (path.endsWith('/script')) {
+      const body = JSON.parse(options.body);
+      const operation = { id: body.requestId, status: 'completed', skill: data.conversation.skill, settings: body.settings,
+        billing: { status: 'settled', exempt: true, chargedPoints: 0, usagePoints: 20 },
+        result: { script: { title: '测试', videoPrompt: '门店展示', shots: [] } } };
+      data.conversation.operations.push(operation); data.conversation.version++;
+      return Response.json({ operation });
+    }
+    return base(path, options);
+  };
+  const f = await fixture(t, data.api);
+  await f.useMaterial(new File(['photo'], '门店.jpg', { type: 'image/jpeg' }), 'photo');
+  f.action('vc-send'); await delay(20);
+  assert.match(f.html(), /已消耗 20 积分/);
+  data.conversation.operations[0].billing = { status: 'settled', exempt: false, chargedPoints: 19, usagePoints: 20 };
+  data.conversation.version++; await f.poll();
+  assert.match(f.html(), /已消耗 19 积分/);
+});
+
 test('current director completion is not blocked by a slow history list and late queued replies never rewind the editor', async t => {
   const data = composerApi(), base = data.api; let releasePost, releaseHistory, stallHistory = false, operation;
   data.api = async (path, options) => {

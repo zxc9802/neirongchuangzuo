@@ -269,6 +269,34 @@ test('full workflow: upload, director, apply, single idempotent render, correct 
   const assets = collectGeneratedAssets([], [], Date.now(), [], [], [task]); assert.equal(assets.length, 1); assert.equal(assets[0].source, 'AI 视频');
 });
 
+test('director meters regular and unlimited accounts, replays once and restores historical usage from its ledger', async t => {
+  for (const unlimited of [false, true]) await t.test(unlimited ? 'unlimited' : 'regular', async t => {
+    const opid = randomUUID(); let f;
+    f = await fixture(t, { director: async input => {
+      const scope = { userId: 'alice', taskId: `director:${opid}`, receiptId: 'analysis-and-planning' };
+      await f.wallet.prepareCostCall({ ...scope, provider: 'test', quoteCny: .2 });
+      await f.wallet.finishCostCall({ ...scope, costCny: .16 });
+      return script(input);
+    } });
+    await f.wallet.setUnlimited('alice', unlimited);
+    const id = await f.init(); await f.upload(id);
+    const input = { requestId: opid, message: '编排实拍素材', settings, expectedScriptId: null };
+    assert.equal((await f.call(`/conversations/${id}/script`, { body: input })).status, 202);
+    const op = await f.until(async () => (await f.current(id)).operations.find(o => o.status === 'completed' && o.billing?.status === 'settled'));
+    assert.equal(op.billing.usagePoints, 20);
+    assert.equal(op.billing.chargedPoints, unlimited ? 0 : 20);
+    assert.equal((await f.wallet.snapshot('alice')).available, unlimited ? 1000 : 980);
+    await f.call(`/conversations/${id}/script`, { body: input });
+    assert.equal(f.state.scripts, 1);
+    await f.close();
+    const path = join(f.root, 'creator', id, 'state.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+    delete saved.operations[0].billing.usagePoints;
+    await writeFile(path, JSON.stringify(saved)); await f.open();
+    assert.equal((await f.current(id)).operations[0].billing.usagePoints, 20);
+    assert.equal((await f.wallet.snapshot('alice')).available, unlimited ? 1000 : 980);
+  });
+});
+
 test('switching modules keeps materials while isolating director history and rejecting an old applied script', async t => {
   const inputs = [], f = await fixture(t, { director: async input => { inputs.push(structuredClone(input)); return script(input); } });
   const id = await f.init('store-visit'); await f.upload(id);

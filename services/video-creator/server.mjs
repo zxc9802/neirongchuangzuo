@@ -14,7 +14,7 @@ import { normalizeVoice } from '../video/speech.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { calculateCredits } from '../credits/store.mjs';
-import { costPoints } from '../credits/costs.mjs';
+import { costPoints, costPointsFromMicros } from '../credits/costs.mjs';
 
 const PREFIX = '/api/video-creator', DAY = 86400000;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -92,7 +92,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         : op.status === 'completed' ? await credits.settle({ ...scope, units: Math.min(op.settings.duration, op.actualDuration || op.settings.duration) }) : await credits.release(scope);
       op.settlement.completedAt = now(); delete op.settlement.error;
       op.billing = { status: value.status, reservedPoints: value.reservedPoints, chargedPoints: value.chargedPoints,
-        exempt: value.exempt, ...(meter.enabled ? { mode: 'api_cost' } : {}) };
+        exempt: value.exempt, ...(meter.enabled ? { mode: 'api_cost', usagePoints: costPointsFromMicros(value.settledUnits) } : {}) };
     } catch (cause) { op.settlement.error = safe(cause); op.billing = { ...op.billing, status: 'pending' }; }
   }
   function launch(key, work) {
@@ -251,6 +251,12 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   const ready = (async () => {
     await store.ready;
     for (const c of store.records.values()) {
+      if (meter.enabled) for (const op of c.operations.filter(o => o.billing?.status === 'settled' && !Number.isSafeInteger(o.billing.usagePoints))) {
+        const saved = await credits.reservation(c.userId, costId('director', op.id));
+        if (saved?.status === 'settled' && Number.isSafeInteger(saved.settledUnits)) {
+          op.billing.usagePoints = saved.kind === 'api-cost' ? costPointsFromMicros(saved.settledUnits) : saved.chargedPoints;
+        }
+      }
       for (const task of c.tasks.filter(pending)) { task.events ||= []; task.events.push({ at: now(), action: 'server_resumed', phase: task.status }); }
       for (const op of c.operations.filter(o => ['queued', 'running'].includes(o.status))) { op.status = 'failed'; op.error = '编导请求在服务重启时中断，请核对后再发起。'; op.code = 'DIRECTOR_INTERRUPTED'; await settle(costScope(c, costId('director', op.id)), op); }
       for (const task of c.tasks.filter(t => t.status === 'reserving')) {

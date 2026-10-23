@@ -82,7 +82,7 @@ html[data-theme="dark"] .vc-workflow-feedback.is-error{background:#3a2927;color:
 .vc-message{padding:4px 0 22px;font-size:13px;line-height:1.9}
 .vc-user-message{margin:0 0 22px 38px;padding:10px 14px;background:#ececf0;border-radius:13px 13px 3px 13px;white-space:pre-wrap;color:#46464e}
 .vc-assistant-message{padding:0 3px;overflow-wrap:anywhere}
-.vc-script-document{cursor:pointer;border-radius:9px;padding:0 3px}.vc-script-document:hover{background:#ededf238}
+.vc-script-document{cursor:pointer;border-radius:9px;padding:0 3px}
 .vc-script-document h2{font-size:17px;line-height:1.7;margin:4px 0 15px;font-weight:600}
 .vc-script-document h3{font-size:14px;font-weight:600;margin:22px 0 8px}
 .vc-script-document h4{font-size:13px;font-weight:600;margin:17px 0 7px}

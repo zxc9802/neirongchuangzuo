@@ -244,8 +244,14 @@ async function upload(files, purpose) {
 }
 function consumedCredits() {
   const operations = state.session?.operations || [];
-  const points = operations.reduce((sum, op) => sum + (op.billing?.status === 'settled' && Number.isSafeInteger(op.billing.chargedPoints) ? op.billing.chargedPoints : 0), 0);
-  return `已消耗 ${points.toLocaleString(uiLocale())} 积分${operations.some(op => op.billing && !['settled', 'released'].includes(op.billing.status)) ? ' · 核对中' : ''}`;
+  const points = operations.reduce((sum, op) => {
+    const billed = op.billing?.exempt ? op.billing.usagePoints : op.billing?.chargedPoints;
+    return sum + (op.billing?.status === 'settled' && Number.isSafeInteger(billed) ? billed : 0);
+  }, 0);
+  const pending = operations.some(op => ['queued', 'running', 'settling'].includes(op.status)
+    || op.billing && !['settled', 'released'].includes(op.billing.status)
+    || op.billing?.exempt && op.billing.status === 'settled' && !Number.isSafeInteger(op.billing.usagePoints));
+  return `已消耗 ${points.toLocaleString(uiLocale())} 积分${pending ? ' · 核对中' : ''}`;
 }
 async function quote() {
   const revision = ++quoteVersion, account = state.owner;
