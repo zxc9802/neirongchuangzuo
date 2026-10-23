@@ -5744,6 +5744,18 @@ export const EXTRA_UI_COPY = {
     "en": "Preserving the original speech rhythm while changing the voice",
     "ms": "Mengekalkan rentak pertuturan asal sambil menukar suara"
   },
+  "正在分离人声与背景声": {
+    "en": "Separating speech from background audio",
+    "ms": "Memisahkan pertuturan daripada audio latar"
+  },
+  "正在合成新声音与原背景声": {
+    "en": "Mixing the new voice with the original background audio",
+    "ms": "Menggabungkan suara baharu dengan audio latar asal"
+  },
+  "已替换人声并混回原背景声，未调整语速；请试听检查音乐、人声残留和口型。": {
+    "en": "Voice replaced and original background audio mixed back without changing speech speed. Preview to check music, any remaining original speech, and lip sync.",
+    "ms": "Suara telah diganti dan audio latar asal digabungkan semula tanpa mengubah kelajuan pertuturan. Pratonton untuk menyemak muzik, baki suara asal dan penyegerakan bibir."
+  },
   "正在查询任务，请稍后新建。": {
     "en": "Checking the task. Please create a new one later.",
     "ms": "Sedang menyemak tugas. Sila buat tugas baharu kemudian."

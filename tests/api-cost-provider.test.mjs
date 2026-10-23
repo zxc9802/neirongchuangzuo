@@ -67,6 +67,25 @@ test('insufficient reservation stops a paid call before dispatch',async t=>{
   await assert.rejects(meter.run(scope,()=>meter.fetch('https://api.openlux.ai/v1/images/edits',{method:'POST',body:form})),{code:'INSUFFICIENT_POINTS',providerNotDispatched:true});
   assert.equal(calls,0);assert.equal((await x.settleCost(scope)).chargedPoints,0);
 });
+test('SAM separation and voice conversion settle separate receipts once in actual-cost mode',async t=>{
+  const x=await ledger(t),scope={userId:'alice',taskId:'deep-voice'};await x.reserveCost(scope);
+  const models=['fal-ai/sam-audio/separate','fal-ai/chatterbox/speech-to-speech'];
+  const quoted=[],posts=[];
+  const meter=createApiCostMeter({credits:x,prices:{fal:async model=>{
+    quoted.push(model);return {unit_price:model===models[0] ? .05 : .10,fx:1};
+  }},fetchImpl:async(url,options={})=>{
+    if(options.method==='POST'){posts.push(url);return reply({request_id:url.includes('sam-audio')?'sam-1':'voice-1'});}
+    return new Response('{}',{headers:{'x-fal-billable-units':'1'}});
+  }});
+  for(const model of models)await meter.run(scope,()=>meter.fetch('https://queue.fal.run/'+model,
+    {method:'POST',headers:{Authorization:'Key test'},body:JSON.stringify({audio_url:'https://fal.media/source.wav'})}));
+  for(let i=0;i<2;i++)for(const path of ['fal-ai/sam-audio/requests/sam-1','fal-ai/chatterbox/requests/voice-1'])
+    await meter.run(scope,()=>meter.fetch('https://queue.fal.run/'+path));
+  const done=await x.settleCost(scope);
+  assert.deepEqual(quoted,models);assert.equal(posts.length,2);
+  assert.equal(Object.keys(done.costItems).length,2);assert.equal(done.settledUnits,150000);assert.equal(done.chargedPoints,19);
+});
+
 test('fal final units use the exact submitted endpoint tariff, including queue parent paths',async t=>{
   const x=await ledger(t),scope={userId:'alice',taskId:'task'};await x.reserveCost(scope);
   const meter=createApiCostMeter({credits:x,prices:{fal:async()=>({unit_price:1,fx:6.724})},fetchImpl:async url=>url.includes('/requests/')?new Response('{}',{headers:{'x-fal-billable-units':'.04'}}):reply({request_id:'fal-request'})});

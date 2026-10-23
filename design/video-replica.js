@@ -28,7 +28,9 @@ const labels = { draft: '等待提交', reserving: '正在预留积分', prepari
 const taskLabel = task => [WAN3_MODEL, WAN3_FAST_MODEL].includes(task.model) && task.status === 'reviewing' ? '正在准备参考素材' : task.mode === 'deep' && task.status === 'running' ? '正在生成深度复刻' : task.mode === 'deep' && task.status === 'reviewing' ? '正在审核参考素材' : task.mode === 'deep' && task.status === 'verifying' && !task.replacements?.voice ? '正在合成原视频声音' : task.status === 'queued' ? '排队等待生成' : task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
   ? '正在识别原视频语言' : task.languageRouting?.translate && task.status === 'preparing'
   ? '正在翻译台词并生成配音' : task.languageRouting?.translate && task.status === 'verifying'
-  ? '正在按译后配音同步口型' : task.voiceEngine === 'chatterbox' && task.status === 'preparing'
+  ? '正在按译后配音同步口型' : task.voiceConversionProgress?.preserveBackground && !task.voiceConversionProgress.separationReady && task.status === 'preparing'
+  ? '正在分离人声与背景声' : task.voiceConversionProgress?.preserveBackground && task.status === 'verifying'
+  ? '正在合成新声音与原背景声' : task.voiceEngine === 'chatterbox' && task.status === 'preparing'
   ? '正在保留原声节奏并转换音色' : task.voiceEngine === 'chatterbox' && task.status === 'verifying'
   ? '正在合成人物画面与目标声音' : task.voiceEngine === 'seedance' && task.sourceAudioMode === 'silent' && task.status === 'preparing'
   ? '正在将原视频语音转为台词' : task.voiceEngine === 'indextts2' && task.status === 'verifying'

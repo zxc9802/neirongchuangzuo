@@ -238,6 +238,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       canResume: !expired && task.status === 'waiting' && task.recovery?.resumeStatus !== 'submitting' && !task.lipsync?.submitting
         && !(isWan3Model(task.model) && (task.segments || [task]).some(part => wan3Queue.active(part) && !segmentConfirmed(part)))
         && !task.voiceConversion?.submitting && !task.voiceConversion?.failed
+        && !task.voiceConversion?.separation?.submitting && !task.voiceConversion?.separation?.failed
         && !task.languageDetection?.pending
         && !task.localization?.failed && !task.localization?.translating && !task.localization?.segments?.some(segment => segment.status === 'submitting')
         && !task.localization?.translationFallback?.submitting
@@ -249,7 +250,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       localizationProgress: task.localization && { ready: task.localization.ready, text: task.localization.text,
         completed: task.localization.segments?.filter(segment => segment.status === 'ready').length || 0,
         total: task.localization.segments?.length || 0 },
-      voiceConversionProgress: task.voiceConversion && { ready: task.voiceConversion.ready },
+      voiceConversionProgress: task.voiceConversion && { ready: task.voiceConversion.ready,
+        preserveBackground: Boolean(task.voiceConversion.preserveBackground), separationReady: Boolean(task.voiceConversion.separation?.ready) },
       voiceEngine: task.voiceEngine || (task.model === FAL_MODEL ? undefined : 'seedance'), narrationProgress: task.narration && { ready: task.narration.ready,
         completed: task.narration.segments.filter(segment => segment.status === 'ready').length, total: task.narration.segments.length },
       model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : task.model === WAN_MODEL ? 'Wan 2.2 人物替换' : models.find(model => model.id === (task.model || MODEL))?.name,
@@ -290,7 +292,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       if ((isFalReplacement(task.model) || task.voiceEngine === 'chatterbox') && record?.kind === 'api-cost' && record.status === 'reserved') {
         // A playable result can arrive before its usage header. Re-read only saved receipts.
-        const urls = [task.falQueue?.result, task.lipsync?.resultUrl, task.voiceConversion?.resultUrl, task.localization?.translationFallback?.resultUrl,
+        const urls = [task.falQueue?.result, task.lipsync?.resultUrl, task.voiceConversion?.resultUrl, task.voiceConversion?.separation?.resultUrl, task.localization?.translationFallback?.resultUrl,
           ...(task.localization?.segments || []).map(segment => segment.resultUrl), ...(task.narration?.segments || []).flatMap(segment =>
           [segment.falQueue?.result, ...(segment.previousJobs || []).map(job => job.falQueue?.result)])];
         for (const name of ['source.mp4', 'generated.mp4', 'result.tmp']) {
@@ -646,6 +648,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         }
         for (const name of ['narration.wav', 'narration.wav.pcm', 'narration.wav.tmp.wav', 'lipsync.mp4', 'lipsync.mp4.download.json']) await rm(join(folder(task), name), { force: true });
         for (const name of ['conversion-source.wav', 'converted-voice.wav', 'converted-voice.wav.download.json',
+          'separation-source.wav', 'separated-vocals.wav', 'separated-vocals.wav.download.json', 'separated-background.wav', 'separated-background.wav.download.json',
           'converted-voice.wav.asr.wav', 'converted-voice.wav.asr.json', 'converted-voice.wav.asr.json.tmp',
           'converted-voice.wav.vad.pcm', 'verification-converted.json']) await rm(join(folder(task), name), { force: true });
         for (const name of ['source-clip.mp4', 'source-clip.mp4.tmp.mp4', 'generated.mp4.join.mp4', 'result.mp4.join.mp4', ...(task.segments || []).flatMap(({ index }) => [`segment-${index}.mp4`,
@@ -820,10 +823,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           lipSync: 'heygen-precision', warning: '已翻译并按参考声音配音、同步口型，请试听核对译文和遮挡效果。' };
       } else if (task.voiceEngine === 'chatterbox') {
         if (!task.voiceConversion?.ready) throw error('换声结果尚未就绪。', 502, 'VIDEO_CONVERSION_PENDING');
-        await voiceConversion.mux(generated, join(folder(task), 'converted-voice.wav'), aligned, task.actualDuration);
+        const background = task.voiceConversion.preserveBackground ? join(folder(task), 'separated-background.wav') : undefined;
+        if (background && !task.voiceConversion.separation?.ready) throw error('背景声音轨尚未就绪。', 502, 'VIDEO_CONVERSION_PENDING');
+        await voiceConversion.mux(generated, join(folder(task), 'converted-voice.wav'), aligned, task.actualDuration, background);
         task.audioCheck = { engine: 'chatterbox', referenceApplied: true, emotionSource: 'original-video', tempoAdjusted: false,
-          lipSync: 'needs_preview',
-          warning: '已按原声转换音色，未调整语速；请预览核对音色、情绪和口型。' };
+          lipSync: 'needs_preview', backgroundAudioPreserved: Boolean(background),
+          warning: background ? '已替换人声并混回原背景声，未调整语速；请试听检查音乐、人声残留和口型。'
+            : '已按原声转换音色，未调整语速；请预览核对音色、情绪和口型。' };
       } else if (task.voiceEngine === 'indextts2') {
         if (!task.narration.ready) return;
         if (!task.lipsync) {

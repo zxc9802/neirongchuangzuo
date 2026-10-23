@@ -1492,7 +1492,8 @@ test('three-day expiry erases private voice, ASR, VAD and download artifacts whi
     'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json',
     'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm',
     'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm',
-    'narration.wav', 'narration.wav.pcm', 'narration.wav.tmp.wav', 'lipsync.mp4', 'lipsync.mp4.download.json'];
+    'narration.wav', 'narration.wav.pcm', 'narration.wav.tmp.wav', 'lipsync.mp4', 'lipsync.mp4.download.json',
+    'separation-source.wav', 'separated-vocals.wav', 'separated-vocals.wav.download.json', 'separated-background.wav', 'separated-background.wav.download.json'];
   await Promise.all(privateArtifacts.map(name => writeFile(join(taskFolder, name), `private material: ${name}`)));
   await mkdir(join(taskFolder, 'narration'));
   await writeFile(join(taskFolder, 'narration', 'emotion-0.wav'), 'private emotion');
@@ -2868,6 +2869,68 @@ test('PixVerse draft switching clears the Seedance audio mode and rejects direct
   assert.equal(rejected.status, 400); assert.equal((await rejected.json()).code, 'VIDEO_VOICE_ENGINE_INVALID');
   assert.equal((await app.current(id)).status, 'draft');
   assert.equal((await app.wallet.snapshot('alice')).held, 0); assert.equal(app.state.generations, 0);
+});
+
+test('deep voice task resumes separation and conversion receipts, then mixes background with the unchanged model price', async t => {
+  let separated = false, converted = false, original, audio;
+  const posts = [];
+  const app = await fixture(t, { costMode: true, voiceConversion: undefined, env: { FAL_KEY: 'test-only-key' },
+    config: { ...CONFIG, falKey: 'test-only-key' },
+    providerStorage: { upload: async path => 'https://fal.media/' + path.split(/[\\/]/).at(-1) },
+    voice: async (_input, output) => { await writeFile(output, await readFile(audio)); return { duration: 4 }; },
+    download: async (_url, output) => writeFile(output, await readFile(output.endsWith('.wav') ? audio : original)),
+    fetchImpl: async (url, options) => {
+      const target = new URL(url);
+      assert.equal(target.hostname, 'queue.fal.run', 'fixed model price must keep the existing billing route');
+      const sam = target.pathname.startsWith('/fal-ai/sam-audio');
+      if (options.method === 'POST') {
+        posts.push(target.pathname);
+        const base = `https://queue.fal.run/fal-ai/${sam ? 'sam-audio' : 'chatterbox'}/requests/${sam ? 'sam-1' : 'voice-1'}`;
+        return Response.json({ request_id: sam ? 'sam-1' : 'voice-1', status_url: base + '/status', response_url: base });
+      }
+      if (target.pathname.endsWith('/status')) return Response.json({ status: (sam ? separated : converted) ? 'COMPLETED' : 'IN_PROGRESS' });
+      return Response.json(sam ? { target: { url: 'https://fal.media/vocals.wav' }, residual: { url: 'https://fal.media/background.wav' } }
+        : { audio: { url: 'https://fal.media/converted.wav' } });
+    } });
+  original = join(app.root, 'original.mp4'); audio = join(app.root, 'audio.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=25:d=4',
+    '-f', 'lavfi', '-i', 'sine=duration=4', '-c:v', 'libx264', '-c:a', 'aac', original]);
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', original, '-vn', audio]);
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: { voice: true } } });
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: await readFile(original) });
+  await uploadVoice(app, id);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const separating = await app.until(id, task => task.voiceConversionProgress?.preserveBackground && posts.length === 1);
+  assert.equal(separating.voiceConversionProgress.separationReady, false); assert.equal(app.state.generations, 0);
+  assert.doesNotMatch(JSON.stringify(separating), /fal\.media|queue\.fal|test-only-key/);
+  await app.close(); separated = true; await app.open();
+  await app.until(id, task => task.voiceConversionProgress?.separationReady && posts.length === 2);
+  await app.close(); converted = true; await app.open();
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const done = await app.until(id, task => task.status === 'completed');
+  assert.equal(done.audioCheck.backgroundAudioPreserved, true);
+  assert.match(done.audioCheck.warning, /混回原背景声/);
+  assert.equal(done.billing.chargedPoints, generationPrice('video', done.model).pointsPerSecond * 4);
+  assert.deepEqual(posts, ['/fal-ai/sam-audio/separate', '/fal-ai/chatterbox/speech-to-speech']);
+  assert.equal(app.state.generations, 1);
+  const metadata = await probeVideo(join(app.root, 'video', id, 'result.mp4'));
+  assert.equal(metadata.duration, 4); assert.equal(metadata.audio, true);
+});
+
+for (const uncertain of [false, true]) test(`deep separation ${uncertain ? 'uncertain' : 'failed'} task cannot resume a paid submission`, async t => {
+  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 4 }; },
+    voiceConversion: { enabled: true, advance: async (task, _folder, save) => {
+      task.voiceConversion = { ready: false, preserveBackground: true, separation: { [uncertain ? 'submitting' : 'failed']: true } };
+      await save(); throw new VideoError('人声分离未完成', 502, uncertain ? 'VIDEO_CONVERSION_UNCERTAIN' : 'VIDEO_CONVERSION_FAILED');
+    } } });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: { voice: true } } });
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO }); await uploadVoice(app, id);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  const waiting = await app.until(id, task => task.status === 'waiting');
+  assert.equal(waiting.canResume, false); assert.equal(app.state.generations, 0);
+  await app.close(); await app.open();
+  assert.equal((await app.current(id)).canResume, false);
 });
 
 const DEEP_MODELS = ['doubao-seedance-2-0-260128', PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, WAN3_MODEL];

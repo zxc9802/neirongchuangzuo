@@ -969,6 +969,18 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan
   assert.equal(calls.filter(call => call.path.endsWith('/start')).length, 1);
 });
 
+test('deep voice progress distinguishes separation, conversion and background mixing', async t => {
+  const tasks = [
+    { id: 'separating', status: 'preparing', voiceConversionProgress: { preserveBackground: true, separationReady: false } },
+    { id: 'converting', status: 'preparing', voiceConversionProgress: { preserveBackground: true, separationReady: true } },
+    { id: 'mixing', status: 'verifying', voiceConversionProgress: { preserveBackground: true, separationReady: true, ready: true } },
+  ].map(task => ({ ...task, createdAt: Date.now(), mode: 'deep', model: STANDARD_MODEL, voiceEngine: 'chatterbox', replacements: { voice: true } }));
+  const page = await fixture(t, { tasks }); page.recover(); await page.poll();
+  for (const [id, label] of [['separating', '正在分离人声与背景声'], ['converting', '正在保留原声节奏并转换音色'], ['mixing', '正在合成新声音与原背景声']]) {
+    page.select(id); page.rebind(); assert.match(page.html(), new RegExp(`id="replica-result"[^]*?<h3>${label}</h3>`));
+  }
+});
+
 test('deep UI requires only checked material and restores history mode, options and original audio status', async t => {
   let requests = 0;
   const task = { id: 'deep-history', status: 'completed', createdAt: Date.now(), mode: 'deep', model: STANDARD_MODEL,
