@@ -10,12 +10,13 @@ const windows = new Map<string, { startedAt: number; count: number }>();
 export function acquireCoverExtractionSlot(
   userId: string,
   now = Date.now(),
+  callsUnlimited = false,
 ): (() => void) | null {
   let window = windows.get(userId);
   if (!window || now - window.startedAt >= RATE_WINDOW_MS) {
     window = { startedAt: now, count: 0 };
   }
-  if (window.count >= MAX_PER_WINDOW || activeGlobal >= MAX_GLOBAL || activeUsers.has(userId)) {
+  if ((!callsUnlimited && window.count >= MAX_PER_WINDOW) || activeGlobal >= MAX_GLOBAL || activeUsers.has(userId)) {
     return null;
   }
   window.count += 1;

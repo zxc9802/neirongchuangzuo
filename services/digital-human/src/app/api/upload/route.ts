@@ -50,7 +50,7 @@ export async function POST(req: NextRequest) {
     if (validationError) {
       return NextResponse.json({ error: validationError }, { status: 400 });
     }
-    if (!consumeUploadGrantBudget(access.userId, fileSize)) {
+    if (!consumeUploadGrantBudget(access.userId, fileSize, Date.now(), access.session?.user.callsUnlimited === true)) {
       return NextResponse.json({ error: "上传频率或容量超过当前时间窗限制" }, { status: 429 });
     }
     await cleanupExpiredPendingUploads();

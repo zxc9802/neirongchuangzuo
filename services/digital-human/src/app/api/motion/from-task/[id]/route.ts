@@ -53,7 +53,7 @@ export async function POST(req: NextRequest, context: Context) {
     const local = resolveAllowedLocalMediaPath(source);
     const size = remoteKey ? await CosService.getObjectSize(remoteKey) : local ? fs.statSync(local).size : 0;
     if (!size || size > MAX_UPLOAD_BYTES.videos) return NextResponse.json({error: "成片为空或超过 500 MB，请先剪辑后上传"}, {status: 400});
-    if (!consumeUploadGrantBudget(access.userId, size)) return NextResponse.json({error: "视频转入频率或容量超限，请稍后重试"}, {status: 429});
+    if (!consumeUploadGrantBudget(access.userId, size, Date.now(), access.session?.user.callsUnlimited === true)) return NextResponse.json({error: "视频转入频率或容量超限，请稍后重试"}, {status: 429});
     await cleanupExpiredPendingUploads();
     const uploadKey = `uploads/users/${ownerKeyFor(access.userId)}/videos/${crypto.randomUUID()}.mp4`;
     if (!reservePendingUpload({key: uploadKey, userId: access.userId, folder: "videos", bytes: size})) return NextResponse.json({error: "待处理视频容量已满，请稍后重试"}, {status: 429});

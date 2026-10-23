@@ -46,7 +46,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: true, coverUrl: toPublicAvatar(avatar, true).coverUrl });
     }
     cleanupUserId = avatar.userId;
-    releaseSlot = acquireCoverExtractionSlot(avatar.userId || access.userId || "local");
+    releaseSlot = acquireCoverExtractionSlot(avatar.userId || access.userId || "local", Date.now(), access.session?.user.callsUnlimited === true);
     if (!releaseSlot) {
       return NextResponse.json(
         { error: "封面截取请求过于频繁，请稍后重试" },

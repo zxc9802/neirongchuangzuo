@@ -7,6 +7,25 @@ import { PGlite } from '@electric-sql/pglite';
 import * as invites from '../src/lib/server/registration-invites.mjs';
 import * as phones from '../src/lib/server/account-phones.mjs';
 
+test('unlimited upload and cover requests bypass counts while keeping capacity and concurrency', async () => {
+  const { consumeUploadGrantBudget } = await import('../src/lib/server/upload-policy.ts');
+  const { acquireCoverExtractionSlot } = await import('../src/lib/server/cover-extraction-limiter.ts?unlimited');
+  const now = Date.now();
+  for (let i = 0; i < 40; i++) assert.equal(consumeUploadGrantBudget('unlimited-upload', 1, now, true), true);
+  assert.equal(consumeUploadGrantBudget('unlimited-upload', 1, now), false);
+  assert.equal(consumeUploadGrantBudget('unlimited-upload', 2 * 1024 * 1024 * 1024, now, true), false);
+  assert.equal(consumeUploadGrantBudget('other-upload', 1, now), true);
+  for (let i = 0; i < 15; i++) {
+    const release = acquireCoverExtractionSlot('unlimited-cover', now, true);
+    assert.equal(typeof release, 'function');
+    assert.equal(acquireCoverExtractionSlot('unlimited-cover', now, true), null);
+    release();
+  }
+  assert.equal(acquireCoverExtractionSlot('unlimited-cover', now), null);
+  const release = acquireCoverExtractionSlot('other-cover', now);
+  assert.equal(typeof release, 'function'); release();
+});
+
 test('database call exemption defaults off and updates existing sessions immediately', async t => {
   const database = new PGlite(); await database.waitReady;
   t.after(() => database.close());

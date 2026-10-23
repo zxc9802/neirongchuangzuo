@@ -285,7 +285,8 @@ export function ownerKeyFor(userId: string | null | undefined): string {
 export function consumeUploadGrantBudget(
   userId: string | null | undefined,
   requestedBytes: number,
-  now = Date.now()
+  now = Date.now(),
+  callsUnlimited = false
 ): boolean {
   const key = ownerKeyFor(userId);
   let window = uploadGrantWindows.get(key);
@@ -293,7 +294,7 @@ export function consumeUploadGrantBudget(
     window = { startedAt: now, count: 0, bytes: 0 };
   }
   if (
-    window.count >= MAX_UPLOAD_GRANTS_PER_WINDOW ||
+    (!callsUnlimited && window.count >= MAX_UPLOAD_GRANTS_PER_WINDOW) ||
     window.bytes + requestedBytes > MAX_UPLOAD_GRANT_BYTES_PER_WINDOW
   ) return false;
   window.count += 1;
