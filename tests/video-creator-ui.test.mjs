@@ -182,23 +182,43 @@ test('saved photos and voices enter the AI video character and voice inputs with
   assert.equal(data.scriptCalls, 0); assert.equal(data.tasks.length, 0);
 });
 
-test('resolution chooser only exposes 720p for every model and legacy scripts require a matching new plan', async t => {
+test('resolution chooser exposes 480p and 720p for every model while 1080p scripts require a new plan', async t => {
   const data = composerApi(), f = await fixture(t, data.api);
   f.action('vc-settings');
   assert.match(f.popover(), /720p/);
-  assert.doesNotMatch(f.popover(), /480p|1080p|<select/);
+  assert.match(f.popover(), /480p/);
+  assert.doesNotMatch(f.popover(), /1080p|<select/);
   f.action('vc-close-popover');
   for (const model of VIDEO_MODELS) {
     f.action('vc-setting-choice',{field:'model',value:model.id});
-    f.action('vc-settings'); assert.match(f.popover(),/720p/);assert.doesNotMatch(f.popover(),/480p|1080p/); f.action('vc-close-popover');
+    f.action('vc-settings'); assert.match(f.popover(),/720p/);assert.match(f.popover(),/480p/);assert.doesNotMatch(f.popover(),/1080p/); f.action('vc-close-popover');
   }
   f.node('#vc-images').onchange({ target:{files:[new File(['photo'],'餐位.jpg',{type:'image/jpeg'})]} }); await delay(25);
-  data.conversation.operations=[{id:'legacy',status:'completed',skill:'store-discovery',settings:{...DEFAULT_VIDEO_SETTINGS,resolution:'480p'},message:'介绍门店',
-    result:{script:{title:'旧版脚本',shots:[],videoPrompt:'旧480p生成提示词',referenceImageIds:data.conversation.assets.map(a=>a.id)}}}];
+  data.conversation.operations=[{id:'legacy',status:'completed',skill:'store-discovery',settings:{...DEFAULT_VIDEO_SETTINGS,resolution:'1080p'},message:'介绍门店',
+    result:{script:{title:'旧版脚本',shots:[],videoPrompt:'旧1080p生成提示词',referenceImageIds:data.conversation.assets.map(a=>a.id)}}}];
   await f.poll(); f.action('vc-apply',{id:'legacy'});
   assert.match(f.html(), /编导要求/); assert.match(f.html(), /按720p重新输出上一版完整脚本/);
-  f.action('vc-stage-generation'); assert.doesNotMatch(f.html(), /旧480p生成提示词/);
+  f.action('vc-stage-generation'); assert.doesNotMatch(f.html(), /旧1080p生成提示词/);
   assert.match(f.html(), /9:16 · 720p/); assert.equal(data.scriptCalls, 0);
+});
+
+test('480p selection persists across model changes and applies a 480p director script', async t => {
+  const data = composerApi(), f = await fixture(t, data.api);
+  f.action('vc-stage-generation');
+  assert.match(f.html(), /9:16 · 720p/);
+  f.action('vc-setting-choice', { field: 'resolution', value: '480p' });
+  assert.match(f.html(), /9:16 · 480p/);
+  for (const model of VIDEO_MODELS) {
+    f.action('vc-setting-choice', { field: 'model', value: model.id });
+    assert.match(f.html(), /9:16 · 480p/);
+  }
+  f.node('#vc-images').onchange({ target: { files: [new File(['photo'], '餐位.jpg', { type: 'image/jpeg' })] } }); await delay(25);
+  data.conversation.operations = [{ id: 'low-res', status: 'completed', skill: 'store-discovery', settings: { ...DEFAULT_VIDEO_SETTINGS, resolution: '480p' }, message: '介绍门店',
+    result: { script: { title: '480p脚本', shots: [], videoPrompt: '480p门店宣传脚本', referenceImageIds: data.conversation.assets.map(a => a.id) } } }];
+  await f.poll(); f.action('vc-apply', { id: 'low-res' });
+  assert.match(f.html(), /480p门店宣传脚本/);
+  assert.match(f.html(), /9:16 · 480p/);
+  assert.equal(data.scriptCalls, 0);
 });
 
 test('client applies the exclusive 50MB image boundary to both image groups without increasing audio size', async t => {
@@ -457,4 +477,71 @@ test('applying and reopening a video keeps the exact planned images in the edito
   f.action('vc-new'); f.action('vc-select-task',{id:task.id}); await delay(25);
   assert.doesNotMatch(f.html(), /alt="person.jpg"/);
   f.action('vc-generate'); await delay(25); assert.equal(submitted.scriptId,op.id); assert.deepEqual(submitted.referenceImageIds,op.result.script.referenceImageIds);
+});
+
+
+test('switching compatible models retains a 15-second applied script and its references', async t => {
+  const data = composerApi(), f = await fixture(t, data.api), notices = [];
+  f.ctx.toast = text => notices.push(text);
+  await f.useMaterial(new File(['photo'], '门店.jpg', { type: 'image/jpeg' }), 'photo');
+  const op = { id: 'fifteen', status: 'completed', skill: 'store-discovery', settings: { ...DEFAULT_VIDEO_SETTINGS, duration: 15 },
+    result: { script: { title: '15秒门店', videoPrompt: '保留完整15秒分镜', shots: [], referenceImageIds: data.conversation.assets.map(a => a.id) } } };
+  data.conversation.operations = [op]; await f.poll(); f.action('vc-apply', { id: op.id });
+  for (const model of VIDEO_MODELS) {
+    f.action('vc-setting-choice', { field: 'model', value: model.id });
+    assert.match(f.html(), /视频提示词/); assert.match(f.html(), /保留完整15秒分镜/); assert.match(f.html(), /720p · 15s/);
+    const draft = JSON.parse(localStorage.getItem(accountStorageKey('video-creator-ui-drafts')))[0];
+    assert.equal(draft.scriptId, op.id); assert.equal(draft.settings.model, model.id);
+    assert.deepEqual(draft.referenceImageIds, op.result.script.referenceImageIds);
+  }
+  assert.equal(notices.includes('设置已更改，请让编导调整脚本。'), false);
+  assert.equal(data.scriptCalls, 0);
+  f.action('vc-setting-choice', { field: 'language', value: 'en' });
+  assert.match(f.html(), /编导要求/);
+  assert.equal(notices.includes('设置已更改，请让编导调整脚本。'), true);
+});
+
+test('an incompatible model does not silently shorten or discard an applied 30-second script', async t => {
+  const data = composerApi(), f = await fixture(t, data.api), notices = [];
+  f.ctx.toast = text => notices.push(text);
+  await f.useMaterial(new File(['photo'], '门店.jpg', { type: 'image/jpeg' }), 'photo');
+  data.conversation.operations = [{ id: 'thirty', status: 'completed', skill: 'store-discovery', settings: { ...DEFAULT_VIDEO_SETTINGS, duration: 30 },
+    result: { script: { title: '30秒门店', videoPrompt: '保留完整30秒分镜', shots: [] } } }];
+  await f.poll(); f.action('vc-apply', { id: 'thirty' });
+  f.action('vc-setting-choice', { field: 'model', value: VIDEO_MODELS[0].id });
+  assert.match(f.html(), /保留完整30秒分镜/); assert.match(f.html(), /720p · 30s/); assert.match(f.html(), /video-max/);
+  assert.match(notices.at(-1), /不支持当前30秒/);
+});
+
+test('clear drafts includes the active editor, stays clear after polling and preserves recoverable drafts and finished videos', async t => {
+  const data = composerApi(), f = await fixture(t, data.api);
+  await f.useMaterial(new File(['photo'], '门店.jpg', { type: 'image/jpeg' }), 'photo');
+  f.node('#vc-message').input({ target: { value: '第一份未提交要求' } });
+  f.action('vc-new');
+  await f.useMaterial(new File(['photo'], '餐位.jpg', { type: 'image/jpeg' }), 'photo');
+  f.node('#vc-message').input({ target: { value: '第二份当前编辑要求' } });
+  const key = accountStorageKey('video-creator-ui-drafts'), before = JSON.parse(localStorage.getItem(key));
+  assert.equal(before.length, 2);
+  const current = before.find(d => d.input === '第二份当前编辑要求');
+  data.tasks = [{ id: 'kept', conversationId: 'finished', status: 'completed', title: '保留成片', settings: DEFAULT_VIDEO_SETTINGS, createdAt: Date.now() }];
+  await f.poll(); f.action('vc-clear-drafts'); assert.match(f.modal().content, /当前编辑内容/);
+  f.action('vc-confirm-hide', { kind: 'drafts' }); await f.poll();
+  assert.doesNotMatch(f.html(), /第一份未提交要求|第二份当前编辑要求|预览 餐位|当前创作|打开草稿/);
+  assert.match(f.html(), /保留成片/);
+  assert.equal(JSON.parse(localStorage.getItem(accountStorageKey('video-creator-ui-active-draft'))), null);
+  assert.equal(JSON.parse(localStorage.getItem(key)).length, 2);
+  assert.deepEqual(new Set(JSON.parse(localStorage.getItem(accountStorageKey('video-creator-ui-hidden-local-drafts')))), new Set(before.map(d => d.id)));
+  f.action('vc-restore-record', { kind: 'local', id: current.id });
+  f.action('vc-open-local-draft', { id: current.id }); await delay(25);
+  assert.match(f.html(), /第二份当前编辑要求/); assert.match(f.html(), /预览 餐位.jpg/);
+});
+
+test('clear drafts is enabled with only the current edited draft', async t => {
+  const data = composerApi(), f = await fixture(t, data.api);
+  f.node('#vc-message').input({ target: { value: '唯一当前草稿' } });
+  f.action('vc-stage-generation');
+  const clearButton = f.html().match(/<button\b[^>]*data-action="vc-clear-drafts"[^>]*>/)?.[0];
+  assert.ok(clearButton); assert.doesNotMatch(clearButton, /\bdisabled\b/);
+  f.action('vc-confirm-hide', { kind: 'drafts' });
+  assert.doesNotMatch(f.html(), /唯一当前草稿|当前创作/);
 });

@@ -3,7 +3,7 @@ import { safeVideoError } from '../video/errors.mjs';
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { createHash, createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import { VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, videoAssetPurpose } from '../../design/video-catalog.js';
+import { VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, videoAssetPurpose, sameVideoScriptSettings } from '../../design/video-catalog.js';
 import { createCreatorStore, UUID } from './store.mjs';
 import { createDirectorModel, creatorError } from './model.mjs';
 import { DIRECTOR_PLAN_VERSION } from './director-plan.mjs';
@@ -434,7 +434,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
             || referenceImageIds.some(id => !c.assets.some(a => a.id === id && a.type === 'image'))) throw creatorError('视频参考图片无效，请重新应用脚本。', 400, 'CREATOR_INVALID_REFERENCES');
           if (input.scriptId) {
             const op = c.operations.find(o => o.id === input.scriptId && o.status === 'completed' && o.result?.script);
-            if (!op || op.skill !== c.skill || hash(op.settings) !== hash(settings) || hash(op.assetIds) !== hash(c.assets.map(a => a.id))) throw creatorError('脚本与当前素材或设置不一致，请重新应用脚本。', 409, 'SCRIPT_SETTINGS_CHANGED');
+            if (!op || op.skill !== c.skill || !sameVideoScriptSettings(op.settings, settings) || hash(op.assetIds) !== hash(c.assets.map(a => a.id))) throw creatorError('脚本与当前素材或设置不一致，请重新应用脚本。', 409, 'SCRIPT_SETTINGS_CHANGED');
             if (op.result.script.referenceImageIds) {
               if (input.referenceImageIds && hash(input.referenceImageIds) !== hash(op.result.script.referenceImageIds)) throw creatorError('参考图片与编导脚本不一致，请重新应用脚本。', 409, 'SCRIPT_SETTINGS_CHANGED');
               referenceImageIds = op.result.script.referenceImageIds;

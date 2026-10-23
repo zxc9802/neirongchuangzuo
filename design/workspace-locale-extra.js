@@ -7196,9 +7196,9 @@ export const EXTRA_UI_COPY = {
     "en": "Current creation",
     "ms": "Ciptaan semasa"
   },
-  "当前仅支持720p，请让编导调整旧脚本。": {
-    "en": "Currently supports 720p only. Ask the video director to adjust the old script.",
-    "ms": "Buat masa ini, 720p sahaja disokong. Minta pengarah video melaraskan skrip lama."
+  "当前支持480p和720p，请让编导调整旧脚本。": {
+    "en": "480p and 720p are supported. Ask the video director to adjust the old script.",
+    "ms": "480p dan 720p disokong. Minta pengarah video melaraskan skrip lama."
   },
   "当前浏览器不支持语音输入，请使用 Chrome 或直接输入文字。": {
     "en": "This browser does not support voice input. Use Chrome or enter text directly.",
@@ -8616,9 +8616,17 @@ export const EXTRA_UI_COPY = {
     "en": "View production history: {value5}",
     "ms": "Lihat rekod penghasilan: {value5}"
   },
-  "从当前浏览器列表移除全部草稿？已生成文件不受影响。": {
-    "en": "Remove all drafts from the current browser list? Generated files will not be affected.",
-    "ms": "Alih keluar semua draf daripada senarai pelayar semasa? Fail yang telah dijana tidak akan terjejas."
+  "清空全部草稿及当前编辑内容？可从已移除记录中恢复。已生成文件不受影响。": {
+    "en": "Clear all drafts and the current editor? You can restore them from Removed records. Generated files will not be affected.",
+    "ms": "Kosongkan semua draf dan kandungan editor semasa? Anda boleh memulihkannya daripada Rekod dialih keluar. Fail yang telah dijana tidak akan terjejas."
+  },
+  "所选模型不支持当前{value0}秒时长，请先调整时长或选择其他模型。": {
+    "en": "This model does not support the current {value0}-second duration. Adjust the duration first or choose another model.",
+    "ms": "Model ini tidak menyokong tempoh {value0} saat semasa. Laraskan tempoh dahulu atau pilih model lain."
+  },
+  "所选模型最多支持{value0}张图片，请选择video-max或新建创作。": {
+    "en": "This model supports up to {value0} images. Choose video-max or start a new creation.",
+    "ms": "Model ini menyokong sehingga {value0} imej. Pilih video-max atau mulakan ciptaan baharu."
   },
   "从当前浏览器列表移除这条记录？已生成文件不受影响。": {
     "en": "Remove this record from the current browser list? Generated files will not be affected.",

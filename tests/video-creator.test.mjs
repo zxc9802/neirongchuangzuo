@@ -128,12 +128,13 @@ test('Seedance request matches reference repository and enforces model-specific 
   await assert.rejects(createCreatorProvider(dedicated).generateCreative({ ...settings, prompt: '门店', imageIds: ['x'], audioIds: [] }), /独立接口配置不完整/);
 });
 
-test('new video requests only accept 720p while persisted legacy jobs retain upstream resolution support', async t => {
+test('new video requests accept 480p and 720p but still reject 1080p', async t => {
   assert.equal(DEFAULT_VIDEO_SETTINGS.resolution, '720p');
   const f = await fixture(t), id = await f.init(); await f.upload(id);
   for (const model of VIDEO_MODELS) {
-    assert.deepEqual(model.resolutions, ['720p']);
-    for (const resolution of ['480p', '1080p']) {
+    assert.deepEqual(model.resolutions, ['480p', '720p']);
+    assert.equal(normalizeVideoSettings({ ...settings, model: model.id, resolution: '480p' }).resolution, '480p');
+    for (const resolution of ['1080p']) {
       const input = { ...settings, model: model.id, resolution };
       assert.throws(() => normalizeVideoSettings(input), /设置无效/);
       assert.equal((await f.call('/quote', { body: { settings: input } })).status, 400);
@@ -143,6 +144,24 @@ test('new video requests only accept 720p while persisted legacy jobs retain ups
   }
   assert.equal(f.state.generates, 0);
   assert.equal(creativeGenerationBody({ ...settings, resolution: '480p', prompt: '已提交的旧任务', imageIds: ['x'], audioIds: [] }).payload.params.resolution, '480p');
+});
+
+test('480p survives director, quote and provider submission for every video model', async t => {
+  for (const model of VIDEO_MODELS) {
+    const f = await fixture(t); f.state.done = true;
+    const id = await f.init(); await f.upload(id);
+    const selected = { ...settings, model: model.id, resolution: '480p' };
+    assert.equal((await f.call('/quote', { body: { settings: selected } })).status, 200);
+    const opId = randomUUID();
+    assert.equal((await f.call(`/conversations/${id}/script`, { body: { requestId: opId, message: '介绍门店', settings: selected } })).status, 202);
+    const op = await f.until(async () => (await f.current(id)).operations.find(o => o.id === opId && o.status === 'completed'));
+    assert.equal(op.settings.resolution, '480p');
+    assert.equal((await f.generate(id, randomUUID(), { settings: selected, scriptId: opId })).status, 202);
+    const task = await f.until(async () => (await f.current(id)).tasks.find(t => t.status === 'completed'));
+    assert.equal(task.settings.resolution, '480p');
+    assert.equal(f.state.input.resolution, '480p');
+    assert.equal(creativeGenerationBody(f.state.input).payload.params.resolution, '480p');
+  }
 });
 
 test('image uploads accept just under 50MB, reject the exact boundary and preserve the audio limit', async t => {
@@ -455,4 +474,24 @@ test('director diagnostics persist privately across restart and expire with medi
   await f.until(async () => (await f.current(id)).operations[0].diagnostics.rawAvailable === false);
   await assert.rejects(readFile(path), { code: 'ENOENT' });
   assert.equal((await f.current(id)).operations[0].diagnostics.attempts[1].finishReason, 'stop');
+});
+
+
+test('an applied 15-second director script can switch provider models without bypassing content-setting checks', async t => {
+  const f = await fixture(t); await f.wallet.setUnlimited('alice', true); f.state.done = true;
+  const id = await f.init(); await f.upload(id);
+  const planned = { ...settings, duration: 15 }, opId = randomUUID();
+  assert.equal((await f.call(`/conversations/${id}/script`, { body: { requestId: opId, message: '15秒门店', settings: planned } })).status, 202);
+  await f.until(async () => (await f.current(id)).operations.find(o => o.id === opId && o.status === 'completed'));
+  for (const model of VIDEO_MODELS) {
+    const taskId = randomUUID(), selected = { ...planned, model: model.id };
+    assert.equal((await f.generate(id, taskId, { settings: selected, scriptId: opId })).status, 202);
+    await f.until(async () => (await f.current(id)).tasks.find(t => t.id === taskId && t.status === 'completed'));
+    assert.equal(f.state.input.model, model.id); assert.equal(f.state.input.duration, 15);
+  }
+  for (const change of [{ duration: 10 }, { language: 'en' }, { ratio: '16:9' }, { generateAudio: false }, { resolution: '480p' }]) {
+    const res = await f.generate(id, randomUUID(), { settings: { ...planned, ...change }, scriptId: opId });
+    assert.equal(res.status, 409); assert.equal((await res.json()).code, 'SCRIPT_SETTINGS_CHANGED');
+  }
+  assert.equal(f.state.scripts, 1);
 });

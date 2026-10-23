@@ -13,7 +13,8 @@ export const VIDEO_PROVIDER_MODELS = [
   { id: 'doubao-seedance-2-0-260128', name: 'video-pro', durations: [4, 5, 6, 8, 10, 12, 15], resolutions: ['480p', '720p', '1080p'], maxImages: 9 },
   { id: 'doubao-seedance-2-5-260628', name: 'video-max', durations: [4, 5, 6, 8, 10, 12, 15, 20, 25, 30], resolutions: ['480p', '720p', '1080p'], maxImages: 30 },
 ];
-export const VIDEO_MODELS = VIDEO_PROVIDER_MODELS.map(model => ({ ...model, resolutions: ['720p'] }));
+export const VIDEO_MODELS = VIDEO_PROVIDER_MODELS.map(model => ({ ...model, resolutions: model.resolutions.filter(value => ['480p', '720p'].includes(value)) }));
 export const VIDEO_RATIOS = ['9:16', '16:9', '3:4', '4:3', '1:1', '21:9'];
 export const VIDEO_LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英文' }, { id: 'th', name: '泰语' }, { id: 'ms', name: '马来语' }, { id: 'pt', name: '葡萄牙语' }];
 export const DEFAULT_VIDEO_SETTINGS = { model: VIDEO_MODELS[2].id, duration: 25, ratio: '9:16', resolution: '720p', language: 'zh', generateAudio: true };
+export const sameVideoScriptSettings = (before, after) => ['duration', 'ratio', 'resolution', 'language', 'generateAudio'].every(key => before?.[key] === after?.[key]);
