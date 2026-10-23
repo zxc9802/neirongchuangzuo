@@ -9,6 +9,7 @@ export const GENERATION_PRICES = Object.freeze([
   ['video', 'doubao-seedance-2-0-fast-260128', 1.8],
   ['video', 'doubao-seedance-2-0-mini-260615', 1],
   ['video', 'wan3.0-video', 2.4],
+  ['video', 'wan3.0-video-prime', 3.6],
   ['digital-human', 'b', 0.1],
   ['digital-human', 'd', 0.12],
   ['digital-human', 'e', 1],

@@ -4,12 +4,14 @@ import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malay
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
+const WAN3_MODEL = 'wan3.0-video', WAN3_FAST_MODEL = 'wan3.0-video-prime';
 const MODELS = [
   { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15, extendedDuration: 60 },
   { id: 'doubao-seedance-2-5-260628', name: 'qiya-2.5', maxDuration: 30, extendedDuration: 60 },
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', maxDuration: 15, extendedDuration: 60 },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, extendedDuration: 60 },
   { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, extendedDuration: 60 },
+  { id: WAN3_FAST_MODEL, name: 'qiya-3.0 快速版', maxDuration: 15, extendedDuration: 60, fast: true },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
 const REPLACEMENTS = { photo: '人脸', voice: '声音', product: '商品', background: '背景' };
@@ -110,14 +112,16 @@ function selectedModel() {
 function modelName(task) { return (task.model === 'fal-ai/pixverse/swap' ? 'PixVerse Swap' : MODELS.find(model => model.id === (task.model || DEFAULT_MODEL))?.name) || ''; }
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
+  const wan3 = [WAN3_MODEL, WAN3_FAST_MODEL].includes(selected.id);
+  const fast = wan3 ? `<div class="replica-fast-option"><label for="replica-wan3-fast"><input id="replica-wan3-fast" type="checkbox" aria-describedby="replica-wan3-fast-hint" ${selected.fast ? 'checked' : ''} ${locked || !state.config?.models?.find(model => model.id === WAN3_FAST_MODEL)?.enabled ? 'disabled' : ''}>快速版</label><span id="replica-wan3-fast-hint">选择快速版后生成速度加快，但是积分消耗增加50%</span></div>` : '';
   const price = generationPrice('video', selected.id);
   const description = price ? `单段最多 ${selected.maxDuration} 秒，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
   const automatic = selected.extendedDuration ? `<p class="replica-model-description">${ctx.esc(`自动识别原视频时长，超过 ${selected.maxDuration} 秒自动分段，支持整条最长 ${selected.extendedDuration} 秒。`)}</p>` : '';
-  return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.map(model => {
+  return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.filter(model => !model.fast).map(model => {
     const configured = state.config?.models?.find(item => item.id === model.id);
     const unavailable = !state.config?.enabled || configured?.enabled === false || model.id === 'wan3.0-video' && !configured?.enabled;
-    return `<option value="${model.id}" ${selected.id === model.id ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
-  }).join('')}</select><p id="replica-model-description" class="replica-model-description" title="${ctx.esc(MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p>${automatic}</div>`;
+    return `<option value="${model.id}" ${selected.id === model.id || selected.fast && model.id === WAN3_MODEL ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
+  }).join('')}</select>${fast}<p id="replica-model-description" class="replica-model-description" title="${ctx.esc(MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p>${automatic}</div>`;
 }
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', extra = ['product', 'background'].includes(kind), title = video ? '参考视频' : voice ? '声音参考' : extra ? `${REPLACEMENTS[kind]}参考图` : '目标人物照片', selected = state.files[kind] || selectedMaterials[kind];
@@ -162,7 +166,8 @@ async function toggleReplacement(kind, enabled) {
 function generationEstimate() {
   const model = selectedModel();
   if (!MODELS.some(item => item.id === model.id)) return '';
-  return `<p class="replica-time-estimate">生成时间约为 ${model.id === 'wan3.0-video' ? '13–17' : '5–10'} 分钟</p>`;
+  if ([WAN3_MODEL, WAN3_FAST_MODEL].includes(model.id)) return '<p class="replica-time-estimate">生成时间受视频时长和排队情况影响，请留意任务进度。</p>';
+  return '<p class="replica-time-estimate">生成时间约为 5–10 分钟</p>';
 }
 function result(ctx) {
   const task = state.current;
@@ -382,6 +387,8 @@ export function bindVideoReplica(ctx) {
   context = ctx;
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
   document.querySelector('#replica-models').onchange = event => { void selectModel(event.target.value); };
+  const fast = document.querySelector('#replica-wan3-fast');
+  if (fast) fast.onchange = event => { void selectModel(event.target.checked ? WAN3_FAST_MODEL : WAN3_MODEL); };
   for (const kind of inputKinds()) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
   for (const next of ['classic', 'deep']) document.querySelector(`#replica-mode-${next}`).onclick = () => switchMode(next);
   if (deepMode()) for (const kind of Object.keys(REPLACEMENTS)) document.querySelector(`#replica-toggle-${kind}`).onchange = event => { void toggleReplacement(kind, event.target.checked); };

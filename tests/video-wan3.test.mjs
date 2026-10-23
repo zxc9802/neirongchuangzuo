@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createWan3Provider, wan3GenerationBody, wan3Price, wan3Usage } from '../services/video/wan3.mjs';
-import { generationBody, videoConfig, WAN3_MODEL } from '../services/video/provider.mjs';
+import { generationBody, videoConfig, WAN3_MODEL, WAN3_FAST_MODEL, createVideoProvider } from '../services/video/provider.mjs';
 import { loadWorkspaceSettings } from '../services/runtime-settings.mjs';
 
 const task = { model: WAN3_MODEL, video: { duration: 14.582 }, sourceAudioMode: 'original',
@@ -92,4 +92,35 @@ test('Wan discount ends at Beijing midnight and input seconds are retained in us
   assert.equal(wan3Price(Date.parse('2026-10-31T23:59:59+08:00')), .42);
   assert.equal(wan3Price(Date.parse('2026-11-01T00:00:00+08:00')), .6);
   assert.equal(wan3Usage(usage).duration, 29.15);
+});
+
+
+for (const model of [WAN3_MODEL, WAN3_FAST_MODEL]) test(`${model} aggregate and official adapters retain the requested model`, async () => {
+  const config = videoConfig({ VIDEO_API_BASE_URL: 'https://aggregate.example', VIDEO_PROJECT_CODE: 'project',
+    VIDEO_ACCESS_KEY: 'test-access', VIDEO_SECRET_KEY: 'test-secret', TEMP_ASSET_SIGNING_SECRET: 'sign' }, 'https://workspace.example');
+  assert.equal(config.wan3Enabled, true); assert.equal(config.wan3AggregateEnabled, true);
+  const requests = [];
+  const provider = createVideoProvider(config, async (url, options) => {
+    requests.push({ url: String(url), body: JSON.parse(options.body) });
+    return Response.json({ success: true, data: { success: true, result: { taskId: 'aggregate-job' } } });
+  });
+  const input = { ...task, model, materials: { photo: { id: 'image-id' }, video: { id: 'video-id' } } };
+  assert.equal((await provider.generate(input)).taskId, 'aggregate-job');
+  assert.equal(requests[0].url, 'https://aggregate.example/openApi/generate');
+  assert.equal(requests[0].body.modelId, model);
+  assert.equal(requests[0].body.payload.params.mode, 'fusion_video');
+  assert.equal(wan3GenerationBody({ ...task, model }).model, model);
+});
+
+test('aggregate Wan distinguishes explicit rate limit and rejection from uncertain server failures', async () => {
+  const config = { video: { base: 'https://aggregate.example' } };
+  for (const [response, code, notDispatched] of [
+    [new Response('{}', { status: 429 }), 'VIDEO_PROVIDER_RATE_LIMITED', true],
+    [Response.json({ success: true, data: { success: false, message: 'No capacity' } }), 'VIDEO_PROVIDER_REJECTED', true],
+    [new Response('{}', { status: 503 }), 'VIDEO_PROVIDER_UNAVAILABLE', undefined],
+  ]) {
+    const provider = createVideoProvider(config, async () => response);
+    await assert.rejects(provider.generate(task), cause => cause.code === code && cause.providerNotDispatched === notDispatched);
+  }
+  assert.equal(wan3Price(Date.parse('2026-10-23T00:00:00+08:00'), WAN3_FAST_MODEL), .9);
 });

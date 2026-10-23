@@ -235,7 +235,7 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan
   } });
   page.recover(); await page.poll();
   page.node('#replica-models').onchange({ target: { value: model } }); await page.settle();
-  const estimate = `生成时间约为 ${model === 'wan3.0-video' ? '13–17' : '5–10'} 分钟`;
+  const estimate = model === 'wan3.0-video' ? '生成时间受视频时长和排队情况影响' : '生成时间约为 5–10 分钟';
   assert.ok(page.html().includes(estimate), 'the empty preview follows the selected model');
   if (model === 'wan3.0-video') {
     assert.match(page.html(), /单段最多 15 秒，RM 2.4\/秒（492 积分\/秒）/);
@@ -258,7 +258,7 @@ test('generation estimate follows the viewed draft and resets with a new replica
   const task = { id: 'wan-estimate', model: 'wan3.0-video', status: 'draft', createdAt: Date.now() };
   const page = await fixture(t, { tasks: [task] });
   page.recover(); await page.poll(); page.select(task.id); await page.settle();
-  assert.match(page.html(), /生成时间约为 13–17 分钟/);
+  assert.match(page.html(), /生成时间受视频时长和排队情况影响/);
   Object.assign(task, { status: 'completed', resultUrl: '/result.mp4' });
   await page.poll();
   assert.doesNotMatch(page.html(), /生成时间约为/);
@@ -980,4 +980,29 @@ test('deep UI requires only checked material and restores history mode, options 
   assert.match(page.html(), /id="replica-toggle-background"[^>]*checked[^>]*disabled/);
   assert.match(page.html(), /src="\/background.jpg"/); assert.match(page.html(), /已保留原视频声音/);
   assert.doesNotMatch(page.html(), /NaN|replica-photo"|replica-voice"/);
+});
+
+
+test('Wan fast checkbox updates price and model, restores drafts and locks submitted tasks', async t => {
+  const task = { id: 'wan-fast-draft', model: 'wan3.0-video', status: 'draft', duration: 4, createdAt: Date.now() }; const calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (path.endsWith('/config')) return Response.json({ enabled: true, models: ['wan3.0-video', 'wan3.0-video-prime'].map(id => ({ id, enabled: true })) });
+    if (path.endsWith('/model')) { const body = JSON.parse(options.body); calls.push(body); task.model = body.model; return Response.json({ task }); }
+  } });
+  page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  assert.match(page.html(), /id="replica-wan3-fast"/);
+  assert.match(page.html(), /生成速度加快，但是积分消耗增加50%/);
+  page.node('#replica-wan3-fast').onchange({ target: { checked: true } }); await page.settle();
+  assert.equal(calls.at(-1).model, 'wan3.0-video-prime');
+  assert.match(page.html(), /738 积分\/秒/); assert.match(page.cost(), /2952/);
+  assert.match(page.html(), /option value="wan3.0-video" selected/);
+  assert.doesNotMatch(page.html(), /option value="wan3.0-video-prime"/);
+  page.node('#replica-new').onclick(); page.select(task.id); page.rebind();
+  assert.match(page.html(), /id="replica-wan3-fast"[^>]*checked/);
+  page.node('#replica-wan3-fast').onchange({ target: { checked: false } }); await page.settle();
+  assert.match(page.html(), /492 积分\/秒/);
+  Object.assign(task, { model: 'wan3.0-video-prime', status: 'running' }); await page.poll();
+  assert.match(page.html(), /id="replica-wan3-fast"[^>]*checked[^>]*disabled/);
+  const count = calls.length; page.node('#replica-wan3-fast').onchange({ target: { checked: false } }); await page.settle();
+  assert.equal(calls.length, count);
 });

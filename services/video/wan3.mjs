@@ -1,12 +1,13 @@
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
-import { generationBody, WAN3_MODEL, VideoError } from './provider.mjs';
+import { generationBody, WAN3_MODEL, WAN3_FAST_MODEL, VideoError } from './provider.mjs';
 import { providerFailure, readProviderResponse, safeVideoError } from './errors.mjs';
 import { deepImageKinds, isDeepReplica } from './deep-replica.mjs';
 
 const base = 'https://dashscope.aliyuncs.com';
 // Beijing standard 720P: the published 30% discount ends after October 31.
-export function wan3Price(at = Date.now()) {
+export function wan3Price(at = Date.now(), model = WAN3_MODEL) {
+  if (model === WAN3_FAST_MODEL) return .9;
   return at >= Date.parse('2026-08-24T00:00:00+08:00') && at < Date.parse('2026-11-01T00:00:00+08:00') ? .42 : .6;
 }
 export function wan3GenerationBody(task) {
@@ -16,7 +17,7 @@ export function wan3GenerationBody(task) {
   const replica = generationBody(task);
   const images = isDeepReplica(task) ? deepImageKinds(task) : ['photo'];
   const media = [...images.map(kind => ({ type: 'reference_image', url: task.materials[kind].id })), { type: 'reference_video', url: task.materials.video.id }];
-  return { model: WAN3_MODEL, input: { prompt: isDeepReplica(task) ? replica.prompt.replaceAll('图片', '图') : replica.prompt, media },
+  return { model: task.model || WAN3_MODEL, input: { prompt: isDeepReplica(task) ? replica.prompt.replaceAll('图片', '图') : replica.prompt, media },
     parameters: { resolution: '720P', ratio: 'adaptive', duration: -1,
       audio: replica.payload.params.generateAudio, prompt_extend: false, watermark: false } };
 }
@@ -54,8 +55,8 @@ export function createWan3Provider(config, fetchImpl = fetch) {
     }
   }
   return {
-    async upload(path, contentType) {
-      const { data: policy } = await call(`/api/v1/uploads?action=getPolicy&model=${WAN3_MODEL}`);
+    async upload(path, contentType, model = WAN3_MODEL) {
+      const { data: policy } = await call(`/api/v1/uploads?action=getPolicy&model=${model}`);
       let host;
       try {
         host = new URL(policy.upload_host);

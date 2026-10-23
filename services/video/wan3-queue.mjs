@@ -1,4 +1,4 @@
-import { WAN3_MODEL } from './provider.mjs';
+import { isWan3Model } from './provider.mjs';
 
 const LIMIT = 5;
 const parts = task => task.segments || [task];
@@ -7,7 +7,7 @@ const parts = task => task.segments || [task];
 // Queue tickets and request times live in task.json alongside the provider IDs.
 export function createWan3Queue({ jobs, save, now = Date.now }) {
   let sequence = Promise.resolve(), order = 0, restartUntil = 0;
-  const entries = () => [...jobs.values()].filter(task => task.model === WAN3_MODEL)
+  const entries = () => [...jobs.values()].filter(task => isWan3Model(task.model))
     .flatMap(task => parts(task).filter(part => part.wan3Queue).map(part => ({ task, part, ticket: part.wan3Queue })));
   const waiting = () => entries().filter(({ task, ticket }) => task.status === 'queued' && ticket.state === 'queued')
     .sort((a, b) => a.ticket.order - b.ticket.order);
@@ -24,7 +24,7 @@ export function createWan3Queue({ jobs, save, now = Date.now }) {
     active: part => part.wan3Queue?.state === 'active',
     async restore() {
       for (const task of jobs.values()) {
-        if (task.model !== WAN3_MODEL) continue;
+        if (!isWan3Model(task.model)) continue;
         let changed = false;
         for (const part of parts(task)) {
           if (!part.wan3Queue && (part.providerDispatched || part.providerId)) {
@@ -78,7 +78,7 @@ export function createWan3Queue({ jobs, save, now = Date.now }) {
       delete task.wan3QueuedAt;
     },
     view(task) {
-      if (task.model !== WAN3_MODEL || task.status !== 'queued') return undefined;
+      if (!isWan3Model(task.model) || task.status !== 'queued') return undefined;
       const queue = waiting(), index = queue.findIndex(entry => entry.task === task);
       return { position: index < 0 ? 0 : index + 1, pending: queue.filter(entry => entry.task === task).length };
     },

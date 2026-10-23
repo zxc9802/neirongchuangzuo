@@ -51,7 +51,7 @@ test('invalid, nonfinite, unbounded or fractional image units are rejected', () 
 
 test('model reservations round agreed prices, preserve the rate across restart and leave legacy rates unchanged', async t => {
   const { ledger, open } = await local(t);
-  assert.deepEqual(GENERATION_PRICES.map(price => price.pointsPerSecond), [410, 615, 369, 205, 492, 21, 25, 205]);
+  assert.deepEqual(GENERATION_PRICES.map(price => price.pointsPerSecond), [410, 615, 369, 205, 492, 738, 21, 25, 205]);
   for (const [index, price] of GENERATION_PRICES.entries()) {
     const input = { userId: `model-${index}`, taskId: 'priced', kind: price.kind, units: 1, pricingKey: price.key };
     assert.equal((await ledger.reserve(input)).reservedPoints, price.pointsPerSecond);

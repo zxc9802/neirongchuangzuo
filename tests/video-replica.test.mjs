@@ -10,7 +10,7 @@ import { execFileSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
-import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL } from '../services/video/provider.mjs';
+import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL, WAN3_FAST_MODEL } from '../services/video/provider.mjs';
 import { wan3GenerationBody } from '../services/video/wan3.mjs';
 import { planSegments } from '../services/video/segments.mjs';
 import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
@@ -755,11 +755,11 @@ test('all four Seedance editions are offered and removed models cannot start or 
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
   assert.deepEqual(config.models.slice(0, 4).map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
-  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [false, 15]]);
+  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [false, 15], [false, 15]]);
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '单段最多15秒，整条最多60秒，1元/秒');
   assert.equal(config.models[1].description, '单段最多30秒，整条最多60秒，1.5元/秒');
-  assert.deepEqual(config.models.map(model => model.extendedDuration), [60, 60, 60, 60, 60]);
+  assert.deepEqual(config.models.map(model => model.extendedDuration), [60, 60, 60, 60, 60, 60]);
   assert.equal(config.model, 'doubao-seedance-2-0-260128');
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
   const id = await app.init(); await app.upload(id);
@@ -2493,7 +2493,7 @@ test('Wan is enabled with its own credentials and validates its 60-second total 
     now: () => Date.parse('2026-10-21T12:00:00+08:00'), probe: async () => ({ ...META, duration }) });
   const config = await (await app.call('/config')).json();
   assert.equal(config.enabled, true); assert.equal(config.model, WAN3_MODEL);
-  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [WAN3_MODEL]);
+  assert.deepEqual(config.models.filter(model => model.enabled).map(model => model.id), [WAN3_MODEL, WAN3_FAST_MODEL]);
   assert.equal(config.models.find(model => model.id === WAN3_MODEL).cnyPerSecond, .42);
   const id = randomUUID();
   assert.equal((await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, voiceEngine: 'seedance' } })).status, 201);
@@ -2964,4 +2964,93 @@ for (const model of DEEP_MODELS) test(`deep ${model} keeps product references an
   assert.equal(calls.length, model === PREMIUM_MODEL ? 2 : 4);
   for (const task of calls) { assert.equal(task.materials.product.id, 'product'); assert.equal(task.photo, undefined); assert.equal(task.voice, undefined); }
   assert.equal(completed.actualDuration, 60); assert.equal(restores, 1);
+});
+
+
+for (const model of [WAN3_MODEL, WAN3_FAST_MODEL]) test(`${model} starts on the aggregate and settles the selected price`, async t => {
+  let officialCalls = 0;
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    wan3Provider: { generate: async () => { officialCalls++; throw new Error('wrong route'); } } });
+  const id = await app.init(); await app.upload(id);
+  const response = await app.call(`/tasks/${id}/start`, { body: { model } }); assert.equal(response.status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.body.modelId, model); assert.equal(app.state.generations, 1); assert.equal(officialCalls, 0);
+  assert.deepEqual(app.state.body.payload.resources, ['asset://photo-id']);
+  await app.close(); await app.open(); app.state.done = true;
+  const done = await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.generations, 1, 'restart only queries the saved aggregate receipt');
+  assert.equal(done.billing.chargedPoints, 4 * (model === WAN3_FAST_MODEL ? 738 : 492));
+});
+
+for (const failure of ['rejected', 'failed-job', 'material']) test(`Wan ${failure} retries three times then uses official Prime, persisting the budget`, async t => {
+  let at = Date.now(), attempts = 0, officialCalls = 0; const officialUploads = [];
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true }, now: () => at,
+    ...(failure === 'material' ? { provider: {
+      createMaterial: async () => { attempts++; throw new VideoError('Material unavailable', 502, 'VIDEO_PROVIDER_UNAVAILABLE'); },
+    } } : {}),
+    generate: async () => { attempts++; if (failure === 'rejected') throw new VideoError('No capacity', 502, 'VIDEO_PROVIDER_REJECTED'); return { taskId: `failed-${attempts}` }; },
+    query: async () => ({ failed: true, error: 'Upstream failed' }),
+    wan3Provider: {
+      upload: async (path, mime, model) => { officialUploads.push({ path, model }); return { id: 'oss://official/' + path.split(/[\\/]/).at(-1), status: 2 }; },
+      generate: async task => { officialCalls++; assert.equal(task.model, WAN3_FAST_MODEL); assert.match(task.materials.photo.id, /^oss:/); assert.match(task.materials.video.id, /^oss:/); return { taskId: 'official-prime' }; },
+      query: async id => { assert.equal(id, 'official-prime'); return { completed: true, url: 'https://cdn.example/official.mp4' }; },
+    } });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: { model: WAN3_FAST_MODEL } });
+  for (let count = 1; count <= 4; count++) {
+    await app.until(id, task => attempts === count && task.recovery?.state === 'retrying');
+    assert.equal(officialCalls, 0);
+    if (count === 2) { await app.close(); await app.open(); }
+    at += 6000;
+  }
+  const done = await app.until(id, task => task.status === 'completed');
+  assert.equal(attempts, 4); assert.equal(officialCalls, 1); assert.equal(done.billing.chargedPoints, 4 * 738);
+  assert.ok(officialUploads.every(upload => upload.model === WAN3_FAST_MODEL));
+  const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal(saved.wan3Route, 'official'); assert.equal(saved.wan3Failures, 4); assert.equal(saved.wan3History.length, 4);
+});
+
+test('Wan ambiguous submission holds without aggregate retry or official fallback across restart', async t => {
+  let officialCalls = 0;
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true }, uncertain: true,
+    wan3Provider: { generate: async () => { officialCalls++; } } });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: { model: WAN3_FAST_MODEL } });
+  await app.until(id, task => task.code === 'VIDEO_SUBMISSION_UNCERTAIN');
+  await app.close(); await app.open(); await delay(80);
+  assert.equal(app.state.generations, 1); assert.equal(officialCalls, 0);
+});
+
+
+test('Wan segmented retry replaces only the failed part and keeps completed aggregate segments', async t => {
+  let at = Date.now(), failures = 0, officialCalls = 0; const generated = [];
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true }, now: () => at,
+    probe: async () => ({ ...META, duration: 20 }), scenes: async () => ({ cuts: [] }),
+    cutSegment: async (_in, out) => writeFile(out, VIDEO),
+    joinSegments: async (_inputs, _segments, out) => { await writeFile(out, VIDEO); return { ...META, duration: 20 }; },
+    restoreAudio: async (_source, _generated, out) => writeFile(out, VIDEO),
+    provider: {
+      createMaterial: async (_url, kind) => ({ id: kind, status: 2 }),
+      generate: async task => { generated.push(task.materials.video.id); return { taskId: task.materials.video.id }; },
+      query: async id => {
+        if (id === 'segment-1') { failures++; return { failed: true, error: 'No capacity' }; }
+        return { completed: true, url: 'https://cdn.example/first.mp4' };
+      },
+    },
+    wan3Provider: {
+      upload: async path => ({ id: 'oss://' + path.split(/[\\/]/).at(-1), status: 2 }),
+      generate: async task => { officialCalls++; assert.equal(task.model, WAN3_FAST_MODEL); assert.equal(task.materials.video.id, 'oss://segment-1.mp4'); return { taskId: 'official-second' }; },
+      query: async id => { assert.equal(id, 'official-second'); return { completed: true, url: 'https://cdn.example/second.mp4' }; },
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_FAST_MODEL, mode: 'deep', replacements: { photo: true } } });
+  await app.upload(id); assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  for (let count = 1; count <= 4; count++) {
+    await app.until(id, task => failures === count && task.recovery?.state === 'retrying');
+    if (count === 2) { await app.close(); await app.open(); }
+    at += 6000;
+  }
+  const done = await app.until(id, task => task.status === 'completed');
+  assert.equal(officialCalls, 1); assert.equal(generated.filter(id => id === 'segment-0').length, 1);
+  assert.equal(generated.filter(id => id === 'segment-1').length, 4); assert.equal(done.billing.chargedPoints, 20 * 738);
 });

@@ -6,6 +6,8 @@ export const PIXVERSE_MODEL = 'fal-ai/pixverse/swap';
 // Retained for recovery and settlement of tasks submitted before removal.
 export const WAN_MODEL = 'fal-ai/wan/v2.2-14b/animate/replace';
 export const WAN3_MODEL = 'wan3.0-video';
+export const WAN3_FAST_MODEL = 'wan3.0-video-prime';
+export const isWan3Model = model => model === WAN3_MODEL || model === WAN3_FAST_MODEL;
 export const DURATIONS = [4, 5, 6, 8, 10, 12, 15];
 export const MODELS = [
   // Opt-in custom duration: generate the opening 60 seconds in parts within each model's limit.
@@ -14,6 +16,7 @@ export const MODELS = [
   { id: 'doubao-seedance-2-0-fast-260128', name: 'qiya-2.0-f1', description: '单段最多15秒，整条最多60秒，0.8元/秒', cnyPerSecond: 0.8, maxDuration: 15, extendedDuration: 60, durations: DURATIONS, resolution: '720p' },
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', description: '单段最多15秒，整条最多60秒，0.5元/秒', cnyPerSecond: 0.5, maxDuration: 15, extendedDuration: 60, durations: DURATIONS, resolution: '720p' },
   { id: WAN3_MODEL, name: 'qiya-3.0', description: '单段最多15秒 · 整条最多60秒 · 720P · 输入与输出均计费', cnyPerSecond: 0.6, maxDuration: 15, extendedDuration: 60, durations: DURATIONS, resolution: '720p' },
+  { id: WAN3_FAST_MODEL, name: 'qiya-3.0 快速版', description: '生成速度加快，积分消耗增加50%', cnyPerSecond: 0.9, maxDuration: 15, extendedDuration: 60, durations: DURATIONS, resolution: '720p' },
   { id: PIXVERSE_MODEL, name: 'PixVerse Swap', description: '最长30秒 · 720p · 按实际费用，配音口型另计', maxDuration: 30, durations: Array.from({ length: 29 }, (_, i) => i + 2), resolution: '720p' },
 ];
 export const PROMPT = '编辑视频1。同时完成两项编辑：人物替换和原视频叠加水印去除。将视频1中的唯一人物完整替换为图片1中的人物。删除视频1画面中已有的平台和作者水印，包括抖音/TikTok、快手、小红书等平台的图标及名称、抖音号等账号ID、@用户名、作者昵称及其相邻角标；这些叠加标记属于水印，不属于需要保留的台词字幕或场景标识。无论水印位于左上角、右上角、底部还是随时间移动，都要从第一帧到最后一帧去除，包括半透明文字和图案水印，并自然重建被遮挡的背景，不得保留、复制或新增水印，不用模糊、马赛克、色块或裁切画面的方式遮盖水印。去水印要求优先于下文的背景、字幕和口型保留要求。图片1是人物外貌的唯一参考，头部、脸型、五官及其比例、眉眼、鼻子、嘴唇、耳朵、下颌轮廓、发际线和发型都必须采用图片1；不得保留视频1原人物的脸部特征，不得混合两个人的五官，不能只换衣服而保留原脸。人物的服装采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情变化、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样，但上述保留要求仅适用于非水印内容；保留正常台词字幕的原文、位置、排版和出现时间，不重画字幕。正常台词字幕、商品包装文字和场景中的真实招牌不属于水印，须保持原样。';
@@ -46,6 +49,8 @@ export function videoConfig(env = {}, publicOrigin) {
       }
     } catch { config.enabled = false; }
   }
+  config.wan3AggregateEnabled = config.enabled;
+  config.wan3Enabled = Boolean(config.enabled || config.dashscopeKey);
   return config;
 }
 export function generationBody(task) {
@@ -98,7 +103,7 @@ export function parseGeneration(body, secrets = []) {
 }
 export function createVideoProvider(config, fetchImpl = fetch) {
   const secrets = [config.video, config.material].flatMap(value => [value?.access, value?.secret]);
-  async function call(kind, path, body) {
+  async function call(kind, path, body, wan3 = false) {
     const values = config[kind];
     let response;
     try {
@@ -107,6 +112,8 @@ export function createVideoProvider(config, fetchImpl = fetch) {
         body: JSON.stringify(body), signal: AbortSignal.timeout(60_000) });
       const data = await readProviderResponse(response);
       const detail = providerFailure(data, secrets);
+      if (wan3 && response.status === 429) throw Object.assign(
+        new VideoError('模型请求频率受限，正在重试。', 429, 'VIDEO_PROVIDER_RATE_LIMITED'), { providerNotDispatched: true });
       if (response.status >= 500 || [408, 429].includes(response.status)) {
         throw new VideoError(`模型请求暂未成功（HTTP ${response.status}）${detail ? `：${detail}` : '，上游未返回具体原因。'}`, 502, 'VIDEO_PROVIDER_UNAVAILABLE');
       }
@@ -133,7 +140,14 @@ export function createVideoProvider(config, fetchImpl = fetch) {
       const item = result.data?.records?.find(record => String(record.materialId) === id);
       return { status: Number(item?.status || 1), ...(Number(item?.status) === 3 ? { error: providerFailure(item, secrets) } : {}) };
     },
-    async generate(task) { return parseGeneration(await call('video', '/openApi/generate', generationBody(task)), secrets); },
+    async generate(task) {
+      const wan3 = isWan3Model(task.model);
+      const body = await call('video', '/openApi/generate', generationBody(task), wan3);
+      const result = parseGeneration(body, secrets);
+      if (wan3 && body.data?.success === false && !result.taskId && !result.failed) throw Object.assign(
+        new VideoError(providerFailure(body, secrets) || '模型服务拒绝请求。', 502, 'VIDEO_PROVIDER_REJECTED'), { providerNotDispatched: true });
+      return result;
+    },
     async query(id) { return parseGeneration(await call('video', '/openApi/queryResult', { taskId: id, abilityType: 'VIDEO' }), secrets); },
   };
 }
