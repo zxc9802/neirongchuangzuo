@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { generationBody, WAN3_MODEL, VideoError } from './provider.mjs';
 import { providerFailure, readProviderResponse, safeVideoError } from './errors.mjs';
+import { deepImageKinds, isDeepReplica } from './deep-replica.mjs';
 
 const base = 'https://dashscope.aliyuncs.com';
 // Beijing standard 720P: the published 30% discount ends after October 31.
@@ -13,8 +14,9 @@ export function wan3GenerationBody(task) {
     throw new VideoError('Wan 3.0 换声请使用 Chatterbox 音色转换。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
   }
   const replica = generationBody(task);
-  const media = [{ type: 'reference_image', url: task.materials.photo.id }, { type: 'reference_video', url: task.materials.video.id }];
-  return { model: WAN3_MODEL, input: { prompt: replica.prompt, media },
+  const images = isDeepReplica(task) ? deepImageKinds(task) : ['photo'];
+  const media = [...images.map(kind => ({ type: 'reference_image', url: task.materials[kind].id })), { type: 'reference_video', url: task.materials.video.id }];
+  return { model: WAN3_MODEL, input: { prompt: isDeepReplica(task) ? replica.prompt.replaceAll('图片', '图') : replica.prompt, media },
     parameters: { resolution: '720P', ratio: 'adaptive', duration: -1,
       audio: replica.payload.params.generateAudio, prompt_extend: false, watermark: false } };
 }

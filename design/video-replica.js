@@ -12,11 +12,16 @@ const MODELS = [
   { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, extendedDuration: 60 },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
+const REPLACEMENTS = { photo: '人脸', voice: '声音', product: '商品', background: '背景' };
+const emptyReplacements = () => ({ photo: false, voice: false, product: false, background: false });
+let mode = 'classic', replacements = emptyReplacements(), modeDrafts = {};
+const deepMode = () => mode === 'deep';
+const inputKinds = () => deepMode() ? ['video', ...Object.keys(REPLACEMENTS).filter(kind => replacements[kind])] : ['video', 'photo', 'voice'];
 const LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英语' }, { id: 'ms', name: '马来语' }];
 const languageName = code => LANGUAGES.find(item => item.id === code)?.name || code || '待识别';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务').replace(/Wan\s*3\.0/gi, 'qiya-3.0');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成失败', waiting: '处理暂停', cancelled: '已停止处理', expired: '已过期' };
-const taskLabel = task => task.status === 'queued' ? '排队等待生成' : task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
+const taskLabel = task => task.mode === 'deep' && task.status === 'running' ? '正在生成深度复刻' : task.mode === 'deep' && task.status === 'reviewing' ? '正在审核参考素材' : task.mode === 'deep' && task.status === 'verifying' && !task.replacements?.voice ? '正在合成原视频声音' : task.status === 'queued' ? '排队等待生成' : task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
   ? '正在识别原视频语言' : task.languageRouting?.translate && task.status === 'preparing'
   ? '正在翻译台词并生成配音' : task.languageRouting?.translate && task.status === 'verifying'
   ? '正在按译后配音同步口型' : task.voiceEngine === 'chatterbox' && task.status === 'preparing'
@@ -31,6 +36,7 @@ const taskLabel = task => task.status === 'queued' ? '排队等待生成' : task
 function segmentText(task) {
   if (!task.segments) return '';
   const total = task.segments.total, seam = Number(Number(task.segments.seam).toFixed(2));
+  if (task.mode === 'deep' && !task.replacements?.voice) return `分 ${total} 段生成，整条保留原视频声音`;
   if (total > 2) return `分 ${total} 段生成，整条统一换声`;
   if (task.segments.boundary === 'scene') return `分 ${total} 段生成 · 第 ${seam} 秒接续（镜头切换处），整条统一换声`;
   if (task.segments.boundary === 'pause') return `分 ${total} 段生成 · 第 ${seam} 秒接续（说话停顿处），整条统一换声`;
@@ -43,7 +49,11 @@ let selectedMaterials = {};
 function resetFiles() { for (const url of Object.values(state.urls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; selectedMaterials = {}; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
-  if (state.owner !== owner) { resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true }; }
+  if (state.owner !== owner) {
+    for (const draft of Object.values(modeDrafts)) for (const url of Object.values(draft.urls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url);
+    modeDrafts = {}; mode = 'classic'; replacements = emptyReplacements();
+    resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
+  }
 }
 async function request(path, options = {}) {
   const signal = AbortSignal.timeout(options.method === 'PUT' ? 180_000 : options.method ? 60_000 : 15_000);
@@ -61,6 +71,7 @@ async function request(path, options = {}) {
 function jsonPost(body = {}) { return { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }; }
 function remember(task) {
   state.current = task;
+  if (task.mode === 'deep') replacements = { ...task.replacements };
   state.model = task.model || state.model;
   state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt);
   observeCreditTask(task);
@@ -109,21 +120,44 @@ function modelPicker(ctx) {
   }).join('')}</select><p id="replica-model-description" class="replica-model-description" title="${ctx.esc(MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p>${automatic}</div>`;
 }
 function slot(kind, ctx) {
-  const video = kind === 'video', voice = kind === 'voice', title = video ? '参考视频' : voice ? '声音参考' : '目标人物照片', selected = state.files[kind] || selectedMaterials[kind];
+  const video = kind === 'video', voice = kind === 'voice', extra = ['product', 'background'].includes(kind), title = video ? '参考视频' : voice ? '声音参考' : extra ? `${REPLACEMENTS[kind]}参考图` : '目标人物照片', selected = state.files[kind] || selectedMaterials[kind];
   const saved = state.current?.[kind];
   const voiceRequired = voice && (!state.current || state.current.status === 'draft' || ['indextts2', 'chatterbox'].includes(state.current.voiceEngine) || state.current.sourceAudioMode === 'silent');
   const disabled = state.busy || pending(state.current) || state.current && state.current.status !== 'draft' && !(video && state.current.canReplaceSource) || voice && !state.config?.voiceEnabled;
-  const source = state.urls[kind] || state.current?.[video ? 'sourceVideoUrl' : voice ? 'sourceVoiceUrl' : 'sourcePhotoUrl'];
+  const source = state.urls[kind] || state.current?.[{ video: 'sourceVideoUrl', voice: 'sourceVoiceUrl', photo: 'sourcePhotoUrl', product: 'sourceProductUrl', background: 'sourceBackgroundUrl' }[kind]];
   const preview = source ? video
     ? `<video src="${ctx.esc(source)}" controls playsinline preload="metadata" aria-label="参考视频预览"></video>`
     : voice ? `<audio src="${ctx.esc(source)}" controls preload="metadata" aria-label="声音参考试听"></audio>`
-      : `<img src="${ctx.esc(source)}" alt="目标人物照片预览">` : `<div class="replica-upload-symbol">${ctx.icon(video ? 'video' : voice ? 'audio' : 'image')}</div>`;
-  return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title"><span>${video ? '01' : voice ? '03' : '02'}</span><h3>${t(title)}${voice ? `<small>${t(voiceRequired ? '必填' : '选填')} · ${t('更换音色')}</small>` : ''}</h3></div>
+      : `<img src="${ctx.esc(source)}" alt="${title}预览">` : `<div class="replica-upload-symbol">${ctx.icon(video ? 'video' : voice ? 'audio' : 'image')}</div>`;
+  return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title">${deepMode() ? '' : `<span>${video ? '01' : voice ? '03' : '02'}</span>`}<h3>${t(title)}${voice ? `<small>${t(voiceRequired ? '必填' : '选填')} · ${t('更换音色')}</small>` : ''}</h3></div>
     ${voice ? voiceHint() : ''}<div class="replica-input-preview">${preview}</div>
-    <strong class="replica-file-name">${ctx.esc(selected?.name || (saved?.assetId ? '已存入资产，长期保留' : saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : '上传你想替换成的人物'))}</strong>
-    <p>${video ? `单个人物 · 2–${selectedModel().extendedDuration || selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : '清晰正脸 · JPG / PNG / WebP · 最大 10 MB'}</p>
+    <strong class="replica-file-name">${ctx.esc(selected?.name || (saved?.assetId ? '已存入资产，长期保留' : saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : extra ? `上传想替换成的${REPLACEMENTS[kind]}` : '上传你想替换成的人物'))}</strong>
+    <p>${video ? `${deepMode() ? '参考原视频动作与镜头' : '单个人物'} · 2–${selectedModel().extendedDuration || selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : `${extra ? '清晰图片 · 宽高至少 300 像素' : '清晰正脸'} · JPG / PNG / WebP · 最大 10 MB`}</p>
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="${t('上传')} ${t(title)}">
-    <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${t(selected || saved ? '更换' : '选择')} ${t(title)}</label>${!video ? `<a href="#assets" class="replica-asset-link">${t(voice ? '从资产选择声音' : '从资产选择形象')}</a>` : ''}</section>`;
+    <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${t(selected || saved ? '更换' : '选择')} ${t(title)}</label>${!video && !extra ? `<a href="#assets" class="replica-asset-link">${t(voice ? '从资产选择声音' : '从资产选择形象')}</a>` : ''}</section>`;
+}
+function deepInputs(ctx) {
+  const locked = state.busy || state.current && state.current.status !== 'draft';
+  return `<div class="replica-deep-source">${slot('video', ctx)}</div><div class="replica-deep-options"><div class="replica-deep-intro"><h2>选择要替换的内容</h2><p>四项可自由组合，未开启的项目保留原视频内容。</p></div>${Object.entries(REPLACEMENTS).map(([kind, label]) => `<section class="replica-deep-option ${replacements[kind] ? 'enabled' : ''}"><label class="replica-option-toggle" for="replica-toggle-${kind}"><span>替换${label}<small>可选</small></span><input id="replica-toggle-${kind}" type="checkbox" ${replacements[kind] ? 'checked' : ''} ${locked ? 'disabled' : ''}></label>${replacements[kind] ? slot(kind, ctx) : `<p class="replica-keep">保留原视频${label}</p>`}</section>`).join('')}</div>`;
+}
+function switchMode(next) {
+  if (state.busy || !['classic', 'deep'].includes(next) || mode === next) return;
+  modeDrafts[mode] = { current: state.current, model: state.model, files: state.files, urls: state.urls, selectedMaterials, replacements };
+  mode = next;
+  const draft = modeDrafts[mode];
+  state.current = draft?.current || null; state.model = draft?.model || DEFAULT_MODEL;
+  state.files = draft?.files || {}; state.urls = draft?.urls || {};
+  selectedMaterials = draft?.selectedMaterials || {}; replacements = draft?.replacements || emptyReplacements();
+  state.error = ''; refresh();
+}
+async function toggleReplacement(kind, enabled) {
+  if (!deepMode() || state.busy || state.current && state.current.status !== 'draft') return;
+  const next = { ...replacements, [kind]: enabled };
+  if (!state.current) { replacements = next; state.error = ''; refresh(); return; }
+  state.busy = true; state.error = ''; refresh();
+  try { remember((await request(`/tasks/${state.current.id}/options`, jsonPost({ replacements: next }))).task); }
+  catch (cause) { state.error = cause.message; }
+  finally { state.busy = false; refresh(); }
 }
 function generationEstimate() {
   const model = selectedModel();
@@ -132,6 +166,7 @@ function generationEstimate() {
 }
 function result(ctx) {
   const task = state.current;
+  if (!task && deepMode()) return `<div class="replica-empty">${ctx.icon('video')}<h3>沿用原片表演，自选替换内容</h3><p>人脸、声音、商品、背景可自由组合<br>上传参考视频，开启需要替换的项目</p>${generationEstimate()}<span>深度复刻成片在这里预览</span></div>`;
   if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p>${generationEstimate()}<span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
   const message = failureMessage(task);
@@ -157,13 +192,13 @@ function progress(ctx) {
     <small>任务编号：${ctx.esc(task.id)}</small>`;
 }
 function history(ctx) {
-  return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" title="${ctx.esc(failureMessage(task))}" ${state.busy ? 'disabled' : ''}><span>${ctx.esc(['waiting', 'failed'].includes(task.status) && task.error ? failureMessage(task).split('原始原因：')[0] : taskLabel(task))}</span><small>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${ctx.esc(new Date(task.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} · ${task.duration || '—'} 秒</small></button>`).join('') : '<p class="replica-muted">你的复刻记录会保存在这里</p>';
+  return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" title="${ctx.esc(failureMessage(task))}" ${state.busy ? 'disabled' : ''}><span>${task.mode === 'deep' ? '深度复刻 · ' : ''}${ctx.esc(['waiting', 'failed'].includes(task.status) && task.error ? failureMessage(task).split('原始原因：')[0] : taskLabel(task))}</span><small>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${ctx.esc(new Date(task.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} · ${task.duration || '—'} 秒</small></button>`).join('') : '<p class="replica-muted">你的复刻记录会保存在这里</p>';
 }
 function summary(ctx) {
   const task = state.current;
   const route = task?.languageRouting;
   const language = route ? `<span>原视频：${ctx.esc(languageName(route.source))} · 所选语言：${ctx.esc(languageName(route.target))} · ${route.translate ? '翻译配音并同步口型' : route.reason === 'same-language' ? '语言一致，沿用原方案' : '中文沿用原方案'}</span>` : '';
-  return task ? `<div><strong>${taskLabel(task)}</strong>${language}<span>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${segmentText(task) ? `<span>${ctx.esc(segmentText(task))}</span>` : ''}${task.captionCheck?.warning ? `<span>${ctx.esc(displayMessage(task.captionCheck.warning))}</span>` : ''}${task.audioCheck ? `<span>${task.audioCheck.engine === 'indextts2' ? '已使用参考声音配音，并按新配音处理口型；请预览核对效果。' : task.audioCheck.warning ? ctx.esc(displayMessage(task.audioCheck.warning)) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
+  return task ? `<div><strong>${taskLabel(task)}</strong>${language}<span>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${segmentText(task) ? `<span>${ctx.esc(segmentText(task))}</span>` : ''}${task.captionCheck?.warning ? `<span>${ctx.esc(displayMessage(task.captionCheck.warning))}</span>` : ''}${task.audioCheck ? `<span>${task.audioCheck.originalAudioPreserved ? '已保留原视频声音。' : task.audioCheck.engine === 'indextts2' ? '已使用参考声音配音，并按新配音处理口型；请预览核对效果。' : task.audioCheck.warning ? ctx.esc(displayMessage(task.audioCheck.warning)) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
 }
 function playerStyle(task) {
   let width = Number(task?.video?.width), height = Number(task?.video?.height);
@@ -175,7 +210,7 @@ function costText() {
   const task = state.current;
   const unlimited = workspaceCreditsState().snapshot?.unlimited === true, exempt = task?.billing?.exempt === true;
   const actualCost=workspaceCreditsState().snapshot?.pricing?.mode==='api_cost';
-  const conversionCost = !task || task.status === 'draft' || task.voiceEngine === 'chatterbox' ? '；音色转换另按实际用量结算' : '';
+  const conversionCost = (!deepMode() || replacements.voice) && (!task || task.status === 'draft' || task.voiceEngine === 'chatterbox') ? '；音色转换另按实际用量结算' : '';
   const price = generationPrice('video', selectedModel().id);
   if (!unlimited && !exempt && price && (!task || task.status === 'draft' || task.billing?.mode === 'model_price')) {
     return task?.duration ? `预计 ${generationPoints(task.duration, task.billing?.pricingKey || price.key)} 积分 · ${task.duration} 秒 · 按成片时长结算，积分四舍五入；失败退回预留积分。`
@@ -197,10 +232,10 @@ function submitArea(ctx) {
 export function renderVideoReplica(ctx) {
   account(); context = ctx;
   const task = state.current;
-  return `<div class="replica-heading"><div><span class="replica-eyebrow">1:1复刻 · ${ctx.esc(selectedModel().name)}</span><h1>人物 1:1 复刻</h1><p>上传一个视频和一张照片，让照片中的人物出演原视频。</p></div><span class="replica-badge">人物替换</span></div>
-    <div class="replica-toolbar"><button type="button" id="replica-new" class="secondary" ${state.busy ? 'disabled' : ''}>新建复刻</button></div>
-    <div class="replica-layout"><section class="replica-form"><div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>${modelPicker(ctx)}
-      <p class="replica-note">请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。</p>
+  return `<div class="replica-heading"><div><span class="replica-eyebrow">1:1复刻 · ${ctx.esc(selectedModel().name)}</span><h1>${deepMode() ? '深度复刻' : '人物 1:1 复刻'}</h1><p>${deepMode() ? '参考原视频的动作和镜头，自选替换人脸、声音、商品或背景。' : '上传一个视频和一张照片，让照片中的人物出演原视频。'}</p></div><span class="replica-badge">${deepMode() ? '按需替换' : '人物替换'}</span></div>
+    <div class="replica-toolbar"><div class="replica-mode-switch" role="group" aria-label="复刻模式"><button type="button" id="replica-mode-classic" aria-pressed="${!deepMode()}" ${state.busy ? 'disabled' : ''}>原版复刻</button><button type="button" id="replica-mode-deep" aria-pressed="${deepMode()}" ${state.busy ? 'disabled' : ''}>深度复刻</button></div><button type="button" id="replica-new" class="secondary" ${state.busy ? 'disabled' : ''}>新建复刻</button></div>
+    <div class="replica-layout"><section class="replica-form">${deepMode() ? deepInputs(ctx) : `<div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>`}${modelPicker(ctx)}
+      <p class="replica-note">${deepMode() ? '画面替换效果以实际生成结果为准，生成后请预览核对人脸、商品和背景。' : '请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。'}</p>
       <div id="replica-submit-area" class="replica-submit-area">${submitArea(ctx)}</div></section>
       <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
@@ -241,17 +276,24 @@ async function selectFile(kind, file) {
 }
 async function submit() {
   if (state.busy || pending(state.current) || state.current && state.current.status !== 'draft') return;
-  if ((!state.files.video && !state.current?.video) || (!state.files.photo && !selectedMaterials.photo && !state.current?.photo)) { state.error = '请先上传一段参考视频和一张人物照片。'; refresh(); return; }
-  if (!state.files.voice && !selectedMaterials.voice && !state.current?.voice) { state.error = '请先上传声音参考。'; refresh(); return; }
+  if (deepMode()) {
+    for (const kind of inputKinds()) if (!state.files[kind] && !selectedMaterials[kind] && !state.current?.[kind]) {
+      state.error = kind === 'video' ? '请先上传参考视频。' : `请先上传${REPLACEMENTS[kind]}参考素材。`; refresh(); return;
+    }
+  } else {
+    if ((!state.files.video && !state.current?.video) || (!state.files.photo && !selectedMaterials.photo && !state.current?.photo)) { state.error = '请先上传一段参考视频和一张人物照片。'; refresh(); return; }
+    if (!state.files.voice && !selectedMaterials.voice && !state.current?.voice) { state.error = '请先上传声音参考。'; refresh(); return; }
+  }
   state.busy = true; state.error = ''; refresh();
   try {
     const id = state.current?.id || crypto.randomUUID();
-    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = DEFAULT_VOICE;
+    const model = selectedModel().id, { voiceEngine, sourceAudioMode } = deepMode() && !replacements.voice ? { voiceEngine: 'seedance', sourceAudioMode: 'original' } : DEFAULT_VOICE;
+    const deep = deepMode() ? { mode: 'deep', replacements } : {};
     // Keep the request ID before networking so an uncertain response can be retried safely.
-    if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now(), model };
-    remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode }))).task);
+    if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now(), model, ...deep };
+    remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode, ...deep }))).task);
     if (state.current.status === 'draft') {
-      for (const kind of ['video', 'photo', 'voice']) {
+      for (const kind of inputKinds()) {
         if (selectedMaterials[kind]) {
           remember((await request(`/tasks/${id}/${kind}`, jsonPost({ assetId: selectedMaterials[kind].id }))).task);
           continue;
@@ -294,7 +336,7 @@ async function poll() {
   try {
     const [config, data] = await Promise.all([state.config ? Promise.resolve(state.config) : request('/config'), request('/tasks')]);
     if (state.owner !== owner) return;
-    const inputs = () => ['video', 'photo', 'voice'].map(kind => slot(kind, context)).join('');
+    const inputs = () => deepMode() ? deepInputs(context) : ['video', 'photo', 'voice'].map(kind => slot(kind, context)).join('');
     const previous = { inputs: inputs(), models: modelPicker(context), result: result(context), style: playerStyle(state.current), actions: submitArea(context) };
     const firstLoad = state.loading;
     state.config = config; state.tasks = data.tasks; state.loading = false; state.pollError = '';
@@ -328,6 +370,10 @@ export function useReplicaMaterial(material) {
   if (!['photo', 'voice'].includes(material.kind) || !/^(photo|voice)-[a-f0-9]{64}$/.test(material.id)) throw new Error('素材无效。');
   if (state.current && state.current.status !== 'draft') { resetFiles(); state.current = null; }
   const kind = material.kind;
+  if (deepMode() && !replacements[kind]) {
+    if (state.current) throw new Error('请先在深度复刻草稿中开启对应的替换项目。');
+    replacements = { ...replacements, [kind]: true };
+  }
   if (state.urls[kind]?.startsWith('blob:')) URL.revokeObjectURL(state.urls[kind]);
   delete state.files[kind]; selectedMaterials[kind] = material;
   state.urls[kind] = `/api/assets/materials/${material.id}/media`; state.error = ''; refresh();
@@ -336,16 +382,20 @@ export function bindVideoReplica(ctx) {
   context = ctx;
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
   document.querySelector('#replica-models').onchange = event => { void selectModel(event.target.value); };
-  for (const kind of ['video', 'photo', 'voice']) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
+  for (const kind of inputKinds()) document.querySelector(`#replica-${kind}`).onchange = event => { void selectFile(kind, event.target.files[0]); };
+  for (const next of ['classic', 'deep']) document.querySelector(`#replica-mode-${next}`).onclick = () => switchMode(next);
+  if (deepMode()) for (const kind of Object.keys(REPLACEMENTS)) document.querySelector(`#replica-toggle-${kind}`).onchange = event => { void toggleReplacement(kind, event.target.checked); };
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
   const resume = document.querySelector('#replica-resume'); if (resume) resume.onclick = () => { void recoverTask('resume'); };
   const cancel = document.querySelector('#replica-cancel'); if (cancel) cancel.onclick = () => { void recoverTask('cancel'); };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
-  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; state.error = ''; refresh(); };
+  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; replacements = emptyReplacements(); state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };
   document.querySelector('#replica-history').onclick = event => {
     const button = event.target.closest('[data-replica-task]'); if (!button || state.busy) return;
-    resetFiles(); state.current = state.tasks.find(task => task.id === button.dataset.replicaTask); state.model = state.current?.model || DEFAULT_MODEL; state.error = ''; refresh();
+    const task = state.tasks.find(task => task.id === button.dataset.replicaTask); if (!task) return;
+    switchMode(task.mode === 'deep' ? 'deep' : 'classic');
+    resetFiles(); state.current = task; replacements = task.replacements ? { ...task.replacements } : emptyReplacements(); state.model = task.model || DEFAULT_MODEL; state.error = ''; refresh();
   };
   if (!timer) { void poll(); timer = setInterval(() => { void poll(); }, 5000); }
 }

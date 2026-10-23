@@ -2863,3 +2863,105 @@ test('PixVerse draft switching clears the Seedance audio mode and rejects direct
   assert.equal((await app.current(id)).status, 'draft');
   assert.equal((await app.wallet.snapshot('alice')).held, 0); assert.equal(app.state.generations, 0);
 });
+
+const DEEP_MODELS = ['doubao-seedance-2-0-260128', PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, WAN3_MODEL];
+for (const model of DEEP_MODELS) for (const selected of [[], ['photo'], ['product'], ['background'], ['voice'], ['photo', 'voice', 'product', 'background']]) {
+  test(`deep ${model} completes with ${selected.join('+') || 'all original'} and preserves options across restart`, async t => {
+    const replacements = Object.fromEntries(['photo', 'voice', 'product', 'background'].map(kind => [kind, selected.includes(kind)]));
+    const calls = { materials: [], generations: [], conversions: 0, restores: 0, muxes: 0 };
+    let done = false;
+    const provider = {
+      createMaterial: async (_url, kind) => { calls.materials.push(kind); return { id: kind + '-id', status: 2 }; },
+      upload: async path => { const kind = path.split(/[\\/]/).at(-1).replace('.jpg', '').replace('source.mp4', 'video'); calls.materials.push(kind); return { id: kind + '-id', status: 2 }; },
+      generate: async task => { calls.generations.push(model === WAN3_MODEL ? wan3GenerationBody(task) : generationBody(task)); return { taskId: 'deep-job' }; },
+      query: async () => done ? { url: 'https://cdn.example/deep.mp4' } : {},
+    };
+    const app = await fixture(t, { provider, wan3Provider: provider, config: { ...CONFIG, wan3Enabled: true },
+      captions: { extract: async () => assert.fail('deep mode must not rewrite original subtitles') },
+      voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 4 }; },
+      restoreAudio: async (_source, _generated, output) => { calls.restores++; await writeFile(output, VIDEO); },
+      voiceConversion: { enabled: replacements.voice, advance: async (task, _folder, save) => { calls.conversions++; task.voiceConversion = { ready: true }; await save(); },
+        mux: async (_video, _audio, output) => { calls.muxes++; await writeFile(output, VIDEO); } } });
+    const id = randomUUID();
+    assert.equal((await app.call('/tasks', { body: { requestId: id, model, mode: 'deep', replacements } })).status, 201);
+    for (const kind of ['video', ...selected]) {
+      const response = await fetch(app.base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: VIDEO });
+      assert.equal(response.status, 200, await response.text());
+    }
+    await app.close(); await app.open();
+    assert.deepEqual((await app.current(id)).replacements, replacements);
+    // Legacy request overrides must not enable sound or disable preservation in deep mode.
+    const response = await app.call(`/tasks/${id}/start`, { body: { voiceEngine: 'indextts2', sourceAudioMode: 'silent' } });
+    assert.equal(response.status, 202, await response.text());
+    await app.until(id, task => task.status === 'running');
+    const expected = ['photo', 'product', 'background'].filter(kind => replacements[kind]);
+    assert.deepEqual(calls.materials.sort(), [...expected, 'video'].sort());
+    assert.equal(calls.generations.length, 1);
+    const resources = model === WAN3_MODEL ? calls.generations[0].input.media.filter(media => media.type === 'reference_image').map(media => media.url)
+      : calls.generations[0].payload.resources.map(url => url.replace('asset://', ''));
+    assert.deepEqual(resources, expected.map(kind => kind + '-id'));
+    await app.close(); await app.open(); done = true;
+    const completed = await app.until(id, task => task.status === 'completed');
+    assert.equal(completed.mode, 'deep'); assert.equal(completed.model, model); assert.ok(completed.resultUrl);
+    assert.deepEqual(completed.replacements, replacements);
+    assert.equal(calls.generations.length, 1); assert.equal(calls.conversions, Number(replacements.voice));
+    assert.equal(calls.restores, Number(!replacements.voice)); assert.equal(calls.muxes, Number(replacements.voice));
+    assert.equal(completed.billing.status, 'settled');
+  });
+}
+
+test('deep options validate selected inputs before billing, exclude disabled assets, and lock after dispatch', async t => {
+  const app = await fixture(t, { restoreAudio: async (_source, _generated, output) => writeFile(output, VIDEO) });
+  const id = randomUUID();
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), mode: 'invalid' } })).status, 400);
+  assert.equal((await app.call('/tasks', { body: { requestId: randomUUID(), mode: 'deep', replacements: { product: 'true' } } })).status, 400);
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: { product: true, background: true } } });
+  const upload = kind => fetch(app.base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: VIDEO });
+  assert.equal((await upload('video')).status, 200);
+  assert.equal((await upload('photo')).status, 400);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 400);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0); assert.equal(app.state.generations, 0);
+  for (const kind of ['product', 'background']) assert.equal((await upload(kind)).status, 200);
+  assert.equal((await app.call(`/tasks/${id}/product`, { owner: 'bob' })).status, 404);
+  assert.equal((await app.call(`/tasks/${id}/product`)).headers.get('content-type'), 'image/jpeg');
+  assert.equal((await app.call(`/tasks/${id}/options`, { body: { replacements: { product: true } } })).status, 200);
+  assert.equal((await app.current(id)).background, undefined);
+  assert.equal((await app.call(`/tasks/${id}/background`)).status, 404);
+  assert.equal((await app.call(`/tasks/${id}/source-audio`, { body: { voiceEngine: 'chatterbox' } })).status, 409);
+  await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
+  assert.deepEqual(app.state.body.payload.resources, ['asset://product-id']);
+  assert.equal((await app.call(`/tasks/${id}/options`, { body: { replacements: {} } })).status, 409);
+  assert.equal((await upload('product')).status, 409);
+  const signed = app.state.creates.find(item => item.kind === 'product').url;
+  const url = new URL(signed);
+  assert.equal((await fetch(app.base + url.pathname + url.search)).status, 200);
+  assert.equal((await fetch(app.base + url.pathname + url.search.replace(/signature=./, 'signature=x'))).status, 403);
+  const classic = await app.init();
+  assert.equal((await app.call(`/tasks/${classic}/options`, { body: { replacements: {} } })).status, 409);
+  assert.equal((await fetch(app.base + `/api/video-replica/tasks/${classic}/product`, { method: 'PUT', body: VIDEO })).status, 400);
+});
+
+for (const model of DEEP_MODELS) test(`deep ${model} keeps product references and original audio across 60-second segments`, async t => {
+  const calls = [];
+  const provider = {
+    createMaterial: async (_url, kind) => ({ id: kind, status: 2 }),
+    upload: async path => ({ id: path.split(/[\\/]/).at(-1).replace(/\.(jpg|mp4)$/, ''), status: 2 }),
+    generate: async task => { calls.push(task); return { taskId: task.materials.video.id }; },
+    query: async id => ({ url: `https://cdn.example/${id}.mp4` }),
+  };
+  let restores = 0;
+  const app = await fixture(t, { provider, wan3Provider: provider, config: { ...CONFIG, wan3Enabled: true },
+    probe: async path => ({ ...META, duration: /segment-\d-result\.tmp$/.test(path) ? model === PREMIUM_MODEL ? 30 : 15 : 60 }),
+    scenes: async () => ({ cuts: [] }),
+    cutSegment: async (_input, output) => writeFile(output, VIDEO),
+    joinSegments: async (_inputs, _segments, output) => { await writeFile(output, VIDEO); return { ...META, duration: 60 }; },
+    restoreAudio: async (_source, _generated, output) => { restores++; await writeFile(output, VIDEO); } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model, mode: 'deep', replacements: { product: true } } });
+  for (const kind of ['video', 'product']) assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: VIDEO })).status, 200);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(calls.length, model === PREMIUM_MODEL ? 2 : 4);
+  for (const task of calls) { assert.equal(task.materials.product.id, 'product'); assert.equal(task.photo, undefined); assert.equal(task.voice, undefined); }
+  assert.equal(completed.actualDuration, 60); assert.equal(restores, 1);
+});

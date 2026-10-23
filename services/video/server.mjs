@@ -9,7 +9,8 @@ import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL } from './provider.mjs';
 import { safeVideoError } from './errors.mjs';
-import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, downloadVideo, serveMedia } from './media.mjs';
+import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, restoreSourceAudio, downloadVideo, serveMedia } from './media.mjs';
+import { DEEP_IMAGE_KINDS, DEEP_KINDS, DEEP_LABELS, deepImageKinds, isDeepReplica, preservesSourceAudio } from './deep-replica.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createPixverseProvider } from './pixverse.mjs';
@@ -35,7 +36,7 @@ const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const isFalReplacement = model => model === PIXVERSE_MODEL || model === WAN_MODEL;
 const error = (message, status = 400, code) => new VideoError(message, status, code);
 const json = (res, status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' }); res.end(JSON.stringify(value)); };
-export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo|voice|generated|narration|emotion-\d{1,2}|segment-\d)$/.test(path);
+export const isVideoSourcePath = path => /^\/api\/video-replica\/source\/[a-f0-9-]{36}\/(video|photo|product|background|voice|generated|narration|emotion-\d{1,2}|segment-\d)$/.test(path);
 
 async function readBody(req, limit) {
   if (Number(req.headers['content-length']) > limit) throw error('文件过大，请压缩后重试。', 413, 'VIDEO_UPLOAD_TOO_LARGE');
@@ -54,7 +55,7 @@ async function readJSON(req) {
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo,
-  photo = normalizePhoto, voice = normalizeVoice, speech, captions = createCaptionService(env),
+  photo = normalizePhoto, voice = normalizeVoice, restoreAudio = restoreSourceAudio, speech, captions = createCaptionService(env),
   narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
   scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
@@ -95,6 +96,18 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!model) throw error('请选择有效的生成版本，请刷新页面后重新提交。', 400, 'VIDEO_MODEL_INVALID');
     if (!model.enabled) throw error(`${model.name}尚未配置，请联系管理员。`, 503, 'VIDEO_NOT_CONFIGURED');
     return model.id;
+  }
+  function deepOptions(value = {}) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.entries(value).some(([key, enabled]) => !DEEP_KINDS.includes(key) || typeof enabled !== 'boolean')) {
+      throw error('请选择有效的深度复刻替换项目。', 400, 'VIDEO_REPLACEMENTS_INVALID');
+    }
+    return Object.fromEntries(DEEP_KINDS.map(kind => [kind, value[kind] === true]));
+  }
+  function validateDeepModel(model) {
+    if (!models.some(item => item.id === model && !isFalReplacement(item.id))) {
+      throw error('该历史版本不支持新建深度复刻，请选择当前生成版本。', 400, 'VIDEO_MODEL_INVALID');
+    }
   }
   function selectedSourceAudioMode(mode = 'original', model = MODEL) {
     if (!['original', 'silent'].includes(mode) || mode === 'silent' && !MODELS.some(item => item.id === model && !isFalReplacement(item.id))) {
@@ -163,8 +176,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   const instance = createRequestLedger({ storageDir });
   let closing = false, fatal = false, timer, shutdownPromise;
   const folder = task => join(storageDir, task.id);
-  const file = (task, kind) => join(folder(task), kind === 'photo' ? 'photo.jpg' : kind === 'video' ? 'source.mp4' : kind === 'voice' ? 'reference.wav' : /^segment-\d$/.test(kind) ? `${kind}.mp4` : 'result.mp4');
-  const mime = kind => kind === 'photo' ? 'image/jpeg' : kind === 'voice' ? 'audio/wav' : 'video/mp4';
+  const file = (task, kind) => join(folder(task), DEEP_IMAGE_KINDS.includes(kind) ? `${kind}.jpg` : kind === 'video' ? 'source.mp4' : kind === 'voice' ? 'reference.wav' : /^segment-\d$/.test(kind) ? `${kind}.mp4` : 'result.mp4');
+  const mime = kind => DEEP_IMAGE_KINDS.includes(kind) ? 'image/jpeg' : kind === 'voice' ? 'audio/wav' : 'video/mp4';
   const isExpired = task => !ACTIVE.has(task.status) && task.expiresAt <= now();
   function serialize(key, action) {
     const pending = (locks.get(key) || Promise.resolve()).catch(() => {}).then(action);
@@ -201,6 +214,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const costPricing = task.billing?.mode === 'api_cost' || (!task.billing && costMeter.enabled);
     const pricingKey = task.billing?.pricingKey || task.pricingKey || (!task.billing && task.status === 'draft' ? generationPrice('video', task.model || MODEL)?.key : undefined);
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
+      ...(isDeepReplica(task) ? { mode: 'deep', replacements: task.replacements, product: task.product, background: task.background,
+        sourceProductUrl: !expired && task.product ? `${PREFIX}/tasks/${task.id}/product` : null,
+        sourceBackgroundUrl: !expired && task.background ? `${PREFIX}/tasks/${task.id}/background` : null } : {}),
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
       startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video && video, targetDuration: task.targetDuration, segments: segmentView(task), queue: wan3Queue.view(task), photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
@@ -346,7 +362,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   function materialFailure(kind, material) {
     const part = /^segment-(\d+)$/.exec(kind);
-    return `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : part ? `参考视频第 ${Number(part[1]) + 1} 段` : '参考视频'}未通过素材审核：${safeMessage(material.error) || '上游未返回具体拒绝原因。'}`;
+    return `${kind === 'photo' ? '人物照片' : kind === 'voice' ? '声音参考' : ['product', 'background'].includes(kind) ? `${DEEP_LABELS[kind]}图片` : part ? `参考视频第 ${Number(part[1]) + 1} 段` : '参考视频'}未通过素材审核：${safeMessage(material.error) || '上游未返回具体拒绝原因。'}`;
   }
   // Older tasks discarded provider reasons. Query their existing receipts once; never regenerate.
   async function restoreFailureReason(task) {
@@ -382,6 +398,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return `${config.publicOrigin}${PREFIX}/source/${task.id}/${kind}?expires=${expires}&signature=${signature(task.id, kind, expires)}`;
   }
   async function analyzeSource(task) {
+    if (isDeepReplica(task)) return;
     if (task.voiceEngine === 'chatterbox') {
       // Whole-track conversion uses audio directly; only legacy translation needs text.
       if (!task.targetLanguage) return;
@@ -548,7 +565,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await reconcile(task);
       if (!task.cleaned) {
         await archiveTaskMaterials(task);
-        for (const name of ['photo.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result.mp4.borders.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
+        for (const name of ['photo.jpg', 'product.jpg', 'background.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result.mp4.borders.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         await rm(join(folder(task), 'narration'), { recursive: true, force: true });
         await rm(join(folder(task), 'localization'), { recursive: true, force: true });
         for (const name of ['localized-voice.wav', 'localized-voice.wav.asr.json', 'localized-voice.wav.asr.json.tmp',
@@ -604,7 +621,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         segment.cut = true; await save(task);
       }
       const videoKinds = task.segments ? task.segments.map(segment => `segment-${segment.index}`) : ['video'];
-      for (const kind of ['photo', ...videoKinds, ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
+      for (const kind of [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), ...videoKinds, ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
         if (!task.materials[kind]) {
           task.materials[kind] = task.model === WAN3_MODEL
             ? await wan3Provider.upload(kind === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4') : file(task, kind), mime(kind))
@@ -671,7 +688,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
     }
     if (task.status === 'downloading') {
-      const target = task.voice || task.captions ? join(folder(task), 'generated.mp4') : file(task, 'result');
+      const target = task.voice || task.captions || preservesSourceAudio(task) ? join(folder(task), 'generated.mp4') : file(task, 'result');
       let metadata;
       if (task.segments) {
         for (const segment of task.segments) {
@@ -689,12 +706,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         await rename(temporary, target);
       }
       task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
-      if (task.voice || task.captions) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
+      if (task.voice || task.captions || preservesSourceAudio(task)) { task.rawReady = true; task.status = 'verifying'; task.error = ''; delete task.code; await save(task); }
       else { await complete(task); }
     }
     if (task.status === 'verifying') {
       const generated = join(folder(task), 'generated.mp4'), aligned = join(folder(task), 'result.tmp');
-      if (task.languageRouting?.translate) {
+      if (preservesSourceAudio(task)) {
+        await restoreAudio(file(task, 'video'), generated, aligned);
+        task.audioCheck = { engine: 'original', referenceApplied: false, originalAudioPreserved: true };
+      } else if (task.languageRouting?.translate) {
         if (!task.localization?.ready) throw error('译后配音尚未就绪。', 502, 'VIDEO_LOCALIZATION_PENDING');
         if (!task.lipsync) {
           task.lipsyncFiles ||= {};
@@ -895,7 +915,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     try {
       await ready;
       const url = new URL(req.url, 'http://localhost'), path = url.pathname;
-      const source = /^\/api\/video-replica\/source\/([a-f0-9-]{36})\/(video|photo|voice|generated|narration|emotion-\d{1,2}|segment-\d)$/.exec(path);
+      const source = /^\/api\/video-replica\/source\/([a-f0-9-]{36})\/(video|photo|product|background|voice|generated|narration|emotion-\d{1,2}|segment-\d)$/.exec(path);
       if (source) {
         const task = jobs.get(source[1]), expires = Number(url.searchParams.get('expires')), supplied = url.searchParams.get('signature') || '';
         const valid = config.signingSecret && /^\d{13}$/.test(url.searchParams.get('expires') || '') && /^[a-f0-9]{64}$/.test(supplied)
@@ -937,19 +957,23 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const existing = jobs.get(body.requestId);
           if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
           const model = selectedModel(body.model);
+          if (body.mode !== undefined && !['classic', 'deep'].includes(body.mode)) throw error('复刻模式无效。', 400, 'VIDEO_MODE_INVALID');
+          const deep = body.mode === 'deep', replacements = deep ? deepOptions(body.replacements) : undefined;
+          if (deep) validateDeepModel(model);
           // Keep explicit legacy parameters compatible; new clients convert the source voice.
-          const task = { id: body.requestId, userId, model, voiceEngine: selectedVoiceEngine(body.voiceEngine ?? 'chatterbox'),
-            sourceAudioMode: selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model),
+          const task = { id: body.requestId, userId, model, voiceEngine: deep ? replacements.voice ? 'chatterbox' : 'seedance' : selectedVoiceEngine(body.voiceEngine ?? 'chatterbox'),
+            sourceAudioMode: deep ? 'original' : selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model),
+            ...(deep ? { mode: 'deep', replacements } : {}),
             status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
       }
-      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|voice|model|duration|language|source-audio|analyze|speech|recheck|start|result|resume|cancel))?$/.exec(path);
+      const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|product|background|voice|options|model|duration|language|source-audio|analyze|speech|recheck|start|result|resume|cancel))?$/.exec(path);
       const task = match && jobs.get(match[1]);
       if (!task || task.userId !== userId) throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
       if (!match[2] && req.method === 'GET') { json(res, 200, { task: view(task) }); return; }
       if (isExpired(task)) throw error('素材或成片已过期，请重新上传。', 410, 'VIDEO_EXPIRED');
-      if (['video', 'photo', 'voice'].includes(match[2]) && ['GET', 'HEAD'].includes(req.method)) {
+      if (['video', ...DEEP_KINDS].includes(match[2]) && ['GET', 'HEAD'].includes(req.method)) {
         if (!task[match[2]]) throw error('素材尚未上传。', 404, 'VIDEO_NOT_FOUND');
         await serveMedia(req, res, file(task, match[2]), mime(match[2])); return;
       }
@@ -979,10 +1003,21 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           }
           json(res, 200, { task: view(task) }); return;
         }
+        if (match[2] === 'options' && req.method === 'POST') {
+          const body = await readJSON(req);
+          if (!isDeepReplica(task) || task.status !== 'draft') throw error('只有深度复刻草稿可以调整替换项目。', 409);
+          const replacements = deepOptions(body.replacements);
+          for (const kind of DEEP_KINDS) if (!replacements[kind]) { delete task[kind]; delete task.materials[kind]; }
+          task.replacements = replacements;
+          task.voiceEngine = replacements.voice ? 'chatterbox' : 'seedance';
+          task.sourceAudioMode = 'original';
+          await save(task); json(res, 200, { task: view(task) }); return;
+        }
         if (match[2] === 'model' && req.method === 'POST') {
           const body = await readJSON(req);
           if (task.status !== 'draft') throw error('任务已提交，不能切换生成版本。', 409);
           const model = selectedModel(body.model);
+          if (isDeepReplica(task)) validateDeepModel(model);
           if (task.video) {
             videoDuration(task.video, model);
             if (segmentPlan(task.video, model) && !task.video.boundaries) {
@@ -1009,6 +1044,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         }
         if (match[2] === 'source-audio' && req.method === 'POST') {
           const body = await readJSON(req);
+          if (isDeepReplica(task)) throw error('深度复刻请通过声音替换开关设置。', 409);
           if (task.status !== 'draft') throw error('任务已提交，不能切换参考视频声音模式。', 409);
           const sourceAudioMode = selectedSourceAudioMode(body.sourceAudioMode, task.model);
           const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
@@ -1019,20 +1055,29 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.voiceEngine = voiceEngine;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
-        if (['video', 'photo', 'voice'].includes(match[2]) && (req.method === 'PUT' || req.method === 'POST' && match[2] !== 'video')) {
+        if (['video', ...DEEP_KINDS].includes(match[2]) && (req.method === 'PUT' || req.method === 'POST' && ['photo', 'voice'].includes(match[2]))) {
           const replacingSource = match[2] === 'video' && view(task).canReplaceSource;
           if (task.status !== 'draft' && !replacingSource) throw error('任务已提交，不能替换素材。', 409);
           const kind = match[2];
+          if (isDeepReplica(task) ? kind !== 'video' && !task.replacements[kind] : ['product', 'background'].includes(kind)) {
+            throw error('请先在深度复刻中启用对应的替换项目。', 400, 'VIDEO_REPLACEMENT_DISABLED');
+          }
           const imported = req.method === 'POST' && materialLibrary ? await materialLibrary.get(userId, (await readJSON(req)).assetId) : null;
           if (req.method === 'POST' && (!imported || imported.kind !== kind)) throw error('请选择相应类型的本人素材。', 400);
           const bytes = imported ? imported.bytes : await readBody(req, kind === 'video' ? VIDEO_LIMIT : kind === 'voice' ? VOICE_LIMIT : PHOTO_LIMIT);
           let name = imported?.name;
           if (!name && req.headers['x-file-name']) { try { name = decodeURIComponent(req.headers['x-file-name']); } catch {} }
           const temporary = join(folder(task), 'upload.tmp');
-          if (kind === 'photo') {
-            const normalized = imported ? bytes : await photo(bytes); await writeFile(temporary, normalized, { mode: 0o600 });
-            const asset = materialLibrary && (imported || await materialLibrary.save(userId, { kind, path: temporary, name }));
-            task.photo = { ready: true, ...(asset ? { assetId: asset.id } : {}) };
+          if (DEEP_IMAGE_KINDS.includes(kind)) {
+            let normalized;
+            try { normalized = imported ? bytes : await photo(bytes); }
+            catch (cause) {
+              if (kind !== 'photo' && cause.code === 'VIDEO_PHOTO_INVALID') throw error(`请上传清晰的 JPG、PNG 或 WebP ${DEEP_LABELS[kind]}图片，宽高至少 300 像素。`, 400, 'VIDEO_PHOTO_INVALID');
+              throw cause;
+            }
+            await writeFile(temporary, normalized, { mode: 0o600 });
+            const asset = kind === 'photo' && materialLibrary && (imported || await materialLibrary.save(userId, { kind, path: temporary, name }));
+            task[kind] = { ready: true, ...(asset ? { assetId: asset.id } : {}) };
           } else if (kind === 'voice') {
             await writeFile(temporary, bytes, { mode: 0o600 });
             const normalized = join(folder(task), 'voice.tmp.wav');
@@ -1121,8 +1166,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (match[2] === 'start' && req.method === 'POST') {
           const body = await readJSON(req);
           if (task.status !== 'draft') { json(res, 200, { task: view(task) }); return; }
-          if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
-          const voiceEngine = selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
+          if (isDeepReplica(task)) {
+            if (!task.video) throw error('请先上传参考视频。');
+            for (const kind of DEEP_KINDS) if (task.replacements[kind] && !task[kind]) throw error(`请先上传${DEEP_LABELS[kind]}参考素材。`, 400, 'VIDEO_REPLACEMENT_REQUIRED');
+          } else if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
+          const voiceEngine = isDeepReplica(task) ? task.replacements.voice ? 'chatterbox' : 'seedance' : selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
           if (voiceEngine === 'chatterbox') {
             if (!task.voice) throw error('请先上传目标声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
             if (!voiceConversion?.enabled) throw error('音色转换服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
@@ -1132,8 +1180,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             if (!narration?.enabled || !lipsync?.enabled) throw error('参考声音配音或口型服务尚未配置，请联系管理员。', 503, 'VIDEO_VOICE_NOT_CONFIGURED');
           }
           const model = selectedModel(body.model ?? (models.some(model => model.id === task.model) ? task.model : MODEL));
+          if (isDeepReplica(task)) validateDeepModel(model);
           if (model === WAN3_MODEL && task.voice && !['indextts2', 'chatterbox'].includes(voiceEngine)) throw error('Wan 3.0 换声请使用 Chatterbox 音色转换。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
-          const sourceAudioMode = selectedSourceAudioMode(body.sourceAudioMode ?? task.sourceAudioMode, model);
+          const sourceAudioMode = isDeepReplica(task) ? 'original' : selectedSourceAudioMode(body.sourceAudioMode ?? task.sourceAudioMode, model);
           if (voiceEngine === 'chatterbox' && sourceAudioMode !== 'original') throw error('音色转换需要保留原视频声音。', 400, 'VIDEO_SOURCE_AUDIO_MODE_INVALID');
           if (sourceAudioMode === 'silent' && !task.voice) throw error('请先上传声音参考。', 400, 'VIDEO_VOICE_REQUIRED');
           if (isFalReplacement(model) && task.voice && !['indextts2', 'chatterbox'].includes(voiceEngine)) throw error(`${models.find(item => item.id === model).name} 更换声音需使用独立配音和口型同步，请新建复刻后上传声音参考。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
@@ -1150,7 +1199,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           }
           if (segmentPlan(task.video, model)) {
             // Whole-track conversion keeps one continuous voice across the joined parts.
-            if (voiceEngine !== 'chatterbox') throw error(`超过 ${models.find(item => item.id === model).maxDuration} 秒的生成时长需使用 Chatterbox 音色转换分段生成。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
+            if (voiceEngine !== 'chatterbox' && !preservesSourceAudio(task)) throw error(`超过 ${models.find(item => item.id === model).maxDuration} 秒的生成时长需使用 Chatterbox 音色转换分段生成。`, 400, 'VIDEO_VOICE_ENGINE_INVALID');
             if (!task.video.boundaries) task.video = { ...task.video, boundaries: await segmentBoundaries(file(task, 'video'), task.video, model) };
           }
           const duration = videoDuration(task.video, model), plan = segmentPlan(task.video, model);
@@ -1164,7 +1213,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.voiceEngine = voiceEngine;
           // Ignore cached clients and clear draft choices from before language selection was removed.
           delete task.targetLanguage; delete task.languageRouting; delete task.languageDetection; delete task.localization;
-          task.recoveryPolicy = ['indextts2', 'chatterbox'].includes(voiceEngine) || sourceAudioMode === 'silent' ? 1 : undefined;
+          task.recoveryPolicy = isDeepReplica(task) || ['indextts2', 'chatterbox'].includes(voiceEngine) || sourceAudioMode === 'silent' ? 1 : undefined;
           if (task.recoveryPolicy) task.recoveryDeadline = now() + 30 * 60_000;
           task.sourceAudioMode = sourceAudioMode;
           task.status = 'reserving'; task.startedAt = now(); task.expiresAt = now() + 3 * DAY; await save(task);

@@ -89,6 +89,21 @@ export async function normalizePhoto(bytes) {
     return await input.rotate().resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 95 }).toBuffer();
   } catch { throw new VideoError('请上传清晰的 JPG、PNG 或 WebP 人物照片，宽高至少 300 像素。', 400, 'VIDEO_PHOTO_INVALID'); }
 }
+export async function restoreSourceAudio(source, generated, output) {
+  try {
+    const original = await probeVideo(source), edited = await probeVideo(generated);
+    const duration = Math.min(original.duration, edited.duration);
+    await run('ffmpeg', ['-v', 'error', '-nostdin', '-y', '-protocol_whitelist', 'file,pipe', '-i', generated,
+      '-protocol_whitelist', 'file,pipe', '-i', source, '-map', '0:v:0', '-map', '1:a:0?',
+      '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', String(duration), '-movflags', '+faststart', '-f', 'mp4', output],
+    { timeout: 120_000, maxBuffer: 1024 * 1024 });
+    const result = await probeVideo(output);
+    if (result.audio !== original.audio || Math.abs(result.duration - duration) > 0.15) throw new Error('Invalid original audio');
+  } catch {
+    await rm(output, { force: true });
+    throw new VideoError('原视频声音合成未完成，请重试处理已有成片。', 502, 'VIDEO_SOURCE_AUDIO_RESTORE_FAILED');
+  }
+}
 const DOWNLOAD_LIMIT = 200 * 1024 * 1024;
 const strongEtag = value => typeof value === 'string' && /^"[^\r\n"]*"$/.test(value) ? value : null;
 const byteCount = value => typeof value === 'string' && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null;

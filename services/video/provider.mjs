@@ -1,4 +1,5 @@
 import { providerFailure, readProviderResponse, safeVideoError } from './errors.mjs';
+import { DEEP_IMAGE_KINDS, deepGenerationBody, isDeepReplica } from './deep-replica.mjs';
 
 export const MODEL = 'doubao-seedance-2-0-260128';
 export const PIXVERSE_MODEL = 'fal-ai/pixverse/swap';
@@ -48,6 +49,7 @@ export function videoConfig(env = {}, publicOrigin) {
   return config;
 }
 export function generationBody(task) {
+  if (isDeepReplica(task)) return deepGenerationBody(task, MODEL);
   // Separate audio services consume the source after the visual edit.
   const voiceConversion = task.voice && task.voiceEngine === 'chatterbox';
   const separateNarration = task.voice && ['indextts2', 'chatterbox'].includes(task.voiceEngine);
@@ -121,7 +123,7 @@ export function createVideoProvider(config, fetchImpl = fetch) {
   }
   return {
     async createMaterial(url, kind) {
-      const result = await call('material', '/openApi/material/create', { name: `replica-${kind}`, originalUrl: url, type: 1, fileType: kind === 'photo' ? 1 : kind === 'voice' ? 2 : 3, thirdChannel: 1 });
+      const result = await call('material', '/openApi/material/create', { name: `replica-${kind}`, originalUrl: url, type: 1, fileType: DEEP_IMAGE_KINDS.includes(kind) ? 1 : kind === 'voice' ? 2 : 3, thirdChannel: 1 });
       if (!result.data?.materialId) throw new VideoError('素材服务未返回素材编号。', 502, 'VIDEO_MATERIAL_INVALID');
       return { id: String(result.data.materialId), status: Number(result.data.status || 1),
         ...(Number(result.data.status) === 3 ? { error: providerFailure(result.data, secrets) } : {}) };

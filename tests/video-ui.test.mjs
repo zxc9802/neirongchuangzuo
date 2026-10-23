@@ -116,7 +116,7 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
   await settle();
   return { node, ctx, useMaterial: module.useReplicaMaterial, recover: () => { failing = false; }, fail: () => { failing = true; },
     poll: async () => { poll(); await settle(); }, message: () => node('#replica-error').textContent,
-    html: () => html, cost: () => node('#replica-cost').textContent, renders: () => renders, settle,
+    html: () => html, cost: () => node('#replica-cost').textContent, renders: () => renders, settle, rebind: () => module.bindVideoReplica(ctx),
     select: id => node('#replica-history').onclick({ target: { closest: () => ({ dataset: { replicaTask: id } }) } }),
     wallet: async value => { wallet = value; await refreshWorkspaceCredits(); } };
 }
@@ -917,4 +917,67 @@ test('API voice errors do not reintroduce the removed engine name', async t => {
   page.node('#replica-submit').onclick(); await page.settle();
   assert.match(page.message(), /配音服务.*拒绝了配音请求/);
   assert.doesNotMatch(page.html(), /IndexTTS2|replica-voice-engine|配音模型/);
+});
+
+test('deep mode has four optional replacements and keeps the classic draft separate', async t => {
+  const page = await fixture(t); page.recover(); await page.poll();
+  page.node('#replica-photo').onchange({ target: { files: [new File(['data'], 'classic-face.png')] } });
+  page.node('#replica-mode-deep').onclick(); page.rebind();
+  for (const kind of ['photo', 'voice', 'product', 'background']) {
+    assert.match(page.html(), new RegExp(`id="replica-toggle-${kind}"`));
+    assert.doesNotMatch(page.html(), new RegExp(`id="replica-${kind}"`));
+  }
+  page.node('#replica-toggle-product').onchange({ target: { checked: true } }); page.rebind();
+  page.node('#replica-product').onchange({ target: { files: [new File(['data'], 'deep-product.png')] } });
+  page.node('#replica-mode-classic').onclick(); page.rebind();
+  assert.match(page.html(), /classic-face.png/); assert.doesNotMatch(page.html(), /deep-product.png|replica-toggle-/);
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.match(page.message(), /参考视频和一张人物照片/);
+  page.node('#replica-mode-deep').onclick(); page.rebind();
+  assert.match(page.html(), /deep-product.png/); assert.doesNotMatch(page.html(), /classic-face.png/);
+  page.node('#replica-new').onclick();
+  assert.doesNotMatch(page.html(), /deep-product.png/); assert.match(page.html(), /id="replica-mode-deep" aria-pressed="true"/);
+});
+
+for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan3.0-video']) test(`deep UI ${model} submits only enabled references with no mandatory face or voice`, async t => {
+  const calls = []; let task;
+  const page = await fixture(t, { apiFetch: (path, options) => {
+    if (path.endsWith('/config')) return Response.json({ enabled: true, models: [{ id: model, enabled: true }], voiceEnabled: false });
+    if (!options?.method) return;
+    const body = options.method === 'POST' ? JSON.parse(options.body) : {};
+    calls.push({ path, method: options.method, body });
+    if (path.endsWith('/tasks')) task = { id: body.requestId, status: 'draft', ...body };
+    else if (options.method === 'PUT') task[path.split('/').at(-1)] = { ready: true };
+    else if (path.endsWith('/start')) task.status = 'running';
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.node('#replica-mode-deep').onclick(); page.rebind();
+  page.node('#replica-models').onchange({ target: { value: model } });
+  for (const kind of ['product', 'background']) { page.node('#replica-toggle-' + kind).onchange({ target: { checked: true } }); page.rebind(); }
+  for (const kind of ['video', 'product', 'background']) page.node('#replica-' + kind).onchange({ target: { files: [new File(['data'], kind + '.mp4')] } });
+  page.node('#replica-toggle-background').onchange({ target: { checked: false } }); page.rebind();
+  page.node('#replica-submit').onclick(); await page.settle();
+  const creation = calls.find(call => call.path.endsWith('/tasks')).body;
+  assert.equal(creation.model, model); assert.equal(creation.mode, 'deep'); assert.equal(creation.voiceEngine, 'seedance');
+  assert.deepEqual(creation.replacements, { photo: false, voice: false, product: true, background: false });
+  assert.deepEqual(calls.filter(call => call.method === 'PUT').map(call => call.path.split('/').at(-1)), ['video', 'product']);
+  assert.equal(calls.filter(call => call.path.endsWith('/start')).length, 1);
+});
+
+test('deep UI requires only checked material and restores history mode, options and original audio status', async t => {
+  let requests = 0;
+  const task = { id: 'deep-history', status: 'completed', createdAt: Date.now(), mode: 'deep', model: STANDARD_MODEL,
+    replacements: { photo: false, voice: false, product: true, background: true }, product: { ready: true }, background: { ready: true },
+    sourceProductUrl: '/product.jpg', sourceBackgroundUrl: '/background.jpg', audioCheck: { originalAudioPreserved: true } };
+  const page = await fixture(t, { tasks: [task], apiFetch: (_url, options) => { if (options?.method) requests++; } });
+  page.recover(); await page.poll(); page.node('#replica-mode-deep').onclick(); page.rebind();
+  page.node('#replica-video').onchange({ target: { files: [new File(['data'], 'video.mp4')] } });
+  page.node('#replica-toggle-background').onchange({ target: { checked: true } }); page.rebind();
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.equal(requests, 0); assert.match(page.message(), /背景参考素材/);
+  page.select(task.id); page.rebind();
+  assert.match(page.html(), /id="replica-mode-deep" aria-pressed="true"/);
+  assert.match(page.html(), /id="replica-toggle-background"[^>]*checked[^>]*disabled/);
+  assert.match(page.html(), /src="\/background.jpg"/); assert.match(page.html(), /已保留原视频声音/);
+  assert.doesNotMatch(page.html(), /NaN|replica-photo"|replica-voice"/);
 });
