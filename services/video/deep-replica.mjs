@@ -5,7 +5,7 @@ export const isDeepReplica = task => task.mode === 'deep';
 export const preservesSourceAudio = task => isDeepReplica(task) && !task.replacements.voice;
 export const deepImageKinds = task => DEEP_IMAGE_KINDS.filter(kind => task.replacements[kind]);
 
-export function deepGenerationBody(task, defaultModel) {
+export function deepGenerationBody(task, defaultModel, resource = kind => `asset://${task.materials[kind].id}`) {
   const images = deepImageKinds(task);
   const reference = kind => `图片${images.indexOf(kind) + 1}`;
   const instructions = [
@@ -24,5 +24,5 @@ export function deepGenerationBody(task, defaultModel) {
   if (task.video?.duration) instructions.push(`视频1实际时长为${task.video.duration.toFixed(3)}秒，动作严格对应原视频时刻，不延伸或重复片段。`);
   return { modelId: task.model || defaultModel, abilityType: 'VIDEO', prompt: instructions.join('\n'),
     payload: { params: { mode: 'fusion_video', resolution: '720p', scale: 'adaptive', duration: -1, generateAudio: false },
-      resources: images.map(kind => `asset://${task.materials[kind].id}`), referVideoUrl: [`asset://${task.materials.video.id}`] } };
+      resources: images.map(resource), referVideoUrl: [resource('video')] } };
 }

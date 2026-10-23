@@ -2971,24 +2971,54 @@ for (const model of DEEP_MODELS) test(`deep ${model} keeps product references an
 for (const model of [WAN3_MODEL, WAN3_FAST_MODEL]) test(`${model} starts on the aggregate and settles the selected price`, async t => {
   let officialCalls = 0;
   const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    queryMaterial: async () => assert.fail('Wan must not query material registration'),
     wan3Provider: { generate: async () => { officialCalls++; throw new Error('wrong route'); } } });
   const id = await app.init(); await app.upload(id);
   const response = await app.call(`/tasks/${id}/start`, { body: { model } }); assert.equal(response.status, 202);
   await app.until(id, task => task.status === 'running');
   assert.equal(app.state.body.modelId, model); assert.equal(app.state.generations, 1); assert.equal(officialCalls, 0);
-  assert.deepEqual(app.state.body.payload.resources, ['asset://photo-id']);
+  assert.equal(app.state.creates.length, 0);
+  for (const [kind, url] of [['photo', app.state.body.payload.resources[0]], ['video', app.state.body.payload.referVideoUrl[0]]]) {
+    const source = new URL(url);
+    assert.equal(source.origin, CONFIG.publicOrigin); assert.equal(source.pathname, `/api/video-replica/source/${id}/${kind}`);
+    assert.ok(source.searchParams.get('signature'));
+    const response = await fetch(app.base + source.pathname + source.search);
+    assert.equal(response.status, 200); assert.deepEqual(Buffer.from(await response.arrayBuffer()), kind === 'photo' ? Buffer.from('photo') : VIDEO);
+  }
   await app.close(); await app.open(); app.state.done = true;
   const done = await app.until(id, task => task.status === 'completed');
   assert.equal(app.state.generations, 1, 'restart only queries the saved aggregate receipt');
   assert.equal(done.billing.chargedPoints, 4 * (model === WAN3_FAST_MODEL ? 738 : 492));
 });
 
-for (const failure of ['rejected', 'failed-job', 'material']) test(`Wan ${failure} retries three times then uses official Prime, persisting the budget`, async t => {
+for (const model of [WAN3_MODEL, WAN3_FAST_MODEL]) for (const status of ['reviewing', 'queued'])
+test(`${model} resumes old ${status} materials as direct URLs without registration`, async t => {
+  const app = await fixture(t, { credits: null, config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    queryMaterial: async () => assert.fail('Old Wan materials must not be queried'),
+    wan3Provider: { generate: async () => assert.fail('Must keep the aggregate route') } });
+  const id = randomUUID(), kinds = ['photo', 'product', 'background', 'video'];
+  await app.call('/tasks', { body: { requestId: id, model, mode: 'deep', replacements: { photo: true, product: true, background: true } } });
+  for (const kind of kinds) assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: VIDEO })).status, 200);
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  Object.assign(saved, { status, startedAt: Date.now(), wan3Route: 'aggregate', wan3Failures: 2,
+    materials: Object.fromEntries(kinds.map(kind => [kind, { id: `old-${kind}-id`, status: status === 'queued' ? 2 : 1 }])),
+    ...(status === 'queued' ? { wan3Queue: { state: 'queued', order: 1, attempts: [] }, wan3QueuedAt: Date.now() } : {}) });
+  await writeFile(path, JSON.stringify(saved)); await app.open();
+  await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 1);
+  assert.deepEqual([...app.state.body.payload.resources, ...app.state.body.payload.referVideoUrl].map(url => {
+    const source = new URL(url); assert.equal(source.origin, CONFIG.publicOrigin); assert.ok(source.searchParams.get('signature'));
+    return source.pathname.split('/').at(-1);
+  }), kinds);
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).wan3Failures, 2);
+  await app.close(); await app.open(); await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.generations, 1, 'a saved receipt must never be resubmitted');
+});
+
+for (const failure of ['rejected', 'failed-job']) test(`Wan ${failure} retries three times then uses official Prime, persisting the budget`, async t => {
   let at = Date.now(), attempts = 0, officialCalls = 0; const officialUploads = [];
   const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true }, now: () => at,
-    ...(failure === 'material' ? { provider: {
-      createMaterial: async () => { attempts++; throw new VideoError('Material unavailable', 502, 'VIDEO_PROVIDER_UNAVAILABLE'); },
-    } } : {}),
     generate: async () => { attempts++; if (failure === 'rejected') throw new VideoError('No capacity', 502, 'VIDEO_PROVIDER_REJECTED'); return { taskId: `failed-${attempts}` }; },
     query: async () => ({ failed: true, error: 'Upstream failed' }),
     wan3Provider: {
@@ -3031,8 +3061,15 @@ test('Wan segmented retry replaces only the failed part and keeps completed aggr
     joinSegments: async (_inputs, _segments, out) => { await writeFile(out, VIDEO); return { ...META, duration: 20 }; },
     restoreAudio: async (_source, _generated, out) => writeFile(out, VIDEO),
     provider: {
-      createMaterial: async (_url, kind) => ({ id: kind, status: 2 }),
-      generate: async task => { generated.push(task.materials.video.id); return { taskId: task.materials.video.id }; },
+      createMaterial: async () => assert.fail('Wan must not register segment materials'),
+      queryMaterial: async () => assert.fail('Wan must not query segment materials'),
+      generate: async task => {
+        const body = generationBody(task);
+        assert.equal(body.payload.resources[0], task.materials.photo.id);
+        assert.equal(body.payload.referVideoUrl[0], task.materials.video.id);
+        const segment = new URL(task.materials.video.id).pathname.split('/').at(-1);
+        generated.push(segment); return { taskId: segment };
+      },
       query: async id => {
         if (id === 'segment-1') { failures++; return { failed: true, error: 'No capacity' }; }
         return { completed: true, url: 'https://cdn.example/first.mp4' };

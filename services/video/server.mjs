@@ -392,6 +392,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         task.error = generationFailure(result, segment);
         if (segment) segment.error = safeMessage(result.error);
       } else {
+        if (isWan3Model(task.model)) return;
         const entry = Object.entries(task.materials || {}).find(([, value]) => value.status === 3);
         if (!entry) return;
         const [kind, material] = entry, result = await taskProvider.queryMaterial(material.id);
@@ -491,6 +492,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   async function wan3Input(task, part = task) {
     const input = part === task ? task : segmentTask(task, part);
+    // Also convert saved, unsubmitted aggregate jobs from the old material-ID flow.
+    if (isWan3Model(task.model) && part.wan3Route === 'aggregate') {
+      const kinds = [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), 'video',
+        ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])];
+      return { ...input, materials: Object.fromEntries(kinds.map(kind => [kind,
+        { id: sourceUrl(task, kind === 'video' && part !== task ? `segment-${part.index}` : kind), status: 2 }])) };
+    }
     // Existing official tasks already have OSS materials. A fallback uploads only its own source span.
     if (!isWan3Model(task.model) || part.wan3Route !== 'official' || !part.wan3Failures) return input;
     const kinds = [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), part === task ? 'video' : `segment-${part.index}`];
@@ -680,6 +688,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (task.voiceEngine === 'indextts2') return;
     }
     if (task.status === 'reviewing') {
+      const wan3Aggregate = isWan3Model(task.model) && (task.segments?.[0] || task).wan3Route === 'aggregate';
       for (const segment of task.segments || []) {
         if (segment.cut) continue;
         await cutSegment(file(task, 'video'), file(task, `segment-${segment.index}`), segment.start, segment.end);
@@ -688,9 +697,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const videoKinds = task.segments ? task.segments.map(segment => `segment-${segment.index}`) : ['video'];
       for (const kind of videoKinds) if (!task.materials[kind]) await prepareVideoReference(task, kind);
       for (const kind of [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), ...videoKinds, ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
-        if (!task.materials[kind]) {
-          task.materials[kind] = isWan3Model(task.model) && taskProvider === wan3Provider
-            ? await wan3Provider.upload(materialFile(task, kind), mime(kind), task.model)
+        if (!task.materials[kind] || wan3Aggregate) {
+          task.materials[kind] = isWan3Model(task.model)
+            ? wan3Aggregate ? { id: sourceUrl(task, kind), status: 2 }
+              : await wan3Provider.upload(materialFile(task, kind), mime(kind), task.model)
             : isFalReplacement(task.model)
             ? { id: await providerStorage.upload(file(task, kind), mime(kind)), status: 2 }
             : await taskProvider.createMaterial(sourceUrl(task, kind), kind);

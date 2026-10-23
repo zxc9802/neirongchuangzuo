@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { generationBody, createVideoProvider, MODELS, PIXVERSE_MODEL, WAN3_MODEL } from '../services/video/provider.mjs';
+import { generationBody, createVideoProvider, MODELS, PIXVERSE_MODEL, WAN3_MODEL, isWan3Model } from '../services/video/provider.mjs';
 import { wan3GenerationBody } from '../services/video/wan3.mjs';
 import { restoreSourceAudio, probeVideo } from '../services/video/media.mjs';
 
@@ -16,15 +16,20 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
     const selectedImages = kinds.slice(0, 3).filter(kind => replacements[kind]);
     const task = { mode: 'deep', model: model.id, replacements, video: { duration: 4 },
       voiceEngine: replacements.voice ? 'chatterbox' : 'seedance', ...(replacements.voice ? { voice: {} } : {}),
-      materials: Object.fromEntries(['video', ...selectedImages].map(kind => [kind, { id: kind + '-asset' }])) };
+      materials: Object.fromEntries(['video', ...selectedImages].map(kind => [kind, { id: isWan3Model(model.id) ? `https://workspace.example/${kind}?signature=test` : kind + '-asset' }])) };
+    if (isWan3Model(model.id)) {
+      const direct = generationBody(task);
+      assert.deepEqual(direct.payload.resources, selectedImages.map(kind => task.materials[kind].id));
+      assert.deepEqual(direct.payload.referVideoUrl, [task.materials.video.id]);
+    }
     const body = model.id === WAN3_MODEL ? wan3GenerationBody(task) : generationBody(task);
     const prompt = body.prompt || body.input.prompt;
     if (model.id === WAN3_MODEL) {
-      assert.deepEqual(body.input.media, [...selectedImages.map(kind => ({ type: 'reference_image', url: kind + '-asset' })), { type: 'reference_video', url: 'video-asset' }]);
+      assert.deepEqual(body.input.media, [...selectedImages.map(kind => ({ type: 'reference_image', url: task.materials[kind].id })), { type: 'reference_video', url: task.materials.video.id }]);
       assert.equal(body.parameters.audio, false);
     } else {
-      assert.deepEqual(body.payload.resources, selectedImages.map(kind => `asset://${kind}-asset`));
-      assert.deepEqual(body.payload.referVideoUrl, ['asset://video-asset']);
+      assert.deepEqual(body.payload.resources, selectedImages.map(kind => isWan3Model(model.id) ? task.materials[kind].id : `asset://${kind}-asset`));
+      assert.deepEqual(body.payload.referVideoUrl, [isWan3Model(model.id) ? task.materials.video.id : 'asset://video-asset']);
       assert.equal(body.payload.params.generateAudio, false);
       assert.equal(body.payload.referAudioUrl, undefined);
     }

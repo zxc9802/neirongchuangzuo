@@ -54,7 +54,8 @@ export function videoConfig(env = {}, publicOrigin) {
   return config;
 }
 export function generationBody(task) {
-  if (isDeepReplica(task)) return deepGenerationBody(task, MODEL);
+  const resource = kind => isWan3Model(task.model) ? task.materials[kind].id : `asset://${task.materials[kind].id}`;
+  if (isDeepReplica(task)) return deepGenerationBody(task, MODEL, resource);
   // Separate audio services consume the source after the visual edit.
   const voiceConversion = task.voice && task.voiceEngine === 'chatterbox';
   const separateNarration = task.voice && ['indextts2', 'chatterbox'].includes(task.voiceEngine);
@@ -75,8 +76,8 @@ export function generationBody(task) {
   return { modelId: task.model || MODEL, abilityType: 'VIDEO', prompt: PROMPT + lengthPrompt + captionPrompt + voicePrompt,
     // Video editing follows the source; fixed ratio/duration values are rejected by Seedance.
     payload: { params: { mode: 'fusion_video', resolution: '720p', scale: 'adaptive', duration: -1, generateAudio: !voiceConversion && !(task.sourceAudioMode === 'silent' && separateNarration) },
-      resources: [`asset://${task.materials.photo.id}`], referVideoUrl: [`asset://${task.materials.video.id}`],
-      ...(task.voice && !separateNarration ? { referAudioUrl: [`asset://${task.materials.voice.id}`] } : {}) } };
+      resources: [resource('photo')], referVideoUrl: [resource('video')],
+      ...(task.voice && !separateNarration ? { referAudioUrl: [resource('voice')] } : {}) } };
 }
 function nestedVideoUrl(value, key = '', depth = 0) {
   if (depth > 6 || !value) return undefined;

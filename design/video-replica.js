@@ -25,7 +25,7 @@ const LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英语' }, {
 const languageName = code => LANGUAGES.find(item => item.id === code)?.name || code || '待识别';
 const displayMessage = value => String(value || '').replace(/IndexTTS2/gi, '配音服务').replace(/Wan\s*3\.0/gi, 'qiya-3.0');
 const labels = { draft: '等待提交', reserving: '正在预留积分', preparing: '正在自动分析字幕与人声', reviewing: '正在审核人物素材', submitting: '正在提交生成', running: '正在替换人物', downloading: '正在保存成片', verifying: '正在核对台词与开口时间', settling: '正在确认积分', completed: '复刻完成', failed: '生成失败', waiting: '处理暂停', cancelled: '已停止处理', expired: '已过期' };
-const taskLabel = task => task.mode === 'deep' && task.status === 'running' ? '正在生成深度复刻' : task.mode === 'deep' && task.status === 'reviewing' ? '正在审核参考素材' : task.mode === 'deep' && task.status === 'verifying' && !task.replacements?.voice ? '正在合成原视频声音' : task.status === 'queued' ? '排队等待生成' : task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
+const taskLabel = task => [WAN3_MODEL, WAN3_FAST_MODEL].includes(task.model) && task.status === 'reviewing' ? '正在准备参考素材' : task.mode === 'deep' && task.status === 'running' ? '正在生成深度复刻' : task.mode === 'deep' && task.status === 'reviewing' ? '正在审核参考素材' : task.mode === 'deep' && task.status === 'verifying' && !task.replacements?.voice ? '正在合成原视频声音' : task.status === 'queued' ? '排队等待生成' : task.status === 'preparing' && ['en', 'ms'].includes(task.targetLanguage) && !task.languageRouting
   ? '正在识别原视频语言' : task.languageRouting?.translate && task.status === 'preparing'
   ? '正在翻译台词并生成配音' : task.languageRouting?.translate && task.status === 'verifying'
   ? '正在按译后配音同步口型' : task.voiceEngine === 'chatterbox' && task.status === 'preparing'

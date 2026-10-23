@@ -104,11 +104,13 @@ for (const model of [WAN3_MODEL, WAN3_FAST_MODEL]) test(`${model} aggregate and 
     requests.push({ url: String(url), body: JSON.parse(options.body) });
     return Response.json({ success: true, data: { success: true, result: { taskId: 'aggregate-job' } } });
   });
-  const input = { ...task, model, materials: { photo: { id: 'image-id' }, video: { id: 'video-id' } } };
+  const input = { ...task, model, materials: { photo: { id: 'https://workspace.example/photo?signature=test' }, video: { id: 'https://workspace.example/video?signature=test' } } };
   assert.equal((await provider.generate(input)).taskId, 'aggregate-job');
   assert.equal(requests[0].url, 'https://aggregate.example/openApi/generate');
   assert.equal(requests[0].body.modelId, model);
   assert.equal(requests[0].body.payload.params.mode, 'fusion_video');
+  assert.deepEqual(requests[0].body.payload.resources, [input.materials.photo.id]);
+  assert.deepEqual(requests[0].body.payload.referVideoUrl, [input.materials.video.id]);
   assert.equal(wan3GenerationBody({ ...task, model }).model, model);
 });
 
