@@ -136,7 +136,7 @@ function slot(kind, ctx) {
   return `<section class="replica-upload ${voice ? 'replica-voice-slot' : ''}"><div class="replica-slot-title">${deepMode() ? '' : `<span>${video ? '01' : voice ? '03' : '02'}</span>`}<h3>${t(title)}${voice ? `<small>${t(voiceRequired ? '必填' : '选填')} · ${t('更换音色')}</small>` : ''}</h3></div>
     ${voice ? voiceHint() : ''}<div class="replica-input-preview">${preview}</div>
     <strong class="replica-file-name">${ctx.esc(selected?.name || (saved?.assetId ? '已存入资产，长期保留' : saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : extra ? `上传想替换成的${REPLACEMENTS[kind]}` : '上传你想替换成的人物'))}</strong>
-    <p>${video ? `${deepMode() ? '参考原视频动作与镜头' : '单个人物'} · 2–${selectedModel().extendedDuration || selectedModel().maxDuration} 秒 · MP4 / MOV · 最大 50 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : `${extra ? '清晰图片 · 宽高至少 300 像素' : '清晰正脸'} · JPG / PNG / WebP · 最大 10 MB`}</p>
+    <p>${video ? `${deepMode() ? '参考原视频动作与镜头' : '单个人物'} · 2–${selectedModel().extendedDuration || selectedModel().maxDuration} 秒 · MP4 / MOV · 上限 300 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : `${extra ? '清晰图片 · 宽高至少 300 像素' : '清晰正脸'} · JPG / PNG / WebP · 最大 10 MB`}</p>
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="${t('上传')} ${t(title)}">
     <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${t(selected || saved ? '更换' : '选择')} ${t(title)}</label>${!video && !extra ? `<a href="#assets" class="replica-asset-link">${t(voice ? '从资产选择声音' : '从资产选择形象')}</a>` : ''}</section>`;
 }
@@ -265,7 +265,7 @@ async function selectModel(id) {
 }
 async function selectFile(kind, file) {
   if (!file) return;
-  const limit = kind === 'video' ? 50 : kind === 'voice' ? 15 : 10;
+  const limit = kind === 'video' ? 300 : kind === 'voice' ? 15 : 10;
   if (file.size > limit * 1024 * 1024) { state.error = `文件过大，${kind === 'video' ? '视频' : kind === 'voice' ? '声音参考' : '照片'}不能超过 ${limit} MB。`; refresh(); return; }
   if (state.urls[kind]) URL.revokeObjectURL(state.urls[kind]);
   delete selectedMaterials[kind];

@@ -1905,7 +1905,7 @@ test('new tasks complete after restart without ASR, VAD or duration quality gate
   assert.equal(app.state.generations, 1);
 });
 
-async function segmentedReplica(t, { generate, query, probe, model = PREMIUM_MODEL, duration = 45 } = {}) {
+async function segmentedReplica(t, { generate, query, probe, prepareReference, model = PREMIUM_MODEL, duration = 45 } = {}) {
   const calls = { creates: [], generations: [], cuts: [], joins: [], downloads: [], muxes: [], conversions: 0, finished: new Set(), receiptsReady: true };
   const name = path => path.split(/[\\/]/).at(-1);
   const provider = {
@@ -1924,6 +1924,7 @@ async function segmentedReplica(t, { generate, query, probe, model = PREMIUM_MOD
     },
   };
   const app = await fixture(t, { costMode: true, provider, wan3Provider: provider, config: { ...CONFIG, wan3Enabled: true },
+    ...(prepareReference ? { prepareReference } : {}),
     speech: fakeSpeech({ detect: async () => [{ start: 0.2, end: 10 }, { start: 10.6, end: 44 }] }),
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 5 }; },
     probe: probe || (async path => ({ ...META, duration: /segment-\d-result\.tmp$/.test(path) ? model === PREMIUM_MODEL ? 25 : 15 : duration })),
@@ -3053,4 +3054,77 @@ test('Wan segmented retry replaces only the failed part and keeps completed aggr
   const done = await app.until(id, task => task.status === 'completed');
   assert.equal(officialCalls, 1); assert.equal(generated.filter(id => id === 'segment-0').length, 1);
   assert.equal(generated.filter(id => id === 'segment-1').length, 4); assert.equal(done.billing.chargedPoints, 20 * 738);
+});
+
+
+for (const model of [PREMIUM_MODEL, WAN3_MODEL]) test(model + ' submits the compressed copy while keeping the owner source intact across restart and expiry', async t => {
+  let at = Date.now(), preparations = 0, done = false; const urls = [], uploads = [];
+  const compressed = Buffer.from('COMPRESSED REFERENCE');
+  const provider = {
+    createMaterial: async (url, kind) => { urls.push(url); return { id: kind, status: 2 }; },
+    upload: async path => { uploads.push({ path, bytes: await readFile(path) }); return { id: 'oss://reference', status: 2 }; },
+    generate: async () => ({ taskId: 'reference-job' }),
+    query: async () => done ? { url: 'https://cdn.example/result.mp4' } : {},
+  };
+  const app = await fixture(t, { now: () => at, provider, wan3Provider: provider, config: { ...CONFIG, wan3Enabled: true },
+    prepareReference: async (input, output, selected) => {
+      preparations++; assert.equal(selected, model); assert.deepEqual(await readFile(input), VIDEO);
+      await writeFile(output, compressed); return { compressed: true, inputBytes: 210_000_000, outputBytes: compressed.length };
+    }, restoreAudio: async (source, _generated, output) => {
+      assert.deepEqual(await readFile(source), VIDEO); await writeFile(output, VIDEO);
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model, mode: 'deep', replacements: {} } });
+  assert.equal((await fetch(app.base + '/api/video-replica/tasks/' + id + '/video', { method: 'PUT', body: VIDEO })).status, 200);
+  await app.call('/tasks/' + id + '/start', { body: {} }); await app.until(id, task => task.status === 'running');
+  if (model === WAN3_MODEL) {
+    assert.match(uploads[0].path, /video.reference.mp4$/); assert.deepEqual(uploads[0].bytes, compressed);
+  } else {
+    const url = new URL(urls[0]);
+    assert.deepEqual(Buffer.from(await (await fetch(app.base + url.pathname + url.search)).arrayBuffer()), compressed);
+  }
+  assert.deepEqual(Buffer.from(await (await app.call('/tasks/' + id + '/video')).arrayBuffer()), VIDEO);
+  await app.close(); await app.open(); done = true;
+  await app.until(id, task => task.status === 'completed'); assert.equal(preparations, 1);
+  at += 4 * 86400_000; await app.until(id, task => task.status === 'expired');
+  for (let i = 0; i < 100 && (await readdir(join(app.root, 'video', id))).some(name => name.includes('.reference.mp4')); i++) await delay(10);
+  assert.equal((await readdir(join(app.root, 'video', id))).some(name => name.includes('.reference.mp4')), false);
+});
+
+test('segmented references check each cut separately and submit only the over-limit cut as a compressed copy', async t => {
+  const checked = [], compressed = Buffer.from('COMPRESSED SEGMENT');
+  const app = await segmentedReplica(t, { prepareReference: async (input, output) => {
+    const name = input.split(/[\\/]/).at(-1); checked.push(name);
+    assert.deepEqual(await readFile(input), VIDEO);
+    const oversized = name === 'segment-0.mp4';
+    if (oversized) await writeFile(output, compressed);
+    return { compressed: oversized, inputBytes: oversized ? 210_000_000 : VIDEO.length, outputBytes: oversized ? compressed.length : VIDEO.length };
+  } });
+  const id = await segmentedDraft(app);
+  await app.call('/tasks/' + id + '/start', { body: {} }); await app.until(id, task => task.status === 'running');
+  assert.deepEqual(checked, ['segment-0.mp4', 'segment-1.mp4']);
+  for (const kind of ['segment-0', 'segment-1']) {
+    const url = new URL(app.calls.creates.find(item => item.kind === kind).url);
+    const bytes = Buffer.from(await (await fetch(app.base + url.pathname + url.search)).arrayBuffer());
+    assert.deepEqual(bytes, kind === 'segment-0' ? compressed : VIDEO);
+  }
+  assert.deepEqual(Buffer.from(await (await app.call('/tasks/' + id + '/video')).arrayBuffer()), VIDEO);
+  await app.close(); await app.open();
+  assert.equal(checked.length, 2); assert.equal(app.calls.generations.length, 2);
+});
+
+test('failed reference compression stops before material upload or generation and stays stopped after restart', async t => {
+  let preparations = 0;
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    prepareReference: async () => { preparations++; throw new VideoError('超限参考视频压缩未完成，已停止提交视频生成。', 422, 'VIDEO_REFERENCE_COMPRESSION_FAILED'); } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, mode: 'deep', replacements: {} } });
+  await fetch(app.base + '/api/video-replica/tasks/' + id + '/video', { method: 'PUT', body: VIDEO });
+  await app.call('/tasks/' + id + '/start', { body: {} });
+  const stopped = await app.until(id, task => task.status === 'waiting');
+  assert.match(stopped.error, /压缩未完成/); assert.equal(stopped.code, 'VIDEO_REFERENCE_COMPRESSION_FAILED');
+  assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
+  await app.close(); await app.open(); await delay(80);
+  assert.equal((await app.current(id)).status, 'waiting'); assert.equal(preparations, 1);
+  assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 0);
 });

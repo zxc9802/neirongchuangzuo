@@ -11,7 +11,7 @@ import sharp from 'sharp';
 import { isPublicAddress } from '../ai/server.mjs';
 import { VideoError } from './provider.mjs';
 
-export const VIDEO_LIMIT = 50 * 1024 * 1024;
+export const VIDEO_LIMIT = 300 * 1024 * 1024;
 export const PHOTO_LIMIT = 10 * 1024 * 1024;
 const run = promisify(execFile);
 export async function probeVideo(path) {

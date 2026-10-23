@@ -10,6 +10,7 @@ import { loadAIConfig } from '../ai/server.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, isWan3Model } from './provider.mjs';
 import { safeVideoError } from './errors.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, restoreSourceAudio, downloadVideo, serveMedia } from './media.mjs';
+import { prepareReferenceVideo } from './reference-video.mjs';
 import { DEEP_IMAGE_KINDS, DEEP_KINDS, DEEP_LABELS, deepImageKinds, isDeepReplica, preservesSourceAudio } from './deep-replica.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
@@ -57,7 +58,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, restoreAudio = restoreSourceAudio, speech, captions = createCaptionService(env),
   narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
-  scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, prepareReference = prepareReferenceVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const diagnosticQueries = new Set();
   const diagnosticSecrets = [config.video?.access, config.video?.secret, config.material?.access, config.material?.secret,
@@ -178,6 +179,17 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   const folder = task => join(storageDir, task.id);
   const file = (task, kind) => join(folder(task), DEEP_IMAGE_KINDS.includes(kind) ? `${kind}.jpg` : kind === 'video' ? 'source.mp4' : kind === 'voice' ? 'reference.wav' : /^segment-\d$/.test(kind) ? `${kind}.mp4` : 'result.mp4');
   const mime = kind => DEEP_IMAGE_KINDS.includes(kind) ? 'image/jpeg' : kind === 'voice' ? 'audio/wav' : 'video/mp4';
+  const referenceFile = (task, kind) => join(folder(task), `${kind}.reference.mp4`);
+  const referenceInput = (task, kind) => kind === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4')
+    : kind === 'video' && task.videoCaptionsRemoved ? join(folder(task), 'source-clean.mp4') : file(task, kind);
+  const materialFile = (task, kind) => task.referenceVideos?.[kind]?.compressed ? referenceFile(task, kind) : referenceInput(task, kind);
+  async function prepareVideoReference(task, kind) {
+    if (task.referenceVideos?.[kind]) return;
+    const result = await prepareReference(referenceInput(task, kind), referenceFile(task, kind), task.model);
+    task.referenceVideos ||= {};
+    task.referenceVideos[kind] = result;
+    await save(task);
+  }
   const isExpired = task => !ACTIVE.has(task.status) && task.expiresAt <= now();
   function serialize(key, action) {
     const pending = (locks.get(key) || Promise.resolve()).catch(() => {}).then(action);
@@ -486,8 +498,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     task.wan3OfficialMaterials ||= {};
     for (const kind of kinds) {
       if (task.wan3OfficialMaterials[kind]) continue;
+      if (kind === 'video' || kind.startsWith('segment-')) await prepareVideoReference(task, kind);
       task.wan3OfficialMaterials[kind] = await wan3Provider.upload(
-        kind === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4') : file(task, kind), mime(kind), task.model);
+        materialFile(task, kind), mime(kind), task.model);
       await save(task);
     }
     return { ...input, materials: { ...task.wan3OfficialMaterials, video: task.wan3OfficialMaterials[kinds.at(-1)] } };
@@ -631,6 +644,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           `segment-${index}.mp4.tmp.mp4`, `segment-${index}-result.mp4`, `segment-${index}-result.tmp`, `segment-${index}-result.tmp.download.json`])]) {
           await rm(join(folder(task), name), { force: true });
         }
+        for (const kind of ['video', 'segment-0', 'segment-1', 'segment-2', 'segment-3']) {
+          for (const suffix of ['', '.tmp.mp4', '.pass-0.log', '.pass-0.log.mbtree']) await rm(referenceFile(task, kind) + suffix, { force: true });
+        }
         task.cleaned = true; await save(task);
       }
       return;
@@ -670,10 +686,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         segment.cut = true; await save(task);
       }
       const videoKinds = task.segments ? task.segments.map(segment => `segment-${segment.index}`) : ['video'];
+      for (const kind of videoKinds) if (!task.materials[kind]) await prepareVideoReference(task, kind);
       for (const kind of [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), ...videoKinds, ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
         if (!task.materials[kind]) {
           task.materials[kind] = isWan3Model(task.model) && taskProvider === wan3Provider
-            ? await wan3Provider.upload(kind === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4') : file(task, kind), mime(kind), task.model)
+            ? await wan3Provider.upload(materialFile(task, kind), mime(kind), task.model)
             : isFalReplacement(task.model)
             ? { id: await providerStorage.upload(file(task, kind), mime(kind)), status: 2 }
             : await taskProvider.createMaterial(sourceUrl(task, kind), kind);
@@ -901,6 +918,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       catch (cause) {
         if (fatal) return;
+        if (cause.code === 'VIDEO_REFERENCE_COMPRESSION_FAILED') { await fail(task, cause.message, cause.code); return; }
         if (task.status === 'reviewing' && await retryWan3(task, cause, task.segments?.[0] || task, true)) return;
         if (task.recoveryPolicy) { await recover(task, cause); return; }
         if (cause.code === 'VIDEO_TRANSCRIPTION_PENDING') {
@@ -982,8 +1000,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (emotion ? !task.video?.audio || !task.narration?.segments[Number(emotion[1])]
           : part ? !task.segments?.[Number(part[1])]?.cut : kind === 'generated' ? !task.rawReady : kind === 'narration' ? !task.narration?.ready : !task[kind]) throw error('素材尚未准备好。', 404, 'VIDEO_NOT_FOUND');
         const input = emotion ? join(folder(task), 'narration', `${kind}.wav`) : kind === 'generated' ? join(folder(task), 'generated.mp4')
-          : kind === 'narration' ? join(folder(task), 'narration.wav') : kind === 'video' && task.videoAudioRemoved ? join(folder(task), 'source-silent.mp4')
-          : source[2] === 'video' && task.videoCaptionsRemoved ? join(folder(task), 'source-clean.mp4') : file(task, source[2]);
+          : kind === 'narration' ? join(folder(task), 'narration.wav') : materialFile(task, kind);
         await serveMedia(req, res, input, emotion || kind === 'narration' ? 'audio/wav' : mime(kind)); return;
       }
       const userId = req.authenticatedUserId;
@@ -1159,6 +1176,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             delete task.languageRouting; delete task.languageDetection; delete task.localization;
             delete task.voiceConversion; delete task.segments; delete task.segmentBoundary;
             delete task.videoAudioRemoved;
+            delete task.referenceVideos;
             delete task.videoCaptionsRemoved; delete task.captions; delete task.captionsChecked; delete task.captionCheck;
             delete task.speech;
             delete task.originalSpeech; delete task.speechConfirmedAt;
@@ -1264,6 +1282,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           else { delete task.segments; delete task.segmentBoundary; }
           task.model = model;
           if (isWan3Model(model)) for (const part of task.segments || [task]) part.wan3Route = config.wan3AggregateEnabled ? 'aggregate' : 'official';
+          delete task.referenceVideos;
           task.duration = duration;
           task.pricingKey = generationPrice('video', model)?.key;
           task.cnyPerSecond = isWan3Model(model) ? wan3Price(now(), task.model) : models.find(item => item.id === model).cnyPerSecond;

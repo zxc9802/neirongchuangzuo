@@ -7160,9 +7160,9 @@ export const EXTRA_UI_COPY = {
     "en": "Content direction to choose",
     "ms": "Arah kandungan untuk dipilih"
   },
-  "单个人物 · 2–{value0} 秒 · MP4 / MOV · 最大 50 MB": {
-    "en": "One person · 2–{value0} sec · MP4 / MOV · max 50 MB",
-    "ms": "Seorang · 2–{value0} saat · MP4 / MOV · maksimum 50 MB"
+  "单个人物 · 2–{value0} 秒 · MP4 / MOV · 上限 300 MB": {
+    "en": "One person · 2–{value0} sec · MP4 / MOV · max 300 MB",
+    "ms": "Seorang · 2–{value0} saat · MP4 / MOV · maksimum 300 MB"
   },
   "单个素材不能超过 100MB。": {
     "en": "Each asset must be no larger than 100MB.",
