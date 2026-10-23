@@ -16,7 +16,7 @@ async function fixture(t, api) {
     });
     return nodes.get(k);
   };
-  let poll, html, modal;
+  let poll, html, modal, renders = 0;
   globalThis.workspaceUser = { id: crypto.randomUUID() };
   const store=new Map(); globalThis.localStorage={getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v)};
   globalThis.innerWidth=1920;globalThis.innerHeight=900;
@@ -29,11 +29,11 @@ async function fixture(t, api) {
   globalThis.fetch = async (path, options) => path === '/api/workspace/credits' ? Response.json({ unlimited: true }) : api(path, options);
   const module = await import('../design/video-creator.js?test=' + crypto.randomUUID());
   const ctx = { esc: x => String(x ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'), icon: () => '', mode: 'video', button: (action, text, _class, attrs = '') => `<button data-action="${action}" ${attrs}>${text}</button>`,
-    configs: { video: { prompt: '', files: [] } }, assets: [], toast() {}, openModal(title, _subtitle, content) { modal = { title, content }; }, refresh() { html = module.renderVideoCreator(ctx); } };
+    configs: { video: { prompt: '', files: [] } }, assets: [], toast() {}, openModal(title, _subtitle, content) { modal = { title, content }; }, refresh() { renders++; html = module.renderVideoCreator(ctx); } };
   ctx.refresh(); module.bindVideoCreator(ctx);
   t.after(() => { module.disposeVideoCreator(); for (const key of names) { if (old[key] === undefined) delete globalThis[key]; else globalThis[key] = old[key]; } });
   await delay(15);
-  return { node, ctx, useMaterial: module.useVideoMaterial, html: () => html, modal: () => modal, popover:()=>node('.vc-popover').innerHTML, action: (name, data = {}, actionContext = ctx) => module.handleVideoCreatorAction(name, { dataset: data, getBoundingClientRect(){return {left:10,top:600,bottom:630};},setAttribute(){} }, actionContext), async poll() { await poll(); await delay(5); } };
+  return { node, ctx, renders: () => renders, mount: root => module.mountVideoCreator(root, ctx), useMaterial: module.useVideoMaterial, html: () => html, modal: () => modal, popover:()=>node('.vc-popover').innerHTML, action: (name, data = {}, actionContext = ctx) => module.handleVideoCreatorAction(name, { dataset: data, getBoundingClientRect(){return {left:10,top:600,bottom:630};},setAttribute(){} }, actionContext), async poll() { await poll(); await delay(5); } };
 }
 
 function composerApi() {
@@ -554,4 +554,72 @@ test('clear drafts is enabled with only the current edited draft', async t => {
   assert.ok(clearButton); assert.doesNotMatch(clearButton, /\bdisabled\b/);
   f.action('vc-confirm-hide', { kind: 'drafts' });
   assert.doesNotMatch(f.html(), /唯一当前草稿|当前创作/);
+});
+
+
+test('maintenance-only history timestamps do not repaint an idle workspace', async t => {
+  const data = composerApi(), base = data.api; let updatedAt = 1;
+  const f = await fixture(t, (path, options) => path.endsWith('/conversations') && !options?.method
+    ? Response.json({ conversations: [{ id:'historical', title:'历史草稿', updatedAt }] }) : base(path, options));
+  await f.poll(); const before = f.renders(); updatedAt += 5000; await f.poll(); await f.poll();
+  assert.equal(f.renders(), before);
+});
+
+test('opening a server draft reuses its local identity and individual removal survives polling', async t => {
+  const data = composerApi(), base = data.api;
+  const f = await fixture(t, (path, options) => path.endsWith('/conversations') && !options?.method
+    ? Response.json({conversations:data.conversation ? [{id:data.conversation.id,title:'门店草稿',updatedAt:1}] : []}) : base(path, options));
+  await f.useMaterial(new File(['photo'],'门店.jpg',{type:'image/jpeg'}),'photo');
+  f.node('#vc-message').input({target:{value:'已有草稿内容'}});
+  const key = accountStorageKey('video-creator-ui-drafts');
+  const initial = JSON.parse(localStorage.getItem(key))[0];
+  for (let i=0;i<3;i++) { f.action('vc-new'); f.action('vc-open-conversation',{id:data.conversation.id}); await delay(25); await f.poll(); }
+  assert.equal(JSON.parse(localStorage.getItem(key)).length,1);
+  assert.equal(JSON.parse(localStorage.getItem(key))[0].id,initial.id);
+  assert.match(f.html(),/data-action="vc-hide-local-draft"/);
+  f.action('vc-hide-local-draft',{id:initial.id}); assert.equal(f.modal().title,'移除记录');
+  f.action('vc-confirm-hide',{kind:'local',id:initial.id}); await f.poll();
+  assert.doesNotMatch(f.html(),/已有草稿内容|打开草稿|当前创作/);
+  assert.match(f.html(),/>已移除记录<\/button>/);
+  f.action('vc-restore-record',{kind:'local',id:initial.id});
+  f.action('vc-open-local-draft',{id:initial.id}); await delay(25);
+  assert.match(f.html(),/已有草稿内容/);
+});
+
+test('panel updates preserve the connected player and untouched editor DOM', async t => {
+  const {parseHTML} = await import('linkedom');
+  const data = composerApi(), f = await fixture(t,data.api);
+  await f.useMaterial(new File(['photo'],'门店.jpg',{type:'image/jpeg'}),'photo');
+  const task = {id:'playback',conversationId:data.conversation.id,status:'completed',title:'播放测试',settings:DEFAULT_VIDEO_SETTINGS,createdAt:1,duration:15,resultUrl:'/result.mp4'};
+  data.tasks=[task];data.conversation.tasks=[task]; await f.poll();
+  f.action('vc-select-task',{id:task.id});await delay(25);
+  const original = globalThis.document;
+  const dom = parseHTML('<html><body><main></main></body></html>').document;
+  dom.body.dataset.page='video'; const root=dom.querySelector('main');
+  globalThis.document=dom; f.mount(root);
+  const video=root.querySelector('#vc-result-video'), editor=root.querySelector('#vc-prompt');
+  assert.ok(video); video.testPlaying=true;
+  globalThis.document=original; f.action('vc-queue');
+  globalThis.document=dom; f.mount(root);
+  assert.equal(root.querySelector('#vc-result-video'),video);
+  assert.equal(root.querySelector('#vc-prompt'),editor);
+  globalThis.document=original; task.warning='测试提示';await f.poll();
+  globalThis.document=dom; f.mount(root);
+  assert.equal(root.querySelector('#vc-result-video'),video);
+  assert.equal(video.isConnected,true);assert.equal(video.testPlaying,true);
+  assert.match(root.textContent,/测试提示/);
+  globalThis.document=original;
+});
+
+test('new creation clears live typed text even when the original panel markup was empty', async t => {
+  const {parseHTML} = await import('linkedom');
+  const data = composerApi(), f = await fixture(t,data.api), original = globalThis.document;
+  const dom = parseHTML('<html><body><main></main></body></html>').document;
+  dom.body.dataset.page='video';const root=dom.querySelector('main');
+  globalThis.document=dom;f.mount(root);root.querySelector('#vc-message').textContent='刚输入的草稿';
+  globalThis.document=original;f.node('#vc-message').input({target:{value:'刚输入的草稿'}});f.action('vc-new');
+  globalThis.document=dom;f.mount(root);
+  assert.equal(root.querySelector('#vc-message').textContent,'');
+  assert.match(root.querySelector('.vc-task-list').textContent,/刚输入的草稿/);
+  globalThis.document=original;
 });

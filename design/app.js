@@ -1,6 +1,6 @@
 import { uiLocale } from './workspace-preferences.js';
 import {renderVideoReplica,bindVideoReplica,disposeVideoReplica} from './video-replica.js';
-import {renderVideoCreator,bindVideoCreator,disposeVideoCreator,handleVideoCreatorAction} from './video-creator.js';
+import {mountVideoCreator,bindVideoCreator,disposeVideoCreator,handleVideoCreatorAction} from './video-creator.js';
 import {renderHomeView,bindHomeView,handleHomeAction} from './home.js';
 import {accountStorageKey} from './account-storage.js';
 import {t} from './workspace-preferences.js';
@@ -119,7 +119,7 @@ function render(){
  if(mode==='avatar'){main.className='special-workspace avatar-studio';main.innerHTML=renderDigitalHuman(ctx);bindDigitalHuman(ctx);return;}
  if(mode==='mix'){main.className='special-workspace mix-studio';main.innerHTML=renderStudio(mode,ctx);bindStudio(mode,ctx);return;}
  if(mode==='replica'){main.className='video-replica-workspace';main.innerHTML=renderVideoReplica(ctx);bindVideoReplica(ctx);return;}
- if(mode==='video'){main.className='video-creator-workspace';main.innerHTML=renderVideoCreator(ctx);bindVideoCreator(ctx);return;}
+ if(mode==='video'){main.className='video-creator-workspace';mountVideoCreator(main,ctx);bindVideoCreator(ctx);return;}
  main.className=`workspace ${queueOpen?'queue-expanded':'queue-hidden'}`;
  main.innerHTML=renderWorkbench(ctx);bindWorkbench(ctx);
 }

@@ -13,6 +13,7 @@ const labels = { reserving: '预留积分', preparing: '准备素材', reviewing
 const busyTask = task => ['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'settling'].includes(task.status);
 let context, timer, stream, voiceSession, loading = false, loadPromise, quoteVersion = 0;
 let state, cloud, cloudOwner;
+const boundEditors = new WeakSet(), boundPlayers = new WeakSet(), mountedPanels = new WeakMap();
 function ensureCloud() {
   if (cloudOwner === owner() && cloud) return cloud;
   cloud?.close(); const account = owner(); cloudOwner = account;
@@ -50,14 +51,15 @@ function refresh() {
     if (selection?.rangeCount && editor.contains(selection.anchorNode)) { const range = document.createRange(); range.selectNodeContents(editor); range.setEnd(selection.anchorNode, selection.anchorOffset); state.view.caret = range.toString().length; }
   }
   const video = document.querySelector('#vc-result-video');
-  if (video) state.view.playback = { id: state.selectedTask, time: video.currentTime, paused: video.paused, muted: video.muted };
+  if (video) state.view.playback = { element: video, id: state.selectedTask, time: video.currentTime, paused: video.paused, muted: video.muted };
   context.refresh();
 }
 function localDrafts() { return uiRead('drafts', []).filter(d => d && typeof d.id === 'string' && VIDEO_SKILLS.some(s => s.id === d.skill)); }
 function persistDraft(force = false) {
-  if (!state || state.owner !== owner() || state.restoringDraft) return true;
+  if (!state || state.owner !== owner() || state.restoringDraft || state.selectedTask && !force) return true;
   if (!state.draftId && (force || !state.selectedTask && (state.input || state.prompt || state.session?.assets.length))) state.draftId = crypto.randomUUID();
   if (!state.draftId) return true;
+  if (uiRead('hidden-local-drafts', []).includes(state.draftId) || state.session && uiRead('hidden-drafts', []).includes(state.session.id)) return true;
   const snapshot = draftSnapshot(state), drafts = localDrafts(), old = drafts.find(d => d.id === snapshot.id);
   const fingerprint = JSON.stringify(snapshot);
   if (old?.fingerprint === fingerprint) { state.draftSaveFailed = false; return true; }
@@ -83,8 +85,18 @@ async function openLocalDraft(id) {
   state.restoringDraft = false; uiWrite('active-draft', draft.id); state.quote = null; void quote();
 }
 const meaningfulDraft = d => Boolean(d.conversationId || d.input?.trim() || d.prompt?.trim());
+function visibleLocalDrafts() {
+  const hidden = uiRead('hidden-local-drafts', []), hiddenSessions = uiRead('hidden-drafts', []);
+  const seen = new Set();
+  return localDrafts().sort((a,b) => (b.id === state.draftId) - (a.id === state.draftId) || b.updatedAt - a.updatedAt).filter(d => {
+    if (!meaningfulDraft(d) || hidden.includes(d.id) || hiddenSessions.includes(d.conversationId)) return false;
+    if (state.tasks.some(t => t.conversationId === d.conversationId) && d.selectedTask) return false;
+    const { id, updatedAt, fingerprint, title, ...content } = d;
+    const key = JSON.stringify(content); if (seen.has(key)) return false; seen.add(key); return true;
+  });
+}
 function localDraftRows(ctx) {
-  return localDrafts().filter(d => d.id !== state.draftId && meaningfulDraft(d) && !uiRead('hidden-local-drafts', []).includes(d.id)).map(d => `<article class="vc-task-row"><button type="button" class="vc-task" data-action="vc-open-local-draft" data-id="${ctx.esc(d.id)}" ${state.busy ? 'disabled' : ''} aria-label="打开草稿 ${ctx.esc(d.title)}"><span class="vc-task-thumb vc-draft-thumb">${ctx.icon('list')}</span><span class="vc-task-copy"><strong>${ctx.esc(d.title)}</strong><span class="vc-task-status">草稿</span><small>${new Date(d.updatedAt).toLocaleString(uiLocale(), {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</small></span></button></article>`).join('');
+  return visibleLocalDrafts().map(d => `<article class="vc-task-row ${d.id === state.draftId && !state.selectedTask ? 'active' : ''}"><button type="button" class="vc-task" data-action="vc-open-local-draft" data-id="${ctx.esc(d.id)}" ${state.busy ? 'disabled' : ''} aria-label="打开草稿 ${ctx.esc(d.title)}"><span class="vc-task-thumb vc-draft-thumb">${ctx.icon('list')}</span><span class="vc-task-copy"><strong>${ctx.esc(d.title)}</strong><span class="vc-task-status">${d.id === state.draftId && !state.selectedTask ? '当前创作' : '草稿'}</span><small>${new Date(d.updatedAt).toLocaleString(uiLocale(), {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</small></span></button><div class="vc-task-actions">${ctx.button('vc-hide-local-draft', uiIcon('trash'), 'vc-icon', `data-id="${ctx.esc(d.id)}" aria-label="移除草稿 ${ctx.esc(d.title)}" ${locked() ? 'disabled' : ''}`)}</div></article>`).join('');
 }
 function editorAssets(root) { return root?.id === 'vc-message' ? state.session?.assets || [] : referenceAssets(); }
 function editorField(root) { return root?.id === 'vc-message' ? 'input' : 'prompt'; }
@@ -281,7 +293,7 @@ async function loadOnce() {
       if (state.owner !== account || state.session?.id !== conversationId) return;
       let changed = JSON.stringify(data.conversation) !== JSON.stringify(state.session);
       saveSession(data.conversation);
-      for (const task of state.session.tasks) state.tasks = [settledSnapshot(state.tasks.find(t => t.id === task.id), task), ...state.tasks.filter(t => t.id !== task.id)];
+      for (const task of state.session.tasks) { const index = state.tasks.findIndex(t => t.id === task.id); if (index < 0) state.tasks.push(task); else state.tasks[index] = settledSnapshot(state.tasks[index], task); }
       changed = recoverAcceptedRequests() || changed;
       if (changed) refresh();
     }) : Promise.resolve();
@@ -289,7 +301,7 @@ async function loadOnce() {
       if (state.owner !== account) return;
       const previous = state.tasks;
       const merged = tasks.tasks.map(task => settledSnapshot(previous.find(t => t.id === task.id), task));
-      let changed = JSON.stringify(previous) !== JSON.stringify(merged) || JSON.stringify(state.conversations) !== JSON.stringify(conversations.conversations) || !state.config;
+      let changed = JSON.stringify(previous) !== JSON.stringify(merged) || JSON.stringify(state.conversations.map(({updatedAt, ...c}) => c)) !== JSON.stringify(conversations.conversations.map(({updatedAt, ...c}) => c)) || !state.config;
       state.config = config; state.tasks = merged; state.conversations = conversations.conversations;
       if (state.session) state.session.tasks = state.session.tasks.map(task => settledSnapshot(task, merged.find(t => t.id === task.id) || task));
       changed = recoverAcceptedRequests() || changed;
@@ -612,7 +624,7 @@ function expandEditor() {
   document.querySelector('#modal').classList.add('vc-expanded-modal'); bindRichEditor(document.querySelector('#vc-expanded-prompt'));
 }
 function bindRichEditor(root) {
-  if (!root) return;
+  if (!root || boundEditors.has(root)) return; boundEditors.add(root);
   const field = editorField(root), limit = field === 'input' ? 8000 : 12000;
   root.addEventListener('input', event => {
     if (voiceSession) return;
@@ -681,7 +693,7 @@ function preview(ctx) {
 function formatTime(value) { return `${Math.floor(Number(value) / 60)}:${String(Math.floor(Number(value) % 60)).padStart(2, '0')}`; }
 function queue(ctx) {
   const { esc, button, icon } = ctx, hiddenDrafts = uiRead('hidden-drafts', []), tasks = visibleTasks(), drafts = state.conversations.filter(c => !state.tasks.some(t => t.conversationId === c.id) && c.id !== state.session?.id && !hiddenDrafts.includes(c.id) && !localDrafts().some(d => d.conversationId === c.id));
-  return `<aside class="vc-queue panel ${state.queue ? '' : 'is-collapsed'}" aria-label="视频任务队列"><header><strong>任务队列</strong><div>${hiddenTasks().length || hiddenDrafts.length || uiRead('hidden-local-drafts', []).length ? button('vc-hidden-records', uiIcon('trash'), 'vc-icon', 'aria-label="已移除记录"') : ''}${button('vc-clear-drafts', '清空草稿', 'textbutton', !locked() && (drafts.length || localDrafts().some(d => meaningfulDraft(d) && !uiRead('hidden-local-drafts', []).includes(d.id))) ? '' : 'disabled')}${button('vc-queue', uiIcon(state.queue ? 'fold' : 'unfold'), 'vc-icon', `aria-label="${state.queue ? '收起' : '展开'}视频任务队列"`)}</div></header><div class="vc-task-list">${localDraftRows(ctx)}${(state.draftId || state.session) && !tasks.some(t => t.conversationId === state.session?.id) ? `<article class="vc-task-row ${!state.selectedTask ? 'active' : ''}">${button('vc-current', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(t('当前创作'))}</strong><small>${esc(VIDEO_SKILLS.find(s => s.id === state.skill).name)}</small></span>`, 'vc-task', 'title="当前创作"')}</article>` : ''}${tasks.slice(0, 50).map(t => `<article class="vc-task-row ${state.selectedTask === t.id ? 'active' : ''}">${button('vc-select-task', `<span class="vc-task-thumb">${taskThumbnail(t, ctx)}${busyTask(t) ? '<i class="vc-task-pulse"></i>' : ''}</span><span class="vc-task-copy"><strong>${esc(t.title)}</strong><span class="vc-task-status ${t.status === 'failed' ? 'failed' : ''}">${labels[t.status] || '处理中'}</span><small>${esc(new Date(t.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small></span>`, 'vc-task', `data-id="${t.id}" title="${esc(t.title)} · ${labels[t.status]}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-favorite', uiIcon('heart'), `vc-icon ${favorites().includes(t.id) ? 'is-favorite' : ''}`, `data-id="${t.id}" aria-label="${favorites().includes(t.id) ? '取消收藏' : '收藏'} ${esc(t.title)}" aria-pressed="${favorites().includes(t.id)}"`)}${button('vc-hide-task', uiIcon('trash'), 'vc-icon', `data-id="${t.id}" aria-label="移除任务 ${esc(t.title)}" ${busyTask(t) ? 'disabled' : ''}`)}</div></article>`).join('')}${drafts.map(c => `<article class="vc-task-row">${button('vc-open-conversation', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(c.title)}</strong><span class="vc-task-status">脚本草稿</span><small>${new Date(c.updatedAt).toLocaleDateString(uiLocale())}</small></span>`, 'vc-task', `data-id="${c.id}" title="${esc(c.title)}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-hide-draft', uiIcon('trash'), 'vc-icon', `data-id="${c.id}" aria-label="移除草稿 ${esc(c.title)}"`)}</div></article>`).join('')}${!tasks.length && !drafts.length && !state.session && !localDrafts().length ? '<p class="vc-muted">还没有生成记录</p>' : ''}</div></aside>`;
+  return `<aside class="vc-queue panel ${state.queue ? '' : 'is-collapsed'}" aria-label="视频任务队列"><header><strong>任务队列</strong><div>${hiddenTasks().length || hiddenDrafts.length || uiRead('hidden-local-drafts', []).length ? button('vc-hidden-records', '已移除记录', 'textbutton', 'aria-label="已移除记录"') : ''}${button('vc-clear-drafts', '清空草稿', 'textbutton', !locked() && (drafts.length || localDrafts().some(d => meaningfulDraft(d) && !uiRead('hidden-local-drafts', []).includes(d.id))) ? '' : 'disabled')}${button('vc-queue', uiIcon(state.queue ? 'fold' : 'unfold'), 'vc-icon', `aria-label="${state.queue ? '收起' : '展开'}视频任务队列"`)}</div></header><div class="vc-task-list">${localDraftRows(ctx)}${!visibleLocalDrafts().some(d => d.id === state.draftId) && !state.selectedTask && (state.draftId || state.session) && !hiddenDrafts.includes(state.session?.id) && !tasks.some(t => t.conversationId === state.session?.id) ? `<article class="vc-task-row ${!state.selectedTask ? 'active' : ''}">${button('vc-current', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(t('当前创作'))}</strong><small>${esc(VIDEO_SKILLS.find(s => s.id === state.skill).name)}</small></span>`, 'vc-task', 'title="当前创作"')}</article>` : ''}${tasks.slice(0, 50).map(t => `<article class="vc-task-row ${state.selectedTask === t.id ? 'active' : ''}">${button('vc-select-task', `<span class="vc-task-thumb">${taskThumbnail(t, ctx)}${busyTask(t) ? '<i class="vc-task-pulse"></i>' : ''}</span><span class="vc-task-copy"><strong>${esc(t.title)}</strong><span class="vc-task-status ${t.status === 'failed' ? 'failed' : ''}">${labels[t.status] || '处理中'}</span><small>${esc(new Date(t.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small></span>`, 'vc-task', `data-id="${t.id}" title="${esc(t.title)} · ${labels[t.status]}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-favorite', uiIcon('heart'), `vc-icon ${favorites().includes(t.id) ? 'is-favorite' : ''}`, `data-id="${t.id}" aria-label="${favorites().includes(t.id) ? '取消收藏' : '收藏'} ${esc(t.title)}" aria-pressed="${favorites().includes(t.id)}"`)}${button('vc-hide-task', uiIcon('trash'), 'vc-icon', `data-id="${t.id}" aria-label="移除任务 ${esc(t.title)}" ${busyTask(t) ? 'disabled' : ''}`)}</div></article>`).join('')}${drafts.map(c => `<article class="vc-task-row">${button('vc-open-conversation', `<span class="vc-task-thumb vc-draft-thumb">${icon('list')}</span><span class="vc-task-copy"><strong>${esc(c.title)}</strong><span class="vc-task-status">脚本草稿</span><small>${new Date(c.updatedAt).toLocaleDateString(uiLocale())}</small></span>`, 'vc-task', `data-id="${c.id}" title="${esc(c.title)}" ${state.busy ? 'disabled' : ''}`)}<div class="vc-task-actions">${button('vc-hide-draft', uiIcon('trash'), 'vc-icon', `data-id="${c.id}" aria-label="移除草稿 ${esc(c.title)}"`)}</div></article>`).join('')}${!tasks.length && !drafts.length && !state.session && !localDrafts().length ? '<p class="vc-muted">还没有生成记录</p>' : ''}</div></aside>`;
 }
 function videoTool(kind) {
   const task = currentTask(); if (!task?.resultUrl) return;
@@ -700,7 +712,7 @@ function videoTool(kind) {
   if (['subtitle', 'watermark'].includes(kind)) { const update = () => { const region = document.querySelector('#vc-erase-region'); for (const [key, prop] of [['x', 'left'], ['y', 'top'], ['w', 'width'], ['h', 'height']]) region.style[prop] = document.querySelector('#vc-tool-' + key).value + '%'; }; document.querySelectorAll('.vc-tool-options input').forEach(input => { input.oninput = update; }); update(); }
 }
 function bindPlayer() {
-  const video = document.querySelector('#vc-result-video'); if (!video) return;
+  const video = document.querySelector('#vc-result-video'); if (!video || boundPlayers.has(video)) return; boundPlayers.add(video);
   const update = () => {
     document.querySelectorAll('[data-action="vc-player-play"]').forEach(b => { b.innerHTML = uiIcon(video.paused ? 'play' : 'pause'); });
     document.querySelector('.vc-player-big').hidden = !video.paused;
@@ -742,6 +754,44 @@ export function renderVideoCreator(ctx) {
   if (!state || state.owner !== owner()) reset(); context = ctx;
   return `<div class="vc-shell ${state.sidebar ? '' : 'vc-sidebar-hidden'}">${navigation(ctx)}<div class="vc-layout ${state.queue ? '' : 'vc-queue-hidden'}">${editor(ctx)}${preview(ctx)}${queue(ctx)}</div></div>`;
 }
+function patchPreview(live, before, after) {
+  if (before.isEqualNode(after)) return;
+  if (before.nodeType !== after.nodeType || before.nodeName !== after.nodeName) { live.replaceWith(after.cloneNode(true)); return; }
+  if (after.nodeType !== 1) { live.textContent = after.textContent; return; }
+  for (const attr of [...before.attributes]) if (!after.hasAttribute(attr.name)) live.removeAttribute(attr.name);
+  for (const attr of [...after.attributes]) if (before.getAttribute(attr.name) !== attr.value) live.setAttribute(attr.name, attr.value);
+  const current = [...live.childNodes], old = [...before.childNodes], next = [...after.childNodes];
+  for (let i = 0; i < Math.max(old.length, next.length); i++) {
+    if (!next[i]) current[i]?.remove();
+    else if (!old[i]) live.append(next[i].cloneNode(true));
+    else patchPreview(current[i], old[i], next[i]);
+  }
+}
+export function mountVideoCreator(root, ctx) {
+  const html = renderVideoCreator(ctx), previous = mountedPanels.get(root);
+  if (!previous || previous.owner !== owner() || !root.querySelector('.vc-shell')) {
+    root.innerHTML = html;
+    mountedPanels.set(root, { owner: owner(), html });
+    return;
+  }
+  const liveEditor = root.querySelector('#vc-message') || root.querySelector('#vc-prompt');
+  const editorDirty = liveEditor && readPromptEditor(liveEditor) !== state[editorField(liveEditor)];
+  if (previous.html === html && !editorDirty) return;
+  const before = document.createElement('template'), after = document.createElement('template');
+  before.innerHTML = previous.html; after.innerHTML = html;
+  for (const selector of ['.vc-shell', '.vc-layout']) root.querySelector(selector).className = after.content.querySelector(selector).className;
+  const oldLayout = before.content.querySelector('.vc-layout'), newLayout = after.content.querySelector('.vc-layout'), layout = root.querySelector('.vc-layout');
+  for (let i = 0; i < newLayout.children.length; i++) {
+    if (oldLayout.children[i]?.outerHTML === newLayout.children[i].outerHTML && !(i === 0 && editorDirty)) continue;
+    const oldPanel = oldLayout.children[i], newPanel = newLayout.children[i];
+    const oldVideo = oldPanel?.querySelector('#vc-result-video'), newVideo = newPanel.querySelector('#vc-result-video');
+    if (oldVideo && newVideo && oldVideo.getAttribute('src') === newVideo.getAttribute('src')) patchPreview(layout.children[i], oldPanel, newPanel);
+    else layout.children[i].replaceWith(newPanel.cloneNode(true));
+  }
+  const oldNav = before.content.querySelector('.vc-shell').firstElementChild, newNav = after.content.querySelector('.vc-shell').firstElementChild;
+  if (oldNav.outerHTML !== newNav.outerHTML) root.querySelector('.vc-shell').firstElementChild.replaceWith(newNav.cloneNode(true));
+  mountedPanels.set(root, { owner: owner(), html });
+}
 export async function useVideoMaterial(file, kind) {
   const account = state.owner;
   await load();
@@ -776,9 +826,11 @@ export function bindVideoCreator(ctx) {
 function savedPrompts() { return uiRead('prompts', readUiStore(accountStorageKey('video-creator-prompts'), [])).filter(p => typeof p.prompt === 'string').slice(0,40); }
 async function openConversation(id, task) {
   if (!persistDraft()) return;
+  const existing = visibleLocalDrafts().find(d => d.conversationId === id);
+  if (!task && existing) return openLocalDraft(existing.id);
   const account = state.owner, data = await request(`/conversations/${id}`); if (state.owner !== account) return; saveSession(data.conversation);
   const previousSettings = task?.settings || data.conversation.settings;
-  state.draftId = null; uiWrite('active-draft', null); state.settings = editableSettings(previousSettings); state.input = ''; state.prompt = task?.prompt || '';
+  state.draftId = task ? null : existing?.id || crypto.randomUUID(); uiWrite('active-draft', state.draftId); state.settings = editableSettings(previousSettings); state.input = ''; state.prompt = task?.prompt || '';
   state.scriptId = task?.scriptId || null; state.referenceImageIds = task?.referenceImageIds || null; state.stage = task ? 'generation' : 'director'; state.selectedTask = task?.id || null; state.preview = 'result'; void quote();
   if (previousSettings.resolution !== state.settings.resolution && data.conversation.operations.some(o => o.result?.script)) replanResolution(previousSettings);
 }
@@ -885,7 +937,7 @@ function restoreView() {
     }
   }
   const playback = view?.playback, video = document.querySelector('#vc-result-video');
-  if (video && playback?.id === state.selectedTask) { video.muted = playback.muted; video.addEventListener('loadedmetadata', () => { video.currentTime = playback.time; if (!playback.paused) video.play().catch(() => {}); }, { once: true }); }
+  if (video && playback?.element !== video && playback?.id === state.selectedTask) { video.muted = playback.muted; video.addEventListener('loadedmetadata', () => { video.currentTime = playback.time; if (!playback.paused) video.play().catch(() => {}); }, { once: true }); }
 }
 async function useSavedPrompt(id) {
   const item = savedPrompts().find(p => p.id === id); if (!item || locked()) return;
@@ -975,14 +1027,17 @@ function handleUiAction(action, el, ctx) {
   else if (action === 'vc-favorite') { const ids = favorites(); if (uiWrite('favorites', ids.includes(el.dataset.id) ? ids.filter(id => id !== el.dataset.id) : [...ids, el.dataset.id])) refresh(); }
   else if (action === 'vc-hidden-records') {
     const locals = localDrafts().filter(d => uiRead('hidden-local-drafts', []).includes(d.id));
-    const tasks = state.tasks.filter(t => hiddenTasks().includes(t.id)), drafts = state.conversations.filter(c => uiRead('hidden-drafts', []).includes(c.id));
+    const tasks = state.tasks.filter(t => hiddenTasks().includes(t.id)), drafts = state.conversations.filter(c => uiRead('hidden-drafts', []).includes(c.id) && !locals.some(d => d.conversationId === c.id));
     modal('已移除记录', `<div class="vc-removed-list">${locals.map(d => `<article><span>${esc(d.title)}</span>${button('vc-restore-record','恢复','vc-outline',`data-id="${esc(d.id)}" data-kind="local"`)}</article>`).join('')}${tasks.map(t => `<article><span>${esc(t.title)}</span>${button('vc-restore-record','恢复','vc-outline',`data-id="${t.id}" data-kind="task"`)}</article>`).join('')}${drafts.map(c => `<article><span>${esc(c.title)}</span>${button('vc-restore-record','恢复','vc-outline',`data-id="${c.id}" data-kind="draft"`)}</article>`).join('') || (!tasks.length && !locals.length ? '<p>没有已移除记录</p>' : '')}</div>`);
   }
   else if (action === 'vc-restore-record') {
+    const restored = el.dataset.kind === 'local' && localDrafts().find(d => d.id === el.dataset.id);
+    if (restored?.conversationId) uiWrite('hidden-drafts', uiRead('hidden-drafts', []).filter(id => id !== restored.conversationId));
     const key = el.dataset.kind === 'task' ? 'hidden-tasks' : el.dataset.kind === 'local' ? 'hidden-local-drafts' : 'hidden-drafts'; uiWrite(key, uiRead(key, []).filter(id => id !== el.dataset.id)); document.querySelector('#modal').close(); refresh();
   }
   else if (action === 'vc-hide-task') confirmListAction('task', el.dataset.id);
   else if (action === 'vc-hide-draft') confirmListAction('draft', el.dataset.id);
+  else if (action === 'vc-hide-local-draft') { if (!locked()) confirmListAction('local', el.dataset.id); }
   else if (action === 'vc-clear-drafts') confirmListAction('drafts');
   else if (action === 'vc-confirm-hide') {
     if (el.dataset.kind === 'drafts') {
@@ -994,7 +1049,19 @@ function handleUiAction(action, el, ctx) {
       stream?.close(); reset(); Object.assign(state, { config, tasks, conversations, bridge, draftRestored: true });
       uiWrite('active-draft', null); document.querySelector('#modal').close(); refresh(); void quote(); return true;
     }
-    if (el.dataset.kind === 'task') { if (!uiWrite('hidden-tasks', [...hiddenTasks(), el.dataset.id])) return true; if (state.selectedTask === el.dataset.id) state.selectedTask = null; }
+    if (el.dataset.kind === 'local') {
+      if (locked()) return true;
+      const draft = localDrafts().find(d => d.id === el.dataset.id);
+      const content = d => JSON.stringify([d.conversationId,d.skill,d.settings,d.input,d.prompt,d.stage,d.scriptId,d.referenceImageIds,d.selectedTask]);
+      const related = localDrafts().filter(d => d.id === draft?.id || draft && content(d) === content(draft));
+      if (!uiWrite('hidden-local-drafts', [...new Set([...uiRead('hidden-local-drafts', []), ...related.map(d => d.id)])])) return true;
+      if (draft?.conversationId && !visibleLocalDrafts().some(d => d.conversationId === draft.conversationId)) uiWrite('hidden-drafts', [...new Set([...uiRead('hidden-drafts', []), draft.conversationId])]);
+      if (related.some(d => d.id === state.draftId)) {
+        const { config, tasks, conversations, bridge } = state; stream?.close(); reset();
+        Object.assign(state, { config, tasks, conversations, bridge, draftRestored: true }); uiWrite('active-draft', null);
+      }
+    }
+    else if (el.dataset.kind === 'task') { if (!uiWrite('hidden-tasks', [...hiddenTasks(), el.dataset.id])) return true; if (state.selectedTask === el.dataset.id) state.selectedTask = null; }
     else { const ids = uiRead('hidden-drafts', []), next = el.dataset.kind === 'drafts' ? state.conversations.filter(c => c.id !== state.session?.id && !state.tasks.some(t => t.conversationId === c.id)).map(c => c.id) : [el.dataset.id]; if (!uiWrite('hidden-drafts', [...new Set([...ids, ...next])])) return true; }
     document.querySelector('#modal').close(); refresh();
   }
