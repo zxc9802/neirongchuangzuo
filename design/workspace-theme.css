@@ -6,6 +6,11 @@
   --ui-border: #e2e6ed;
   --ui-text: #283241;
   --ui-muted: #697588;
+  --vc-control-hover: #edf1f7;
+  --vc-muted: #596579;
+  --vc-selected-bg: #e8f1ff;
+  --vc-selected-text: #174f93;
+  --vc-selected-border: #648ec2;
 }
 .workspace-preferences { display: none; position: absolute; top: 18px; right: 32px; z-index: 16; align-items: center; gap: 8px; color: var(--ui-text); }
 body[data-page="home"] .workspace-preferences { display: flex; }
@@ -35,6 +40,11 @@ html:not([lang="zh-CN"]) :is(.vc-choice-grid > button, .restaurant-type-card h3,
   --ui-border: #354052;
   --ui-text: #e8edf4;
   --ui-muted: #abb7c8;
+  --vc-control-hover: #2e394a;
+  --vc-muted: #abb7c8;
+  --vc-selected-bg: #273d57;
+  --vc-selected-text: #c1ddff;
+  --vc-selected-border: #78a8df;
   --line: #354052;
   --muted: #abb7c8;
   --surface: #191f29;
@@ -196,3 +206,51 @@ html:not([lang="zh-CN"]) :is(.vc-choice-grid > button, .restaurant-type-card h3,
 .image-mode-option { min-width: 0; white-space: normal; overflow-wrap: anywhere; line-height: 1.45; height: auto; min-height: 40px; }
 html:not([lang="zh-CN"]) :is(.restaurant-primary, .restaurant-secondary, .studio-quiet-button,
   .studio-text-button, .vc-result-tool, .dh-outline-button, .dh-add-voice) { white-space: normal; overflow-wrap: anywhere; }
+
+/* Video overlays use one palette for default, selected and interactive states. */
+.vc-popover :is(.vc-choice-grid > button, .vc-ratio-options > button, .vc-model-options > button,
+  .vc-model-symbol, .vc-skill-card, .vc-skill-tabs button),
+.vc-dialog :is(.vc-library-upload, .vc-library-sources button, .vc-role-categories button) {
+  background: var(--ui-raised); color: var(--ui-text); border-color: var(--ui-border);
+}
+.vc-popover :is(.vc-model-options small, .vc-skill-card small, .vc-setting-title, .vc-range-labels, header small),
+.vc-dialog :is(.vc-library-upload > small, .vc-library-tabs > button, .vc-library-tabs > span,
+  .vc-library-item small, .vc-select-all, .vc-library-empty) { color: var(--vc-muted); }
+.vc-popover :is(.vc-choice-grid > button, .vc-ratio-options > button, .vc-model-options > button,
+  .vc-skill-card, .vc-skill-tabs button):hover,
+.vc-dialog :is(.vc-library-upload, .vc-library-tabs > button, .vc-library-sources button, .vc-role-categories button):hover {
+  background: var(--vc-control-hover); color: var(--ui-text); border-color: var(--vc-selected-border);
+}
+.vc-popover :is(.vc-choice-grid > button.selected, .vc-ratio-options > button.selected,
+  .vc-model-options > button.selected, .vc-skill-card.selected),
+.vc-dialog :is(.vc-library-sources button.selected, .vc-role-categories button.selected) {
+  background: var(--vc-selected-bg); color: var(--vc-selected-text); border-color: var(--vc-selected-border);
+  box-shadow: inset 0 0 0 1px var(--vc-selected-border);
+}
+.vc-popover :is(.vc-model-options > button > svg, .vc-skill-card > svg) { color: var(--vc-selected-text); }
+.vc-popover .vc-model-options strong small, .vc-popover .vc-setting-title > strong {
+  background: var(--vc-selected-bg); color: var(--vc-selected-text);
+}
+.vc-popover .vc-skill-tabs, .vc-dialog :is(.vc-library-tabs, .vc-prompt-library > article) { border-color: var(--ui-border); }
+.vc-dialog .vc-library-tabs { background: transparent; }
+.vc-dialog .vc-library-tabs > button.selected {
+  color: var(--vc-selected-text); background: var(--vc-selected-bg);
+  box-shadow: inset 0 -2px var(--vc-selected-border); border-radius: 4px 4px 0 0;
+}
+.vc-dialog .vc-library-item.selected { border-color: var(--vc-selected-border); box-shadow: 0 0 0 1px var(--vc-selected-border); }
+.vc-dialog .vc-library-check { background: var(--ui-surface); border-color: var(--ui-muted); }
+.vc-dialog .selected .vc-library-check { background: #276ed1; border-color: #276ed1; }
+.vc-dialog input[type="checkbox"], .vc-popover input[type="range"] { accent-color: var(--vc-selected-border); }
+.vc-popover .vc-search, .vc-dialog .vc-search, .vc-dialog #vc-library-type {
+  background: var(--ui-raised); color: var(--vc-muted); border-color: var(--ui-border);
+}
+:root[data-theme] :is(.vc-popover, .vc-dialog) .vc-search input {
+  background: transparent; color: var(--ui-text); border: 0;
+}
+.vc-popover .vc-search input::placeholder, .vc-dialog .vc-search input::placeholder { color: var(--vc-muted); }
+.vc-popover .vc-search:focus-within, .vc-dialog .vc-search:focus-within {
+  outline: 2px solid var(--vc-selected-border); outline-offset: 2px;
+}
+.vc-popover button:focus-visible, .vc-dialog :is(button, select):focus-visible {
+  outline: 2px solid var(--vc-selected-border); outline-offset: 2px;
+}
