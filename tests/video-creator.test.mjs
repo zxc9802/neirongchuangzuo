@@ -75,7 +75,7 @@ async function fixture(t, options = {}) {
     handler = createVideoCreatorHandler({ storageDir: join(root, 'creator'), config: CONFIG, provider, credits: wallet,
       director: { enabled: true, async generate(input, hooks) { state.scripts++; if (options.director) return options.director(input, hooks); return script(input); } },
       logger: { error: (...items) => state.diagnosticErrors.push(items) },
-      aiConfig: {}, download: async (_url, path) => { state.downloads++; if (state.downloadFailed) throw new Error('Disk full'); await writeFile(path, MP4); },
+      aiConfig: {}, download: async (_url, path, signal, settings) => { state.downloads++; if (options.download) return options.download(_url, path, signal, settings); if (state.downloadFailed) throw new Error('Disk full'); await writeFile(path, MP4); },
       probe: async () => ({ duration: 4, width: 720, height: 1280, audio: true }), ...(options.voice ? { voice: options.voice } : {}), pollIntervalMs: 15, now: () => clock });
     await handler.ready;
     app = createServer((req, res) => { req.authenticatedUserId = req.headers['x-owner'] === 'none' ? null : req.headers['x-owner'] || 'alice'; void handler(req, res); });
@@ -494,4 +494,17 @@ test('an applied 15-second director script can switch provider models without by
     assert.equal(res.status, 409); assert.equal((await res.json()).code, 'SCRIPT_SETTINGS_CHANGED');
   }
   assert.equal(f.state.scripts, 1);
+});
+
+test('the last save attempt tolerates a slow CDN without submitting or charging for another video', async t => {
+  const modes=[];
+  const f=await fixture(t,{download:async(_url,path,_signal,options)=>{
+    modes.push(options.optimizeThroughput);
+    if(options.optimizeThroughput)throw new Error('Video download too slow to finish promptly');
+    await writeFile(path,MP4);
+  }}),id=await f.init();await f.upload(id);f.state.done=true;await f.generate(id);
+  const task=await f.until(async()=>{const value=(await f.current(id)).tasks[0];return value?.status==='completed'&&value;});
+  assert.deepEqual(modes,[true,true,false]);assert.equal(f.state.generates,1);
+  assert.equal(task.billing.status,'settled');assert.equal(task.events.filter(e=>e.action==='download_retry').length,2);
+  assert.equal((await f.call(`/tasks/${task.id}/result`)).status,200);
 });

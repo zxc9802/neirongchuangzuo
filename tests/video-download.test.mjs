@@ -485,3 +485,15 @@ test('TOS resume validates the original strong ETag and never connects to privat
   assert.equal(fallback.calls.length, 1);
   assert.equal(new URL(fallback.calls[0].url).hostname, 'aggregationpic.buerdt.net');
 });
+
+test('patient fallback finishes a slow progressing stream but still enforces idle timeout', async t => {
+  const body=Buffer.alloc(160*1024,19);
+  const app=await fixture(t,async(_req,res)=>{
+    res.writeHead(200,{'Content-Length':body.length,ETag:ETAG});
+    for(let offset=0;offset<body.length&&!res.destroyed;offset+=4096){res.write(body.subarray(offset,offset+4096));await delay(20);}
+    if(!res.destroyed)res.end();
+  },{throughputWindowMs:30,attemptTimeoutMs:5000});
+  await app.run({optimizeThroughput:false});assert.deepEqual(await readFile(app.path),body);
+  const stalled=await fixture(t,(_req,res)=>{res.writeHead(200,{'Content-Length':8192,ETag:ETAG});res.write(Buffer.alloc(4096));});
+  await assert.rejects(stalled.run({optimizeThroughput:false,idleTimeoutMs:100}),/stalled/);
+});

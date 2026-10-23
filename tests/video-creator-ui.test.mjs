@@ -657,3 +657,24 @@ test('hover preview uses the current photo outside the clipped strip and clears 
     f.event('pointerout',{target:trigger,relatedTarget:null});assert.equal(dom.querySelector('.vc-asset-hover'),null);
   } finally {globalThis.document=original;}
 });
+
+test('gallery navigates session photos in order, skips audio and expired photos, and resets zoom', async t => {
+  const data=composerApi(),f=await fixture(t,data.api);
+  for(const name of ['门头.jpg','环境.jpg','菜品.jpg'])await f.useMaterial(new File(['photo'],name,{type:'image/jpeg'}),'photo');
+  const [first,second,last]=data.conversation.assets;
+  data.conversation.assets.splice(1,0,{id:'audio',type:'audio',url:'/voice',name:'声音'}, {id:'expired',type:'image',url:'/old',expired:true,name:'过期'});
+  await f.poll();f.action('vc-preview-asset',{id:first.id});
+  assert.match(f.modal().content,/1 \/ 3/);assert.match(f.modal().content,/vc-lightbox-prev[^>]*disabled/);
+  f.action('vc-lightbox-prev');assert.equal(f.modal().title,first.name);
+  f.action('vc-zoom',{value:'0.25'});f.action('vc-lightbox-next');
+  assert.equal(f.modal().title,second.name);assert.match(f.modal().content,/2 \/ 3/);assert.match(f.modal().content,/100%/);
+  f.action('vc-lightbox-next');assert.equal(f.modal().title,last.name);assert.match(f.modal().content,/vc-lightbox-next[^>]*disabled/);
+  f.action('vc-lightbox-next');assert.equal(f.modal().title,last.name);
+  f.action('vc-lightbox-prev');assert.equal(f.modal().title,second.name);
+  const original=document.querySelector;document.querySelector=selector=>selector==='#modal[open].vc-lightbox-modal'?f.node('#modal'):original(selector);
+  let prevented=0;f.event('keydown',{key:'ArrowLeft',target:{closest:()=>null,matches:()=>false},preventDefault(){prevented++;}});
+  assert.equal(f.modal().title,first.name);assert.equal(prevented,1);
+  f.event('keydown',{key:'ArrowRight',target:{closest:()=>({}),matches:()=>false},preventDefault(){throw Error('must not intercept text editing');}});
+  assert.equal(f.modal().title,first.name);
+  f.action('vc-preview-asset',{id:'audio'});assert.doesNotMatch(f.modal().content,/vc-lightbox-next|vc-lightbox-counter/);
+});

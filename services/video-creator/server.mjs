@@ -203,7 +203,10 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         if (closing) return;
         const temporary = await store.path(c.id, task.id + '.tmp'), result = await store.path(c.id, `result-${task.id}.mp4`);
         try {
-          await download(task.resultSource, temporary, controller.signal); const metadata = await probe(temporary);
+          // Try alternate CDN addresses first; the last attempt must let a slow,
+          // progressing stream finish within the normal download/idle deadlines.
+          await download(task.resultSource, temporary, controller.signal, { optimizeThroughput: (task.downloadAttempts || 0) < 2 });
+          const metadata = await probe(temporary);
           await rename(temporary, result); task.status = 'completed'; task.completedAt = now(); task.expiresAt = now() + 3 * DAY;
           observeTask(task, now()); task.actualDuration = metadata.duration;
           if (task.settings.generateAudio && !metadata.audio) task.warning = '成片没有音轨，请预览确认。';

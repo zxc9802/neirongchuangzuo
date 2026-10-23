@@ -34,7 +34,7 @@ export function validateGrounding(value,observations) {
   }
 }
 export function narrationRepairRequest(value,input) {
-  return { task:'只修改旁白，按镜头返回{"voiceovers":["..."]}，保持数组长度。可以空白留环境声；不得更改画面、素材、事实，不得切断句子。中文每秒最多3字；保留套餐、价格、有效期、使用条件，条件可在镜头间分布，若预算无法容纳则返回{"needsClarification":true}，不得删减必要限制。',
+  return { task:'只修改旁白，按镜头返回{"voiceovers":["..."]}，保持数组长度。先通读全片再压缩，保留目标顾客、核心到店理由和自然邀请，删掉次要描写而不是把宣传改成物品清单或镜头说明。不要把每句都压成“看环境、看细节”之类标签。可以空白留环境声；不得更改画面、素材、事实，不得切断句子。中文每秒最多3字；保留套餐、价格、有效期、使用条件，条件可在镜头间分布，若预算无法容纳则返回{"needsClarification":true}，不得删减必要限制。',
     language:input.settings.language, budgetUnit:narrationBudget(input.settings.language).unit, request:input.message, offerFacts:value.offerFacts||null,
     shots:value.script.shots.map(s=>({seconds:s.end-s.start,maximumUnits:Math.floor((s.end-s.start)*narrationBudget(input.settings.language).repairRate),visual:s.visual,voiceover:s.voiceover})) };
 }

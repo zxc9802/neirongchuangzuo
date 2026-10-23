@@ -246,7 +246,7 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
     await writeFile(metadataPath, JSON.stringify(downloadState), { mode: 0o600 });
     let bytes = start;
     progress({ bytes, totalBytes, resumed: start > 0, complete: false });
-    if (totalBytes !== null) {
+    if (totalBytes !== null && options.optimizeThroughput !== false) {
       // Avoid a slow address even if its stream could fit the ten-minute limit.
       // Measure this response only, not a retained partial download.
       // Unknown lengths and small final tails retain the existing timeout rules.

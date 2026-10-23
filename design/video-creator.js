@@ -589,13 +589,25 @@ function scheduleAssetHover(trigger) {
     (document.querySelector('#modal[open]') || document.body).append(assetHover);
   }, 250);
 }
-function previewAsset(id) {
+function previewAsset(id, navigating = false) {
   const asset = resolvePreviewAsset(id);
   if (!asset || asset.expired || asset.expiresAt && asset.expiresAt <= Date.now() || !mediaUrl(asset.url)) { context.toast('这份素材已过期或不可用，请重新上传。'); return; }
-  state.libraryReturn = document.querySelector('#modal')?.classList.contains('vc-asset-modal') ? state.picker : null;
+  if (!navigating) {
+    state.libraryReturn = document.querySelector('#modal')?.classList.contains('vc-asset-modal') ? state.picker : null;
+    const available = state.libraryReturn ? filteredLibrary() : state.session?.assets || assetLibrary();
+    state.previewGallery = available.filter(a => a.type === 'image' && !a.expired && !(a.expiresAt && a.expiresAt <= Date.now()) && mediaUrl(a.url)).map(a => a.id);
+    if (asset.type === 'image' && !state.previewGallery.includes(id)) state.previewGallery = [id];
+  }
   state.previewAsset = asset; state.zoom = 1;
-  modal(asset.name, `<div class="vc-lightbox-media">${asset.type === 'image' ? `<img id="vc-lightbox-image" src="${context.esc(mediaUrl(asset.url))}" alt="${context.esc(asset.name)}">` : `<audio controls src="${context.esc(mediaUrl(asset.url))}" aria-label="声音参考试听"></audio>`}</div><footer class="vc-lightbox-controls">${asset.type === 'image' ? context.button('vc-zoom', '−', 'vc-icon', 'data-value="-0.25" aria-label="缩小图片"') + '<span id="vc-zoom-label">100%</span>' + context.button('vc-zoom', '+', 'vc-icon', 'data-value="0.25" aria-label="放大图片"') : ''}<a href="${context.esc(mediaUrl(asset.url))}" download="${context.esc(asset.name)}" class="vc-icon" aria-label="下载素材">${uiIcon('download')}</a>${context.button('vc-lightbox-done', '关闭预览', 'vc-outline')}</footer>`, true);
+  const gallery = state.previewGallery || [], index = gallery.indexOf(id);
+  const navigation = asset.type === 'image' && gallery.length > 1 ? context.button('vc-lightbox-prev', '‹', 'vc-lightbox-arrow vc-lightbox-prev', `aria-label="上一张图片" ${index <= 0 ? 'disabled' : ''}`) + context.button('vc-lightbox-next', '›', 'vc-lightbox-arrow vc-lightbox-next', `aria-label="下一张图片" ${index >= gallery.length - 1 ? 'disabled' : ''}`) : '';
+  modal(asset.name, `<div class="vc-lightbox-media">${navigation}${asset.type === 'image' ? `<img id="vc-lightbox-image" src="${context.esc(mediaUrl(asset.url))}" alt="${context.esc(asset.name)}">` : `<audio controls src="${context.esc(mediaUrl(asset.url))}" aria-label="声音参考试听"></audio>`}</div><footer class="vc-lightbox-controls">${asset.type === 'image' ? `<span class="vc-lightbox-counter" aria-live="polite">${index + 1} / ${gallery.length}</span>` : ''}${asset.type === 'image' ? context.button('vc-zoom', '−', 'vc-icon', 'data-value="-0.25" aria-label="缩小图片"') + '<span id="vc-zoom-label">100%</span>' + context.button('vc-zoom', '+', 'vc-icon', 'data-value="0.25" aria-label="放大图片"') : ''}<a href="${context.esc(mediaUrl(asset.url))}" download="${context.esc(asset.name)}" class="vc-icon" aria-label="下载素材">${uiIcon('download')}</a>${context.button('vc-lightbox-done', '关闭预览', 'vc-outline')}</footer>`, true);
   document.querySelector('#modal').classList.add('vc-lightbox-modal');
+}
+function navigatePreview(direction) {
+  const gallery = state?.previewGallery || [], index = gallery.indexOf(state?.previewAsset?.id);
+  if (index < 0 || index + direction < 0 || index + direction >= gallery.length) return;
+  previewAsset(gallery[index + direction], true);
 }
 function durationControl() {
   const s = state.settings, model = VIDEO_MODELS.find(m => m.id === s.model), durations = model.durations;
@@ -1020,6 +1032,7 @@ function handleUiAction(action, el, ctx) {
   else if (action === 'vc-cancel-library') { state.picker = null; document.querySelector('#modal').close(); }
   else if (action === 'vc-confirm-library') { const picker = state.picker, reopen = state.returnExpanded; state.returnExpanded = false; document.querySelector('#modal').close(); void perform(() => applyLibrarySelection(picker)).then(() => { if (reopen) expandEditor(); }); }
   else if (action === 'vc-preview-asset') previewAsset(el.dataset.id);
+  else if (action === 'vc-lightbox-prev' || action === 'vc-lightbox-next') navigatePreview(action === 'vc-lightbox-prev' ? -1 : 1);
   else if (action === 'vc-lightbox-done') {
     const old = state.libraryReturn; state.libraryReturn = null; document.querySelector('#modal').close(); if (old) { referencePicker(old.purpose, ctx, old.replaceId); state.picker = old; document.querySelector('#vc-library-search').value = old.query; document.querySelectorAll('[data-action="vc-library-tab"]').forEach(b => b.classList.toggle('selected', b.dataset.value === old.tab)); document.querySelectorAll('[data-action="vc-library-source"]').forEach(b => b.classList.toggle('selected', b.dataset.value === old.source)); renderLibraryGrid(); }
   }
@@ -1139,3 +1152,9 @@ document.addEventListener('focusin', event => { const trigger = event.target.clo
 document.addEventListener('focusout', hideAssetHover);
 document.addEventListener('scroll', hideAssetHover, true);
 document.addEventListener('pointerdown', hideAssetHover);
+
+document.addEventListener('keydown', event => {
+  if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+    || event.target.closest('input,textarea,select,[contenteditable="true"]') || !document.querySelector('#modal[open].vc-lightbox-modal')) return;
+  event.preventDefault(); navigatePreview(event.key === 'ArrowLeft' ? -1 : 1);
+});
