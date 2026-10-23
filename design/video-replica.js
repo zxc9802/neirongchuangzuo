@@ -1,6 +1,7 @@
 import { uiLocale, t } from './workspace-preferences.js';
 import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malaysian-prices.js';
+import { selectReplicaMaterial } from './generated-assets.js';
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
@@ -138,7 +139,7 @@ function slot(kind, ctx) {
     <strong class="replica-file-name">${ctx.esc(selected?.name || (saved?.assetId ? '已存入资产，长期保留' : saved ? '素材已上传并保存' : video ? '上传你想保留动作的视频' : voice ? '选择想使用的单人声音' : extra ? `上传想替换成的${REPLACEMENTS[kind]}` : '上传你想替换成的人物'))}</strong>
     <p>${video ? `${deepMode() ? '参考原视频动作与镜头' : '单个人物'} · 2–${selectedModel().extendedDuration || selectedModel().maxDuration} 秒 · MP4 / MOV · 上限 300 MB` : voice ? state.config && !state.config.voiceEnabled ? '换声服务尚未配置，请联系管理员。' : '清晰单人声音 · 2–15 秒 · MP3 / WAV · 最大 15 MB' : `${extra ? '清晰图片 · 宽高至少 300 像素' : '清晰正脸'} · JPG / PNG / WebP · 最大 10 MB`}</p>
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="${t('上传')} ${t(title)}">
-    <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${t(selected || saved ? '更换' : '选择')} ${t(title)}</label>${!video && !extra ? `<a href="#assets" class="replica-asset-link">${t(voice ? '从资产选择声音' : '从资产选择形象')}</a>` : ''}</section>`;
+    <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${t(selected || saved ? '更换' : '选择')} ${t(title)}</label>${!video && !extra ? `<a href="#assets" class="replica-asset-link" data-replica-select-${kind}>${t(voice ? '从资产选择声音' : '从资产选择形象')}</a>` : ''}</section>`;
 }
 function deepInputs(ctx) {
   const locked = state.busy || state.current && state.current.status !== 'draft';
@@ -151,7 +152,7 @@ function deepInputs(ctx) {
     return `<div class="replica-material ${active ? 'is-selected' : ''}"><input id="replica-${kind}" class="replica-hidden-input" type="file" accept="${kind === 'voice' ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}参考素材"><label for="replica-${kind}" class="replica-material-tile ${disabled ? 'is-disabled' : ''}" title="${ctx.esc(selected?.name || `添加${title}参考素材`)}">${source && kind !== 'voice' ? `<img src="${ctx.esc(source)}" alt="${ctx.esc(title)}参考素材">` : ctx.icon(kind === 'photo' ? 'avatar' : kind === 'voice' ? 'audio' : kind === 'product' ? 'store' : 'image')}<span class="replica-material-add" aria-hidden="true">+</span></label><input id="replica-toggle-${kind}" class="replica-material-toggle" type="checkbox" aria-label="替换${REPLACEMENTS[kind]}" ${active ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="replica-material-label">${title}<small>可选</small></span><span class="replica-material-name" title="${ctx.esc(name)}">${ctx.esc(name)}</span></div>`;
   }).join('');
   const voiceSource = replacements.voice && (state.urls.voice || state.current?.sourceVoiceUrl);
-  return `<div class="replica-material-heading"><span>替换素材</span><small>已选 ${Object.values(replacements).filter(Boolean).length} / 4 项</small></div><div class="replica-materials">${cards}</div>${voiceSource ? `<audio class="replica-material-audio" src="${ctx.esc(voiceSource)}" controls preload="metadata" aria-label="声音参考试听"></audio>` : ''}<div class="replica-material-library">${!locked && replacements.photo ? '<a href="#assets">从资产选择形象</a>' : ''}${!locked && replacements.voice ? '<a href="#assets">从资产选择声音</a>' : ''}</div>${deepSource(ctx)}<p class="replica-deep-guidance">未选择的项目保留原视频内容。<br>沿用原片的动作、镜头和时长，自由组合替换内容。</p>`;
+  return `<div class="replica-material-heading"><span>替换素材</span><small>已选 ${Object.values(replacements).filter(Boolean).length} / 4 项</small></div><div class="replica-materials">${cards}</div>${voiceSource ? `<audio class="replica-material-audio" src="${ctx.esc(voiceSource)}" controls preload="metadata" aria-label="声音参考试听"></audio>` : ''}<div class="replica-material-library">${!locked && replacements.photo ? '<a href="#assets" data-replica-select-photo>从资产选择形象</a>' : ''}${!locked && replacements.voice ? '<a href="#assets" data-replica-select-voice>从资产选择声音</a>' : ''}</div>${deepSource(ctx)}<p class="replica-deep-guidance">未选择的项目保留原视频内容。<br>沿用原片的动作、镜头和时长，自由组合替换内容。</p>`;
 }
 function deepSource(ctx) {
   const source = state.urls.video || state.current?.sourceVideoUrl, saved = state.current?.video;
@@ -420,6 +421,10 @@ export function bindVideoReplica(ctx) {
   };
   for (const next of ['classic', 'deep']) document.querySelector(`#replica-mode-${next}`).onclick = () => switchMode(next);
   if (deepMode()) for (const kind of Object.keys(REPLACEMENTS)) document.querySelector(`#replica-toggle-${kind}`).onchange = event => { void toggleReplacement(kind, event.target.checked); };
+  for (const kind of ['photo', 'voice']) {
+    const select = document.querySelector(`[data-replica-select-${kind}]`);
+    if (select) select.onclick = event => { event.preventDefault(); selectReplicaMaterial(ctx, kind); };
+  }
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
   const resume = document.querySelector('#replica-resume'); if (resume) resume.onclick = () => { void recoverTask('resume'); };
   const cancel = document.querySelector('#replica-cancel'); if (cancel) cancel.onclick = () => { void recoverTask('cancel'); };

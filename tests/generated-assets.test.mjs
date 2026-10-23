@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { parseHTML } from 'linkedom';
 import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets, bindGeneratedAssets, disposeGeneratedAssets, collectMaterialAssets, materialDestinations, handleGeneratedAssetsAction } from '../design/generated-assets.js';
+import { renderVideoReplica, bindVideoReplica, disposeVideoReplica } from '../design/video-replica.js';
 
 const now = Date.parse('2026-09-30T06:00:00Z');
 const hour = 3600000;
@@ -45,6 +47,83 @@ test('assets preview routes a stored photo into AI image references without subm
   assert.equal(imported.files[0].name, item.filename); assert.equal(imported.files[0].type, 'image/jpeg');
   assert.deepEqual(ctx.configs.image.files, ['existing', 'new-image']);
   assert.ok(calls.every(([, options]) => !options.method || options.method === 'GET'));
+});
+
+for (const mode of ['classic', 'deep']) for (const kind of ['photo', 'voice']) for (const clickTarget of ['cover', 'button']) test(`selecting a ${kind} from the ${mode} replica asset ${clickTarget} returns it directly and preserves other inputs`, async t => {
+  const previous = { document: globalThis.document, fetch: globalThis.fetch, workspaceUser: globalThis.workspaceUser };
+  const nodes = new Map(), item = material(kind), calls = [];
+  const node = selector => { if (!nodes.has(selector)) nodes.set(selector, { innerHTML: '' }); return nodes.get(selector); };
+  globalThis.workspaceUser = { id: crypto.randomUUID() };
+  globalThis.document = { body: { dataset: { page: 'replica' } }, querySelector: node };
+  globalThis.fetch = async (path, options) => {
+    calls.push([path, options]);
+    return Response.json(path === '/api/assets/materials' ? { configured: true, materials: [material('photo'), material('voice')] }
+      : path.endsWith('/config') ? { enabled: true } : { tasks: [] });
+  };
+  t.after(() => { disposeGeneratedAssets(); disposeVideoReplica(); Object.assign(globalThis, previous); });
+  let html, modalCount = 0;
+  const ctx = { mode: 'replica', esc: value => String(value ?? ''), icon: () => '',
+    button: (action, text, cls, attributes) => `<button data-action="${action}" ${attributes || ''}>${text}</button>`,
+    openModal: () => { modalCount++; }, toast: message => assert.fail(message),
+    refresh() {
+      html = ctx.mode === 'replica' ? renderVideoReplica(ctx) : renderGeneratedAssets(ctx);
+    },
+    navigate(target) {
+      if (target !== 'replica') disposeVideoReplica();
+      if (target !== 'assets') disposeGeneratedAssets();
+      ctx.mode = target; document.body.dataset.page = target; ctx.refresh();
+      if (target === 'replica') bindVideoReplica(ctx); else bindGeneratedAssets(ctx);
+    },
+  };
+  const settle = async () => { for (let n = 0; n < 10; n++) await new Promise(resolve => setImmediate(resolve)); };
+  ctx.refresh(); bindVideoReplica(ctx); await settle();
+  if (mode === 'deep') {
+    node('#replica-mode-deep').onclick(); bindVideoReplica(ctx);
+    for (const selectedKind of ['photo', 'voice']) node(`#replica-toggle-${selectedKind}`).onchange({ target: { checked: true } });
+    bindVideoReplica(ctx); await settle();
+  }
+  node('#replica-video').onchange({ target: { files: [new File(['video'], 'original.mp4', { type: 'video/mp4' })] } });
+  const other = kind === 'photo' ? 'voice' : 'photo', otherName = other === 'photo' ? 'keep-photo.jpg' : 'keep-voice.wav';
+  node(`#replica-${other}`).onchange({ target: { files: [new File(['data'], otherName, { type: other === 'photo' ? 'image/jpeg' : 'audio/wav' })] } });
+  const replica = parseHTML(html).document;
+  const entry = replica.querySelector(`[data-replica-select-${kind}]`);
+  assert.ok(entry, `the ${kind} entry must carry the replica selection intent`);
+  assert.equal(entry.textContent, kind === 'photo' ? '从资产选择形象' : '从资产选择声音');
+  let prevented = false;
+  node(`[data-replica-select-${kind}]`).onclick({ preventDefault() { prevented = true; } });
+  assert.ok(prevented); await settle();
+  assert.equal(ctx.mode, 'assets');
+  const picker = parseHTML(node('#material-assets-results').innerHTML).document;
+  assert.equal(picker.querySelectorAll('.generated-asset-card').length, 1, 'only the requested material kind belongs in the picker');
+  assert.match(node('#material-assets-results').innerHTML, new RegExp(kind === 'photo' ? '选择此形象' : '选择此声音'));
+  assert.doesNotMatch(node('#material-assets-results').innerHTML, /使用到/);
+  const cover = picker.querySelector('.generated-asset-cover'), choose = picker.querySelector('.generated-asset-footer button');
+  for (const element of [cover, choose]) {
+    assert.equal(element.dataset.action, 'material-use'); assert.equal(element.dataset.target, 'replica');
+    assert.equal(element.dataset.id, item.id);
+  }
+  const clicked = clickTarget === 'cover' ? cover : choose;
+  handleGeneratedAssetsAction(clicked.dataset.action, clicked, ctx); await settle();
+  assert.equal(ctx.mode, 'replica'); assert.equal(modalCount, 0);
+  assert.match(html, /我的素材/); assert.match(html, /original\.mp4/);
+  assert.ok(html.includes(otherName), 'the other selected material must be preserved');
+  assert.match(html, new RegExp(item.url));
+  assert.ok(calls.every(([, options]) => !options?.method || options.method === 'GET'));
+
+  node(`[data-replica-select-${other}]`).onclick({ preventDefault() {} }); await settle();
+  const nextPicker = parseHTML(node('#material-assets-results').innerHTML).document;
+  const nextChoose = nextPicker.querySelector('.generated-asset-footer button');
+  assert.equal(nextChoose.dataset.id, material(other).id, 'switching entry must select the other material kind');
+  handleGeneratedAssetsAction(nextChoose.dataset.action, nextChoose, ctx); await settle();
+  assert.equal(ctx.mode, 'replica'); assert.equal(modalCount, 0);
+  assert.match(html, /original\.mp4/);
+  for (const selected of [item, material(other)]) assert.ok(html.includes(selected.url), 'both chosen assets must remain in the replica');
+
+  ctx.navigate('assets'); await settle();
+  const library = parseHTML(node('#material-assets-results').innerHTML).document;
+  assert.equal(library.querySelectorAll('.generated-asset-card').length, 2, 'normal assets navigation clears the selection filter');
+  handleGeneratedAssetsAction('material-preview', { dataset: { id: item.id } }, ctx);
+  assert.equal(modalCount, 1, 'opening assets normally still offers destination choices');
 });
 const image = (overrides = {}) => ({ id, status: 'completed', createdAt: new Date(now - 74 * hour).toISOString(), completedAt: new Date(now - hour).toISOString(), images: [{ url: `/api/ai/media/${id}/result-1.png`, filename: 'result-1.png' }], prompt: '设计宣传海报\n主标题：真实工艺，看细节\n要点：打样流程', ...overrides });
 const restaurant = (overrides = {}) => ({ id, status: 'completed', completedAt: now - hour, copy: { titles: ['附近午餐来吃一碗面'] }, files: [{ role: 'image', filename: '01.jpg', url: `/api/restaurant/tasks/${id}/files/01.jpg`, expiresAt: now + 2 * hour }, { role: 'zip', filename: 'package.zip', url: `/api/restaurant/tasks/${id}/files/package.zip`, expiresAt: now + 2 * hour }], sourceImages: [{ filename: 'original-1.jpg', url: `/api/restaurant/tasks/${id}/files/original-1.jpg` }], ...overrides });
