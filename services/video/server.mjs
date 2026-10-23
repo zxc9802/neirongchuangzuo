@@ -1128,7 +1128,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           task.voiceEngine = voiceEngine;
           await save(task); json(res, 200, { task: view(task) }); return;
         }
-        if (['video', ...DEEP_KINDS].includes(match[2]) && (req.method === 'PUT' || req.method === 'POST' && ['photo', 'voice'].includes(match[2]))) {
+        if (['video', ...DEEP_KINDS].includes(match[2]) && ['PUT', 'POST'].includes(req.method)) {
           const replacingSource = match[2] === 'video' && view(task).canReplaceSource;
           if (task.status !== 'draft' && !replacingSource) throw error('任务已提交，不能替换素材。', 409);
           const kind = match[2];
@@ -1136,7 +1136,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             throw error('请先在深度复刻中启用对应的替换项目。', 400, 'VIDEO_REPLACEMENT_DISABLED');
           }
           const imported = req.method === 'POST' && materialLibrary ? await materialLibrary.get(userId, (await readJSON(req)).assetId) : null;
-          if (req.method === 'POST' && (!imported || imported.kind !== kind)) throw error('请选择相应类型的本人素材。', 400);
+          if (req.method === 'POST' && (!imported || imported.kind !== (DEEP_IMAGE_KINDS.includes(kind) ? 'photo' : kind))) throw error('请选择相应类型的本人素材。', 400);
           const bytes = imported ? imported.bytes : await readBody(req, kind === 'video' ? VIDEO_LIMIT : kind === 'voice' ? VOICE_LIMIT : PHOTO_LIMIT);
           let name = imported?.name;
           if (!name && req.headers['x-file-name']) { try { name = decodeURIComponent(req.headers['x-file-name']); } catch {} }
@@ -1149,7 +1149,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
               throw cause;
             }
             await writeFile(temporary, normalized, { mode: 0o600 });
-            const asset = kind === 'photo' && materialLibrary && (imported || await materialLibrary.save(userId, { kind, path: temporary, name }));
+            const asset = materialLibrary && (imported || await materialLibrary.save(userId, { kind: 'photo', path: temporary, name }));
             task[kind] = { ready: true, ...(asset ? { assetId: asset.id } : {}) };
           } else if (kind === 'voice') {
             await writeFile(temporary, bytes, { mode: 0o600 });
@@ -1167,11 +1167,12 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
             let metadata = await probe(temporary);
             const model = selectedModel(models.some(model => model.id === task.model) ? task.model : MODEL);
             videoDuration(metadata, model);
+            const asset = materialLibrary && (imported || await materialLibrary.save(userId, { kind: 'video', path: temporary, name, metadata }));
             if (model.startsWith('doubao-seedance-')) metadata = await normalizeSeedanceVideo(temporary, metadata);
             if (segmentPlan(metadata, model)) metadata = { ...metadata, boundaries: await segmentBoundaries(temporary, metadata, model) };
             const duration = videoDuration(metadata, model);
             task.model = model;
-            task.video = metadata;
+            task.video = { ...metadata, ...(asset ? { assetId: asset.id } : {}) };
             delete task.targetDuration;
             delete task.languageRouting; delete task.languageDetection; delete task.localization;
             delete task.voiceConversion; delete task.segments; delete task.segmentBoundary;

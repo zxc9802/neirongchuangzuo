@@ -83,7 +83,7 @@ for (const stage of ['create', 'upload']) test(`a stalled replica ${stage} reque
   assert.equal(posts, 1);
 });
 
-async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiFetch } = {}) {
+async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiFetch, assetFetch } = {}) {
   const keys = ['workspaceUser', 'document', 'fetch', 'setInterval', 'clearInterval'];
   const original = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
   const nodes = new Map();
@@ -94,6 +94,11 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
   globalThis.setInterval = callback => { poll = callback; return 1; };
   globalThis.clearInterval = () => {};
   globalThis.fetch = async (path, options) => {
+    if (path.startsWith('/api/assets/materials/')) {
+      if (assetFetch) return assetFetch(path, options);
+      const kind = path.split('/').at(-1), id = `${kind}-${'a'.repeat(64)}`;
+      return Response.json({ material: { id, kind, name: options.body.name, type: kind === 'photo' ? 'image' : kind === 'voice' ? 'audio' : 'video', permanent: true, createdAt: Date.now(), url: `/api/assets/materials/${id}/media` } });
+    }
     if (apiFetch) { const response = await apiFetch(path, options); if (response) return response; }
     return path === '/api/workspace/credits' ? Response.json(wallet) : path.endsWith('/tasks')
       ? failing ? new Response('<html>Service restarting</html>', { status: 502 }) : taskFetch ? taskFetch(options) : Response.json({ tasks })
@@ -1078,4 +1083,53 @@ for (const fails of [false, true]) test(`deselecting a saved deep draft ${fails 
     finish(); await page.settle();
     assert.doesNotMatch(page.html(), /new-room.png|saved-background.jpg/, 'reenabling must not restore cleared references');
   }
+});
+
+test('direct uploads enter the shared library before generation, and failed saves prevent task submission', async t => {
+  const uploads = [], writes = [];
+  const page = await fixture(t, { assetFetch: (path, options) => {
+    uploads.push({ path, file: options.body });
+    return Response.json({ error: '素材入库失败，请重试。' }, { status: 503 });
+  }, apiFetch: (path, options) => { if (options?.method) writes.push(path); } });
+  page.recover(); await page.poll(); page.node('#replica-mode-deep').onclick(); page.rebind();
+  for (const kind of ['photo', 'voice', 'product', 'background', 'video']) {
+    const file = new File([kind], `${kind}.mp4`);
+    await page.node(`#replica-${kind}`).onchange({ target: { files: [file] } }); page.rebind();
+    assert.equal(uploads.at(-1).path, `/api/assets/materials/${['product', 'background'].includes(kind) ? 'photo' : kind}`);
+    assert.equal(uploads.at(-1).file, file);
+  }
+  assert.match(page.message(), /入库失败/);
+  page.node('#replica-submit').onclick(); await page.settle();
+  assert.match(page.message(), /入库失败/);
+  assert.deepEqual(writes, []);
+});
+
+test('a late direct upload failure does not restore a deselected replacement', async t => {
+  let finish;
+  const page = await fixture(t, { assetFetch: () => new Promise(resolve => { finish = resolve; }) });
+  page.recover(); await page.poll(); page.node('#replica-mode-deep').onclick(); page.rebind();
+  const uploading = page.node('#replica-background').onchange({ target: { files: [new File(['image'], 'background.png')] } });
+  await page.settle(); page.rebind();
+  assert.match(page.message(), /正在保存素材到资产库/);
+  page.node('#replica-remove-background').onclick();
+  finish(Response.json({ error: '素材入库失败，请重试。' }, { status: 503 })); await uploading;
+  assert.doesNotMatch(page.html(), /background.png/);
+  assert.doesNotMatch(page.message(), /入库失败/);
+});
+
+test('changing the model first imports the newly chosen library video into a saved draft', async t => {
+  const task = { id: 'saved-video-draft', status: 'draft', createdAt: Date.now(), model: PREMIUM_MODEL, video: { duration: 20 }, duration: 20 };
+  const calls = [], id = `video-${'b'.repeat(64)}`;
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (options?.method !== 'POST') return;
+    const body = JSON.parse(options.body); calls.push({ path, body });
+    if (path.endsWith('/video')) { task.video = { duration: 5, assetId: body.assetId }; task.duration = 5; }
+    if (path.endsWith('/model')) { assert.equal(task.video.assetId, id); task.model = body.model; }
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  page.useMaterial({ kind: 'video', id, name: '短视频' }); page.rebind();
+  await page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
+  assert.deepEqual(calls.map(call => call.path.split('/').at(-1)), ['video', 'model']);
+  assert.deepEqual(calls[0].body, { assetId: id });
 });

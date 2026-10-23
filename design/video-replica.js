@@ -2,6 +2,7 @@ import { uiLocale, t } from './workspace-preferences.js';
 import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malaysian-prices.js';
 import { openReplicaAssetPicker } from './replica-asset-picker.js';
+import { uploadSharedMaterial } from './generated-assets.js';
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
@@ -49,6 +50,7 @@ const pending = task => task && !['draft', 'completed', 'failed', 'expired', 'wa
 let state = { owner: null, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
 let context, timer, polling = false, unsubscribeCredits;
 let selectedMaterials = {};
+const assetUploads = new WeakMap();
 function resetFiles() { for (const url of Object.values(state.urls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url); state.files = {}; state.urls = {}; selectedMaterials = {}; }
 function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
@@ -93,6 +95,7 @@ function failureMessage(task) {
 function actionMessage() {
   if (state.pollError) return `${displayMessage(state.pollError)} 正在重新连接，已有任务进度已保留。`;
   if (state.error) return displayMessage(state.error);
+  if (Object.values(state.files).some(file => assetUploads.get(file)?.pending)) return '正在保存素材到资产库…';
   if (state.busy) return '';
   if (state.current?.status === 'queued') return '任务已进入队列，轮到后自动生成，无需重复提交。';
   if (state.current?.error || state.current?.recovery) return failureMessage(state.current);
@@ -157,7 +160,7 @@ function deepInputs(ctx) {
 function deepSource(ctx) {
   const source = state.urls.video || state.current?.sourceVideoUrl, saved = state.current?.video;
   const disabled = state.busy || state.current && state.current.status !== 'draft' && !state.current.canReplaceSource;
-  return `<section class="replica-deep-source"><input id="replica-video" class="replica-hidden-input" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" ${disabled ? 'disabled' : ''} aria-label="上传参考视频"><div class="replica-source-stage ${source ? 'has-video' : ''}">${source ? `<video src="${ctx.esc(source)}" controls playsinline preload="metadata" aria-label="参考视频预览"></video><label for="replica-video" class="replica-source-replace ${disabled ? 'is-disabled' : ''}" title="更换参考视频">${ctx.icon('plus')}<span>更换</span></label>` : `<label for="replica-video" class="replica-source-empty ${disabled ? 'is-disabled' : ''}">${ctx.icon('video')}<strong>添加参考视频</strong><span>必选 · 2–${selectedModel().extendedDuration || selectedModel().maxDuration} 秒</span><small>支持 MP4、MOV · 上限 300 MB</small></label>`}</div>${source ? `<p class="replica-source-name" title="${ctx.esc(state.files.video?.name || '参考视频')}">${ctx.esc(state.files.video?.name || '参考视频已上传')}${saved?.duration ? `<span>${saved.duration} 秒</span>` : ''}</p>` : ''}</section>`;
+  return `<section class="replica-deep-source"><input id="replica-video" class="replica-hidden-input" type="file" accept="video/mp4,video/quicktime,.mp4,.mov" ${disabled ? 'disabled' : ''} aria-label="上传参考视频"><div class="replica-source-stage ${source ? 'has-video' : ''}">${source ? `<video src="${ctx.esc(source)}" controls playsinline preload="metadata" aria-label="参考视频预览"></video><label for="replica-video" class="replica-source-replace ${disabled ? 'is-disabled' : ''}" title="更换参考视频">${ctx.icon('plus')}<span>更换</span></label>` : `<label for="replica-video" class="replica-source-empty ${disabled ? 'is-disabled' : ''}">${ctx.icon('video')}<strong>添加参考视频</strong><span>必选 · 2–${selectedModel().extendedDuration || selectedModel().maxDuration} 秒</span><small>支持 MP4、MOV · 上限 300 MB</small></label>`}</div>${source ? `<p class="replica-source-name" title="${ctx.esc(state.files.video?.name || selectedMaterials.video?.name || '参考视频')}">${ctx.esc(state.files.video?.name || selectedMaterials.video?.name || '参考视频已上传')}${saved?.duration ? `<span>${saved.duration} 秒</span>` : ''}</p>` : ''}</section>`;
 }
 function renderDeepReplica(ctx) {
   const task = state.current;
@@ -280,10 +283,10 @@ async function selectModel(id) {
   }
   state.busy = true; state.error = ''; refresh();
   try {
-    if (state.files.video) {
+    if (state.files.video || selectedMaterials.video) {
       const video = state.files.video;
-      remember((await request(`/tasks/${state.current.id}/video`, { method: 'PUT', headers: { 'Content-Type': video.type || 'application/octet-stream' }, body: video })).task);
-      delete state.files.video;
+      remember((await request(`/tasks/${state.current.id}/video`, selectedMaterials.video ? jsonPost({ assetId: selectedMaterials.video.id }) : { method: 'PUT', headers: { 'Content-Type': video.type || 'application/octet-stream' }, body: video })).task);
+      delete state.files.video; delete selectedMaterials.video;
     }
     remember((await request(`/tasks/${state.current.id}/model`, jsonPost({ model: id }))).task);
   }
@@ -296,7 +299,17 @@ async function selectFile(kind, file) {
   if (file.size > limit * 1024 * 1024) { state.error = `文件过大，${kind === 'video' ? '视频' : kind === 'voice' ? '声音参考' : '照片'}不能超过 ${limit} MB。`; refresh(); return; }
   if (state.urls[kind]) URL.revokeObjectURL(state.urls[kind]);
   delete selectedMaterials[kind];
-  state.files[kind] = file; state.urls[kind] = URL.createObjectURL(file); state.error = ''; refresh();
+  state.files[kind] = file; state.urls[kind] = URL.createObjectURL(file); state.error = '';
+  const owner = state.owner, upload = { pending: true, error: null };
+  assetUploads.set(file, upload);
+  upload.promise = uploadSharedMaterial(kind, file).catch(cause => {
+    upload.error = cause;
+    if (state.owner === owner && state.files[kind] === file) state.error = cause.message;
+  }).finally(() => { upload.pending = false; if (state.owner === owner && state.files[kind] === file) refresh(); });
+  refresh();
+  await upload.promise;
+  if (upload.error) return false;
+  if (state.owner !== owner || state.files[kind] !== file) return;
   if (kind === 'video' && state.current?.canReplaceSource) {
     state.busy = true; refresh();
     try {
@@ -313,11 +326,16 @@ async function submit() {
       state.error = kind === 'video' ? '请先上传参考视频。' : `请先上传${REPLACEMENTS[kind]}参考素材。`; refresh(); return;
     }
   } else {
-    if ((!state.files.video && !state.current?.video) || (!state.files.photo && !selectedMaterials.photo && !state.current?.photo)) { state.error = '请先上传一段参考视频和一张人物照片。'; refresh(); return; }
+    if ((!state.files.video && !selectedMaterials.video && !state.current?.video) || (!state.files.photo && !selectedMaterials.photo && !state.current?.photo)) { state.error = '请先上传一段参考视频和一张人物照片。'; refresh(); return; }
     if (!state.files.voice && !selectedMaterials.voice && !state.current?.voice) { state.error = '请先上传声音参考。'; refresh(); return; }
   }
   state.busy = true; state.error = ''; refresh();
   try {
+    for (const kind of inputKinds()) {
+      const upload = assetUploads.get(state.files[kind]);
+      await upload?.promise;
+      if (upload?.error) throw upload.error;
+    }
     const id = state.current?.id || crypto.randomUUID();
     const model = selectedModel().id, { voiceEngine, sourceAudioMode } = deepMode() && !replacements.voice ? { voiceEngine: 'seedance', sourceAudioMode: 'original' } : DEFAULT_VOICE;
     const deep = deepMode() ? { mode: 'deep', replacements } : {};
@@ -396,13 +414,13 @@ async function poll() {
     const details = document.querySelector('#replica-progress'); if (details && context) details.innerHTML = progress(context);
   } finally { polling = false; }
 }
-export function useReplicaMaterial(material) {
+export function useReplicaMaterial(material, kind = material.kind) {
   account();
   if (state.busy) throw new Error('素材正在提交，请完成后再选择。');
-  if (!['photo', 'voice'].includes(material.kind) || !/^(photo|voice)-[a-f0-9]{64}$/.test(material.id)) throw new Error('素材无效。');
+  const assetKind = ['product', 'background'].includes(kind) ? 'photo' : kind;
+  if (!['photo', 'voice', 'video'].includes(assetKind) || material.kind !== assetKind || !new RegExp(`^${assetKind}-[a-f0-9]{64}$`).test(material.id)) throw new Error('素材无效。');
   if (state.current && state.current.status !== 'draft') { resetFiles(); state.current = null; }
-  const kind = material.kind;
-  if (deepMode() && !replacements[kind]) {
+  if (deepMode() && kind !== 'video' && !replacements[kind]) {
     if (state.current) throw new Error('请先在深度复刻草稿中开启对应的替换项目。');
     replacements = { ...replacements, [kind]: true };
   }
@@ -439,8 +457,8 @@ export function bindVideoReplica(ctx) {
           await toggleReplacement(kind, true);
           if (!replacements[kind]) throw new Error(state.error || '请先开启对应的替换项目。');
         }
-        if (choice.material) useReplicaMaterial(choice.material);
-        else await selectFile(kind, choice.file);
+        if (choice.material) useReplicaMaterial(choice.material, kind);
+        else if (await selectFile(kind, choice.file) === false) throw new Error(state.error);
       });
     };
   }

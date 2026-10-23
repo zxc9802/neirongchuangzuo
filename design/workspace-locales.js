@@ -8,6 +8,13 @@ export const LANGUAGES = [
 
 // Only interface copy is translated. Prompts, uploads and generated content keep their original language.
 const entries = [
+  ['，请及时下载。上传的图片、声音和视频长期保留。', '. Download them promptly. Uploaded images, audio and videos are kept permanently.', '. Muat turun segera. Imej, audio dan video yang dimuat naik disimpan secara kekal.'],
+  ['1:1 复刻 · 参考视频', '1:1 Replica · Reference video', 'Replika 1:1 · Video rujukan'],
+  ['查看视频', 'View video', 'Lihat video'],
+  ['素材入库失败，请重试。', 'Could not save the asset. Please try again.', 'Aset tidak dapat disimpan. Sila cuba lagi.'],
+  ['已存入资产库，取消选择不会删除素材。', 'Saved to assets. Cancelling the selection will not delete it.', 'Disimpan dalam aset. Membatalkan pilihan tidak akan memadamkannya.'],
+  ['在复刻页面或资产弹窗上传的图片、声音和视频会自动保存到这里。', 'Images, audio and videos uploaded in Replica or the asset picker are saved here automatically.', 'Imej, audio dan video yang dimuat naik dalam Replika atau pemilih aset disimpan di sini secara automatik.'],
+  ['正在保存素材到资产库…', 'Saving to assets…', 'Menyimpan dalam aset…'],
   ["从资产库选择","Choose from assets","Pilih daripada aset"],
   ["从资产库选择参考视频","Choose a reference video from assets","Pilih video rujukan daripada aset"],
   ["取消选择","Deselect","Nyahpilih"],

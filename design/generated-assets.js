@@ -6,13 +6,25 @@ const TYPES = { all: '全部', image: '图片', video: '视频', audio: '音频'
 const state = { ctx: null, type: 'all', materialType: 'all', limit: 24, materialLimit: 24, records: [], materials: [], errors: [], loading: false, controller: null, timer: null, revision: 0 };
 
 export function collectMaterialAssets(items = []) {
-  return items.filter(item => item?.permanent === true && ['photo', 'voice'].includes(item.kind)
+  return items.filter(item => item?.permanent === true && ['photo', 'voice', 'video'].includes(item.kind)
     && new RegExp(`^${item.kind}-[a-f0-9]{64}$`).test(item.id || '')
     && item.url === `/api/assets/materials/${item.id}/media` && Number.isFinite(item.createdAt));
 }
+export async function uploadSharedMaterial(kind, file, signal) {
+  const assetKind = ['product', 'background'].includes(kind) ? 'photo' : kind;
+  const response = await fetch(`/api/assets/materials/${assetKind}`, { method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
+    body: file, signal: signal || AbortSignal.timeout(180000) });
+  let data;
+  try { data = await response.json(); } catch { throw new Error(t('素材入库失败，请重试。')); }
+  if (!response.ok) throw new Error(data.error || t('素材入库失败，请重试。'));
+  if (!collectMaterialAssets([data.material]).length || data.material.kind !== assetKind) throw new Error(t('素材入库失败，请重试。'));
+  return data.material;
+}
 export function materialDestinations(kind) {
   return kind === 'photo' ? [['replica', '1:1 复刻 · 人物照片'], ['image', 'AI 图片 · 参考图片'], ['video', 'AI 视频 · 角色参考']]
-    : kind === 'voice' ? [['replica', '1:1 复刻 · 参考声音'], ['avatar', '数字人 · 口播声音'], ['video', 'AI 视频 · 参考声音']] : [];
+    : kind === 'voice' ? [['replica', '1:1 复刻 · 参考声音'], ['avatar', '数字人 · 口播声音'], ['video', 'AI 视频 · 参考声音']]
+      : kind === 'video' ? [['replica', '1:1 复刻 · 参考视频']] : [];
 }
 async function useMaterial(item, target, ctx) {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
@@ -43,7 +55,7 @@ async function useMaterial(item, target, ctx) {
 }
 function renderMaterialResults(ctx) {
   const { esc, icon, button } = ctx, filtered = state.materials.filter(item => state.materialType === 'all' || item.kind === state.materialType);
-  return `<div class="material-assets-heading"><h2>形象与参考声音</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '形象'], ['voice', '参考声音']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card"><button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看形象' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon('audio')}<small>参考声音</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '人物形象' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : '在 1:1 复刻中上传并提交的人物照片、参考声音会自动保存到这里。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
+  return `<div class="material-assets-heading"><h2>上传素材</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '图片'], ['voice', '参考声音'], ['video', '视频']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card"><button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看图片' : item.kind === 'video' ? '查看视频' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon(item.type === 'video' ? 'video' : 'audio')}<small>${item.type === 'video' ? '参考视频' : '参考声音'}</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '图片' : item.kind === 'video' ? '参考视频' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : '在复刻页面或资产弹窗上传的图片、声音和视频会自动保存到这里。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
 }
 
 function timestamp(value) {
@@ -139,7 +151,7 @@ function renderResults(ctx) {
 }
 
 export function renderGeneratedAssets(ctx) {
-  return `<section class="generated-assets-heading"><div><span class="generated-assets-eyebrow">我的创作</span><h1>我的资产</h1></div>${ctx.button('generated-assets-refresh', ctx.icon('refresh') + '刷新资产', 'secondary')}</section><section id="material-assets-results" aria-label="长期保存的素材">${renderMaterialResults(ctx)}</section><div class="material-assets-heading"><h2>生成作品</h2><span>近 3 天</span></div><div class="generated-assets-policy">${ctx.icon('clock')}<p>成品保留 <strong>3 天</strong>，请及时下载。形象与参考声音长期保留。</p></div><section id="generated-assets-results" aria-label="已生成素材">${renderResults(ctx)}</section>`;
+  return `<section class="generated-assets-heading"><div><span class="generated-assets-eyebrow">我的创作</span><h1>我的资产</h1></div>${ctx.button('generated-assets-refresh', ctx.icon('refresh') + '刷新资产', 'secondary')}</section><section id="material-assets-results" aria-label="长期保存的素材">${renderMaterialResults(ctx)}</section><div class="material-assets-heading"><h2>生成作品</h2><span>近 3 天</span></div><div class="generated-assets-policy">${ctx.icon('clock')}<p>成品保留 <strong>3 天</strong>，请及时下载。上传的图片、声音和视频长期保留。</p></div><section id="generated-assets-results" aria-label="已生成素材">${renderResults(ctx)}</section>`;
 }
 
 function paint() {
@@ -215,12 +227,12 @@ export function disposeGeneratedAssets() {
 }
 export function handleGeneratedAssetsAction(action, element, ctx) {
   if (ctx.mode !== 'assets') return false;
-  if (action === 'material-filter') { if (['all', 'photo', 'voice'].includes(element.dataset.kind)) state.materialType = element.dataset.kind; state.materialLimit = 24; paint(); return true; }
+  if (action === 'material-filter') { if (['all', 'photo', 'voice', 'video'].includes(element.dataset.kind)) state.materialType = element.dataset.kind; state.materialLimit = 24; paint(); return true; }
   if (action === 'material-more') { state.materialLimit += 24; paint(); return true; }
   if (action === 'material-preview') {
     const item = state.materials.find(item => item.id === element.dataset.id);
     if (!item) { ctx.toast('素材不存在，请刷新重试。'); return true; }
-    const media = item.kind === 'photo' ? `<img src="${ctx.esc(item.url)}" alt="${ctx.esc(item.name)}">` : `<audio src="${ctx.esc(item.url)}" controls preload="metadata"></audio>`;
+    const media = item.kind === 'photo' ? `<img src="${ctx.esc(item.url)}" alt="${ctx.esc(item.name)}">` : item.kind === 'video' ? `<video src="${ctx.esc(item.url)}" controls playsinline preload="metadata"></video>` : `<audio src="${ctx.esc(item.url)}" controls preload="metadata"></audio>`;
     ctx.openModal(item.name, '长期保存 · 选择要使用的功能', `<div class="generated-asset-preview">${media}</div><div class="material-destinations">${materialDestinations(item.kind).map(([target, label]) => ctx.button('material-use', label, 'secondary', `data-id="${ctx.esc(item.id)}" data-target="${target}"`)).join('')}</div>`, true);
     return true;
   }

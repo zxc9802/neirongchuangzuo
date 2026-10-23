@@ -1,4 +1,4 @@
-import { loadAssetLibrary } from './generated-assets.js';
+import { loadAssetLibrary, uploadSharedMaterial } from './generated-assets.js';
 import { t } from './workspace-preferences.js';
 
 const TYPES = { video: 'video', voice: 'audio', photo: 'image', product: 'image', background: 'image' };
@@ -7,7 +7,7 @@ const ACCEPT = { image: 'image/jpeg,image/png,image/webp', audio: 'audio/mpeg,au
 
 export async function openReplicaAssetPicker(ctx, kind, onSelect) {
   const type = TYPES[kind], owner = globalThis.workspaceUser?.id;
-  const controller = new AbortController(), urls = [];
+  const controller = new AbortController();
   let items = (ctx.assets || []).filter(item => item.type === type && item.file).map(item => ({ ...item, key: `local:${item.id}`, origin: 'uploaded' }));
   let selected = null, query = '', filter = 'all', busy = false;
   ctx.openModal(t(TITLES[kind]), t('选择一个素材，确认后填入当前复刻。'), `<section id="replica-asset-picker">
@@ -19,7 +19,7 @@ export async function openReplicaAssetPicker(ctx, kind, onSelect) {
   const dialog = document.querySelector('#modal'), root = document.querySelector('#replica-asset-picker');
   const $ = selector => root.querySelector(selector);
   const current = () => !controller.signal.aborted && dialog.open && root.isConnected && owner === globalThis.workspaceUser?.id;
-  const cleanup = () => { controller.abort(); urls.forEach(url => URL.revokeObjectURL(url)); };
+  const cleanup = () => controller.abort();
   dialog.addEventListener('close', cleanup, { once: true });
   function paint() {
     if (!current()) return;
@@ -27,12 +27,19 @@ export async function openReplicaAssetPicker(ctx, kind, onSelect) {
     $('#rap-grid').innerHTML = `<label class="rap-upload">${ctx.icon('plus')}<strong>${t('上传素材')}</strong><small>${t('支持本地文件上传')}</small><input id="rap-upload" type="file" accept="${ACCEPT[type]}" ${busy ? 'disabled' : ''}></label>` + visible.map(item => `<button type="button" class="rap-item" data-rap-key="${ctx.esc(item.key)}" aria-pressed="${selected === item.key}" ${busy ? 'disabled' : ''}><span class="rap-cover">${type === 'image' ? `<img src="${ctx.esc(item.url)}" alt="" loading="lazy">` : ctx.icon(type === 'audio' ? 'audio' : 'video')}<span class="rap-check" aria-hidden="true">${selected === item.key ? '✓' : ''}</span></span><strong title="${ctx.esc(item.name)}" data-no-i18n>${ctx.esc(item.name)}</strong><small>${t(item.origin === 'generated' ? 'AI生成的' : '我上传的')}</small></button>`).join('') + (!visible.length ? `<p class="rap-empty">${t(query ? '没有找到匹配素材' : '暂无可用素材，可从本地上传。')}</p>` : '');
     $('#rap-count').textContent = t('已选 {count}/1', { count: selected ? 1 : 0 });
     $('#rap-confirm').disabled = !selected || busy;
-    $('#rap-upload').onchange = event => {
+    $('#rap-upload').onchange = async event => {
       const file = event.target.files[0]; if (!file || busy) return;
       if (!validFile(file)) return;
-      const url = URL.createObjectURL(file), key = crypto.randomUUID(); urls.push(url);
-      items.unshift({ key, type, name: file.name, filename: file.name, file, url, origin: 'uploaded' });
-      selected = key; query = ''; filter = 'all'; $('#rap-search').value = ''; updateFilters(); paint();
+      busy = true; $('#rap-status').textContent = t('正在保存素材到资产库…'); paint();
+      try {
+        const material = await uploadSharedMaterial(kind, file, AbortSignal.any([controller.signal, AbortSignal.timeout(180000)]));
+        if (!current()) return;
+        items = items.filter(item => item.key !== material.id);
+        items.unshift({ ...material, key: material.id, material, origin: 'uploaded' });
+        selected = material.id; query = ''; filter = 'all'; $('#rap-search').value = ''; updateFilters();
+        $('#rap-status').textContent = t('已存入资产库，取消选择不会删除素材。');
+      } catch (error) { if (current()) $('#rap-status').textContent = error.message || t('素材入库失败，请重试。'); }
+      finally { busy = false; paint(); }
     };
   }
   function validFile(file) {
@@ -56,7 +63,7 @@ export async function openReplicaAssetPicker(ctx, kind, onSelect) {
     busy = true; $('#rap-status').textContent = t('正在读取素材…'); paint();
     try {
       let file = item.file;
-      if (!file && item.material?.kind !== kind) {
+      if (!file && !item.material) {
         if (item.expires && item.expires <= Date.now()) throw new Error(t('这份成品已到期，请刷新作品列表。'));
         const response = await fetch(item.url, { credentials: 'same-origin', cache: 'no-store', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]) });
         if (!response.ok) throw new Error(t('素材下载失败，请重试。'));
@@ -73,7 +80,7 @@ export async function openReplicaAssetPicker(ctx, kind, onSelect) {
   try {
     const library = await loadAssetLibrary(AbortSignal.any([controller.signal, AbortSignal.timeout(120000)]));
     if (!current()) return;
-    items.push(...library.materials.filter(item => item.type === type).map(item => ({ ...item, key: item.id, material: item, origin: 'uploaded' })),
+    items.push(...library.materials.filter(item => item.type === type && !items.some(existing => existing.key === item.id)).map(item => ({ ...item, key: item.id, material: item, origin: 'uploaded' })),
       ...library.records.filter(item => item.type === type).map(item => ({ ...item, name: item.title, origin: 'generated' })));
     $('#rap-status').textContent = library.errors.join(' '); paint();
   } catch (error) { if (current()) $('#rap-status').textContent = error.message || t('素材读取失败，请重试。'); }

@@ -79,11 +79,16 @@ async function workspace(t, { enabled = true, legacy = false } = {}) {
   const handler = createVideoHandler({ storageDir: join(root, 'video'), materialLibrary: library, now: () => now, pollIntervalMs: 20,
     config: { enabled: true, publicOrigin: 'https://workspace.example', signingSecret: 'test-only' },
     photo: async bytes => Buffer.concat([Buffer.from('jpeg:'), bytes]),
+    probe: async () => ({ duration: 5, width: 640, height: 640, audio: true }),
     voice: async (input, output) => { await writeFile(output, Buffer.concat([Buffer.from('wav:'), await readFile(input)])); return { duration: 4 }; },
     speech: { enabled: true, detect: async () => [{ start: 0.2 }] }, captions: { extract: async () => null },
     narration: null, lipsync: null, voiceConversion: null,
   });
-  const materials = createMaterialHandler({ library, archiveExisting: userId => handler.archiveMaterials(userId) });
+  const materials = createMaterialHandler({ library, archiveExisting: userId => handler.archiveMaterials(userId),
+    photo: async bytes => { if (bytes.toString() === 'invalid') throw Object.assign(new Error('图片格式无效。'), { status: 400 }); return Buffer.concat([Buffer.from('jpeg:'), bytes]); },
+    voice: async (input, output) => { await writeFile(output, Buffer.concat([Buffer.from('wav:'), await readFile(input)])); return { duration: 4 }; },
+    probe: async () => ({ duration: 5, width: 640, height: 640, audio: true }),
+  });
   await handler.ready;
   const server = createServer((req, res) => {
     req.authenticatedUserId = req.headers['x-owner'] || undefined;
@@ -96,13 +101,70 @@ async function workspace(t, { enabled = true, legacy = false } = {}) {
     method, headers: { ...(owner ? { 'X-Owner': owner } : {}), ...(json ? { 'Content-Type': 'application/json' } : {}), ...headers },
     body: json ? JSON.stringify(json) : body,
   });
-  async function draft(owner = 'alice') {
+  async function draft(owner = 'alice', options = {}) {
     const id = randomUUID();
-    assert.equal((await request('/api/video-replica/tasks', { owner, method: 'POST', json: { requestId: id, voiceEngine: 'seedance' } })).status, 201);
+    assert.equal((await request('/api/video-replica/tasks', { owner, method: 'POST', json: { requestId: id, voiceEngine: 'seedance', ...options } })).status, 201);
     return id;
   }
-  return { library, request, draft, root, advance: days => { now += days * 86400000; } };
+  return { library, request, draft, root, cos, advance: days => { now += days * 86400000; } };
 }
+
+test('standalone uploads persist before generation and all replica slots reuse owned assets without duplicate objects', async t => {
+  const app = await workspace(t), saved = {};
+  const video = Buffer.from([0, 0, 0, 16, ...Buffer.from('ftypisom0000')]);
+  for (const kind of ['photo', 'voice', 'video']) {
+    const body = kind === 'video' ? video : Buffer.from(kind);
+    const response = await app.request(`/api/assets/materials/${kind}`, { method: 'POST', body, headers: { 'X-File-Name': encodeURIComponent(`新素材-${kind}.mp4`) } });
+    assert.equal(response.status, 201, await response.clone().text());
+    saved[kind] = (await response.json()).material;
+    assert.equal(saved[kind].permanent, true);
+    assert.equal((await app.request(`/api/assets/materials/${kind}`, { method: 'POST', body })).status, 201);
+    assert.equal((await app.request(saved[kind].url, { owner: 'bob' })).status, 404);
+  }
+  const materials = (await (await app.request('/api/assets/materials')).json()).materials;
+  assert.equal(materials.length, 3);
+  assert.equal(materials.find(item => item.kind === 'video').type, 'video');
+  assert.equal((await app.request(saved.video.url, { headers: { Range: 'bytes=4-7' } })).status, 206);
+  const id = await app.draft('alice', { mode: 'deep', replacements: { photo: true, voice: true, product: true, background: true } });
+  const before = app.cos.writes.length;
+  for (const kind of ['photo', 'product', 'background', 'voice', 'video']) {
+    const asset = saved[['product', 'background'].includes(kind) ? 'photo' : kind];
+    const response = await app.request(`/api/video-replica/tasks/${id}/${kind}`, { method: 'POST', json: { assetId: asset.id } });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal((await response.json()).task[kind].assetId, asset.id);
+  }
+  assert.equal(app.cos.writes.length, before, 'imported photos, sounds and videos are never re-encoded into duplicate assets');
+  assert.equal((await app.request(`/api/video-replica/tasks/${id}/background`, { method: 'POST', json: { assetId: saved.voice.id } })).status, 400);
+  await app.request(`/api/video-replica/tasks/${id}/options`, { method: 'POST', json: { replacements: { photo: false, voice: false, product: false, background: false } } });
+  assert.equal((await app.library.list('alice')).length, 3, 'deselection does not delete shared assets');
+});
+
+test('direct deep task uploads also archive product images, backgrounds and reference videos', async t => {
+  const app = await workspace(t);
+  const id = await app.draft('alice', { mode: 'deep', replacements: { photo: false, voice: false, product: true, background: true } });
+  for (const kind of ['product', 'background', 'video']) {
+    const body = kind === 'video' ? Buffer.from([0, 0, 0, 16, ...Buffer.from('ftypisom0000')]) : kind;
+    const response = await app.request(`/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.ok((await response.json()).task[kind].assetId);
+  }
+  assert.equal((await app.library.list('alice')).length, 3);
+});
+
+test('standalone uploads reject unauthenticated, invalid, empty, oversized and failed cloud writes', async t => {
+  const app = await workspace(t);
+  assert.equal((await app.request('/api/assets/materials/photo', { method: 'POST', body: 'photo', owner: '' })).status, 401);
+  for (const [kind, body] of [['photo', 'invalid'], ['video', 'not-video'], ['voice', '']]) {
+    assert.equal((await app.request(`/api/assets/materials/${kind}`, { method: 'POST', body })).status, 400);
+  }
+  assert.equal((await app.request('/api/assets/materials/photo', { method: 'POST', body: Buffer.alloc(10 * 1024 * 1024 + 1) })).status, 413);
+  app.cos.failIndex(true);
+  assert.equal((await app.request('/api/assets/materials/photo', { method: 'POST', body: 'photo' })).status, 503);
+  assert.deepEqual(await app.library.list('alice'), []);
+  app.cos.failIndex(false);
+  assert.equal((await app.request('/api/assets/materials/photo', { method: 'POST', body: 'photo' })).status, 201);
+  assert.equal((await app.library.list('alice')).length, 1);
+});
 
 test('replica uploads archive originals, imports verify ownership and expired tasks leave reusable media intact', async t => {
   const app = await workspace(t), id = await app.draft();
