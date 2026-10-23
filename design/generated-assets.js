@@ -3,11 +3,7 @@ import { imageTaskTitle } from './image-presets.js';
 import { digitalHumanModelLabel } from './model-labels.js';
 const RETENTION_MS = 72 * 60 * 60 * 1000;
 const TYPES = { all: '全部', image: '图片', video: '视频', audio: '音频' };
-const state = { ctx: null, type: 'all', materialType: 'all', selectingReplicaKind: null, limit: 24, materialLimit: 24, records: [], materials: [], errors: [], loading: false, controller: null, timer: null, revision: 0 };
-
-export function selectReplicaMaterial(ctx, kind) {
-  state.selectingReplicaKind = kind; state.materialLimit = 24; ctx.navigate('assets');
-}
+const state = { ctx: null, type: 'all', materialType: 'all', limit: 24, materialLimit: 24, records: [], materials: [], errors: [], loading: false, controller: null, timer: null, revision: 0 };
 
 export function collectMaterialAssets(items = []) {
   return items.filter(item => item?.permanent === true && ['photo', 'voice'].includes(item.kind)
@@ -46,12 +42,8 @@ async function useMaterial(item, target, ctx) {
   }
 }
 function renderMaterialResults(ctx) {
-  const { esc, icon, button } = ctx, selecting = state.selectingReplicaKind;
-  const filtered = state.materials.filter(item => selecting ? item.kind === selecting : state.materialType === 'all' || item.kind === state.materialType);
-  const title = selecting === 'voice' ? '选择复刻声音' : '选择复刻形象';
-  const label = selecting === 'voice' ? '选择此声音' : '选择此形象';
-  const action = selecting ? 'material-use' : 'material-preview', target = selecting ? ' data-target="replica"' : '';
-  return `<div class="material-assets-heading"><h2>${selecting ? title : '形象与参考声音'}</h2><span>${selecting ? '选择后直接带入 1:1 复刻' : '长期保存，随时复用'}</span></div>${selecting ? '' : `<div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '形象'], ['voice', '参考声音']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>`}${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card"><button class="generated-asset-cover ${item.type}" data-action="${action}" data-id="${esc(item.id)}"${target} aria-label="${selecting ? label : item.kind === 'photo' ? '查看形象' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon('audio')}<small>参考声音</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '人物形象' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button(action, selecting ? label : '使用到…', 'secondary', `data-id="${esc(item.id)}"${target}`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : '在 1:1 复刻中上传并提交的人物照片、参考声音会自动保存到这里。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
+  const { esc, icon, button } = ctx, filtered = state.materials.filter(item => state.materialType === 'all' || item.kind === state.materialType);
+  return `<div class="material-assets-heading"><h2>形象与参考声音</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '形象'], ['voice', '参考声音']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card"><button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看形象' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon('audio')}<small>参考声音</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '人物形象' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : '在 1:1 复刻中上传并提交的人物照片、参考声音会自动保存到这里。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
 }
 
 function timestamp(value) {
@@ -198,25 +190,28 @@ async function fetchRestaurantTasks(signal) {
   } while (cursor);
   return tasks;
 }
+export async function loadAssetLibrary(signal) {
+  const sources = ['图片', '数字人', '餐饮图文', '人物复刻', 'AI视频', '长期素材'];
+  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', signal, sources[0]), fetchTasks('/api/tasks?completed=true', signal, sources[1]), fetchRestaurantTasks(signal), fetchTasks('/api/video-replica/tasks?completed=true', signal, sources[3]), fetchTasks('/api/video-creator/tasks?completed=true', signal, sources[4]), fetchMaterials(signal)]);
+  const errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${t(sources[index])}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${t(sources[index])}作品暂时无法读取。`] : []);
+  const [images, avatars, restaurant, videos, creativeVideos, materials] = results.map(result => result.status === 'fulfilled' ? result.value : []);
+  return { materials, records: collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos, creativeVideos), errors };
+}
 async function load() {
   if (!active() || state.loading) return;
   const revision = ++state.revision;
   const controller = new AbortController(); state.controller = controller;
   const timer = setTimeout(() => controller.abort(), 120000);
   state.loading = true; paint();
-  const sources = ['图片', '数字人', '餐饮图文', '人物复刻', 'AI视频', '长期素材'];
-  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', controller.signal, sources[0]), fetchTasks('/api/tasks?completed=true', controller.signal, sources[1]), fetchRestaurantTasks(controller.signal), fetchTasks('/api/video-replica/tasks?completed=true', controller.signal, sources[3]), fetchTasks('/api/video-creator/tasks?completed=true', controller.signal, sources[4]), fetchMaterials(controller.signal)]);
+  const library = await loadAssetLibrary(controller.signal);
   clearTimeout(timer);
   if (revision !== state.revision || !active()) return;
-  state.errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${t(sources[index])}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${t(sources[index])}作品暂时无法读取。`] : []);
-  const [images, avatars, restaurant, videos, creativeVideos, materials] = results.map(result => result.status === 'fulfilled' ? result.value : []);
-  state.materials = materials;
-  state.records = collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos, creativeVideos);
+  Object.assign(state, library);
   state.loading = false; state.controller = null; paint(); scheduleExpiry();
 }
 export function bindGeneratedAssets(ctx) { state.ctx = ctx; void load(); }
 export function disposeGeneratedAssets() {
-  state.revision++; state.controller?.abort(); state.controller = null; clearTimeout(state.timer); state.loading = false; state.ctx = null; state.records = []; state.materials = []; state.errors = []; state.selectingReplicaKind = null;
+  state.revision++; state.controller?.abort(); state.controller = null; clearTimeout(state.timer); state.loading = false; state.ctx = null; state.records = []; state.materials = []; state.errors = [];
 }
 export function handleGeneratedAssetsAction(action, element, ctx) {
   if (ctx.mode !== 'assets') return false;

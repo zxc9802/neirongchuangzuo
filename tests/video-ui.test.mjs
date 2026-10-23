@@ -1043,3 +1043,39 @@ test('selecting a deep thumbnail file enables that replacement and preserves it 
   await page.node('#replica-product').onchange({ target: { files: [] } });
   assert.equal(calls.length, count); assert.doesNotMatch(page.html(), /id="replica-toggle-product"[^>]*checked/);
 });
+
+for (const fails of [false, true]) test(`deselecting a saved deep draft ${fails ? 'preserves its reference on failure' : 'clears its reference after saving'}`, async t => {
+  const task = { id: 'deep-deselect-draft', status: 'draft', createdAt: Date.now(), mode: 'deep', model: STANDARD_MODEL,
+    replacements: { photo: false, voice: false, product: false, background: true },
+    background: { ready: true }, sourceBackgroundUrl: '/saved-background.jpg' };
+  const calls = []; let finish;
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (!options?.method) return;
+    calls.push(path);
+    assert.ok(path.endsWith('/options'));
+    const body = JSON.parse(options.body);
+    return new Promise(resolve => { finish = () => {
+      if (fails) return resolve(Response.json({ error: '保存失败，请重试。' }, { status: 503 }));
+      task.replacements = body.replacements;
+      if (!body.replacements.background) { delete task.background; delete task.sourceBackgroundUrl; }
+      resolve(Response.json({ task }));
+    }; });
+  } });
+  page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  await page.node('#replica-background').onchange({ target: { files: [new File(['image'], 'new-room.png')] } });
+  page.rebind(); page.node('#replica-remove-background').onclick(); await page.settle();
+  assert.match(page.html(), /new-room.png/, 'keep the reference until the save succeeds');
+  finish(); await page.settle(); page.rebind();
+  assert.equal(calls.length, 1);
+  if (fails) {
+    assert.match(page.html(), /new-room.png/);
+    assert.match(page.html(), /id="replica-toggle-background"[^>]*checked/);
+    assert.match(page.message(), /保存失败/);
+  } else {
+    assert.doesNotMatch(page.html(), /new-room.png|saved-background.jpg/);
+    assert.doesNotMatch(page.html(), /id="replica-toggle-background"[^>]*checked/);
+    page.node('#replica-toggle-background').onchange({ target: { checked: true } }); await page.settle();
+    finish(); await page.settle();
+    assert.doesNotMatch(page.html(), /new-room.png|saved-background.jpg/, 'reenabling must not restore cleared references');
+  }
+});
