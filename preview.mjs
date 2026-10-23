@@ -150,6 +150,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       return;
     }
     req.authenticatedUserId = user?.id;
+    req.callsUnlimited = user?.callsUnlimited === true;
     req.dailyCallExempt = !!user && dailyCallExemptAccount(user.account, runtimeSettings.AI_DAILY_EXEMPT_ACCOUNTS ?? 'zxc9911');
     if (path === '/api/workspace/credits') {
       if (req.method !== 'GET') { safeError(res, 405, 'METHOD_NOT_ALLOWED', '此接口仅允许查看积分。'); return; }
@@ -213,7 +214,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
     }
     const handler = restaurant();
     await handler.ready;
-    if (await withDailyCallPolicy(req.dailyCallExempt, () => handler(req, res), req.authenticatedUserId)) return;
+    if (await withDailyCallPolicy(req.dailyCallExempt, () => handler(req, res), req.authenticatedUserId, req.callsUnlimited)) return;
     safeError(res, 404, 'NOT_FOUND', '接口不存在。'); return;
   }
   if (path === '/api/ai' || path.startsWith('/api/ai/')) {
@@ -227,7 +228,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       return;
     }
     await ready;
-    if (await withDailyCallPolicy(req.dailyCallExempt, () => handleAI(req, res), req.authenticatedUserId)) return;
+    if (await withDailyCallPolicy(req.dailyCallExempt, () => handleAI(req, res), req.authenticatedUserId, req.callsUnlimited)) return;
     safeError(res, 404, 'NOT_FOUND', '接口不存在。');
     return;
   }

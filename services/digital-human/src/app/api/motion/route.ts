@@ -30,7 +30,7 @@ export async function POST(req: NextRequest) {
     if (edit.effect) await (await import("@/lib/motion-library/service")).ownedEffectVersion(edit.effect, access);
     const source = await resolveOwnedUpload({key: body.uploadKey, userId: access.userId, folder: "videos"});
     if (!source) throw new MotionInputError("视频上传凭证无效，请重新上传");
-    release = acquireGenerationSlot(`motion:${access.userId || "local"}`, {enforceHourlyLimit: isExternallyBilledUser(access.session?.user) || access.session?.user.billingAudience === "standalone"});
+    release = acquireGenerationSlot(`motion:${access.userId || "local"}`, {enforceHourlyLimit: access.session?.user.callsUnlimited !== true && (isExternallyBilledUser(access.session?.user) || access.session?.user.billingAudience === "standalone")});
     if (!claimPendingUpload({key: body.uploadKey, userId: access.userId})) throw new MotionInputError("上传凭证已过期或已使用，请重新上传");
     const project = await MotionStore.save({...edit, id: `motion_${crypto.randomUUID()}`, userId: access.userId || undefined,
       name: typeof body.name === "string" ? body.name.slice(0, 120) : "数字人动效", createdAt: Date.now(), updatedAt: Date.now(), source: source.source,

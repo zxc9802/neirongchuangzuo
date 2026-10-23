@@ -18,6 +18,7 @@ export type MainAppUser = {
   role: string;
   groupName?: string;
   billingAudience?: string;
+  callsUnlimited?: boolean;
   authSource?: "internal";
   pointsBalance?: number;
   avatar?: string;

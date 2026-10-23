@@ -11,6 +11,28 @@ import { withDailyCallPolicy } from '../services/ai/call-policy.mjs';
 const input = (id, overrides = {}) => ({ id, kind: 'image', fingerprint: `hash-${id}`, model: 'mock-model', ...overrides });
 const at = Date.parse('2026-09-30T08:00:00Z');
 
+test('account unlimited calls bypass daily and minute quotas without using other accounts allowance', async t => {
+  const f = await fixture(t, { limits: { imageDaily: 1, chatDaily: 1, perMinute: 1 } });
+  const ledger = f.create(); await ledger.ready;
+  await withDailyCallPolicy(false, async () => {
+    for (let i = 0; i < 15; i++) {
+      const id = `free-${i}`;
+      await ledger.reserve(input(id, { kind: i % 2 ? 'chat' : 'image' }));
+      await ledger.markDispatched(id);
+      await ledger.finish(id, { status: 'completed' });
+    }
+    assert.deepEqual((await ledger.summary()).limits, { imageDaily: null, chatDaily: null, perMinute: null });
+  }, 'owner', true);
+  await ledger.close();
+  const reopened = f.create(); await reopened.ready;
+  assert.equal((await reopened.get('free-14')).rateExempt, true);
+  await reopened.reserve(input('ordinary')); await reopened.markDispatched('ordinary');
+  await assert.rejects(reopened.reserve(input('forged', { kind: 'chat', rateExempt: true })), { code: 'RATE_LIMITED' });
+  await assert.rejects(reopened.reserve(input('ordinary-daily')), { code: 'DAILY_QUOTA_EXCEEDED' });
+  await withDailyCallPolicy(false, () => reopened.reserveBatch([input('queued-1'), input('queued-2')]), 'owner', true);
+  await reopened.markDispatched('queued-1'); await reopened.markDispatched('queued-2');
+});
+
 test('explicit unlimited daily and minute budgets still persist every billable dispatch', async t => {
   const f = await fixture(t, {limits:{imageDaily:null,chatDaily:null,perMinute:null}});
   const ledger=f.create();await ledger.ready;

@@ -126,7 +126,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Bound paid attempts independently of whether the task later refunds or is deleted.
-    if (isExternallyBilledUser(user) || user.billingAudience === "standalone") releaseSlot = acquireGenerationSlot(user.id!, { allowConcurrent: true });
+    if (isExternallyBilledUser(user) || user.billingAudience === "standalone") releaseSlot = acquireGenerationSlot(user.id!, { allowConcurrent: true, enforceHourlyLimit: user.callsUnlimited !== true });
     const estimatedDuration = estimateReservationDuration(scriptText);
     const createTask = (reservation: Awaited<ReturnType<typeof reserveMainAppCredits>>, reserving = false) => TaskStore.create({
       id: reservation.requestId,

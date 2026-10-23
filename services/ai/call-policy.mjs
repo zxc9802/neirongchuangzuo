@@ -7,8 +7,13 @@ export function isDailyCallExempt(userId) {
   return current?.dailyExempt === true && (!userId || !current.userId || current.userId === userId);
 }
 
-export function withDailyCallPolicy(dailyExempt, operation, userId) {
-  return policy.run({ dailyExempt: dailyExempt === true, userId }, operation);
+export function isCallRateExempt(userId) {
+  const current = policy.getStore();
+  return current?.callsUnlimited === true && (!userId || !current.userId || current.userId === userId);
+}
+
+export function withDailyCallPolicy(dailyExempt, operation, userId, callsUnlimited = false) {
+  return policy.run({ dailyExempt: dailyExempt === true || callsUnlimited === true, callsUnlimited: callsUnlimited === true, userId }, operation);
 }
 
 export function dailyCallExemptAccount(account, accounts = 'zxc9911') {

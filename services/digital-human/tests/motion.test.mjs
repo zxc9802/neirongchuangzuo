@@ -137,7 +137,7 @@ test('motion create and render apply the external quota only to external account
   const saved=process.env.GENERATION_LIMIT_PATH;
   process.env.GENERATION_LIMIT_PATH=path.join(tmp,'limits.json');
   try {
-    for (const user of [null, {id:'admin',role:'admin'}, {id:'internal',role:'user',billingAudience:'internal'}, {id:'external',role:'user',billingAudience:'external'}, {id:'ordinary',role:'user'}]) {
+    for (const user of [null, {id:'admin',role:'admin'}, {id:'internal',role:'user',billingAudience:'internal'}, {id:'external',role:'user',billingAudience:'external'}, {id:'ordinary',role:'user'}, {id:'standalone',role:'member',billingAudience:'standalone'}, {id:'unlimited',role:'member',billingAudience:'standalone',callsUnlimited:true}]) {
       const access={isolated:!!user,userId:user?.id || null,isAdmin:!user || user.role==='admin',session:user ? {user} : null};
       const ledger=Array.from({length:6},()=>({userId:`motion:${access.userId || 'local'}`,at:Date.now()}));
       fs.writeFileSync(process.env.GENERATION_LIMIT_PATH,JSON.stringify(ledger));
@@ -155,7 +155,7 @@ test('motion create and render apply the external quota only to external account
       };
       const createRoute=loadRoute('../src/app/api/motion/route.ts',deps);
       const editRoute=loadRoute('../src/app/api/motion/[id]/route.ts',deps);
-      const expected=isExternallyBilledUser(user) ? 429 : 202;
+      const expected=!user?.callsUnlimited&&(isExternallyBilledUser(user)||user?.billingAudience==='standalone') ? 429 : 202;
       const created=await createRoute.POST(new NextRequest('http://localhost/api/motion',{method:'POST',body:JSON.stringify({...edit,uploadKey:'uploaded-video',name:'video.mp4'})}));
       assert.equal(created.status,expected,`create for ${user?.id || 'local'}`);
       await new Promise(resolve=>setImmediate(resolve));

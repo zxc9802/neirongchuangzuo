@@ -18,5 +18,5 @@ export async function getWorkspaceUser(req, backend) {
   const data = await response.json();
   const user = data.data?.user;
   if (data.success !== true || data.data?.authMode !== 'standalone' || typeof user?.id !== 'string' || !user.id) throw new Error('Account service not configured');
-  return { id: user.id, account: user.account, nickname: user.nickname, authSource: user.authSource || 'local' };
+  return { id: user.id, account: user.account, nickname: user.nickname, authSource: user.authSource || 'local', callsUnlimited: user.callsUnlimited === true };
 }

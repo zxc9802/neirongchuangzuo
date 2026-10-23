@@ -9,7 +9,7 @@ import { ACCOUNT_PHONES_SCHEMA_SQL, ACCOUNT_IDENTITY_LOCK_SQL, ACCOUNT_LOOKUP_SQ
 export const AUTH_COOKIE = "digital_human_session";
 const SESSION_MS = 30 * 24 * 60 * 60_000;
 const HASH_OPTIONS = { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 };
-type UserRow = { id: string; email: string; nickname: string; password: string };
+type UserRow = { id: string; email: string; nickname: string; password: string; calls_unlimited?: boolean };
 let pool: Pool | undefined;
 let ready: Promise<void> | undefined;
 
@@ -36,6 +36,7 @@ async function db() {
         CREATE TABLE IF NOT EXISTS digital_human_auth.sessions (
           hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES digital_human_auth.users(id), expires_at BIGINT NOT NULL
         );
+        ALTER TABLE digital_human_auth.users ADD COLUMN IF NOT EXISTS calls_unlimited BOOLEAN NOT NULL DEFAULT FALSE;
         CREATE INDEX IF NOT EXISTS sessions_user ON digital_human_auth.sessions(user_id);
         CREATE TABLE IF NOT EXISTS digital_human_auth.internal_sessions (
           hash TEXT PRIMARY KEY, source_user_id TEXT NOT NULL, source_revision TEXT NOT NULL, expires_at BIGINT NOT NULL
@@ -215,7 +216,7 @@ export async function readStandaloneSession(token?: string): Promise<MainAppSess
   return {
     // The opaque local token is never sent to a provider or returned in JSON.
     token: "", expiresAt: Number(row.expires_at), validatedAt: Date.now(),
-    user: { id: row.id, account: row.email, nickname: row.nickname, role: "member", billingAudience: "standalone" },
+    user: { id: row.id, account: row.email, nickname: row.nickname, role: "member", billingAudience: "standalone", callsUnlimited: row.calls_unlimited === true },
   };
 }
 

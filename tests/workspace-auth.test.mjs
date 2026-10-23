@@ -3,7 +3,30 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createPreviewServer } from '../preview.mjs';
-import { isDailyCallExempt } from '../services/ai/call-policy.mjs';
+import { isDailyCallExempt, isCallRateExempt } from '../services/ai/call-policy.mjs';
+
+test('database account exemption reaches AI and restaurant without accepting forged request headers', async t => {
+  const backend = createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ success: true, data: { authMode: 'standalone', user: {
+      id: 'owner', account: 'owner', callsUnlimited: req.headers.cookie === 'session=unlimited',
+    } } }));
+  });
+  const handler = async (req, res) => {
+    await new Promise(resolve => setImmediate(resolve));
+    res.end(JSON.stringify({ daily: isDailyCallExempt('owner'), minute: isCallRateExempt('owner'), other: isDailyCallExempt('other') })); return true;
+  };
+  handler.ready = Promise.resolve(); handler.shutdown = async () => {};
+  const preview = createPreviewServer({ backendUrl: await listen(backend), authRequired: true, credits: { ready: Promise.resolve() }, createAI: () => handler, createRestaurant: () => handler });
+  const base = await listen(preview);
+  t.after(async () => { await preview.shutdown(); backend.closeAllConnections(); await new Promise(resolve => backend.close(resolve)); });
+  for (const path of ['/api/ai/status', '/api/restaurant/status']) {
+    for (const unlimited of [true, false]) {
+      const response = await fetch(base + path, { headers: { cookie: unlimited ? 'session=unlimited' : 'session=ordinary', 'x-calls-unlimited': 'true' } });
+      assert.deepEqual(await response.json(), { daily: unlimited, minute: unlimited, other: false });
+    }
+  }
+});
 
 test('AI and restaurant policy uses the verified account, never client headers', async t => {
   const backend = createServer((req, res) => {

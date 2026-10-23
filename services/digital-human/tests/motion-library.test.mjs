@@ -54,12 +54,13 @@ test('motion keeps an explicit immutable effect revision and rejects malformed r
 function load(file,deps){const code=ts.transpileModule(fs.readFileSync(new URL(file,import.meta.url),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;const module={exports:{}};new Function('require','module','exports',code)(n=>{if(n==='next/server')return {NextRequest,NextResponse};if(n==='node:crypto')return {default:{randomUUID:()=>id.slice(7)},randomUUID:()=>id.slice(7)};assert.ok(n in deps,`Missing mock ${n}`);return deps[n];},module,module.exports);return module.exports;}
 test('library edit and apply enforce session, ownership, saved versions and upload claims',async()=>{
   let access={isolated:true,userId:null},locked=false,releaseCount=0,runs=0,claims=true,saved=0;
+  const slotOptions=[];
   let row={id,userId:'owner',name:'我的动效',status:'ready',revision:1,saved:true,assets:[],messages:[],versions:[{revision:1,compiled:'one'}]};
   const deps={
     'server-only':{},'@/lib/motion-library/access':{canAccessEffect},
     '@/lib/access-control':{resolveAccessContext:async()=>access,canAccessTask,unauthorizedResponse:()=>NextResponse.json({},{status:401}),taskNotFoundResponse:()=>NextResponse.json({},{status:404})},
     '@/lib/server/upload-policy':{resolveOwnedUpload:async({key,userId})=>key===`key-${userId}`?{source:'private',size:12}:null,claimPendingUploads:()=>claims},
-    '@/lib/server/generation-limit':{acquireGenerationSlot:()=>()=>{releaseCount++},GenerationLimitError:class extends Error{}},
+    '@/lib/server/generation-limit':{acquireGenerationSlot:(userId,options)=>{slotOptions.push(options);return ()=>{releaseCount++}},GenerationLimitError:class extends Error{}},
     '@/lib/main-app-billing':{isExternallyBilledUser:()=>true},'@/lib/motion/contract':{MotionInputError},'@/lib/server/safe-log':{logServerError:()=>{}},
     './store':{EffectStore:{get:async()=>structuredClone(row),claim:()=>{if(locked)return false;locked=true;return true;},release:()=>{locked=false},save:async r=>{saved++;row=r;return r;}},publicEffect:r=>({id:r.id,status:r.status,saved:r.saved})},
     './pipeline':{runLibraryEffect:async()=>{runs++}},'./builtins':{getBuiltinEffect},
@@ -87,9 +88,12 @@ test('library edit and apply enforce session, ownership, saved versions and uplo
     assert.equal((await patch({action:'save'})).status,200);assert.equal(runs,0);
     assert.equal((await patch({action:'generate',prompt:'test',uploads:[]})).status,202);await new Promise(r=>setImmediate(r));assert.equal(runs,1);assert.equal(releaseCount,2);
     assert.equal((await patch({action:'generate',prompt:'again'})).status,409);
+    assert.equal(slotOptions.at(-1).enforceHourlyLimit,true);
+    access.session={user:{id:'owner',billingAudience:'standalone',callsUnlimited:true}};
     locked=false;row=undefined;
     const created=await service.editLibrary(new NextRequest('http://localhost/api/motion-library',{method:'POST',body:JSON.stringify({action:'generate',prompt:'create',userId:'other',uploads:[]})}));
     assert.equal(created.status,202);assert.equal(row.userId,'owner');
+    assert.equal(slotOptions.at(-1).enforceHourlyLimit,false);
   }finally{for(const [k,v] of Object.entries(previous)){if(v===undefined)delete process.env[k];else process.env[k]=v;}}
 });
 test('library media denies other accounts, unknown files and untrusted sources before serving bytes',async()=>{

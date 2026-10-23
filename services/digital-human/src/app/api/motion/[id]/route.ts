@@ -33,7 +33,7 @@ export async function PATCH(req: NextRequest, ctx: Context) {
     if (!project.duration) throw new MotionInputError("视频未成功读取，请重新上传");
     const edit = validateMotionEdit(body, project.duration, body.action === "render");
     if (edit.effect) await (await import("@/lib/motion-library/service")).ownedEffectVersion(edit.effect, access);
-    if (body.action !== "save") release = acquireGenerationSlot(`motion:${access.userId || "local"}`, {enforceHourlyLimit: isExternallyBilledUser(access.session?.user) || access.session?.user.billingAudience === "standalone"});
+    if (body.action !== "save") release = acquireGenerationSlot(`motion:${access.userId || "local"}`, {enforceHourlyLimit: access.session?.user.callsUnlimited !== true && (isExternallyBilledUser(access.session?.user) || access.session?.user.billingAudience === "standalone")});
     const next = await MotionStore.save({...project, ...edit, effect: edit.effect, output: undefined, error: undefined,
       status: body.action === "save" ? "ready" : body.action === "render" ? "rendering" : "analyzing",
       progress: body.action === "save" ? 100 : 0, message: body.action === "save" ? "修改已保存" : "任务已开始"});

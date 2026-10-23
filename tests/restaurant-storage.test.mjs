@@ -7,15 +7,15 @@ import { createRestaurantStore, FILES_TTL_MS, TASK_TTL_MS } from '../services/re
 import { createRestaurantMedia } from '../services/restaurant/media.mjs';
 import { withDailyCallPolicy } from '../services/ai/call-policy.mjs';
 
-test('account daily exemption keeps the package ledger without blocking reservation or completion', async t => {
+test('account unlimited calls keep the package ledger without blocking reservation or completion', async t => {
   const f = await fixture(t, { packageDailyLimit: 0 });
   await f.store.createTask('owner', { id: 'exempt', status: 'generating' });
   await assert.rejects(f.store.reservePackage('owner', 'exempt'), { code: 'package_limit' });
-  await withDailyCallPolicy(true, async () => {
+  await withDailyCallPolicy(false, async () => {
     await f.store.reservePackage('owner', 'exempt');
     await f.store.completeTask('owner', 'exempt');
     assert.equal((await f.store.usage('owner')).remaining, null);
-  });
+  }, 'owner', true);
   assert.equal((await f.store.usage('owner')).used, 1);
   assert.equal((await f.store.usage('owner')).limit, 0);
   await f.store.createTask('other', { id: 'not-exempt', status: 'generating' });

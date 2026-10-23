@@ -57,10 +57,10 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
       }},
       "@/lib/server/public-data": publicData,
       "@/lib/public-contract": publicContract,
-      "@/lib/main-app-billing": billing,
+      "@/lib/main-app-billing": {...billing},
       "@/lib/billing-estimate": estimate,
       "@/lib/server/generation-limit": limit,
-      "@/lib/access-control": access,
+      "@/lib/access-control": {...access},
       "@/lib/server/upload-policy": {isOwnedUploadSource: () => true},
       "@/lib/server/media-response": {isTrustedStoredMediaSource: () => true},
       "@/lib/server/task-worker": {currentTaskWorker: () => ({pid: process.pid, host: os.hostname(), instance: "fixture", startedAt: Date.now()})},
@@ -142,6 +142,16 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
       assert.equal((await response.json()).task.inputs.engine, engine);
       finish(); await new Promise(resolve => setImmediate(resolve));
     }
+    user = {...user, id: "standalone-unlimited", role: "member", billingAudience: "standalone", callsUnlimited: true};
+    deps["@/lib/access-control"].resolveAccessContext = async () => ({isolated: true, userId: user.id, isAdmin: false, session: {user}});
+    deps["@/lib/main-app-billing"].reserveMainAppCredits = async () => ({requestId: crypto.randomUUID(), source: "internal", chargeRequired: false, reservedPoints: 0});
+    fs.writeFileSync(process.env.GENERATION_LIMIT_PATH, JSON.stringify(Array.from({length: 30}, () => ({userId: user.id, at: Date.now()}))));
+    for (let i = 0; i < 8; i++) {
+      assert.equal((await post()).status, 200, "unlimited standalone account bypasses full hourly budgets");
+      finish(); await new Promise(resolve => setImmediate(resolve));
+    }
+    user = {...user, callsUnlimited: false};
+    assert.equal((await post()).status, 429, "revoking exemption restores hourly limits");
   } finally {
     finish?.(); globalThis.fetch = savedFetch;
     for (const key of keys) {
