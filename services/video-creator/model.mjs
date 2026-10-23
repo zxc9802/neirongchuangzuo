@@ -162,7 +162,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
     const indexedObservations = observations?.map(o=>({...o,facts:o.facts.map((fact,index)=>({index,text:fact}))}));
     const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}] : content;
     const groundingSystem = observations ? '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n'+GROUNDING_RULES : '';
-    const system = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。每镜旁白宁短勿长，3秒镜头目标6—9字，允许空旁白，不把画面说明照搬为台词。' : directorSystem(input.skill);
+    const system = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以每秒3—4字设计，例如15秒约45—60字，按实际表达留停顿，不为凑字堆描述，也不机械压成每镜6—9字。长句可拆到相邻镜头连续说，每镜仍不超过每秒4字，避免短镜头塞长句。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
     let budget = maxOutputTokens, correction = '';
     for (let attempt = 1; attempt <= 2; attempt++) {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
@@ -194,7 +194,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
           const request=narrationRepairRequest(candidate,input);let feedback;
           for(let repairAttempt=0;repairAttempt<2;repairAttempt++) {
             try {
-              candidate=await auxiliary('narration_repair','你是视频旁白编辑。遵守每镜maximumUnits，只返回要求的JSON，不改写事实。短句可以只写一个重点，不必每镜都说话。中文按去标点后的字符计数，9字预算可以写“白桌青椅，进来坐坐”。不得原样保留超长旁白。',JSON.stringify({...request,...(feedback?{validationFeedback:feedback}:{})}),value=>applyNarrationRepair(candidate,value,input));
+              candidate=await auxiliary('narration_repair','你是视频旁白编辑。遵守每镜maximumUnits，只返回要求的JSON，不改写事实。把全片视为一段连贯口播，先保住消费理由，再删重复和次要细节；不要改成逐镜物品标签。长句可分配到相邻镜头连续说，但每镜不得超出预算，不切断语义，不必每镜都说话。中文按去标点后的字符计数。不得原样保留超长旁白。',JSON.stringify({...request,...(feedback?{validationFeedback:feedback}:{})}),value=>applyNarrationRepair(candidate,value,input));
               break;
             } catch(repairError) {
               if(repairAttempt===1||repairError.outputIssue!=='invalid_voice_repair')throw repairError;
