@@ -497,3 +497,29 @@ test('patient fallback finishes a slow progressing stream but still enforces idl
   const stalled=await fixture(t,(_req,res)=>{res.writeHead(200,{'Content-Length':8192,ETag:ETAG});res.write(Buffer.alloc(4096));});
   await assert.rejects(stalled.run({optimizeThroughput:false,idleTimeoutMs:100}),/stalled/);
 });
+
+test('two slow TOS routes switch back to the provider domain and safely resume the same object', async t => {
+  const source='https://aggregationpic.buerdt.net/result.mp4',origin='bucket.tos-cn-shanghai.volces.com',body=Buffer.from('complete original fallback');
+  const app=await fixture(t,(_req,res)=>range(res,body,4),{resolveCname:async()=>[origin]});
+  await writeFile(app.path,body.subarray(0,4));
+  await writeFile(app.path+'.download.json',JSON.stringify({version:1,url:source,etag:ETAG,totalBytes:body.length,
+    avoidAddresses:[`${origin}|8.8.8.8`,`${origin}|1.1.1.1`]}));
+  const result=await downloadVideo(source,app.path,{...app.settings,optimizeThroughput:false});
+  assert.equal(app.calls[0].url,source);assert.equal(app.calls[0].headers.Range,'bytes=4-');
+  assert.equal(app.calls[0].headers['If-Range'],ETAG);assert.equal(result.resumed,true);
+  assert.deepEqual(await readFile(app.path),body);
+});
+
+test('a preferred provider-domain failure still falls back to TOS after slow-route history', async t => {
+  const source='https://aggregationpic.buerdt.net/result.mp4',origin='bucket.tos-cn-shanghai.volces.com',body=Buffer.from('fallback');
+  const app=await fixture(t,(_req,res,count)=>{
+    if(new URL(app.calls[count-1].url).hostname==='aggregationpic.buerdt.net'){res.writeHead(503);res.end();}
+    else range(res,body,4);
+  },{resolveCname:async()=>[origin]});
+  await writeFile(app.path,body.subarray(0,4));
+  await writeFile(app.path+'.download.json',JSON.stringify({version:1,url:source,etag:ETAG,totalBytes:body.length,
+    avoidAddresses:[`${origin}|8.8.8.8`,`${origin}|1.1.1.1`]}));
+  await downloadVideo(source,app.path,app.settings);
+  assert.deepEqual(app.calls.map(c=>new URL(c.url).hostname),['aggregationpic.buerdt.net',origin]);
+  assert.deepEqual(await readFile(app.path),body);
+});

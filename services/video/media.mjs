@@ -199,7 +199,8 @@ export async function downloadVideo(url, path, signalOrOptions, extraOptions = {
         if (origin) { target.hostname = origin; preferred = target.href; }
       } catch (cause) { if (signal.aborted) throw cause; }
     }
-    const candidates = preferred === String(url) ? [String(url)] : [preferred, String(url)];
+    const slowOrigin = preferred !== String(url) && new Set(avoidAddresses.filter(value => value.startsWith(`${target.hostname}|`))).size >= 2;
+    const candidates = preferred === String(url) ? [String(url)] : slowOrigin ? [String(url), preferred] : [preferred, String(url)];
     const headers = { Accept: 'video/mp4,application/octet-stream', 'Accept-Encoding': 'identity',
       ...(resumed ? { Range: `bytes=${existing}-`, 'If-Range': previous.etag } : {}) };
     for (let index = 0; index < candidates.length; index++) {
