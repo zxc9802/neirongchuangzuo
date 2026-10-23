@@ -16,12 +16,12 @@ async function fixture(t, api) {
     });
     return nodes.get(k);
   };
-  let poll, html, modal, renders = 0;
+  let poll, html, modal, renders = 0; const documentEvents = new Map();
   globalThis.workspaceUser = { id: crypto.randomUUID() };
   const store=new Map(); globalThis.localStorage={getItem:k=>store.get(k)||null,setItem:(k,v)=>store.set(k,v)};
   globalThis.innerWidth=1920;globalThis.innerHeight=900;
   globalThis.document = { body: { dataset: { page: 'video' },append(n){nodes.set('.vc-popover',n);} },
-    addEventListener(){},querySelectorAll(){return [];},createElement(){return node('created-'+crypto.randomUUID());},
+    addEventListener(type,handler){documentEvents.set(type,[...(documentEvents.get(type)||[]),handler]);},querySelectorAll(){return [];},createElement(){return node('created-'+crypto.randomUUID());},
     querySelector:k=>['#vc-result-video','.vc-conversation','.vc-task-list','#modal[open]'].includes(k)?null:node(k) };
 
   globalThis.EventSource = undefined;
@@ -33,7 +33,7 @@ async function fixture(t, api) {
   ctx.refresh(); module.bindVideoCreator(ctx);
   t.after(() => { module.disposeVideoCreator(); for (const key of names) { if (old[key] === undefined) delete globalThis[key]; else globalThis[key] = old[key]; } });
   await delay(15);
-  return { node, ctx, renders: () => renders, mount: root => module.mountVideoCreator(root, ctx), useMaterial: module.useVideoMaterial, html: () => html, modal: () => modal, popover:()=>node('.vc-popover').innerHTML, action: (name, data = {}, actionContext = ctx) => module.handleVideoCreatorAction(name, { dataset: data, getBoundingClientRect(){return {left:10,top:600,bottom:630};},setAttribute(){} }, actionContext), async poll() { await poll(); await delay(5); } };
+  return { node, ctx, event:(type,event)=>{for(const handler of documentEvents.get(type)||[])handler(event);}, renders: () => renders, mount: root => module.mountVideoCreator(root, ctx), useMaterial: module.useVideoMaterial, html: () => html, modal: () => modal, popover:()=>node('.vc-popover').innerHTML, action: (name, data = {}, actionContext = ctx) => module.handleVideoCreatorAction(name, { dataset: data, getBoundingClientRect(){return {left:10,top:600,bottom:630};},setAttribute(){} }, actionContext), async poll() { await poll(); await delay(5); } };
 }
 
 function composerApi() {
@@ -622,4 +622,38 @@ test('new creation clears live typed text even when the original panel markup wa
   assert.equal(root.querySelector('#vc-message').textContent,'');
   assert.match(root.querySelector('.vc-task-list').textContent,/刚输入的草稿/);
   globalThis.document=original;
+});
+
+
+test('history thumbnails and prompt references resolve the session asset after cloud deduplication', async t => {
+  const data = composerApi(), base = data.api;
+  const f = await fixture(t,(path,options) => path.endsWith('/library')
+    ? Response.json({assets:[{id:'library-copy',originKey:'shared-origin',type:'image',name:'云端原图.jpg',url:'/cloud-photo'}]}) : base(path,options));
+  await f.useMaterial(new File(['photo'],'历史实拍.jpg',{type:'image/jpeg'}),'photo');
+  const asset = data.conversation.assets[0];asset.originKey='shared-origin'; await f.poll();
+  f.action('vc-preview-asset',{id:asset.id});
+  assert.equal(f.modal().title,'历史实拍.jpg');assert.match(f.modal().content,/src="\/uploaded"/);
+  f.action('vc-preview-asset',{id:asset.id});assert.match(f.modal().content,/vc-lightbox-image/);
+  const notices=[];f.ctx.toast=text=>notices.push(text);
+  asset.expired=true;asset.url=null;await f.poll();f.action('vc-preview-asset',{id:asset.id});
+  assert.match(notices.at(-1),/已过期或不可用/);
+});
+
+
+test('hover preview uses the current photo outside the clipped strip and clears on leave', async t => {
+  const {parseHTML}=await import('linkedom'),data=composerApi(),f=await fixture(t,data.api);
+  await f.useMaterial(new File(['photo'],'悬停原图.jpg',{type:'image/jpeg'}),'photo');
+  const original=globalThis.document,asset=data.conversation.assets[0];
+  const dom=parseHTML(`<html><body><dialog id="modal" open><div style="overflow:hidden"><button data-action="vc-preview-asset" data-id="${asset.id}">图片1</button></div></dialog></body></html>`).document;
+  dom.body.dataset.page='video';const trigger=dom.querySelector('button');
+  trigger.getBoundingClientRect=()=>({left:100,top:120,bottom:180});
+  globalThis.document=dom;
+  try {
+    f.event('pointerover',{target:trigger,relatedTarget:null});await delay(280);
+    const hover=dom.querySelector('.vc-asset-hover');assert.ok(hover);
+    assert.equal(hover.parentElement,dom.querySelector('#modal'));
+    assert.equal(hover.querySelector('img').getAttribute('src'),'/uploaded');
+    assert.equal(hover.querySelector('img').getAttribute('alt'),'悬停原图.jpg');
+    f.event('pointerout',{target:trigger,relatedTarget:null});assert.equal(dom.querySelector('.vc-asset-hover'),null);
+  } finally {globalThis.document=original;}
 });

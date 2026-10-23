@@ -12,7 +12,7 @@ const API = '/api/video-creator';
 const labels = { reserving: '预留积分', preparing: '准备素材', reviewing: '素材审核', submitting: '提交生成', running: '生成中', downloading: '保存成片', completed: '已完成', failed: '未完成', uncertain: '结果待核对', settling: '费用待核对', expired: '已过期' };
 const busyTask = task => ['reserving', 'preparing', 'reviewing', 'submitting', 'running', 'downloading', 'settling'].includes(task.status);
 let context, timer, stream, voiceSession, loading = false, loadPromise, quoteVersion = 0;
-let state, cloud, cloudOwner;
+let state, cloud, cloudOwner, assetHover, assetHoverTimer;
 const boundEditors = new WeakSet(), boundPlayers = new WeakSet(), mountedPanels = new WeakMap();
 function ensureCloud() {
   if (cloudOwner === owner() && cloud) return cloud;
@@ -331,9 +331,12 @@ function rememberAssets() {
 }
 function assetLibrary() {
   const stored = uiRead('assets', []), map = new Map(stored.filter(a => mediaUrl(a.url) && (!a.expiresAt || a.expiresAt > Date.now())).map(a => [a.originKey || a.id, a]));
-  for (const a of state.session?.assets || []) if (a.url && !a.expired) { const merged = { ...stored.find(item => item.id === a.id), ...a }; map.set(merged.originKey || a.id, merged); }
   for (const a of context.assets || []) if (a.type === 'image' && mediaUrl(a.url)) map.set('workspace-' + a.id, { ...a, id: 'workspace-' + a.id, purpose: 'reference', source: 'uploaded' });
   for (const a of state.cloudAssets || []) map.set(a.originKey || a.id, {...map.get(a.originKey || a.id),...a});
+  for (const a of state.session?.assets || []) if (a.url && !a.expired) {
+    const remembered = stored.find(item => item.id === a.id), key = a.originKey || remembered?.originKey || a.id;
+    map.set(key, { ...map.get(key), ...remembered, ...a });
+  }
   const metadata=new Map(uiRead('asset-meta',[]).map(a=>[a.id,a]));
   return [...map.values()].map(a=>({...a, folderId:metadata.get(a.originKey || a.id)?.folderId || null}));
 }
@@ -343,6 +346,7 @@ function rememberOrigin(asset, origin) {
   uiWrite('assets', previous.map(a => a.id === asset.id ? { ...a, originKey: original.originKey || origin.id, category: original.category, libraryKind: original.libraryKind } : a));
 }
 function modal(title, body, wide = false) {
+  hideAssetHover();
   if (title !== '视频提示词 · 指令编辑' && document.querySelector('#modal')?.classList.contains('vc-expanded-modal')) state.returnExpanded = true;
   document.querySelector('#modal').classList.remove('vc-expanded-modal', 'vc-lightbox-modal', 'vc-asset-modal', 'vc-tool-modal');
   context.openModal(title, '', body.replace(/<button(?![^>]*\btype=)/g, '<button type="button"'), wide);
@@ -568,8 +572,26 @@ async function applyLibrarySelection(picker = state.picker) {
   if (before.length === next.length && before.every((a, i) => a.id === next[i].id)) return;
   return replaceMaterialSet(next);
 }
+function resolvePreviewAsset(id) {
+  return state?.session?.assets.find(a => a.id === id) || assetLibrary().find(a => a.id === id) || uiRead('assets', []).find(a => a.id === id);
+}
+function hideAssetHover() { clearTimeout(assetHoverTimer); assetHover?.remove(); assetHover = null; }
+function scheduleAssetHover(trigger) {
+  hideAssetHover();
+  const asset = resolvePreviewAsset(trigger.dataset.id);
+  if (!asset || asset.type !== 'image' || asset.expired || !mediaUrl(asset.url)) return;
+  assetHoverTimer = setTimeout(() => {
+    if (!trigger.isConnected || document.body.dataset.page !== 'video') return;
+    const rect = trigger.getBoundingClientRect(), width = Math.min(240, innerWidth - 24), height = Math.min(300, innerHeight - 24);
+    assetHover = document.createElement('div'); assetHover.className = 'vc-asset-hover'; assetHover.setAttribute('role', 'tooltip');
+    assetHover.innerHTML = `<img src="${context.esc(mediaUrl(asset.url))}" alt="${context.esc(asset.name)}"><span>${context.esc(asset.name)}</span>`;
+    Object.assign(assetHover.style, { width: width + 'px', height: height + 'px', left: Math.max(12, Math.min(rect.left, innerWidth - width - 12)) + 'px', top: (rect.top >= height + 20 ? rect.top - height - 10 : Math.max(12, Math.min(rect.bottom + 10, innerHeight - height - 12))) + 'px' });
+    (document.querySelector('#modal[open]') || document.body).append(assetHover);
+  }, 250);
+}
 function previewAsset(id) {
-  const asset = assetLibrary().find(a => a.id === id); if (!asset) return;
+  const asset = resolvePreviewAsset(id);
+  if (!asset || asset.expired || asset.expiresAt && asset.expiresAt <= Date.now() || !mediaUrl(asset.url)) { context.toast('这份素材已过期或不可用，请重新上传。'); return; }
   state.libraryReturn = document.querySelector('#modal')?.classList.contains('vc-asset-modal') ? state.picker : null;
   state.previewAsset = asset; state.zoom = 1;
   modal(asset.name, `<div class="vc-lightbox-media">${asset.type === 'image' ? `<img id="vc-lightbox-image" src="${context.esc(mediaUrl(asset.url))}" alt="${context.esc(asset.name)}">` : `<audio controls src="${context.esc(mediaUrl(asset.url))}" aria-label="声音参考试听"></audio>`}</div><footer class="vc-lightbox-controls">${asset.type === 'image' ? context.button('vc-zoom', '−', 'vc-icon', 'data-value="-0.25" aria-label="缩小图片"') + '<span id="vc-zoom-label">100%</span>' + context.button('vc-zoom', '+', 'vc-icon', 'data-value="0.25" aria-label="放大图片"') : ''}<a href="${context.esc(mediaUrl(asset.url))}" download="${context.esc(asset.name)}" class="vc-icon" aria-label="下载素材">${uiIcon('download')}</a>${context.button('vc-lightbox-done', '关闭预览', 'vc-outline')}</footer>`, true);
@@ -913,7 +935,7 @@ export function handleVideoCreatorAction(action, el, ctx) {
   else if (action === 'vc-use-prompt') void useSavedPrompt(el.dataset.id);
   return true;
 }
-export function disposeVideoCreator() { closePopover(); stopRecording(true); stopVoice(); persistDraft(); cloud?.close(); cloud=null; cloudOwner=null; clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }
+export function disposeVideoCreator() { hideAssetHover(); closePopover(); stopRecording(true); stopVoice(); persistDraft(); cloud?.close(); cloud=null; cloudOwner=null; clearInterval(timer); stream?.close(); stream = null; timer = null; context = null; }
 
 function restoreView() {
   const view = state.view; state.view = null;
@@ -1103,3 +1125,17 @@ document.querySelector('#modal')?.addEventListener('close', () => {
   if (expanded) { stopVoice(); }
   if (state?.refreshQueued || expanded) { state.refreshQueued = false; refresh(); }
 });
+
+
+document.addEventListener('pointerover', event => {
+  const trigger = event.target.closest('[data-action="vc-preview-asset"]');
+  if (trigger && !trigger.contains(event.relatedTarget)) scheduleAssetHover(trigger);
+});
+document.addEventListener('pointerout', event => {
+  const trigger = event.target.closest('[data-action="vc-preview-asset"]');
+  if (trigger && !trigger.contains(event.relatedTarget)) hideAssetHover();
+});
+document.addEventListener('focusin', event => { const trigger = event.target.closest('[data-action="vc-preview-asset"]'); if (trigger) scheduleAssetHover(trigger); });
+document.addEventListener('focusout', hideAssetHover);
+document.addEventListener('scroll', hideAssetHover, true);
+document.addEventListener('pointerdown', hideAssetHover);
