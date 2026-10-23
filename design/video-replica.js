@@ -144,6 +144,31 @@ function slot(kind, ctx) {
     <input id="replica-${kind}" type="file" accept="${video ? 'video/mp4,video/quicktime,.mp4,.mov' : voice ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="${t('上传')} ${t(title)}">
     <label for="replica-${kind}" class="secondary replica-file-button ${disabled ? 'disabled' : ''}">${t(selected || saved ? '更换' : '选择')} ${t(title)}</label>${!video && !extra ? `<a href="#assets" class="replica-asset-link" data-replica-select-${kind}>${t(voice ? '从资产选择声音' : '从资产选择形象')}</a>` : ''}</section>`;
 }
+function openMaterialPreview(kind, ctx) {
+  const images = ['product', 'photo', 'background'].filter(key => replacements[key]).map(key => ({
+    kind: key, title: key === 'photo' ? '人物' : REPLACEMENTS[key],
+    source: state.urls[key] || state.current?.[{ product: 'sourceProductUrl', photo: 'sourcePhotoUrl', background: 'sourceBackgroundUrl' }[key]],
+  })).filter(image => image.source);
+  let index = images.findIndex(image => image.kind === kind);
+  if (index < 0) return;
+  ctx.openModal(t('图片预览'), '', `<section id="replica-image-preview"><div class="replica-image-stage"><button type="button" id="replica-image-prev" aria-label="${t('上一张')}" ${images.length < 2 ? 'hidden' : ''}>‹</button><img id="replica-image-full" alt=""><button type="button" id="replica-image-next" aria-label="${t('下一张')}" ${images.length < 2 ? 'hidden' : ''}>›</button></div><p id="replica-image-caption" aria-live="polite"></p></section>`);
+  const root = document.querySelector('#replica-image-preview');
+  const show = offset => {
+    index = (index + offset + images.length) % images.length;
+    const image = images[index], full = root.querySelector('#replica-image-full');
+    full.src = image.source; full.alt = t(image.title);
+    root.querySelector('#replica-image-caption').textContent = `${t(image.title)} · ${index + 1} / ${images.length}`;
+  };
+  root.querySelector('#replica-image-prev').onclick = () => show(-1);
+  root.querySelector('#replica-image-next').onclick = () => show(1);
+  root.onkeydown = event => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault(); show(event.key === 'ArrowLeft' ? -1 : 1);
+    }
+  };
+  show(0);
+  if (images.length > 1) root.querySelector('#replica-image-next').focus();
+}
 function deepInputs(ctx) {
   const locked = state.busy || state.current && state.current.status !== 'draft';
   const cards = ['product', 'photo', 'background', 'voice'].map(kind => {
@@ -152,7 +177,10 @@ function deepInputs(ctx) {
     const disabled = locked || kind === 'voice' && !state.config?.voiceEnabled;
     const title = kind === 'photo' ? '人物' : REPLACEMENTS[kind];
     const name = active ? selected?.name || (saved ? '已上传' : '待添加素材') : '';
-    return `<div class="replica-material ${active ? 'is-selected' : ''}"><div class="replica-material-preview"><input id="replica-${kind}" class="replica-hidden-input" type="file" accept="${kind === 'voice' ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}参考素材"><label for="replica-${kind}" class="replica-material-tile ${disabled ? 'is-disabled' : ''}" title="${ctx.esc(selected?.name || `添加${title}参考素材`)}">${source && kind !== 'voice' ? `<img src="${ctx.esc(source)}" alt="${ctx.esc(title)}参考素材">` : ctx.icon(kind === 'photo' ? 'avatar' : kind === 'voice' ? 'audio' : kind === 'product' ? 'store' : 'image')}<span class="replica-material-add" aria-hidden="true">+</span></label><input id="replica-toggle-${kind}" class="replica-material-toggle" type="checkbox" aria-label="替换${REPLACEMENTS[kind]}" ${active ? 'checked' : ''} ${disabled ? 'disabled' : ''}>${active ? `<button type="button" class="replica-material-remove" id="replica-remove-${kind}" aria-label="取消选择" title="取消选择" ${locked ? 'disabled' : ''}><span aria-hidden="true">×</span></button>` : ''}</div><span class="replica-material-label">${title}<small>可选</small></span><span class="replica-material-name" title="${ctx.esc(name)}">${ctx.esc(name)}</span><div class="replica-material-actions"><button type="button" data-replica-select-${kind} ${disabled ? 'disabled' : ''}>从资产库选择</button></div></div>`;
+    const tile = source && kind !== 'voice'
+      ? `<button type="button" id="replica-preview-${kind}" class="replica-material-tile replica-material-zoom" aria-label="放大预览${title}" title="放大预览${title}"><img src="${ctx.esc(source)}" alt="${ctx.esc(title)}参考素材"></button>${disabled ? '' : `<label for="replica-${kind}" class="replica-material-add" title="更换${title}参考素材" aria-label="更换${title}参考素材">+</label>`}`
+      : `<label for="replica-${kind}" class="replica-material-tile ${disabled ? 'is-disabled' : ''}" title="${ctx.esc(selected?.name || `添加${title}参考素材`)}">${ctx.icon(kind === 'photo' ? 'avatar' : kind === 'voice' ? 'audio' : kind === 'product' ? 'store' : 'image')}<span class="replica-material-add" aria-hidden="true">+</span></label>`;
+    return `<div class="replica-material ${active ? 'is-selected' : ''}"><div class="replica-material-preview"><input id="replica-${kind}" class="replica-hidden-input" type="file" accept="${kind === 'voice' ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}参考素材">${tile}<input id="replica-toggle-${kind}" class="replica-material-toggle" type="checkbox" aria-label="替换${REPLACEMENTS[kind]}" ${active ? 'checked' : ''} ${disabled ? 'disabled' : ''}>${active ? `<button type="button" class="replica-material-remove" id="replica-remove-${kind}" aria-label="取消选择" title="取消选择" ${locked ? 'disabled' : ''}><span aria-hidden="true">×</span></button>` : ''}</div><span class="replica-material-label">${title}<small>可选</small></span><span class="replica-material-name" title="${ctx.esc(name)}">${ctx.esc(name)}</span><div class="replica-material-actions"><button type="button" data-replica-select-${kind} ${disabled ? 'disabled' : ''}>从资产库选择</button></div></div>`;
   }).join('');
   const voiceSource = replacements.voice && (state.urls.voice || state.current?.sourceVoiceUrl);
   return `<div class="replica-material-heading"><span>替换素材</span><small>已选 ${Object.values(replacements).filter(Boolean).length} / 4 项</small></div><div class="replica-materials">${cards}</div>${voiceSource ? `<audio class="replica-material-audio" src="${ctx.esc(voiceSource)}" controls preload="metadata" aria-label="声音参考试听"></audio>` : ''}${deepSource(ctx)}<button type="button" class="replica-source-library" data-replica-select-video ${locked ? 'disabled' : ''}>从资产库选择参考视频</button><p class="replica-deep-guidance">未选择的项目保留原视频内容。<br>沿用原片的动作、镜头和时长，自由组合替换内容。</p>`;
@@ -225,7 +253,7 @@ function progress(ctx) {
     <small>任务编号：${ctx.esc(task.id)}</small>`;
 }
 function history(ctx) {
-  if (deepMode()) return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" title="${ctx.esc(failureMessage(task))}" ${state.busy ? 'disabled' : ''}><span class="replica-history-thumb">${task.sourcePhotoUrl || task.sourceProductUrl || task.sourceBackgroundUrl ? `<img src="${ctx.esc(task.sourcePhotoUrl || task.sourceProductUrl || task.sourceBackgroundUrl)}" alt="" loading="lazy">` : ctx.icon(task.status === 'completed' ? 'video' : 'list')}</span><span class="replica-history-copy"><strong>${ctx.esc(taskLabel(task))}</strong><small>${task.mode === 'deep' ? '深度复刻' : '原版复刻'} · ${ctx.esc(new Date(task.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))}</small></span></button>`).join('') : '<p class="replica-muted replica-history-empty">还没有复刻记录<br>生成后会显示在这里</p>';
+  if (deepMode()) return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" title="${ctx.esc(failureMessage(task))}" ${state.busy ? 'disabled' : ''}><span class="replica-history-thumb">${task.resultUrl || task.sourceVideoUrl ? `<video src="${ctx.esc(task.resultUrl || task.sourceVideoUrl)}#t=0.001" muted playsinline preload="metadata" aria-hidden="true" tabindex="-1"></video>` : ctx.icon(task.status === 'completed' ? 'video' : 'list')}</span><span class="replica-history-copy"><strong>${ctx.esc(taskLabel(task))}</strong><small>${task.mode === 'deep' ? '深度复刻' : '原版复刻'} · ${ctx.esc(modelName(task) || task.modelName || task.model || '未知模型')}</small><small class="replica-history-time">${task.status === 'draft' ? '创建时间' : '生成时间'}：${ctx.esc(new Date(task.startedAt || task.createdAt).toLocaleString(uiLocale(), { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }))}</small></span></button>`).join('') : '<p class="replica-muted replica-history-empty">还没有复刻记录<br>生成后会显示在这里</p>';
   return state.tasks.length ? state.tasks.map(task => `<button type="button" class="replica-history-item ${task.id === state.current?.id ? 'active' : ''}" data-replica-task="${ctx.esc(task.id)}" title="${ctx.esc(failureMessage(task))}" ${state.busy ? 'disabled' : ''}><span>${task.mode === 'deep' ? '深度复刻 · ' : ''}${ctx.esc(['waiting', 'failed'].includes(task.status) && task.error ? failureMessage(task).split('原始原因：')[0] : taskLabel(task))}</span><small>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${ctx.esc(new Date(task.createdAt).toLocaleString(uiLocale(), { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} · ${task.duration || '—'} 秒</small></button>`).join('') : '<p class="replica-muted">你的复刻记录会保存在这里</p>';
 }
 function summary(ctx) {
@@ -387,7 +415,7 @@ async function poll() {
     const [config, data] = await Promise.all([state.config ? Promise.resolve(state.config) : request('/config'), request('/tasks')]);
     if (state.owner !== owner) return;
     const inputs = () => deepMode() ? deepInputs(context) : ['video', 'photo', 'voice'].map(kind => slot(kind, context)).join('');
-    const previous = { inputs: inputs(), models: modelPicker(context), result: result(context), style: playerStyle(state.current), actions: submitArea(context) };
+    const previous = { inputs: inputs(), models: modelPicker(context), result: result(context), style: playerStyle(state.current), actions: submitArea(context), history: history(context) };
     const firstLoad = state.loading;
     state.config = config; state.tasks = data.tasks; state.loading = false; state.pollError = '';
     if (state.current) state.current = data.tasks.find(item => item.id === state.current.id) || state.current;
@@ -400,7 +428,7 @@ async function poll() {
       if (previous.result !== result(context)) output.innerHTML = result(context);
       if (previous.style !== playerStyle(state.current)) output.setAttribute('style', playerStyle(state.current));
       document.querySelector('#replica-result-summary').innerHTML = summary(context);
-      document.querySelector('#replica-history').innerHTML = history(context);
+      if (previous.history !== history(context)) document.querySelector('#replica-history').innerHTML = history(context);
       if (previous.actions !== actions) {
         document.querySelector('#replica-submit-area').innerHTML = actions;
         bindVideoReplica(context);
@@ -446,6 +474,8 @@ export function bindVideoReplica(ctx) {
   for (const next of ['classic', 'deep']) document.querySelector(`#replica-mode-${next}`).onclick = () => switchMode(next);
   if (deepMode()) for (const kind of Object.keys(REPLACEMENTS)) document.querySelector(`#replica-toggle-${kind}`).onchange = event => { void toggleReplacement(kind, event.target.checked); };
   for (const kind of ['video', ...Object.keys(REPLACEMENTS)]) {
+    const preview = document.querySelector(`#replica-preview-${kind}`);
+    if (preview) preview.onclick = () => openMaterialPreview(kind, ctx);
     const remove = document.querySelector(`#replica-remove-${kind}`);
     if (remove) remove.onclick = () => { void toggleReplacement(kind, false); };
     const select = document.querySelector(`[data-replica-select-${kind}]`);

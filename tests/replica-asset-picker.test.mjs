@@ -9,7 +9,7 @@ const stored = (kind, id, name) => ({ kind, id, name, filename: name + (kind ===
 const assets = [stored('photo', photoId, '已存人物'), stored('voice', voiceId, '已存声音')];
 const generatedId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-async function fixture(t, { fetchMedia, fetchMetadata, materials = [...assets], uploadFailure = false } = {}) {
+async function fixture(t, { fetchMedia, fetchMetadata, materials = [...assets], uploadFailure = false, tasks = [] } = {}) {
   const previous = { document: globalThis.document, fetch: globalThis.fetch, workspaceUser: globalThis.workspaceUser };
   const { document, window } = parseHTML('<html><body data-page="replica"><main></main><dialog id="modal"><div id="modal-body"></div></dialog></body></html>');
   globalThis.document = document; globalThis.workspaceUser = { id: crypto.randomUUID() };
@@ -29,7 +29,7 @@ async function fixture(t, { fetchMedia, fetchMetadata, materials = [...assets], 
     const metadata = fetchMetadata?.(path, options); if (metadata) return metadata;
     if (path === '/api/assets/materials') return Response.json({ materials });
     if (path.startsWith('/api/ai/images')) return Response.json({ tasks: [{ id: generatedId, status: 'completed', completedAt: Date.now(), prompt: '生成背景', images: [{ url: `/api/ai/media/${generatedId}/result-1.png`, filename: '背景.png' }] }] });
-    return Response.json(path.endsWith('/config') ? { enabled: true, voiceEnabled: true } : { tasks: [] });
+    return Response.json(path.endsWith('/config') ? { enabled: true, voiceEnabled: true } : { tasks });
   };
   const module = await import(`../design/video-replica.js?picker=${crypto.randomUUID()}`);
   const ctx = { mode: 'replica', assets: [], esc: value => String(value ?? '').replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;'), icon: () => '',
@@ -47,6 +47,63 @@ async function fixture(t, { fetchMedia, fetchMetadata, materials = [...assets], 
     choose: async key => { node(`[data-rap-key="${key}"]`).click(); await node('#rap-confirm').onclick(); await settle(); },
   };
 }
+
+test('deep image previews open the clicked upload, navigate images only, and preserve replacement controls', async t => {
+  const f = await fixture(t);
+  const upload = async kind => f.node(`#replica-${kind}`).onchange({ target: { files: [new File(['data'], `${kind}.png`, { type: 'image/png' })] } });
+  await upload('photo');
+  f.node('#replica-preview-photo').click();
+  assert.equal(f.dialog.open, true);
+  assert.equal(f.node('#replica-image-full').src, f.node('#replica-preview-photo img').src);
+  assert.equal(f.node('#replica-image-prev').hidden, true);
+  assert.equal(f.node('#replica-image-next').hidden, true);
+  f.dialog.close();
+  await upload('product'); await upload('background');
+  await f.open('voice'); await f.choose(voiceId);
+  f.node('#replica-preview-photo').click();
+  assert.equal(f.node('#replica-image-caption').textContent, '人物 · 2 / 3');
+  assert.equal(f.node('#replica-image-next').hidden, false);
+  f.node('#replica-image-next').click();
+  assert.equal(f.node('#replica-image-full').src, f.node('#replica-preview-background img').src);
+  f.node('#replica-image-next').click();
+  assert.equal(f.node('#replica-image-caption').textContent, '商品 · 1 / 3');
+  f.node('#replica-image-prev').click();
+  assert.equal(f.node('#replica-image-caption').textContent, '背景 · 3 / 3');
+  let prevented = false;
+  f.node('#replica-image-preview').onkeydown({ key: 'ArrowLeft', preventDefault() { prevented = true; } });
+  assert.equal(prevented, true);
+  assert.equal(f.node('#replica-image-caption').textContent, '人物 · 2 / 3');
+  f.dialog.close();
+  assert.equal(f.node('#replica-preview-photo').closest('label'), null);
+  assert.equal(f.node('label.replica-material-add[for="replica-photo"]').textContent, '+');
+  f.node('#replica-remove-product').click();
+  f.node('#replica-preview-photo').click();
+  assert.equal(f.node('#replica-image-caption').textContent, '人物 · 1 / 2');
+});
+
+test('deep history uses result or source video frames, shows the recorded model and generation time, and permits locked image previews', async t => {
+  const tasks = [{ id: 'finished', status: 'completed', mode: 'deep', model: 'wan3.0-video-prime', createdAt: 1,
+    startedAt: new Date(2026, 9, 24, 12, 34).getTime(), replacements: { photo: true }, sourcePhotoUrl: '/face.jpg',
+    sourceVideoUrl: '/reference.mp4', resultUrl: '/finished.mp4', photo: {} },
+  { id: 'waiting', status: 'waiting', mode: 'deep', model: 'doubao-seedance-2-5-260628', createdAt: 1, sourceVideoUrl: '/waiting.mp4' },
+  { id: 'expired', status: 'expired', mode: 'deep', model: 'wan3.0-video', createdAt: 1 }];
+  const f = await fixture(t, { tasks });
+  const finished = f.node('[data-replica-task="finished"]'), waiting = f.node('[data-replica-task="waiting"]');
+  assert.equal(finished.querySelector('video').getAttribute('src'), '/finished.mp4#t=0.001');
+  assert.equal(waiting.querySelector('video').getAttribute('src'), '/waiting.mp4#t=0.001');
+  assert.equal(f.node('[data-replica-task="expired"] video'), null);
+  assert.equal(finished.querySelector('img'), null, 'the uploaded face is not the history cover');
+  assert.equal(finished.querySelector('video').hasAttribute('muted'), true);
+  assert.equal(finished.querySelector('video').hasAttribute('autoplay'), false);
+  assert.match(finished.textContent, /qiya-3\.0 快速版/);
+  assert.match(finished.textContent, /生成时间：.*2026.*12:34/);
+  assert.match(waiting.textContent, /qiya-2\.5/);
+  finished.click();
+  assert.equal(f.node('#replica-photo').disabled, true);
+  assert.equal(f.node('#replica-preview-photo').disabled, false);
+  f.node('#replica-preview-photo').click();
+  assert.equal(f.node('#replica-image-full').src, '/face.jpg');
+});
 
 for (const kind of ['photo', 'voice', 'product', 'background']) test(`${kind}: asset dialog confirms into the right slot and selected material can be removed`, async t => {
   const f = await fixture(t);
