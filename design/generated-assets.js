@@ -4,6 +4,20 @@ import { digitalHumanModelLabel } from './model-labels.js';
 const RETENTION_MS = 72 * 60 * 60 * 1000;
 const TYPES = { all: '全部', image: '图片', video: '视频', audio: '音频' };
 const state = { ctx: null, type: 'all', materialType: 'all', limit: 24, materialLimit: 24, records: [], materials: [], errors: [], loading: false, controller: null, timer: null, revision: 0 };
+let libraryCache;
+function currentLibrary() {
+  const owner = globalThis.workspaceUser?.id;
+  if (!libraryCache || libraryCache.owner !== owner) {
+    libraryCache?.controller.abort();
+    libraryCache = { owner, values: [[], [], [], [], [], []], errors: [], loadedAt: 0, pending: null, uploads: [], listeners: new Set(), controller: new AbortController() };
+  }
+  return libraryCache;
+}
+function librarySnapshot(cache, loading = Boolean(cache.pending)) {
+  const [images, avatars, restaurant, videos, creativeVideos, materials] = cache.values;
+  return { materials, records: collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos, creativeVideos), errors: cache.errors.filter(Boolean), loading };
+}
+function notifyLibrary(cache) { for (const listener of cache.listeners) listener(librarySnapshot(cache)); }
 
 export function collectMaterialAssets(items = []) {
   return items.filter(item => item?.permanent === true && ['photo', 'voice', 'video'].includes(item.kind)
@@ -11,6 +25,7 @@ export function collectMaterialAssets(items = []) {
     && item.url === `/api/assets/materials/${item.id}/media` && Number.isFinite(item.createdAt));
 }
 export async function uploadSharedMaterial(kind, file, signal) {
+  const cache = currentLibrary();
   const assetKind = ['product', 'background'].includes(kind) ? 'photo' : kind;
   const response = await fetch(`/api/assets/materials/${assetKind}`, { method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
@@ -19,6 +34,11 @@ export async function uploadSharedMaterial(kind, file, signal) {
   try { data = await response.json(); } catch { throw new Error(t('素材入库失败，请重试。')); }
   if (!response.ok) throw new Error(data.error || t('素材入库失败，请重试。'));
   if (!collectMaterialAssets([data.material]).length || data.material.kind !== assetKind) throw new Error(t('素材入库失败，请重试。'));
+  if (cache === libraryCache && cache.owner === globalThis.workspaceUser?.id) {
+    cache.values[5] = [data.material, ...cache.values[5].filter(item => item.id !== data.material.id)];
+    if (cache.pending) cache.uploads.push(data.material);
+    notifyLibrary(cache);
+  }
   return data.material;
 }
 export function materialDestinations(kind) {
@@ -202,22 +222,48 @@ async function fetchRestaurantTasks(signal) {
   } while (cursor);
   return tasks;
 }
-export async function loadAssetLibrary(signal) {
-  const sources = ['图片', '数字人', '餐饮图文', '人物复刻', 'AI视频', '长期素材'];
-  const results = await Promise.allSettled([fetchTasks('/api/ai/images?completed=true', signal, sources[0]), fetchTasks('/api/tasks?completed=true', signal, sources[1]), fetchRestaurantTasks(signal), fetchTasks('/api/video-replica/tasks?completed=true', signal, sources[3]), fetchTasks('/api/video-creator/tasks?completed=true', signal, sources[4]), fetchMaterials(signal)]);
-  const errors = results.flatMap((result, index) => result.status === 'rejected' ? [result.reason?.name === 'AbortError' ? `${t(sources[index])}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(result.reason?.message) ? result.reason.message : `${t(sources[index])}作品暂时无法读取。`] : []);
-  const [images, avatars, restaurant, videos, creativeVideos, materials] = results.map(result => result.status === 'fulfilled' ? result.value : []);
-  return { materials, records: collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos, creativeVideos), errors };
+export async function loadAssetLibrary(signal, { onUpdate, force = false } = {}) {
+  const cache = currentLibrary(), refresh = force || Date.now() - cache.loadedAt >= 30000;
+  const update = snapshot => { if (!signal?.aborted && cache.owner === globalThis.workspaceUser?.id) onUpdate?.(snapshot); };
+  const detach = () => cache.listeners.delete(update);
+  if (signal?.aborted) return librarySnapshot(cache);
+  cache.listeners.add(update); signal?.addEventListener('abort', detach, { once: true });
+  update(librarySnapshot(cache, Boolean(cache.pending) || refresh));
+  if (!cache.pending && refresh) {
+    // A dialog closing detaches its listener; other pickers can reuse the same requests.
+    const requestSignal = AbortSignal.any([cache.controller.signal, AbortSignal.timeout(120000)]);
+    const sources = ['图片', '数字人', '餐饮图文', '人物复刻', 'AI视频', '长期素材'];
+    cache.errors = []; cache.uploads = [];
+    cache.pending = Promise.allSettled([
+      fetchTasks('/api/ai/images?completed=true', requestSignal, sources[0]), fetchTasks('/api/tasks?completed=true', requestSignal, sources[1]), fetchRestaurantTasks(requestSignal),
+      fetchTasks('/api/video-replica/tasks?completed=true', requestSignal, sources[3]), fetchTasks('/api/video-creator/tasks?completed=true', requestSignal, sources[4]), fetchMaterials(requestSignal),
+    ].map(async (request, index) => {
+      try {
+        const value = await request;
+        cache.values[index] = index === 5 ? [...new Map([...value, ...cache.uploads].map(item => [item.id, item])).values()] : value;
+      } catch (error) {
+        cache.errors[index] = ['AbortError', 'TimeoutError'].includes(error?.name) ? `${t(sources[index])}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(error?.message) ? error.message : `${t(sources[index])}作品暂时无法读取。`;
+      }
+      notifyLibrary(cache);
+    })).then(() => {
+      cache.loadedAt = cache.errors.some(Boolean) ? 0 : Date.now(); cache.pending = null; cache.uploads = [];
+      notifyLibrary(cache);
+    });
+  }
+  try { await cache.pending; return librarySnapshot(cache); }
+  finally { detach(); signal?.removeEventListener('abort', detach); }
 }
-async function load() {
+async function load(force = false) {
   if (!active() || state.loading) return;
   const revision = ++state.revision;
   const controller = new AbortController(); state.controller = controller;
   const timer = setTimeout(() => controller.abort(), 120000);
   state.loading = true; paint();
-  const library = await loadAssetLibrary(controller.signal);
+  const owner = globalThis.workspaceUser?.id;
+  const current = () => revision === state.revision && active() && owner === globalThis.workspaceUser?.id;
+  const library = await loadAssetLibrary(controller.signal, { force, onUpdate: snapshot => { if (current()) { Object.assign(state, snapshot); paint(); scheduleExpiry(); } } });
   clearTimeout(timer);
-  if (revision !== state.revision || !active()) return;
+  if (!current()) return;
   Object.assign(state, library);
   state.loading = false; state.controller = null; paint(); scheduleExpiry();
 }
@@ -243,7 +289,7 @@ export function handleGeneratedAssetsAction(action, element, ctx) {
     void useMaterial(item, target, ctx).catch(error => ctx.toast(error.message || '素材读取失败，请重试。')).finally(() => { element.disabled = false; });
     return true;
   }
-  if (action === 'generated-assets-refresh') { state.limit = 24; void load(); return true; }
+  if (action === 'generated-assets-refresh') { state.limit = 24; void load(true); return true; }
   if (action === 'generated-assets-create') { ctx.navigate('image'); return true; }
   if (action === 'generated-assets-more') { state.limit += 24; paint(); return true; }
   if (action === 'generated-assets-filter') {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets, bindGeneratedAssets, disposeGeneratedAssets, collectMaterialAssets, materialDestinations, handleGeneratedAssetsAction } from '../design/generated-assets.js';
+import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets, bindGeneratedAssets, disposeGeneratedAssets, collectMaterialAssets, materialDestinations, handleGeneratedAssetsAction, loadAssetLibrary, uploadSharedMaterial } from '../design/generated-assets.js';
 
 const now = Date.parse('2026-09-30T06:00:00Z');
 const hour = 3600000;
@@ -136,7 +136,8 @@ test('restaurant file expiry and task identity are independently enforced at the
 });
 
 test('asset loading paginates restaurant metadata without paid calls and keeps existing source error handling', async () => {
-  const original = Object.fromEntries(['document', 'fetch'].map(key => [key, globalThis[key]]));
+  const original = Object.fromEntries(['document', 'fetch', 'workspaceUser'].map(key => [key, globalThis[key]]));
+  globalThis.workspaceUser = { id: crypto.randomUUID() };
   let markup = '';
   const calls = [];
   const host = { set innerHTML(value) { markup = value; } };
@@ -185,4 +186,99 @@ test('the assets entry presents retention and generated type filters without an 
 test('image assets use the same business title or generation-mode fallback as the work page', () => {
   assert.equal(collectGeneratedAssets([image({ prompt: '设计3:4工厂海报\n主标题：真实样件，看细节' })], [], now)[0].title, '真实样件，看细节');
   assert.equal(collectGeneratedAssets([image({ prompt: '内部排版与制作约束', generationMode: 'series' })], [], now)[0].title, '统一风格套图');
+});
+
+function libraryFixture(t, respond) {
+  const previous = { fetch: globalThis.fetch, workspaceUser: globalThis.workspaceUser }, calls = [];
+  globalThis.workspaceUser = { id: crypto.randomUUID() };
+  globalThis.fetch = async (path, options) => {
+    calls.push({ path, options });
+    return await respond?.(path, options) || Response.json(path === '/api/assets/materials' ? { materials: [material('photo')] } : { tasks: [] });
+  };
+  t.after(() => Object.assign(globalThis, previous));
+  return calls;
+}
+const settleLibrary = () => new Promise(resolve => setImmediate(resolve));
+
+test('saved materials appear before slow sources; closing and reopening reuses pending requests and the completed cache', async t => {
+  let finishSlow;
+  const calls = libraryFixture(t, path => path.startsWith('/api/restaurant/') ? new Promise(resolve => { finishSlow = resolve; }) : null);
+  const controller = new AbortController(), snapshots = [];
+  const first = loadAssetLibrary(controller.signal, { onUpdate: value => snapshots.push(value) });
+  await settleLibrary();
+  assert.equal(snapshots.at(-1).materials.length, 1);
+  assert.equal(snapshots.at(-1).loading, true);
+  controller.abort(); const count = snapshots.length;
+  let immediate;
+  const second = loadAssetLibrary(undefined, { onUpdate: value => { immediate = value; } });
+  assert.equal(immediate.materials.length, 1, 'reopened dialog receives available materials synchronously');
+  assert.equal(calls.length, 6, 'in-flight requests are shared');
+  assert.ok(calls.every(call => !call.options.signal.aborted));
+  finishSlow(Response.json({ tasks: [] })); await Promise.all([first, second]);
+  assert.equal(snapshots.length, count, 'closed consumer receives no late updates');
+  assert.equal(immediate.loading, false);
+  const cached = await loadAssetLibrary();
+  assert.equal(cached.materials.length, 1); assert.equal(calls.length, 6);
+});
+
+test('stale assets remain visible while refreshing, expired generated outputs disappear, and manual refresh bypasses freshness', async t => {
+  let time = Date.now(), finishMaterials;
+  t.mock.method(Date, 'now', () => time);
+  const calls = libraryFixture(t, path => {
+    if (path.startsWith('/api/ai/images')) return Response.json({ tasks: [image({ completedAt: time - 1000, expiresAt: time + 1000 })] });
+    if (path === '/api/assets/materials' && finishMaterials !== undefined) return new Promise(resolve => { finishMaterials = resolve; });
+  });
+  assert.equal((await loadAssetLibrary()).records.length, 1);
+  time += 31000; finishMaterials = null;
+  let initial;
+  const refresh = loadAssetLibrary(undefined, { onUpdate: snapshot => { initial ||= snapshot; } });
+  assert.equal(initial.materials.length, 1); assert.equal(initial.records.length, 0); assert.equal(initial.loading, true);
+  await settleLibrary(); finishMaterials(Response.json({ materials: [] })); await refresh;
+  assert.equal((await loadAssetLibrary()).materials.length, 0); assert.equal(calls.length, 12);
+  finishMaterials = undefined;
+  assert.equal((await loadAssetLibrary(undefined, { force: true })).materials.length, 1);
+  assert.equal(calls.length, 18);
+});
+
+test('an upload updates cached assets immediately and survives an older list response without duplicates', async t => {
+  let finishList;
+  const saved = material('photo');
+  libraryFixture(t, (path, options) => {
+    if (options.method === 'POST') return Response.json({ material: saved });
+    if (path === '/api/assets/materials') return new Promise(resolve => { finishList = resolve; });
+  });
+  let visible;
+  const loading = loadAssetLibrary(undefined, { onUpdate: snapshot => { visible = snapshot; } });
+  await uploadSharedMaterial('product', new File(['new'], '商品.png'));
+  assert.equal(visible.materials[0].id, saved.id);
+  finishList(Response.json({ materials: [] }));
+  assert.deepEqual((await loading).materials.map(item => item.id), [saved.id]);
+  await uploadSharedMaterial('photo', new File(['new'], '商品.png'));
+  assert.deepEqual((await loadAssetLibrary()).materials.map(item => item.id), [saved.id]);
+});
+
+test('failed sources retry on reopening instead of caching an empty library as a success', async t => {
+  let fail = true;
+  const calls = libraryFixture(t, path => path === '/api/assets/materials' && fail ? Response.json({}, { status: 503 }) : null);
+  assert.equal((await loadAssetLibrary()).errors.length, 1);
+  fail = false;
+  const retried = await loadAssetLibrary();
+  assert.equal(retried.errors.length, 0); assert.equal(retried.materials.length, 1); assert.equal(calls.length, 12);
+});
+
+test('switching accounts clears cached assets and ignores late responses from the previous account', async t => {
+  let finishOld;
+  const calls = libraryFixture(t, path => path === '/api/assets/materials' ? new Promise(resolve => { finishOld = resolve; }) : null);
+  let oldUpdates = 0;
+  const old = loadAssetLibrary(undefined, { onUpdate: () => { oldUpdates++; } });
+  await settleLibrary(); const count = oldUpdates;
+  globalThis.workspaceUser = { id: crypto.randomUUID() };
+  const oldList = finishOld, snapshots = [];
+  const next = loadAssetLibrary(undefined, { onUpdate: snapshot => snapshots.push(snapshot) });
+  assert.equal(snapshots[0].materials.length, 0);
+  assert.equal(calls[0].options.signal.aborted, true);
+  oldList(Response.json({ materials: [material('photo')] })); await old;
+  finishOld(Response.json({ materials: [material('voice')] })); await next;
+  assert.equal(oldUpdates, count);
+  assert.deepEqual((await loadAssetLibrary()).materials.map(item => item.kind), ['voice']);
 });

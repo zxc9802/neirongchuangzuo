@@ -9,7 +9,7 @@ const stored = (kind, id, name) => ({ kind, id, name, filename: name + (kind ===
 const assets = [stored('photo', photoId, '已存人物'), stored('voice', voiceId, '已存声音')];
 const generatedId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
-async function fixture(t, { fetchMedia, materials = [...assets], uploadFailure = false } = {}) {
+async function fixture(t, { fetchMedia, fetchMetadata, materials = [...assets], uploadFailure = false } = {}) {
   const previous = { document: globalThis.document, fetch: globalThis.fetch, workspaceUser: globalThis.workspaceUser };
   const { document, window } = parseHTML('<html><body data-page="replica"><main></main><dialog id="modal"><div id="modal-body"></div></dialog></body></html>');
   globalThis.document = document; globalThis.workspaceUser = { id: crypto.randomUUID() };
@@ -26,6 +26,7 @@ async function fixture(t, { fetchMedia, materials = [...assets], uploadFailure =
       return Response.json({ material: item });
     }
     if (path.endsWith('/media') || path.includes('/result-1.png')) return fetchMedia ? fetchMedia(path, options) : new Response('image', { headers: { 'Content-Type': 'image/jpeg' } });
+    const metadata = fetchMetadata?.(path, options); if (metadata) return metadata;
     if (path === '/api/assets/materials') return Response.json({ materials });
     if (path.startsWith('/api/ai/images')) return Response.json({ tasks: [{ id: generatedId, status: 'completed', completedAt: Date.now(), prompt: '生成背景', images: [{ url: `/api/ai/media/${generatedId}/result-1.png`, filename: '背景.png' }] }] });
     return Response.json(path.endsWith('/config') ? { enabled: true, voiceEnabled: true } : { tasks: [] });
@@ -61,6 +62,11 @@ for (const kind of ['photo', 'voice', 'product', 'background']) test(`${kind}: a
   assert.match(f.node('main').textContent, /原片.mp4/);
   assert.match(f.node('main').textContent, kind === 'voice' ? /已存声音/ : /已存人物/);
   assert.ok(!f.calls.some(call => call.path === assets[0].url || call.path === assets[1].url), 'owned asset IDs need no media download');
+  const remove = f.node(`#replica-remove-${kind}`);
+  assert.equal(remove.getAttribute('aria-label'), '取消选择');
+  assert.ok(remove.closest('.replica-material-preview'));
+  assert.equal(remove.closest('label'), null, 'removing a reference must not open the file chooser');
+  assert.doesNotMatch(f.node('.replica-material-actions').textContent, /取消选择/);
   f.node(`#replica-remove-${kind}`).click();
   assert.ok(!f.node(`#replica-toggle-${kind}`).hasAttribute('checked'));
   assert.doesNotMatch(f.node('main').textContent, /已存人物|已存声音/);
@@ -163,4 +169,33 @@ test('failed asset uploads show an error without claiming storage or replacing t
   assert.equal(f.dialog.open, true);
   assert.match(f.node('main').textContent, /原片.mp4/);
   assert.doesNotMatch(f.node('#rap-grid').textContent, /失败图片/);
+});
+
+test('picker displays and confirms saved material while a generated source is still loading, then reopens from cache', async t => {
+  let finishSlow;
+  const f = await fixture(t, { fetchMetadata: path => path.startsWith('/api/restaurant/') ? new Promise(resolve => { finishSlow = resolve; }) : null });
+  await f.open('product');
+  assert.ok(f.node(`[data-rap-key="${photoId}"]`));
+  assert.doesNotMatch(f.node('#replica-asset-picker').textContent, /暂无可用素材/);
+  await f.choose(photoId);
+  assert.equal(f.dialog.open, false);
+  assert.ok(f.node('#replica-remove-product'));
+  const requests = f.calls.length;
+  f.node('[data-replica-select-background]').click();
+  assert.ok(f.node(`[data-rap-key="${photoId}"]`), 'cached cards render in the click handler without a loading gap');
+  assert.equal(f.calls.length, requests);
+  finishSlow(Response.json({ tasks: [] })); await f.settle();
+  f.node('#rap-cancel').click(); await f.open('photo');
+  assert.equal(f.calls.length, requests);
+  assert.equal(f.document.querySelectorAll(`[data-rap-key="${photoId}"]`).length, 1);
+});
+
+test('picker does not claim the library is empty before its metadata arrives', async t => {
+  let finish;
+  const f = await fixture(t, { fetchMetadata: path => path === '/api/assets/materials' ? new Promise(resolve => { finish = resolve; }) : null });
+  await f.open('voice');
+  assert.match(f.node('#rap-status').textContent, /正在读取资产/);
+  assert.doesNotMatch(f.node('#replica-asset-picker').textContent, /暂无可用素材/);
+  finish(Response.json({ materials: [] })); await f.settle();
+  assert.match(f.node('#replica-asset-picker').textContent, /暂无可用素材/);
 });
