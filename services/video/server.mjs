@@ -230,7 +230,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         sourceProductUrl: !expired && task.product ? `${PREFIX}/tasks/${task.id}/product` : null,
         sourceBackgroundUrl: !expired && task.background ? `${PREFIX}/tasks/${task.id}/background` : null } : {}),
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
-      startedAt: task.recheckStartedAt || task.startedAt, lastCheckedAt: task.lastCheckedAt,
+      startedAt: task.recheckStartedAt || task.startedAt, generationStartedAt: task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video && video, targetDuration: task.targetDuration, segments: segmentView(task), queue: wan3Queue.view(task), photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
       captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck,
       error: safeMessage(task.error), code: task.code,

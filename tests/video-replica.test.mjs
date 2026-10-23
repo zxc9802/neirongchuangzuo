@@ -1017,10 +1017,12 @@ test('draft correction is persisted and the supplier receives the confirmed rath
 });
 
 test('a failed voice check can recheck the existing media after restart and settle exactly one delivery', async t => {
-  let valid = false;
-  const app = await fixture(t, { voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
+  let valid = false, clock = Date.now();
+  const generationStartedAt = clock;
+  const app = await fixture(t, { now: () => clock, voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; },
     speech: fakeSpeech({ align: async (_source, output) => {
       if (!valid) throw new Error('FFmpeg failed');
+      clock += 20_000;
       await writeFile(output, VIDEO); return { transcriptMatched: true };
     } }) });
   const id = await app.init(); await app.upload(id); await uploadVoice(app, id); await app.call(`/tasks/${id}/analyze`, { body: {} });
@@ -1031,10 +1033,13 @@ test('a failed voice check can recheck the existing media after restart and sett
   await app.close(); await app.open();
   assert.equal((await app.current(id)).canRecheck, true);
   assert.equal((await app.call(`/tasks/${id}/recheck`, { owner: 'bob', body: {} })).status, 404);
-  valid = true;
+  valid = true; clock += 300_000;
   const responses = await Promise.all([app.call(`/tasks/${id}/recheck`, { body: {} }), app.call(`/tasks/${id}/recheck`, { body: {} })]);
   assert.deepEqual(responses.map(response => response.status).sort(), [200, 202]);
   const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.generationStartedAt, generationStartedAt);
+  assert.equal(completed.startedAt, generationStartedAt + 300_000);
+  assert.equal(completed.completedAt - completed.generationStartedAt, 320_000);
   assert.equal(completed.billing.chargedPoints, 1640);
   assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
   assert.equal(app.state.generations, 1); assert.equal(app.state.creates.length, 3);

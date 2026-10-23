@@ -105,6 +105,29 @@ test('deep history uses result or source video frames, shows the recorded model 
   assert.equal(f.node('#replica-image-full').src, '/face.jpg');
 });
 
+test('deep history shows elapsed generation time, preserves the original start after rechecks, and does not invent missing durations', async t => {
+  const start = new Date(2026, 9, 24, 12, 34).getTime();
+  const cases = [
+    ['seconds', { completedAt: start + 45_000 }, '45 秒'],
+    ['minutes', { completedAt: start + 320_000 }, '5 分 20 秒'],
+    ['hours', { completedAt: start + 3_723_000 }, '1 小时 2 分 3 秒'],
+    ['rechecked', { generationStartedAt: start, startedAt: start + 300_000, completedAt: start + 320_000 }, '5 分 20 秒'],
+    ['expired', { status: 'expired', completedAt: start + 61_000 }, '1 分 1 秒'],
+    ['missing-end', {}, '暂无记录'],
+    ['missing-start', { startedAt: null, completedAt: start + 45_000 }, '暂无记录'],
+    ['invalid-order', { completedAt: start - 1000 }, '暂无记录'],
+    ['running', { status: 'running' }, '生成中'],
+    ['queued', { status: 'queued' }, '排队中'],
+    ['waiting', { status: 'waiting' }, '已暂停'],
+    ['failed', { status: 'failed' }, '未完成'],
+    ['draft', { status: 'draft', startedAt: null }, '待生成'],
+  ];
+  const tasks = cases.map(([id, fields]) => ({ id, status: 'completed', mode: 'deep', model: 'wan3.0-video',
+    createdAt: start - 600_000, startedAt: start, duration: 39, ...fields }));
+  const f = await fixture(t, { tasks });
+  for (const [id, , expected] of cases) assert.equal(f.node(`[data-replica-task="${id}"] .replica-history-duration`).textContent, `生成耗时：${expected}`);
+});
+
 for (const kind of ['photo', 'voice', 'product', 'background']) test(`${kind}: asset dialog confirms into the right slot and selected material can be removed`, async t => {
   const f = await fixture(t);
   await f.open(kind);
