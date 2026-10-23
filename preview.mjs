@@ -36,6 +36,7 @@ const files = new Map([
   ['/restaurant-types.js', ['design/restaurant-types.js', 'text/javascript; charset=utf-8']],
   ['/restaurant.css', ['design/restaurant.css', 'text/css; charset=utf-8']],
   ['/video-replica.js', ['design/video-replica.js', 'text/javascript; charset=utf-8']],
+  ['/replica-asset-picker.js', ['design/replica-asset-picker.js', 'text/javascript; charset=utf-8']],
   ['/video-replica.css', ['design/video-replica.css', 'text/css; charset=utf-8']],
   ...['video-creator', 'video-creator-ui', 'video-creator-drafts', 'video-creator-sync', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/video-creator.css', ['design/video-creator.css', 'text/css; charset=utf-8']],

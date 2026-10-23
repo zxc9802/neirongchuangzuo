@@ -56,6 +56,14 @@ async function server(t, { storageDir, config = CONFIG, fetchImpl = async () => 
   return { base, post, storageDir, close, preview };
 }
 
+test('replica asset picker is served as a JavaScript module', async t => {
+  const app = await server(t);
+  const response = await fetch(`${app.base}/replica-asset-picker.js`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /^text\/javascript/);
+  assert.equal(await response.text(), await readFile(new URL('../design/replica-asset-picker.js', import.meta.url), 'utf8'));
+});
+
 async function finished(app, id) {
   const deadline = Date.now() + 30_000;
   let latest;
