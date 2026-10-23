@@ -925,7 +925,7 @@ test('deep mode has four optional replacements and keeps the classic draft separ
   page.node('#replica-mode-deep').onclick(); page.rebind();
   for (const kind of ['photo', 'voice', 'product', 'background']) {
     assert.match(page.html(), new RegExp(`id="replica-toggle-${kind}"`));
-    assert.doesNotMatch(page.html(), new RegExp(`id="replica-${kind}"`));
+    assert.match(page.html(), new RegExp(`id="replica-${kind}"[^>]*type="file"`));
   }
   page.node('#replica-toggle-product').onchange({ target: { checked: true } }); page.rebind();
   page.node('#replica-product').onchange({ target: { files: [new File(['data'], 'deep-product.png')] } });
@@ -979,7 +979,8 @@ test('deep UI requires only checked material and restores history mode, options 
   assert.match(page.html(), /id="replica-mode-deep" aria-pressed="true"/);
   assert.match(page.html(), /id="replica-toggle-background"[^>]*checked[^>]*disabled/);
   assert.match(page.html(), /src="\/background.jpg"/); assert.match(page.html(), /已保留原视频声音/);
-  assert.doesNotMatch(page.html(), /NaN|replica-photo"|replica-voice"/);
+  assert.doesNotMatch(page.html(), /NaN/);
+  assert.doesNotMatch(page.html(), /id="replica-toggle-(photo|voice)"[^>]*checked/);
 });
 
 
@@ -1005,4 +1006,40 @@ test('Wan fast checkbox updates price and model, restores drafts and locks submi
   assert.match(page.html(), /id="replica-wan3-fast"[^>]*checked[^>]*disabled/);
   const count = calls.length; page.node('#replica-wan3-fast').onchange({ target: { checked: false } }); await page.settle();
   assert.equal(calls.length, count);
+});
+
+
+test('deep layout keeps the material desk, preview and history separate and omits unsupported tools', async t => {
+  const page = await fixture(t); page.recover(); await page.poll();
+  page.node('#replica-mode-deep').onclick(); page.rebind();
+  const html = page.html();
+  assert.match(html, /上限 300 MB/);
+  assert.match(html, /class="replica-deep-editor"/); assert.match(html, /class="replica-deep-preview"/);
+  assert.match(html, /<aside class="replica-deep-history"/);
+  assert.ok(html.indexOf('id="replica-product"') < html.indexOf('id="replica-photo"'));
+  assert.ok(html.indexOf('id="replica-background"') < html.indexOf('id="replica-voice"'));
+  assert.doesNotMatch(html, /字幕擦除|水印擦除|画质增强|视频编辑|收藏|<textarea/);
+  for (const id of ['replica-video', 'replica-submit', 'replica-models', 'replica-result', 'replica-history', 'replica-new']) {
+    assert.equal(html.split(`id="${id}"`).length - 1, 1);
+  }
+  page.node('#replica-mode-classic').onclick();
+  assert.match(page.html(), /class="replica-uploads"/); assert.doesNotMatch(page.html(), /replica-deep-studio/);
+});
+
+test('selecting a deep thumbnail file enables that replacement and preserves it through mode switching', async t => {
+  const task = { id: 'deep-layout-draft', status: 'draft', createdAt: Date.now(), mode: 'deep', model: STANDARD_MODEL,
+    replacements: { photo: false, voice: false, product: false, background: false } };
+  const calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (path.endsWith('/options')) { const body = JSON.parse(options.body); calls.push(body); task.replacements = body.replacements; return Response.json({ task }); }
+  } });
+  page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  await page.node('#replica-background').onchange({ target: { files: [new File(['image'], 'new-room.png')] } });
+  assert.equal(calls.length, 1); assert.equal(calls[0].replacements.background, true);
+  assert.match(page.html(), /new-room.png/); assert.match(page.html(), /id="replica-toggle-background"[^>]*checked/);
+  page.node('#replica-mode-classic').onclick(); page.rebind();
+  page.node('#replica-mode-deep').onclick(); page.rebind(); assert.match(page.html(), /new-room.png/);
+  const count = calls.length;
+  await page.node('#replica-product').onchange({ target: { files: [] } });
+  assert.equal(calls.length, count); assert.doesNotMatch(page.html(), /id="replica-toggle-product"[^>]*checked/);
 });
