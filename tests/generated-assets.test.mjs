@@ -17,7 +17,7 @@ test('permanent assets survive the generated-output window and offer only compat
 
 test('assets preview routes a stored photo into AI image references without submitting generation', async t => {
   const previous = { document: globalThis.document, fetch: globalThis.fetch }, nodes = new Map(), item = material('photo');
-  const node = selector => { if (!nodes.has(selector)) nodes.set(selector, { innerHTML: '' }); return nodes.get(selector); };
+  const node = selector => { if (!nodes.has(selector)) nodes.set(selector, { innerHTML: '', addEventListener() {} }); return nodes.get(selector); };
   globalThis.document = { body: { dataset: { page: 'assets' } }, querySelector: node };
   const calls = [];
   globalThis.fetch = async (path, options) => {

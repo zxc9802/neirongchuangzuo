@@ -40,9 +40,50 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
       bytes: item.bytes, duration: item.metadata?.duration, permanent: true,
       url: `/api/assets/materials/${item.id}/media`, filename: `${item.name}.${TYPES[item.kind].ext}` };
   }
+  async function organization(userId) {
+    const result = await call('getObject', { Key: prefix(userId) + 'organization.json' });
+    if (!result) return { order: [], deleted: [] };
+    try {
+      const data = JSON.parse(Buffer.from(result.Body).toString('utf8'));
+      if (!Array.isArray(data.order) || !Array.isArray(data.deleted) || [...data.order, ...data.deleted].some(key => !assetKey(key))) throw new Error();
+      return data;
+    } catch { throw fail('资产排列记录无法读取，请刷新重试。'); }
+  }
+  const assetKey = key => typeof key === 'string' && key.length <= 220 && /^(?:material:(?:photo|voice|video)-[a-f0-9]{64}|(?:image|avatar|restaurant|video|creative-video):[a-zA-Z0-9_.:-]+)$/.test(key);
+  async function organize(userId, input) {
+    if (!input || !['delete', 'restore', 'move'].includes(input.action) || !Array.isArray(input.keys) || !input.keys.length || input.keys.length > 500 || input.keys.some(key => !assetKey(key))) throw fail('资产操作参数无效。', 400);
+    if (input.action === 'move' && (!assetKey(input.target) || !['before', 'after'].includes(input.position) || input.keys.includes(input.target))) throw fail('排列位置无效。', 400);
+    if (input.order !== undefined && (!Array.isArray(input.order) || input.order.length > 5000 || input.order.some(key => !assetKey(key)))) throw fail('排列记录无效。', 400);
+    const previous = locks.get(userId) || Promise.resolve();
+    const operation = previous.catch(() => {}).then(async () => {
+      const data = await organization(userId), keys = [...new Set(input.keys)];
+      const ownMaterials = new Set((await records(userId)).map(item => `material:${item.id}`));
+      if ([...keys, ...(input.target ? [input.target] : [])].some(key => key.startsWith('material:') && !ownMaterials.has(key))) throw fail('素材不存在。', 404);
+      if (input.action === 'delete') data.deleted = [...new Set([...data.deleted, ...keys])];
+      else if (input.action === 'restore') data.deleted = data.deleted.filter(key => !keys.includes(key));
+      else {
+        // Merge a relative move rather than overwriting another tab's entire ordering.
+        const order = [...new Set([...data.order, ...(input.order || [])])].filter(key => !keys.includes(key));
+        if (!order.includes(input.target)) order.push(input.target);
+        const index = order.indexOf(input.target) + (input.position === 'after' ? 1 : 0);
+        order.splice(index, 0, ...keys); data.order = order;
+      }
+      if (data.order.length + data.deleted.length > 20000) throw fail('资产整理记录过多，请联系管理员。', 409);
+      const saved = await call('putObject', { Key: prefix(userId) + 'organization.json', Body: JSON.stringify(data), ContentType: 'application/json', ACL: 'private' });
+      if (!saved) throw fail('资产整理保存失败，请重试。');
+      return data;
+    });
+    locks.set(userId, operation);
+    try { return await operation; } finally { if (locks.get(userId) === operation) locks.delete(userId); }
+  }
   return {
     configured,
-    async list(userId) { return (await records(userId)).sort((a, b) => b.createdAt - a.createdAt).map(view); },
+    organization, organize,
+    async list(userId, { includeDeleted = false } = {}) {
+      const data = await organization(userId), positions = new Map(data.order.map((key, i) => [key, i]));
+      return (await records(userId)).filter(item => includeDeleted || !data.deleted.includes(`material:${item.id}`))
+        .sort((a, b) => (positions.get(`material:${a.id}`) ?? Infinity) - (positions.get(`material:${b.id}`) ?? Infinity) || b.createdAt - a.createdAt).map(view);
+    },
     async save(userId, { kind, path, name, metadata = {} }) {
       if (!TYPES[kind]) throw fail('素材类型无效。', 400);
       const bytes = await readFile(path);
@@ -98,6 +139,12 @@ export function createMaterialHandler({ library, archiveExisting, photo = normal
       const userId = req.authenticatedUserId;
       if (!userId) throw fail('请先登录。', 401);
       const url = new URL(req.url, 'http://localhost');
+      if (url.pathname === '/api/assets/materials/organization' && req.method === 'POST') {
+        let input;
+        try { input = JSON.parse((await uploadBody(req, 128 * 1024)).toString('utf8')); }
+        catch (error) { if (error.status) throw error; throw fail('资产操作参数无效。', 400); }
+        json(200, { organization: await library.organize(userId, input) }); return;
+      }
       const upload = /^\/api\/assets\/materials\/(photo|voice|video)$/.exec(url.pathname);
       if (upload && req.method === 'POST') {
         if (!library.configured) throw fail('素材云存储尚未配置，请联系管理员配置 COS 后重试。');
@@ -122,7 +169,8 @@ export function createMaterialHandler({ library, archiveExisting, photo = normal
       if (url.pathname === '/api/assets/materials' && req.method === 'GET') {
         if (!library.configured) { json(200, { materials: [], configured: false }); return; }
         await archiveExisting?.(userId);
-        json(200, { materials: await library.list(userId), configured: true }); return;
+        const organization = await library.organization(userId), allMaterials = await library.list(userId, { includeDeleted: true });
+        json(200, { materials: allMaterials.filter(item => !organization.deleted.includes(`material:${item.id}`)), allMaterials, organization, configured: true }); return;
       }
       const match = /^\/api\/assets\/materials\/((?:photo|voice|video)-[a-f0-9]{64})\/media$/.exec(url.pathname);
       if (!match) throw fail('素材不存在。', 404);

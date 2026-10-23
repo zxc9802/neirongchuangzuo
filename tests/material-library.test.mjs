@@ -218,3 +218,51 @@ test('opening assets backfills existing source files only for the authenticated 
   assert.equal(await (await app.request(records.find(item => item.kind === 'photo').url)).text(), 'old-photo');
   assert.equal((await (await app.request('/api/assets/materials')).json()).materials.length, 2);
 });
+
+test('asset deletion survives backfill and restart, can be restored, and does not break referenced media', async t => {
+  const app = await workspace(t, { legacy: true });
+  const initial = await (await app.request('/api/assets/materials')).json();
+  const item = initial.materials[0], key = `material:${item.id}`;
+  const change = body => app.request('/api/assets/materials/organization', { method: 'POST', json: body });
+  assert.equal((await change({ action: 'delete', keys: [key] })).status, 200);
+  const deleted = await (await app.request('/api/assets/materials')).json();
+  assert.ok(!deleted.materials.some(value => value.id === item.id));
+  assert.ok(deleted.allMaterials.some(value => value.id === item.id));
+  assert.equal((await app.request(item.url)).status, 200, 'task references continue to read the original');
+  const restarted = createMaterialLibrary({ cosClient: app.cos });
+  assert.ok(!(await restarted.list('alice')).some(value => value.id === item.id));
+  assert.deepEqual((await restarted.organization('bob')).deleted, []);
+  assert.equal((await app.request('/api/assets/materials/organization', { owner: 'bob', method: 'POST', json: { action: 'delete', keys: [key] } })).status, 404);
+  assert.equal((await change({ action: 'restore', keys: [key] })).status, 200);
+  assert.ok((await restarted.list('alice')).some(value => value.id === item.id));
+});
+
+test('relative sorting preserves surrounding assets, persists, and concurrent delete does not overwrite it', async t => {
+  const app = await workspace(t), keys = [];
+  for (const name of ['a', 'b', 'c', 'd']) {
+    const r = await app.request('/api/assets/materials/voice', { method: 'POST', body: name });
+    keys.push(`material:${(await r.json()).material.id}`);
+  }
+  const [a,b,c,d] = keys;
+  const moved = await app.library.organize('alice', { action: 'move', keys: [d], target: c, position: 'before', order: keys });
+  assert.deepEqual(moved.order, [a,b,d,c]);
+  await Promise.all([
+    app.library.organize('alice', { action: 'move', keys: [a], target: c, position: 'after', order: keys }),
+    app.library.organize('alice', { action: 'delete', keys: [b] }),
+  ]);
+  assert.deepEqual((await app.library.organization('alice')).order, [b,d,c,a]);
+  assert.deepEqual((await app.library.list('alice')).map(item => `material:${item.id}`), [d,c,a]);
+  for (const input of [{action:'move',keys:[a],target:a,position:'before'}, {action:'delete',keys:['__proto__']}, {action:'restore',keys:[]}, {action:'move',keys:[a],target:b,position:'before',order:['../../other']}]) {
+    assert.equal((await app.request('/api/assets/materials/organization', { method:'POST',json:input })).status, 400);
+  }
+  assert.equal((await app.request('/api/assets/materials/organization', {owner:'',method:'POST',json:{action:'delete',keys:[a]}})).status, 401);
+});
+
+test('cloud organization failure is not acknowledged as a saved edit', async t => {
+  const app = await workspace(t), item = (await (await app.request('/api/assets/materials/photo', {method:'POST',body:'photo'})).json()).material;
+  const original = app.cos.putObject;
+  app.cos.putObject = (options, done) => options.Key.endsWith('/organization.json') ? done(new Error('outage')) : original(options, done);
+  const response = await app.request('/api/assets/materials/organization', {method:'POST',json:{action:'delete',keys:[`material:${item.id}`]}});
+  assert.equal(response.status, 503);
+  assert.equal((await app.library.list('alice')).length, 1);
+});
