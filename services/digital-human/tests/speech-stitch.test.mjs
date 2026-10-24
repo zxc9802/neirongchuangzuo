@@ -140,10 +140,18 @@ test("IndexTTS actually submits sentence requests, stitches all parts, ignores o
     const cached = await module.exports.generateIndexTTS(text, { ...options, outDir: path.join(dir, 'cached-job') });
     assert.equal(cached.fromCache, true); assert.equal(calls.length, 2);
     assert.deepEqual(fs.readFileSync(cached.finalWavPath), fs.readFileSync(result.finalWavPath));
-    const faster = await module.exports.generateIndexTTS(text, { ...options, toneProfile: 'high', outDir: path.join(dir, 'fast-job') });
-    assert.equal(calls.length, 2, 'segments reuse their original-rate cache');
-    assert.equal(faster.rate, 1.2);
-    assert.ok(Math.abs(faster.selectedDuration - faster.rawDuration / 1.2) < 0.08, 'apply speed once after the final join');
+    assert.equal(result.rate, 1);
+    assert.equal(result.selectedDuration, result.rawDuration);
+    for (const [toneProfile, rate] of [['half', 0.5], ['slow', 0.8], ['high', 1.2], ['fast', 1.5]]) {
+      const faster = await module.exports.generateIndexTTS(text, { ...options, toneProfile, outDir: path.join(dir, toneProfile + '-job') });
+      assert.equal(calls.length, 2, 'segments reuse their original-rate cache');
+      assert.equal(faster.fromCache, false, 'a different speed must not reuse the final track');
+      assert.equal(faster.rate, rate);
+      assert.ok(Math.abs(faster.selectedDuration - faster.rawDuration / rate) < 0.08, 'apply speed once after the final join');
+      const repeat = await module.exports.generateIndexTTS(text, { ...options, toneProfile, outDir: path.join(dir, toneProfile + '-cached') });
+      assert.equal(repeat.fromCache, true);
+      assert.equal(repeat.rate, rate);
+    }
     // A failed later segment must never publish or cache a partial final track.
     calls.length = 0; failSecond = true;
     const failedDir = path.join(dir, 'failed-job');

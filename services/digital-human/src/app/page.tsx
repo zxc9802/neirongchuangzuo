@@ -40,7 +40,8 @@ export default function StudioPage() {
   const [videoData, setVideoData] = useState<PublicVideoSelection | null>(null);
 
   const [scriptText, setScriptText] = useState("");
-  const [toneProfile, setToneProfile] = useState<"low" | "high">("low");
+  const [toneProfile, setToneProfile] = useState<"half" | "slow" | "low" | "high" | "fast">("low");
+  const speechRate = { half: 0.5, slow: 0.8, low: 1, high: 1.2, fast: 1.5 }[toneProfile];
   const [videoFit, setVideoFit] = useState<"smart" | "preserve">("smart");
   const [emotionIntensity, setEmotionIntensity] = useState(0.8);
   const [selectedVoice, setSelectedVoice] = useState<PublicVoiceItem | null>(null);
@@ -367,12 +368,12 @@ export default function StudioPage() {
 
             {/* Dynamic Duration & Points Estimation */}
             {scriptText.trim().length > 0 && (() => {
-              const estDuration = Math.max(3, Math.ceil(scriptText.trim().length / 4.4));
+              const estDuration = Math.max(3, Math.ceil(scriptText.trim().length / (4.4 * speechRate)));
               const workspace = userSession?.billing?.source === "workspace";
               const unlimited = workspace && userSession?.credits?.unlimited === true;
               const estPoints = Math.ceil(estDuration * (userSession?.billing?.ratePerSecond ?? 20));
               const userBalance = workspace ? userSession?.credits?.available : userSession?.user?.pointsBalance;
-              const estimatedReserve = Math.ceil(estimateReservationDuration(scriptText) * (userSession?.billing?.ratePerSecond ?? 20));
+              const estimatedReserve = Math.ceil(estimateReservationDuration(scriptText, speechRate) * (userSession?.billing?.ratePerSecond ?? 20));
               const reservedPoints = workspace && typeof userBalance === "number" ? Math.min(estimatedReserve, userBalance) : estimatedReserve;
               const estCny = (estDuration * 0.2).toFixed(2);
               const isExternal =
@@ -480,36 +481,28 @@ export default function StudioPage() {
 
             <div className="border-t border-white/[0.06] pt-4 space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* Tone profile */}
+                {/* Speech speed */}
                 <div>
                   <label className="text-xs font-medium text-zinc-300 mb-1.5 block">
-                    音调 / 语速配置 (Tone Profile)
+                    语速
                   </label>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setToneProfile("low")}
-                      disabled={isRunning}
-                      className={`rounded-xl border p-2.5 text-xs font-semibold transition-all text-center ${
-                        toneProfile === "low"
-                          ? "border-blue-500/80 bg-blue-500/15 text-blue-200"
-                          : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
-                      }`}
-                    >
-                      标准音调 (1.0×)
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setToneProfile("high")}
-                      disabled={isRunning}
-                      className={`rounded-xl border p-2.5 text-xs font-semibold transition-all text-center ${
-                        toneProfile === "high"
-                          ? "border-blue-500/80 bg-blue-500/15 text-blue-200"
-                          : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
-                      }`}
-                    >
-                      高音调提速 (1.2×)
-                    </button>
+                  <div className="grid grid-cols-3 gap-2" role="group" aria-label="语速">
+                    {([["half", "0.5 倍速"], ["slow", "0.8 倍速"], ["low", "1 倍速"], ["high", "1.2 倍速"], ["fast", "1.5 倍速"]] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => setToneProfile(value)}
+                        aria-pressed={toneProfile === value}
+                        disabled={isRunning}
+                        className={`rounded-xl border p-2.5 text-xs font-semibold transition-all text-center ${
+                          toneProfile === value
+                            ? "border-blue-500/80 bg-blue-500/15 text-blue-200"
+                            : "border-white/[0.06] bg-black/30 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                 </div>
 
@@ -577,7 +570,7 @@ export default function StudioPage() {
 
           {/* Action Trigger */}
           {(() => {
-            const estDuration = estimateReservationDuration(scriptText);
+            const estDuration = estimateReservationDuration(scriptText, speechRate);
             const unlimited = userSession?.billing?.source === "workspace" && userSession?.credits?.unlimited === true;
             const estimate = Math.ceil(estDuration * (userSession?.billing?.ratePerSecond ?? 20));
             const estPoints = userSession?.billing?.source === "workspace" && typeof userSession.credits?.available === "number"

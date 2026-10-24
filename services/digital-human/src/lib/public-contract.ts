@@ -62,7 +62,7 @@ export interface PublicTaskItem {
     avatarId?: string;
     videoName: string;
     scriptText: string;
-    toneProfile: "low" | "high";
+    toneProfile: "half" | "slow" | "low" | "high" | "fast";
     videoFit: "smart" | "preserve";
     emotionIntensity: number;
     speakerVoiceId?: string;

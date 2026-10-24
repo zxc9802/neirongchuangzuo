@@ -69,32 +69,31 @@ async function harness(run) {
   }
 }
 
-for (const language of ['en', 'ms']) test(`${language} uses the chosen native model then the selected own voice; rate applies once`, async () => {
+for (const language of ['en', 'ms']) for (const [toneProfile, rate] of [['low', 1], ['half', 0.5], ['slow', 0.8], ['high', 1.2], ['fast', 1.5]]) test(`${language} uses the chosen native model then the selected own voice; ${rate}x applies once`, async () => {
   await harness(async h => {
     const text = language === 'en' ? 'Hey, good morning! Let us meet later. Sound good?' : 'Hai, selamat pagi! Jom kita makan bersama.';
-    const result = await h.generate(text, language, {toneProfile: 'high'});
+    const result = await h.generate(text, language, {toneProfile});
     const posts = h.calls.filter(c => c.init.method === 'POST');
     assert.deepEqual(posts.map(c => c.url), [endpoint(models[language]), endpoint(models.convert)]);
     if (language === 'en') {
       assert.equal(posts[0].body.reference_audio_url, h.options.englishReferenceAudioUrl);
       assert.equal(posts[0].body.text, text); assert.equal(posts[0].body.accurate_mode, false);
-      assert.equal(result.rate, 1); assert.equal(result.selectedDuration, result.rawDuration);
-      assert.deepEqual(fs.readFileSync(result.rawWavPath), fs.readFileSync(result.finalWavPath));
     } else {
       assert.deepEqual(posts[0].body, {model: models.ms, input: {text, voice: 'native-ms', format: 'wav',
         sample_rate: 24000, rate: 1, language_hints: ['ms']}});
-      assert.equal(result.rate, 1.2);
-      assert.ok(Math.abs(result.rawDuration / result.selectedDuration - 1.2) < .04);
       assert.equal(h.downloads[0].url, 'https://dashscope-result-sg.oss-ap-southeast-1.aliyuncs.com/native.wav?Signature=test');
       assert.deepEqual(h.downloads[0].urlPolicy.allowedHosts, ['dashscope-result-sg.oss-ap-southeast-1.aliyuncs.com']);
       assert.equal(h.downloads[0].headers, undefined);
     }
+    assert.equal(result.rate, rate);
+    assert.ok(Math.abs(result.rawDuration / result.selectedDuration - rate) < .04);
+    if (rate === 1) assert.deepEqual(fs.readFileSync(result.rawWavPath), fs.readFileSync(result.finalWavPath));
     assert.equal(posts[1].body.target_voice_audio_url, h.options.speakerAudioUrl);
     assert.match(posts[1].body.source_audio_url, language === 'en' ? /^https:\/\/fal\.media\// : /^data:audio\/wav;base64,UklGR/);
     assert.ok(h.calls.every(c => c.init.redirect === 'error' && c.init.headers.Authorization ===
       (c.url === endpoint(models.ms) ? 'Bearer singapore-test' : 'Key fal-test')));
     assert.equal(fs.readFileSync(result.finalWavPath).toString('ascii', 0, 4), 'RIFF');
-    const cached = await h.generate(text, language, {toneProfile: 'low'});
+    const cached = await h.generate(text, language, {toneProfile});
     assert.equal(cached.fromCache, true); assert.equal(cached.rate, result.rate);
     assert.equal(h.calls.filter(c => c.init.method === 'POST').length, 2);
   });
@@ -112,13 +111,14 @@ test('long English scripts retain every word while packing sentences into passag
   });
 });
 
-test('cache separates languages, owners and native reference identities', async () => {
+test('cache separates languages, owners, native reference identities and speeds', async () => {
   await harness(async h => {
     await h.generate('Hotel.', 'en');
     await h.generate('Hotel.', 'ms', {outDir: h.options.outDir + '-ms'});
     await h.generate('Hotel.', 'en', {cacheScope: 'other-owner:voice', outDir: h.options.outDir + '-owner'});
     await h.generate('Hotel.', 'en', {englishReferenceAudioUrl: 'https://reference.example/other.wav', outDir: h.options.outDir + '-reference'});
-    assert.equal(h.calls.filter(c => c.init.method === 'POST').length, 8);
+    await h.generate('Hotel.', 'en', {toneProfile: 'fast', outDir: h.options.outDir + '-fast'});
+    assert.equal(h.calls.filter(c => c.init.method === 'POST').length, 10);
   });
 });
 

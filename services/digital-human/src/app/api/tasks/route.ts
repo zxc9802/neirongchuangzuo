@@ -73,7 +73,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    if (scriptText.length > 5000 || !["low", "high"].includes(toneProfile) ||
+    if (scriptText.length > 5000 || !["half", "slow", "low", "high", "fast"].includes(toneProfile) ||
       !["smart", "preserve"].includes(videoFit) ||
       !Number.isFinite(emotionIntensity) || emotionIntensity < 0 || emotionIntensity > 1) {
       return NextResponse.json({ error: "文案最多 5000 字，请检查生成参数" }, { status: 400 });
@@ -127,7 +127,8 @@ export async function POST(req: NextRequest) {
 
     // Bound paid attempts independently of whether the task later refunds or is deleted.
     if (isExternallyBilledUser(user) || user.billingAudience === "standalone") releaseSlot = acquireGenerationSlot(user.id!, { allowConcurrent: true, enforceHourlyLimit: user.callsUnlimited !== true });
-    const estimatedDuration = estimateReservationDuration(scriptText);
+    const speechRate = toneProfile === "half" ? 0.5 : toneProfile === "slow" ? 0.8 : toneProfile === "fast" ? 1.5 : toneProfile === "high" ? 1.2 : 1;
+    const estimatedDuration = estimateReservationDuration(scriptText, speechRate);
     const createTask = (reservation: Awaited<ReturnType<typeof reserveMainAppCredits>>, reserving = false) => TaskStore.create({
       id: reservation.requestId,
       executionOwner: reservation.source === "workspace" ? currentTaskWorker() : undefined,
@@ -170,7 +171,7 @@ export async function POST(req: NextRequest) {
     });
     const reservation = await reserveMainAppCredits({
       user, sessionToken: session?.token, estimatedDuration, engine: engine || "b",
-      minimumDuration: estimateScriptDuration(scriptText),
+      minimumDuration: estimateScriptDuration(scriptText, speechRate),
       beforeReserve: pending => {
         workspaceTask = createTask(pending, true);
         creationReservation = { userId: user.id!, requestId: pending.requestId, source: "workspace" };

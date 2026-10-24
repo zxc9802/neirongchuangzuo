@@ -71,7 +71,7 @@ export interface IndexTTSOptions {
   qwenTtsBaseUrl?: string;
   qwenMalayVoiceId?: string;
   emotionIntensity?: number;
-  toneProfile?: "low" | "high";
+  toneProfile?: "half" | "slow" | "low" | "high" | "fast";
   outDir: string;
   onLog?: (msg: string) => void;
   cacheScope?: string;
@@ -85,7 +85,7 @@ export interface IndexTTSResult {
   finalWavPath: string;
   rawDuration: number;
   selectedDuration: number;
-  toneProfile: "low" | "high";
+  toneProfile: "half" | "slow" | "low" | "high" | "fast";
   rate: number;
   audioUrl?: string;
   fromCache?: boolean;
@@ -355,7 +355,7 @@ async function generatePrimarySpeech(
 
   onLog(`音频下载完成，正在应用音调/语速配置文件 (${toneProfile})...`);
 
-  const rate = toneProfile === "high" ? 1.2 : 1.0;
+  const rate = { half: 0.5, slow: 0.8, low: 1, high: 1.2, fast: 1.5 }[toneProfile];
   const toneResult = await applyToneProfile(rawWavPath, finalWavPath, rate);
 
   // Save to global cache

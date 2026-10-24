@@ -148,8 +148,8 @@ for (const complete of [true, false]) {
   });
 }
 
-for (const toneProfile of [undefined, 'low', 'high']) {
-  test(`a failed IndexTTS sentence switches the entire script to Doubao at 1.2x (${toneProfile || 'default'})`, async () => {
+for (const [toneProfile, rate] of [[undefined, 1], ['low', 1], ['half', 0.5], ['slow', 0.8], ['high', 1.2], ['fast', 1.5]]) {
+  test(`a failed IndexTTS sentence switches the entire script to Doubao at ${rate}x (${toneProfile || 'default'})`, async () => {
     await harness(async h => {
       const text = '第一句话成功。第二句话失败。第三句话成功。';
       const result = await h.generate(text, {...h.options, toneProfile});
@@ -163,8 +163,8 @@ for (const toneProfile of [undefined, 'low', 'high']) {
       assert.equal(fallback[0].init.redirect, 'error');
       assert.equal(result.finalWavPath, path.join(h.options.outDir, 'voice-track.wav'));
       assert.ok(Math.abs(result.rawDuration - 1.86) < 0.04, 'must use only the complete fallback track');
-      assert.equal(result.rate, 1.2);
-      assert.ok(Math.abs(result.selectedDuration - result.rawDuration / 1.2) < 0.08);
+      assert.equal(result.rate, rate);
+      assert.ok(Math.abs(result.selectedDuration - result.rawDuration / rate) < 0.08);
       assert.equal(h.logs.filter(m => m === 'fallback').length, 1);
     });
   });
@@ -181,7 +181,7 @@ test('missing fallback credentials or voice mapping preserves the original error
 test('long Doubao narration resets synthesis at sentence boundaries and speeds the joined track only once', async () => {
   await harness(async h => {
     const text = '你想想，公司里是不是有那么一两个销冠或者技术骨干，业绩全靠他们撑着？但他们一旦离职，经验带不走，甚至客户跟着走。你的企业，也才能真正不再被某个人绑架，实现系统自运转！';
-    const result = await h.generateDoubao(text, {...h.options.fallback, outDir: h.options.outDir});
+    const result = await h.generateDoubao(text, {...h.options.fallback, toneProfile: 'high', outDir: h.options.outDir});
     const requests = h.posts.map(p => p.payload.req_params);
     assert.deepEqual(requests.map(p => p.text), stitch.splitSpeechText(text));
     assert.equal(requests.map(p => p.text).join(''), text, 'no words may be lost or repeated at joins');

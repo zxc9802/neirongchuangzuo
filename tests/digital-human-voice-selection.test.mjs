@@ -78,6 +78,14 @@ test('Malaysian generation prices follow engine, script duration and speaking sp
     }
     listeners.change({ target: { dataset: { dhOption: 'toneProfile' }, value: 'high' } });
     assert.equal(regions.get('#dh-credit-estimate').textContent, '约 72 秒 · 预计 1512 积分 · 21 积分/秒');
+    listeners.change({ target: { dataset: { dhOption: 'toneProfile' }, value: 'fast' } });
+    assert.equal(regions.get('#dh-credit-estimate').textContent, '约 57 秒 · 预计 1197 积分 · 21 积分/秒');
+    assert.equal(regions.get('#dh-script-duration').textContent, '约 57 秒口播');
+    for (const [toneProfile, seconds, points] of [['half', 172, 3612], ['slow', 108, 2268]]) {
+      listeners.change({ target: { dataset: { dhOption: 'toneProfile' }, value: toneProfile } });
+      assert.equal(regions.get('#dh-credit-estimate').textContent, `约 ${seconds} 秒 · 预计 ${points} 积分 · 21 积分/秒`);
+      assert.equal(regions.get('#dh-script-duration').textContent, `约 ${seconds} 秒口播`);
+    }
     ctx.configs.avatar.prompt = '';
     assert.match(render(), /id="dh-credit-estimate"[^>]*>RM 0.1\/秒 · 21 积分\/秒<\/p>/);
   } });
@@ -120,3 +128,22 @@ test('an unavailable saved voice falls back to the configured default', async ()
 test('an unconfigured default does not prevent choosing an available uploaded voice', async () => {
   assert.equal((await loadPage({ voices: [{ ...defaultVoice, audioUrl: '' }, uploadedVoice] })).voiceId, uploadedVoice.id);
 });
+
+for (const [toneProfile, label] of [['half', '0.5 倍速'], ['slow', '0.8 倍速'], ['low', '1 倍速'], ['high', '1.2 倍速'], ['fast', '1.5 倍速']]) {
+  test(`speech speed dropdown ${label} is visible, selectable and retained after reload`, async () => {
+    const inspectSelection = ({ render }) => {
+      const markup = render();
+      assert.ok(markup.indexOf('id="dh-speed-select"') < markup.indexOf('<details class="dh-advanced">'));
+      const controls = markup.match(/<select id="dh-speed-select"[\s\S]*?<\/select>/)[0];
+      assert.equal((controls.match(/<option /g) || []).length, 5);
+      assert.equal((controls.match(/ selected/g) || []).length, 1);
+      assert.ok(controls.includes(`value="${toneProfile}" selected>${label}</option>`));
+    };
+    const saved = await loadPage({ inspect: args => {
+      args.listeners.change({ target: { dataset: { dhOption: 'toneProfile' }, value: toneProfile } });
+      inspectSelection(args);
+    } });
+    assert.equal(saved.toneProfile, toneProfile);
+    await loadPage({ saved, inspect: inspectSelection });
+  });
+}

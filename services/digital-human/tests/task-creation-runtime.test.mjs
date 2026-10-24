@@ -85,6 +85,9 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
     for (const engine of ["a", "c", "veed-v2", "unknown", null]) {
       assert.equal((await post({avatarId: "avatar", scriptText: "你好", engine})).status, 400);
     }
+    for (const toneProfile of ["invalid", "1.5", 1.5, null]) {
+      assert.equal((await post({avatarId: "avatar", scriptText: "你好", toneProfile})).status, 400);
+    }
     assert.equal(requests.length, 0);
     assert.equal((await post()).status, 402);
     assert.equal(pipelines.length, 0);
@@ -135,6 +138,14 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
     }
     assert.equal(tasks[0].inputs.outputType, "video");
     user = {...user, id: "model-admin", role: "admin", billingAudience: "internal"};
+    for (const [toneProfile, seconds] of [["half", 27], ["slow", 19], ["low", 15], ["high", 14], ["fast", 11]]) {
+      const response = await post({avatarId: "avatar", scriptText: "一".repeat(44), toneProfile});
+      assert.equal(response.status, 200);
+      assert.equal(tasks.at(-1).billing.estimatedDuration, seconds);
+      assert.equal(tasks.at(-1).inputs.toneProfile, toneProfile);
+      assert.equal((await response.json()).task.inputs.toneProfile, toneProfile);
+      finish(); await new Promise(resolve => setImmediate(resolve));
+    }
     for (const [engine, provider] of [["b", "veed"], ["d", "latentsync"], ["e", "veed-v2"]]) {
       const response = await post({avatarId: "avatar", scriptText: "你好", engine});
       assert.equal(response.status, 200);

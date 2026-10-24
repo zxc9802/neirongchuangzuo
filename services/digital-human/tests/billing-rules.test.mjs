@@ -12,6 +12,15 @@ test("reservation estimates include a margin without charging for the full avata
   assert.equal(estimateReservationDuration(""), 0);
 });
 
+test("slow narration increases the duration and reservation estimate", () => {
+  const script = "一".repeat(44);
+  assert.equal(billing.estimateScriptDuration(script, 0.5), 20);
+  assert.equal(billing.estimateScriptDuration(script, 0.8), 13);
+  assert.equal(estimateReservationDuration(script, 0.5), 27);
+  assert.equal(estimateReservationDuration(script, 0.8), 19);
+  assert.equal(estimateReservationDuration("", 0.5), 0);
+});
+
 test("rate constants are mutually consistent (20 points/s == 0.20 CNY/s at 100 points per CNY)", () => {
   assert.equal(billing.POINTS_PER_SECOND, 20);
   assert.equal(billing.CNY_PER_SECOND, 0.2);

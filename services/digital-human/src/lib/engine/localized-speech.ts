@@ -162,8 +162,8 @@ export async function generateLocalizedSpeech(text: string, language: "en" | "ms
   if (language === "ms" && !options.qwenTtsApiKey) throw new Error("请配置 QWEN_TTS_API_KEY 或现有 DASHSCOPE_API_KEY");
   if (language === "ms" && !options.qwenMalayVoiceId) throw new Error("请配置同地域的 QWEN_MALAY_VOICE_ID 马来语基础音色");
   const qwenBase = language === "ms" ? qwenBaseUrl(options) : "";
-  const rate = language === "ms" ? 1.2 : 1;
   const toneProfile = options.toneProfile || "low";
+  const rate = { half: 0.5, slow: 0.8, low: 1, high: 1.2, fast: 1.5 }[toneProfile];
   const cacheKey = crypto.createHash("sha256").update(JSON.stringify([
     "fal-localized-speech-v1", MODELS[language], CONVERSION, options.cacheScope || "local", text.trim(),
     identity(options.speakerAudioUrl), language === "en" ? identity(englishReference) : [qwenBase, options.qwenMalayVoiceId], rate,
@@ -237,7 +237,7 @@ export async function generateLocalizedSpeech(text: string, language: "en" | "ms
   options.checkActive?.();
   if (parts.length === 1) fs.copyFileSync(parts[0].audioPath, rawWavPath);
   else await stitchSpeechSegments(parts, rawWavPath);
-  // Apply Malay's 1.2x exactly once, after conversion and before lip sync. English is copied at 1x.
+  // Apply the selected speed once, after conversion and before lip sync.
   const durations = await applyToneProfile(rawWavPath, finalWavPath, rate);
   const result = { ...durations, rawWavPath, finalWavPath, rate, toneProfile, fromCache: false };
   try {

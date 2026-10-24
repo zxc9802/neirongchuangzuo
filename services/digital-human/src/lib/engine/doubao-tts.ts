@@ -8,7 +8,7 @@ import type { IndexTTSResult } from "./indextts";
 type DoubaoTTSOptions = {
   apiKey: string;
   speakerId: string;
-  toneProfile?: "low" | "high";
+  toneProfile?: "half" | "slow" | "low" | "high" | "fast";
   outDir: string;
   onLog?: (message: string) => void;
   checkActive?: () => void;
@@ -45,7 +45,7 @@ export async function generateDoubaoTTS(
   }
   options.checkActive?.();
   const toneProfile = options.toneProfile || "low";
-  const rate = 1.2;
+  const rate = { half: 0.5, slow: 0.8, low: 1, high: 1.2, fast: 1.5 }[toneProfile];
   const durations = await applyToneProfile(rawWavPath, finalWavPath, rate);
   options.onLog?.(`豆包完整配音已就绪，语速 ${rate} 倍，时长 ${durations.selectedDuration.toFixed(1)}s`);
   return { rawWavPath, finalWavPath, ...durations, toneProfile, rate, fromCache: false };
