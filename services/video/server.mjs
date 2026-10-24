@@ -18,6 +18,7 @@ import { createPixverseProvider } from './pixverse.mjs';
 import { createWanProvider } from './wan.mjs';
 import { createWan3Provider, wan3Price, wan3Usage } from './wan3.mjs';
 import { createWan3Queue } from './wan3-queue.mjs';
+import { createWan3Storage } from './wan3-storage.mjs';
 import { createCaptionService, captionSpeech } from './captions.mjs';
 import { createNarrationService } from './narration.mjs';
 import { createVoiceConversionService } from './voice-conversion.mjs';
@@ -58,7 +59,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, restoreAudio = restoreSourceAudio, speech, captions = createCaptionService(env),
   narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
-  scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, prepareReference = prepareReferenceVideo, now = Date.now, pollIntervalMs = 5000 } = {}) {
+  scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, prepareReference = prepareReferenceVideo,
+  wan3Storage = createWan3Storage({ env }), now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
   const diagnosticQueries = new Set();
   const diagnosticSecrets = [config.video?.access, config.video?.secret, config.material?.access, config.material?.secret,
@@ -492,14 +494,26 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     await save(task);
     return true;
   }
+  async function wan3AggregateMaterial(task, kind) {
+    task.wan3CosMaterials ||= {};
+    if (!task.wan3CosMaterials[kind]) {
+      if (kind === 'video' || kind.startsWith('segment-')) await prepareVideoReference(task, kind);
+      await wan3Storage.upload(task.id, kind, materialFile(task, kind), mime(kind));
+      task.wan3CosMaterials[kind] = true;
+      await save(task);
+    }
+    return { id: await wan3Storage.url(task.id, kind), status: 2 };
+  }
   async function wan3Input(task, part = task) {
     const input = part === task ? task : segmentTask(task, part);
     // Also convert saved, unsubmitted aggregate jobs from the old material-ID flow.
     if (isWan3Model(task.model) && part.wan3Route === 'aggregate') {
       const kinds = [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), 'video',
         ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])];
-      return { ...input, materials: Object.fromEntries(kinds.map(kind => [kind,
-        { id: sourceUrl(task, kind === 'video' && part !== task ? `segment-${part.index}` : kind), status: 2 }])) };
+      const materials = {};
+      for (const kind of kinds) materials[kind] = await wan3AggregateMaterial(task,
+        kind === 'video' && part !== task ? `segment-${part.index}` : kind);
+      return { ...input, materials };
     }
     // Existing official tasks already have OSS materials. A fallback uploads only its own source span.
     if (!isWan3Model(task.model) || part.wan3Route !== 'official' || !part.wan3Failures) return input;
@@ -637,6 +651,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await reconcile(task);
       if (!task.cleaned) {
         await archiveTaskMaterials(task);
+        for (const kind of Object.keys(task.wan3CosMaterials || {})) {
+          await wan3Storage.remove(task.id, kind);
+          delete task.wan3CosMaterials[kind];
+          await save(task);
+        }
         for (const name of ['photo.jpg', 'product.jpg', 'background.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result.mp4.borders.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         await rm(join(folder(task), 'narration'), { recursive: true, force: true });
         await rm(join(folder(task), 'localization'), { recursive: true, force: true });
@@ -702,7 +721,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       for (const kind of [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), ...videoKinds, ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
         if (!task.materials[kind] || wan3Aggregate) {
           task.materials[kind] = isWan3Model(task.model)
-            ? wan3Aggregate ? { id: sourceUrl(task, kind), status: 2 }
+            ? wan3Aggregate ? await wan3AggregateMaterial(task, kind)
               : await wan3Provider.upload(materialFile(task, kind), mime(kind), task.model)
             : isFalReplacement(task.model)
             ? { id: await providerStorage.upload(file(task, kind), mime(kind)), status: 2 }
@@ -935,6 +954,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       catch (cause) {
         if (fatal) return;
         if (cause.code === 'VIDEO_REFERENCE_COMPRESSION_FAILED') { await fail(task, cause.message, cause.code); return; }
+        if (cause.code === 'VIDEO_SOURCE_STORAGE_NOT_CONFIGURED') { await fail(task, cause.message, cause.code); return; }
         if (task.status === 'reviewing' && await retryWan3(task, cause, task.segments?.[0] || task, true)) return;
         if (task.recoveryPolicy) { await recover(task, cause); return; }
         if (cause.code === 'VIDEO_TRANSCRIPTION_PENDING') {

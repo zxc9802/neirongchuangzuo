@@ -12,6 +12,7 @@ import sharp from 'sharp';
 import { createVideoHandler } from '../services/video/server.mjs';
 import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL, WAN3_FAST_MODEL } from '../services/video/provider.mjs';
 import { wan3GenerationBody } from '../services/video/wan3.mjs';
+import { createWan3Storage } from '../services/video/wan3-storage.mjs';
 import { planSegments } from '../services/video/segments.mjs';
 import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
@@ -42,7 +43,8 @@ async function fixture(t, options = {}) {
   } } }));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode:options.costMode===true });
   await wallet.ready;
-  const state = { creates: [], queries: 0, generations: 0, done: false, failed: false, review: 2, source: null };
+  const state = { creates: [], queries: 0, generations: 0, done: false, failed: false, review: 2, source: null,
+    cosUploads: [], cosSigns: [], cosDeletes: [] };
   const provider = {
     async createMaterial(url, kind) { state.creates.push({ url, kind }); return { id: kind + '-id', status: state.review }; },
     async queryMaterial(id) { return options.queryMaterial ? options.queryMaterial(id) : state.review; },
@@ -57,6 +59,14 @@ async function fixture(t, options = {}) {
       captions: { extract: async () => null },
       narration: null, lipsync: null, voiceConversion: null,
       providerStorage: { upload: async input => `https://fal.media/${input.split('/').at(-1)}` },
+      wan3Storage: {
+        upload: async (id, kind, path, type) => { state.cosUploads.push({ id, kind, path, type, bytes: await readFile(path) }); },
+        url: async (id, kind) => {
+          state.cosSigns.push({ id, kind });
+          return `https://bucket.cos.ap-shanghai.myqcloud.com/workspace-video/wan3/${id}/${kind}.${['photo', 'product', 'background'].includes(kind) ? 'jpg' : kind === 'voice' ? 'wav' : 'mp4'}?signature=${state.cosSigns.length}`;
+        },
+        remove: async (id, kind) => { state.cosDeletes.push({ id, kind }); },
+      },
       pollIntervalMs: 15, ...options, ...overrides });
     await handler.ready;
     app = createServer((req, res) => { req.authenticatedUserId = req.headers['x-test-owner'] || 'alice'; void handler(req, res); });
@@ -3048,19 +3058,23 @@ for (const model of [WAN3_MODEL, WAN3_FAST_MODEL]) test(`${model} starts on the 
   assert.equal(app.state.creates.length, 0);
   for (const [kind, url] of [['photo', app.state.body.payload.resources[0]], ['video', app.state.body.payload.referVideoUrl[0]]]) {
     const source = new URL(url);
-    assert.equal(source.origin, CONFIG.publicOrigin); assert.equal(source.pathname, `/api/video-replica/source/${id}/${kind}`);
+    assert.equal(source.origin, 'https://bucket.cos.ap-shanghai.myqcloud.com');
+    assert.equal(source.pathname, `/workspace-video/wan3/${id}/${kind}.${kind === 'photo' ? 'jpg' : 'mp4'}`);
     assert.ok(source.searchParams.get('signature'));
-    const response = await fetch(app.base + source.pathname + source.search);
-    assert.equal(response.status, 200); assert.deepEqual(Buffer.from(await response.arrayBuffer()), kind === 'photo' ? Buffer.from('photo') : VIDEO);
+    const upload = app.state.cosUploads.find(item => item.kind === kind);
+    assert.equal(upload.type, kind === 'photo' ? 'image/jpeg' : 'video/mp4');
+    assert.deepEqual(upload.bytes, kind === 'photo' ? Buffer.from('photo') : VIDEO);
   }
+  assert.equal(app.state.cosUploads.length, 2);
   await app.close(); await app.open(); app.state.done = true;
   const done = await app.until(id, task => task.status === 'completed');
   assert.equal(app.state.generations, 1, 'restart only queries the saved aggregate receipt');
+  assert.equal(app.state.cosUploads.length, 2, 'restart reuses uploaded objects');
   assert.equal(done.billing.chargedPoints, 4 * (model === WAN3_FAST_MODEL ? 738 : 492));
 });
 
 for (const model of [WAN3_MODEL, WAN3_FAST_MODEL]) for (const status of ['reviewing', 'queued'])
-test(`${model} resumes old ${status} materials as direct URLs without registration`, async t => {
+test(`${model} resumes old ${status} materials as COS URLs without registration`, async t => {
   const app = await fixture(t, { credits: null, config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
     queryMaterial: async () => assert.fail('Old Wan materials must not be queried'),
     wan3Provider: { generate: async () => assert.fail('Must keep the aggregate route') } });
@@ -3076,12 +3090,14 @@ test(`${model} resumes old ${status} materials as direct URLs without registrati
   await app.until(id, task => task.status === 'running');
   assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 1);
   assert.deepEqual([...app.state.body.payload.resources, ...app.state.body.payload.referVideoUrl].map(url => {
-    const source = new URL(url); assert.equal(source.origin, CONFIG.publicOrigin); assert.ok(source.searchParams.get('signature'));
-    return source.pathname.split('/').at(-1);
+    const source = new URL(url); assert.equal(source.origin, 'https://bucket.cos.ap-shanghai.myqcloud.com'); assert.ok(source.searchParams.get('signature'));
+    return source.pathname.split('/').at(-1).replace(/\.[^.]+$/, '');
   }), kinds);
+  assert.deepEqual(app.state.cosUploads.map(item => item.kind), kinds);
   assert.equal(JSON.parse(await readFile(path, 'utf8')).wan3Failures, 2);
   await app.close(); await app.open(); await app.until(id, task => task.status === 'running');
   assert.equal(app.state.generations, 1, 'a saved receipt must never be resubmitted');
+  assert.equal(app.state.cosUploads.length, kinds.length);
 });
 
 for (const failure of ['rejected', 'failed-job']) test(`Wan ${failure} retries three times then uses official Prime, persisting the budget`, async t => {
@@ -3104,9 +3120,92 @@ for (const failure of ['rejected', 'failed-job']) test(`Wan ${failure} retries t
   }
   const done = await app.until(id, task => task.status === 'completed');
   assert.equal(attempts, 4); assert.equal(officialCalls, 1); assert.equal(done.billing.chargedPoints, 4 * 738);
+  assert.deepEqual(app.state.cosUploads.map(item => item.kind), ['photo', 'video'], 'retries reuse the same private objects');
+  assert.ok(app.state.cosSigns.filter(item => item.kind === 'photo').length >= 4, 'each attempt refreshes the URL');
   assert.ok(officialUploads.every(upload => upload.model === WAN3_FAST_MODEL));
   const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
   assert.equal(saved.wan3Route, 'official'); assert.equal(saved.wan3Failures, 4); assert.equal(saved.wan3History.length, 4);
+});
+
+test('Wan COS uploads the compressed reference while retaining the original owner video', async t => {
+  const compressed = Buffer.from('COMPRESSED WAN REFERENCE'); let preparations = 0;
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    prepareReference: async (_input, output, model) => {
+      preparations++; assert.equal(model, WAN3_MODEL); await writeFile(output, compressed);
+      return { compressed: true, inputBytes: VIDEO.length, outputBytes: compressed.length };
+    } });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: { model: WAN3_MODEL } });
+  await app.until(id, task => task.status === 'running');
+  const video = app.state.cosUploads.find(item => item.kind === 'video');
+  assert.match(video.path, /video\.reference\.mp4$/); assert.deepEqual(video.bytes, compressed);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
+  await app.close(); await app.open(); await app.until(id, task => task.status === 'running');
+  assert.equal(preparations, 1); assert.equal(app.state.cosUploads.length, 2); assert.equal(app.state.generations, 1);
+});
+
+test('Wan storage failure retries only the unfinished upload and does not consume generation retries', async t => {
+  let at = Date.now(), failing = true, officialCalls = 0; const uploads = [];
+  const app = await fixture(t, { now: () => at, config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    wan3Storage: {
+      upload: async (_id, kind) => { uploads.push(kind); if (kind === 'video' && failing) throw new VideoError('COS unavailable', 503, 'VIDEO_SOURCE_STORAGE_FAILED'); },
+      url: async (_id, kind) => `https://bucket.cos.ap-shanghai.myqcloud.com/${kind}?signature=test`,
+    },
+    wan3Provider: { generate: async () => { officialCalls++; } },
+  });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, mode: 'deep', replacements: { photo: true } } });
+  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.code === 'VIDEO_SOURCE_STORAGE_FAILED');
+  assert.equal(app.state.generations, 0); assert.equal(officialCalls, 0);
+  const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal(saved.wan3Failures, undefined); assert.deepEqual(saved.wan3CosMaterials, { photo: true });
+  await app.close(); failing = false; at += 6000; await app.open();
+  await app.until(id, task => task.status === 'running');
+  assert.deepEqual(uploads, ['photo', 'video', 'video']);
+  assert.equal(app.state.generations, 1); assert.equal(officialCalls, 0);
+});
+
+test('Wan without COS configuration pauses before any generation and remains paused after restart', async t => {
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    wan3Storage: createWan3Storage({ env: {} }), wan3Provider: { generate: async () => assert.fail('No fallback for storage configuration') } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, mode: 'deep', replacements: { photo: true } } });
+  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  const task = await app.until(id, task => task.status === 'waiting');
+  assert.equal(task.code, 'VIDEO_SOURCE_STORAGE_NOT_CONFIGURED');
+  await app.close();
+  const saved = JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8'));
+  assert.equal(saved.recovery.action, 'account');
+  await app.open(); await delay(80);
+  assert.equal((await app.current(id)).status, 'waiting'); assert.equal(app.state.generations, 0);
+});
+
+test('Wan refreshes queued COS signatures after a long wait and removes temporary objects on expiry', async t => {
+  let at = Date.now();
+  const app = await fixture(t, { now: () => at, config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true } });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: { model: WAN3_MODEL } });
+  await app.until(id, task => task.status === 'running');
+  const firstUrl = app.state.body.payload.resources[0];
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  delete saved.providerId;
+  saved.providerDispatched = false; saved.status = 'queued';
+  saved.wan3Queue = { state: 'queued', order: 1, attempts: [] };
+  await writeFile(path, JSON.stringify(saved));
+  at += 4 * 86400_000; await app.open(); at += 1001;
+  await app.until(id, task => task.status === 'running');
+  assert.notEqual(app.state.body.payload.resources[0], firstUrl);
+  assert.equal(app.state.cosUploads.length, 2);
+  app.state.done = true; await app.until(id, task => task.status === 'completed');
+  assert.equal(app.state.cosDeletes.length, 0);
+  at += 3 * 86400_000 + 1;
+  await app.until(id, task => task.status === 'expired' && app.state.cosDeletes.length === 2);
+  await app.close();
+  assert.deepEqual(app.state.cosDeletes, [{ id, kind: 'photo' }, { id, kind: 'video' }]);
+  const expired = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(expired.cleaned, true); assert.deepEqual(expired.wan3CosMaterials, {});
 });
 
 test('Wan ambiguous submission holds without aggregate retry or official fallback across restart', async t => {
@@ -3135,7 +3234,7 @@ test('Wan segmented retry replaces only the failed part and keeps completed aggr
         const body = generationBody(task);
         assert.equal(body.payload.resources[0], task.materials.photo.id);
         assert.equal(body.payload.referVideoUrl[0], task.materials.video.id);
-        const segment = new URL(task.materials.video.id).pathname.split('/').at(-1);
+        const segment = new URL(task.materials.video.id).pathname.split('/').at(-1).replace(/\.mp4$/, '');
         generated.push(segment); return { taskId: segment };
       },
       query: async id => {
@@ -3159,6 +3258,7 @@ test('Wan segmented retry replaces only the failed part and keeps completed aggr
   const done = await app.until(id, task => task.status === 'completed');
   assert.equal(officialCalls, 1); assert.equal(generated.filter(id => id === 'segment-0').length, 1);
   assert.equal(generated.filter(id => id === 'segment-1').length, 4); assert.equal(done.billing.chargedPoints, 20 * 738);
+  assert.deepEqual(app.state.cosUploads.map(item => item.kind), ['photo', 'segment-0', 'segment-1']);
 });
 
 
