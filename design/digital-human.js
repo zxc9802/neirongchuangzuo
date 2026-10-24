@@ -7,7 +7,7 @@ import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malay
 
 import { estimatedSpeechSeconds, creditInsufficiency, refreshWorkspaceCredits, subscribeWorkspaceCredits, observeCreditTask, billingPointsText } from './workspace-credits.js';
 let unsubscribeCredits = null;
-const speechEstimate = () => estimatedSpeechSeconds(state.script, ({ half: 0.5, slow: 0.8, low: 1, high: 1.2, fast: 1.5 })[state.toneProfile]);
+const speechEstimate = () => estimatedSpeechSeconds(state.script, ({ half: 0.5, slow: 0.8, gentle: 0.9, low: 1, high: 1.2, fast: 1.5 })[state.toneProfile]);
 function generationPriceText() {
   const price = generationPrice('digital-human', state.engine), seconds = speechEstimate();
   return seconds ? `约 ${seconds} 秒 · 预计 ${generationPoints(seconds, price.key)} 积分 · ${price.pointsPerSecond} 积分/秒`
@@ -69,7 +69,7 @@ function hydrate(ctx) {
     try {
       const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
       for (const key of ['script', 'avatarId', 'voiceId', 'activeTaskId']) if (typeof saved[key] === 'string') state[key] = saved[key];
-      if (['half', 'slow', 'low', 'high', 'fast'].includes(saved.toneProfile)) state.toneProfile = saved.toneProfile;
+      if (['half', 'slow', 'gentle', 'low', 'high', 'fast'].includes(saved.toneProfile)) state.toneProfile = saved.toneProfile;
       if (['smart', 'preserve'].includes(saved.videoFit)) state.videoFit = saved.videoFit;
       if (['b', 'd', 'e'].includes(saved.engine)) state.engine = saved.engine;
       if (saved.emotionReferenceVersion === 1 && Number.isFinite(saved.emotionIntensity)) state.emotionIntensity = Math.max(0.1, Math.min(0.85, saved.emotionIntensity));
@@ -164,7 +164,7 @@ function voicePreview(ctx, voice = currentVoice()) {
 }
 
 function speedMarkup() {
-  return `<div class="dh-speed-section dh-engine-section"><label for="dh-speed-select">语速</label><div class="dh-engine-picker"><select id="dh-speed-select" name="dh-speed" data-dh-option="toneProfile">${[['half', '0.5 倍速'], ['slow', '0.8 倍速'], ['low', '1 倍速'], ['high', '1.2 倍速'], ['fast', '1.5 倍速']].map(([value, label]) => `<option value="${value}" ${state.toneProfile === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div></div>`;
+  return `<div class="dh-speed-section dh-engine-section"><label for="dh-speed-select">语速</label><div class="dh-engine-picker"><select id="dh-speed-select" name="dh-speed" data-dh-option="toneProfile">${[['half', '0.5 倍速'], ['slow', '0.8 倍速'], ['gentle', '0.9 倍速'], ['low', '1 倍速'], ['high', '1.2 倍速'], ['fast', '1.5 倍速']].map(([value, label]) => `<option value="${value}" ${state.toneProfile === value ? 'selected' : ''}>${label}</option>`).join('')}</select></div></div>`;
 }
 
 function engineMarkup(ctx) {

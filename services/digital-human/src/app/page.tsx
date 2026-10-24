@@ -40,8 +40,8 @@ export default function StudioPage() {
   const [videoData, setVideoData] = useState<PublicVideoSelection | null>(null);
 
   const [scriptText, setScriptText] = useState("");
-  const [toneProfile, setToneProfile] = useState<"half" | "slow" | "low" | "high" | "fast">("low");
-  const speechRate = { half: 0.5, slow: 0.8, low: 1, high: 1.2, fast: 1.5 }[toneProfile];
+  const [toneProfile, setToneProfile] = useState<"half" | "slow" | "gentle" | "low" | "high" | "fast">("low");
+  const speechRate = { half: 0.5, slow: 0.8, gentle: 0.9, low: 1, high: 1.2, fast: 1.5 }[toneProfile];
   const [videoFit, setVideoFit] = useState<"smart" | "preserve">("smart");
   const [emotionIntensity, setEmotionIntensity] = useState(0.8);
   const [selectedVoice, setSelectedVoice] = useState<PublicVoiceItem | null>(null);
@@ -487,7 +487,7 @@ export default function StudioPage() {
                     语速
                   </label>
                   <div className="grid grid-cols-3 gap-2" role="group" aria-label="语速">
-                    {([["half", "0.5 倍速"], ["slow", "0.8 倍速"], ["low", "1 倍速"], ["high", "1.2 倍速"], ["fast", "1.5 倍速"]] as const).map(([value, label]) => (
+                    {([["half", "0.5 倍速"], ["slow", "0.8 倍速"], ["gentle", "0.9 倍速"], ["low", "1 倍速"], ["high", "1.2 倍速"], ["fast", "1.5 倍速"]] as const).map(([value, label]) => (
                       <button
                         key={value}
                         type="button"

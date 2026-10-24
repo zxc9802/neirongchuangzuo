@@ -163,7 +163,7 @@ export async function generateLocalizedSpeech(text: string, language: "en" | "ms
   if (language === "ms" && !options.qwenMalayVoiceId) throw new Error("请配置同地域的 QWEN_MALAY_VOICE_ID 马来语基础音色");
   const qwenBase = language === "ms" ? qwenBaseUrl(options) : "";
   const toneProfile = options.toneProfile || "low";
-  const rate = { half: 0.5, slow: 0.8, low: 1, high: 1.2, fast: 1.5 }[toneProfile];
+  const rate = { half: 0.5, slow: 0.8, gentle: 0.9, low: 1, high: 1.2, fast: 1.5 }[toneProfile];
   const cacheKey = crypto.createHash("sha256").update(JSON.stringify([
     "fal-localized-speech-v1", MODELS[language], CONVERSION, options.cacheScope || "local", text.trim(),
     identity(options.speakerAudioUrl), language === "en" ? identity(englishReference) : [qwenBase, options.qwenMalayVoiceId], rate,

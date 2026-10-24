@@ -138,7 +138,7 @@ test("task POST enforces credits and concurrency, sanitizes errors, and keeps in
     }
     assert.equal(tasks[0].inputs.outputType, "video");
     user = {...user, id: "model-admin", role: "admin", billingAudience: "internal"};
-    for (const [toneProfile, seconds] of [["half", 27], ["slow", 19], ["low", 15], ["high", 14], ["fast", 11]]) {
+    for (const [toneProfile, seconds] of [["half", 27], ["slow", 19], ["gentle", 17], ["low", 15], ["high", 14], ["fast", 11]]) {
       const response = await post({avatarId: "avatar", scriptText: "一".repeat(44), toneProfile});
       assert.equal(response.status, 200);
       assert.equal(tasks.at(-1).billing.estimatedDuration, seconds);

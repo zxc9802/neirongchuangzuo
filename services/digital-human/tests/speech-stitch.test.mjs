@@ -142,7 +142,7 @@ test("IndexTTS actually submits sentence requests, stitches all parts, ignores o
     assert.deepEqual(fs.readFileSync(cached.finalWavPath), fs.readFileSync(result.finalWavPath));
     assert.equal(result.rate, 1);
     assert.equal(result.selectedDuration, result.rawDuration);
-    for (const [toneProfile, rate] of [['half', 0.5], ['slow', 0.8], ['high', 1.2], ['fast', 1.5]]) {
+    for (const [toneProfile, rate] of [['half', 0.5], ['slow', 0.8], ['gentle', 0.9], ['high', 1.2], ['fast', 1.5]]) {
       const faster = await module.exports.generateIndexTTS(text, { ...options, toneProfile, outDir: path.join(dir, toneProfile + '-job') });
       assert.equal(calls.length, 2, 'segments reuse their original-rate cache');
       assert.equal(faster.fromCache, false, 'a different speed must not reuse the final track');

@@ -69,7 +69,7 @@ async function harness(run) {
   }
 }
 
-for (const language of ['en', 'ms']) for (const [toneProfile, rate] of [['low', 1], ['half', 0.5], ['slow', 0.8], ['high', 1.2], ['fast', 1.5]]) test(`${language} uses the chosen native model then the selected own voice; ${rate}x applies once`, async () => {
+for (const language of ['en', 'ms']) for (const [toneProfile, rate] of [['low', 1], ['half', 0.5], ['slow', 0.8], ['gentle', 0.9], ['high', 1.2], ['fast', 1.5]]) test(`${language} uses the chosen native model then the selected own voice; ${rate}x applies once`, async () => {
   await harness(async h => {
     const text = language === 'en' ? 'Hey, good morning! Let us meet later. Sound good?' : 'Hai, selamat pagi! Jom kita makan bersama.';
     const result = await h.generate(text, language, {toneProfile});

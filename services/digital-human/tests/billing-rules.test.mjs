@@ -16,8 +16,10 @@ test("slow narration increases the duration and reservation estimate", () => {
   const script = "一".repeat(44);
   assert.equal(billing.estimateScriptDuration(script, 0.5), 20);
   assert.equal(billing.estimateScriptDuration(script, 0.8), 13);
+  assert.equal(billing.estimateScriptDuration(script, 0.9), 12);
   assert.equal(estimateReservationDuration(script, 0.5), 27);
   assert.equal(estimateReservationDuration(script, 0.8), 19);
+  assert.equal(estimateReservationDuration(script, 0.9), 17);
   assert.equal(estimateReservationDuration("", 0.5), 0);
 });
 

@@ -148,7 +148,7 @@ for (const complete of [true, false]) {
   });
 }
 
-for (const [toneProfile, rate] of [[undefined, 1], ['low', 1], ['half', 0.5], ['slow', 0.8], ['high', 1.2], ['fast', 1.5]]) {
+for (const [toneProfile, rate] of [[undefined, 1], ['low', 1], ['half', 0.5], ['slow', 0.8], ['gentle', 0.9], ['high', 1.2], ['fast', 1.5]]) {
   test(`a failed IndexTTS sentence switches the entire script to Doubao at ${rate}x (${toneProfile || 'default'})`, async () => {
     await harness(async h => {
       const text = '第一句话成功。第二句话失败。第三句话成功。';
