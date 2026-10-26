@@ -417,13 +417,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   async function extractSourceCaptions(task) {
     if (task.captionsChecked) return;
     try { task.captions = await captions.extract(file(task, 'video')); }
-    catch { task.captionCheck = { warning: isDeepReplica(task)
-      ? '原视频字幕未能提取，已请求模型保留原字幕，请预览核对文字。'
-      : '原视频字幕未能提取，将继续使用原视频人声。' }; }
+    catch { task.captionCheck = { warning: '原视频字幕未能提取，将继续使用原视频人声。' }; }
     task.captionsChecked = true;
   }
   async function analyzeSource(task) {
-    if (isDeepReplica(task)) { await extractSourceCaptions(task); await save(task); return; }
+    if (isDeepReplica(task)) {
+      // Deep replicas request clean frames from the model; no OCR transcript is rendered back.
+      delete task.captions; delete task.captionsChecked; delete task.captionCheck;
+      await save(task); return;
+    }
     if (task.voiceEngine === 'chatterbox') {
       // Whole-track conversion uses audio directly; only legacy translation needs text.
       if (!task.targetLanguage) return;
@@ -455,10 +457,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     await save(task);
   }
   async function renderCaptions(task, input) {
+    // Also protect in-flight tasks that still have captions saved by an older release.
+    if (isDeepReplica(task)) {
+      delete task.captions; delete task.captionsChecked; delete task.captionCheck;
+      return;
+    }
     if (!task.captions?.cues?.length) return;
     const output = join(folder(task), 'result-caption.tmp');
     try {
-      const captionCheck = await captions.render(input, output, task.captions, { replaceExisting: isDeepReplica(task) });
+      const captionCheck = await captions.render(input, output, task.captions);
       const metadata = await probe(output);
       if ((task.video.audio || task.voice) && !metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw new Error('Invalid caption render');
       await rename(output, input);

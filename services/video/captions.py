@@ -197,14 +197,6 @@ def render(path, output, captions):
     if not font_path:
         raise ValueError('Chinese caption font unavailable')
     layouts = []
-    detector = None
-    if captions.get('replaceExisting') and captions['cues']:
-        from rapidocr_onnxruntime import RapidOCR
-        detector = RapidOCR(intra_op_num_threads=1, inter_op_num_threads=1)
-        boxes = [scaled_box(cue, captions, width, height) for cue in captions['cues']]
-        padding = max(3, round(max(box[3] - box[1] for box in boxes) * .2))
-        band = max(0, min(box[1] for box in boxes) - padding), min(height, max(box[3] for box in boxes) + padding)
-        mask = np.zeros((height, width), dtype=np.uint8)
     for cue in captions['cues']:
         x1, y1, x2, y2 = scaled_box(cue, captions, width, height)
         lines = cue['text'].splitlines()
@@ -220,37 +212,12 @@ def render(path, output, captions):
                                '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-threads', '2', '-pix_fmt', 'yuv420p',
                                '-c:a', 'copy', '-movflags', '+faststart', '-f', 'mp4', output], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
     index = 0
-    erased_frames = 0
     try:
         while True:
             ok, frame = cap.read()
             if not ok:
                 break
             at = index / fps
-            if detector:
-                if index % max(1, round(fps * STEP)) == 0:
-                    # Detect strokes even when model glyphs are unreadable. Limit repairs to the source subtitle band.
-                    caption_frame = frame.copy()
-                    caption_frame[:band[0]] = 0
-                    caption_frame[band[1]:] = 0
-                    detected, _ = detector(caption_frame, use_cls=False, use_rec=False)
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    strokes = cv2.Canny(gray, 60, 180) | cv2.inRange(gray, 180, 255)
-                    mask.fill(0)
-                    for points in detected or []:
-                        points = np.array(points)
-                        x1, y1 = np.floor(points.min(axis=0)).astype(int)
-                        x2, y2 = np.ceil(points.max(axis=0)).astype(int)
-                        margin = max(3, round((y2 - y1) * .15))
-                        stroke = max(3, round((y2 - y1) * .14))
-                        left, top = max(0, x1 - margin), max(band[0], y1 - margin)
-                        right, bottom = min(width, x2 + margin), min(band[1], y2 + margin)
-                        # Repair letter strokes and outlines, not the whole rectangle over clothing or skin.
-                        letters = cv2.dilate(strokes[top:bottom, left:right], np.ones((stroke * 2 + 1, stroke * 2 + 1), np.uint8))
-                        mask[top:bottom, left:right] |= letters
-                if mask.any():
-                    frame = cv2.inpaint(frame, mask, 3, cv2.INPAINT_NS)
-                    erased_frames += 1
             active = [layout for layout in layouts if layout[0]['start'] <= at < layout[0]['end']]
             if active:
                 image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
@@ -272,7 +239,6 @@ def render(path, output, captions):
         if ffmpeg.poll() is None:
             ffmpeg.kill()
             ffmpeg.wait()
-    return {'erasedFrames': erased_frames}
 
 
 if __name__ == '__main__':
@@ -281,6 +247,6 @@ if __name__ == '__main__':
         print(json.dumps(extract(path), ensure_ascii=False))
     elif mode == 'render':
         with open(sys.argv[4], encoding='utf-8') as source:
-            print(json.dumps(render(path, sys.argv[3], json.load(source))))
+            render(path, sys.argv[3], json.load(source))
     else:
         raise ValueError('Unsupported caption operation')

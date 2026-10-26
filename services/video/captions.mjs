@@ -42,21 +42,17 @@ export function createCaptionService(env = {}) {
     const { stdout } = await run(python, ['-X', 'utf8', worker, 'extract', path], { maxBuffer: 2 * 1024 * 1024 });
     return JSON.parse(stdout);
   }
-  async function render(input, output, captions, { replaceExisting = false } = {}) {
-    if (!replaceExisting) {
-      const existing = await extract(input);
-      if (existing?.kind === 'burned' && existing.cues.length) {
-        await copyFile(input, output);
-        return { rendered: false, preserved: true, source: 'model', cueCount: existing.cues.length };
-      }
+  async function render(input, output, captions) {
+    const existing = await extract(input);
+    if (existing?.kind === 'burned' && existing.cues.length) {
+      await copyFile(input, output);
+      return { rendered: false, preserved: true, source: 'model', cueCount: existing.cues.length };
     }
     const metadata = output + '.captions.json';
     try {
-      await writeFile(metadata, JSON.stringify({ ...captions, replaceExisting }), { mode: 0o600 });
-      const { stdout } = await run(python, ['-X', 'utf8', worker, 'render', input, output, metadata], { maxBuffer: 2 * 1024 * 1024 });
-      const { erasedFrames } = JSON.parse(stdout);
-      return { rendered: true, source: 'subtitles', cueCount: captions.cues.length,
-        ...(erasedFrames ? { replaced: true, warning: '已按原片文字重做字幕，并修复残留字幕区域，请预览核对文字与背景。' } : {}) };
+      await writeFile(metadata, JSON.stringify(captions), { mode: 0o600 });
+      await run(python, ['-X', 'utf8', worker, 'render', input, output, metadata], { maxBuffer: 2 * 1024 * 1024 });
+      return { rendered: true, source: 'subtitles', cueCount: captions.cues.length };
     } finally { await rm(metadata, { force: true }); }
   }
   return { extract, render };

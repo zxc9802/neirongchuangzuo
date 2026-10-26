@@ -2957,10 +2957,7 @@ for (const model of DEEP_MODELS) for (const selected of [[], ['photo'], ['produc
     };
     const app = await fixture(t, { provider, wan3Provider: provider, config: { ...CONFIG, wan3Enabled: true },
       captions: { extract: async () => { calls.extracts++; return structuredClone(CAPTIONS); },
-        render: async (_input, output, captions, options) => {
-          calls.renders++; assert.deepEqual(captions, CAPTIONS); assert.equal(options.replaceExisting, true);
-          await writeFile(output, VIDEO);
-        } },
+        render: async () => { calls.renders++; throw new Error('Deep replicas must not repaint or inpaint captions'); } },
       voice: async (_input, output) => { await writeFile(output, VIDEO); return { duration: 4 }; },
       restoreAudio: async (_source, _generated, output) => { calls.restores++; await writeFile(output, VIDEO); },
       voiceConversion: { enabled: replacements.voice, advance: async (task, _folder, save) => { calls.conversions++; task.voiceConversion = { ready: true }; await save(); },
@@ -2990,8 +2987,9 @@ for (const model of DEEP_MODELS) for (const selected of [[], ['photo'], ['produc
     assert.deepEqual(completed.replacements, replacements);
     assert.equal(calls.generations.length, 1); assert.equal(calls.conversions, Number(replacements.voice));
     assert.equal(calls.restores, Number(!replacements.voice)); assert.equal(calls.muxes, Number(replacements.voice));
-    assert.equal(calls.extracts, 1); assert.equal(calls.renders, 1);
-    assert.deepEqual(completed.captions, CAPTIONS); assert.equal(completed.captionCheck.rendered, true);
+    assert.equal(calls.extracts, 0); assert.equal(calls.renders, 0);
+    assert.equal(completed.captions, undefined); assert.equal(completed.captionCheck, undefined);
+    assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
     assert.equal(completed.billing.status, 'settled');
   });
 }
@@ -3029,20 +3027,16 @@ test('deep options validate selected inputs before billing, exclude disabled ass
 
 for (const model of DEEP_MODELS) test(`deep ${model} keeps product references and original audio across 60-second segments`, async t => {
   const calls = [];
-  const sourceCaptions = { ...CAPTIONS, cues: [
-    { ...CAPTIONS.cues[0], start: 29.8, end: 30.2 }, { ...CAPTIONS.cues[1], start: 45.5, end: 49 },
-  ] };
   const provider = {
     createMaterial: async (_url, kind) => ({ id: kind, status: 2 }),
     upload: async path => ({ id: path.split(/[\\/]/).at(-1).replace(/\.(jpg|mp4)$/, ''), status: 2 }),
     generate: async task => { calls.push(task); return { taskId: task.materials.video.id }; },
     query: async id => ({ url: `https://cdn.example/${id}.mp4` }),
   };
-  let restores = 0, captionRenders = 0;
+  let restores = 0, captionRenders = 0, captionExtracts = 0;
   const app = await fixture(t, { provider, wan3Provider: provider, config: { ...CONFIG, wan3Enabled: true },
-    captions: { extract: async () => structuredClone(sourceCaptions), render: async (_input, output, captions, options) => {
-      captionRenders++; assert.deepEqual(captions, sourceCaptions); assert.equal(options.replaceExisting, true); await writeFile(output, VIDEO);
-    } },
+    captions: { extract: async () => { captionExtracts++; return structuredClone(CAPTIONS); },
+      render: async () => { captionRenders++; throw new Error('No local caption processing'); } },
     probe: async path => ({ ...META, duration: /segment-\d-result\.tmp$/.test(path) ? model === PREMIUM_MODEL ? 30 : 15 : 60 }),
     scenes: async () => ({ cuts: [] }),
     cutSegment: async (_input, output) => writeFile(output, VIDEO),
@@ -3054,13 +3048,18 @@ for (const model of DEEP_MODELS) test(`deep ${model} keeps product references an
   assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
   const completed = await app.until(id, task => task.status === 'completed');
   assert.equal(calls.length, model === PREMIUM_MODEL ? 2 : 4);
-  for (const task of calls) { assert.equal(task.materials.product.id, 'product'); assert.equal(task.photo, undefined); assert.equal(task.voice, undefined); }
-  assert.equal(completed.actualDuration, 60); assert.equal(restores, 1); assert.equal(captionRenders, 1);
+  for (const task of calls) {
+    assert.equal(task.materials.product.id, 'product'); assert.equal(task.photo, undefined); assert.equal(task.voice, undefined);
+    assert.match(generationBody(task).prompt, /最终成片不需要字幕，系统也不会补字幕/);
+  }
+  assert.equal(completed.actualDuration, 60); assert.equal(restores, 1); assert.equal(captionRenders, 0); assert.equal(captionExtracts, 0);
 });
 
-test('deep captions are rebuilt on silent sources without adding an audio track', async t => {
+test('deep silent sources skip caption processing without adding an audio track', async t => {
+  let captionCalls = 0;
   const app = await fixture(t, { probe: async () => ({ ...META, audio: false }),
-    captions: { extract: async () => structuredClone(CAPTIONS), render: async (_input, output) => writeFile(output, VIDEO) },
+    captions: { extract: async () => { captionCalls++; return structuredClone(CAPTIONS); },
+      render: async () => { captionCalls++; throw new Error('No local caption processing'); } },
     restoreAudio: async (_source, _generated, output) => writeFile(output, VIDEO) });
   const id = randomUUID();
   await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: {} } });
@@ -3068,22 +3067,36 @@ test('deep captions are rebuilt on silent sources without adding an audio track'
   await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
   app.state.done = true;
   const completed = await app.until(id, task => task.status === 'completed');
-  assert.equal(completed.captionCheck.rendered, true); assert.equal(app.state.generations, 1);
+  assert.equal(completed.captionCheck, undefined); assert.equal(captionCalls, 0); assert.equal(app.state.generations, 1);
 });
 
-for (const stage of ['extract', 'render']) test(`deep caption ${stage} failures retain a playable result and show a warning`, async t => {
+for (const stage of ['draft', 'running']) test(`deep ${stage} tasks with legacy captions never repaint or erase pixels after restart`, async t => {
+  let captionCalls = 0;
   const app = await fixture(t, { captions: {
-    extract: async () => { if (stage === 'extract') throw new Error('OCR unavailable'); return structuredClone(CAPTIONS); },
-    render: async () => { throw new Error('Renderer unavailable'); },
+    extract: async () => { captionCalls++; throw new Error('OCR unavailable'); },
+    render: async () => { captionCalls++; throw new Error('Renderer unavailable'); },
   }, restoreAudio: async (_source, _generated, output) => writeFile(output, VIDEO) });
   const id = randomUUID();
   await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: {} } });
   assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO })).status, 200);
-  await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
-  if (stage === 'extract') assert.match(app.state.body.prompt, /正常台词字幕的原文、位置、排版和出现时间保持原样/);
+  if (stage === 'running') {
+    await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
+  }
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json');
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.captions = structuredClone(CAPTIONS); saved.captionsChecked = true;
+  saved.captionCheck = { rendered: true, warning: '旧版字幕重绘提示' };
+  await writeFile(path, JSON.stringify(saved));
+  await app.open();
+  if (stage === 'draft') {
+    await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
+  }
+  assert.match(app.state.body.prompt, /最终成片不需要字幕，系统也不会补字幕/);
   app.state.done = true;
   const completed = await app.until(id, task => task.status === 'completed');
-  assert.match(completed.captionCheck.warning, /字幕/); assert.equal(app.state.generations, 1);
+  assert.equal(completed.captions, undefined); assert.equal(completed.captionCheck, undefined);
+  assert.equal(captionCalls, 0); assert.equal(app.state.generations, 1);
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
 });
 

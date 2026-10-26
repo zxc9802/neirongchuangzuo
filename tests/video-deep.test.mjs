@@ -43,16 +43,18 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
     assert.match(prompt, /抖音\/TikTok.*账号ID.*@用户名.*作者昵称.*相邻角标/);
     assert.match(prompt, /随时间移动.*从第一帧到最后一帧去除/);
     assert.match(prompt, /自然重建被遮挡的背景.*不用模糊、马赛克、色块或裁切画面/);
-    assert.match(prompt, /去水印要求优先于背景和字幕的保留要求/);
-    assert.match(prompt, /正常台词字幕、商品包装文字和场景中的真实招牌不属于水印，不得因去水印而误删/);
-    assert.match(prompt, /未指定的非水印内容保持原样/);
-    assert.match(prompt, /正常台词字幕的原文、位置、排版和出现时间保持原样/);
-    for (const request of [generationBody({ ...task, captions: { cues: [{ start: 0, end: 4, text: '原片准确字幕' }] } }),
+    assert.match(prompt, /去水印要求优先于背景保留要求/);
+    assert.match(prompt, /商品包装文字和场景中的真实招牌不属于水印，不得因去水印而误删/);
+    assert.match(prompt, /未指定的非水印、非字幕内容保持原样/);
+    for (const request of [body, generationBody({ ...task, captions: { cues: [{ start: 0, end: 4, text: '原片准确字幕' }] } }),
       ...(isWan3Model(model.id) ? [wan3GenerationBody({ ...task, captions: { cues: [{ start: 0, end: 4, text: '原片准确字幕' }] } })] : [])]) {
       const cleanPrompt = request.prompt || request.input.prompt;
       assert.match(cleanPrompt, /去除视频1中画面叠加的台词字幕/);
-      assert.match(cleanPrompt, /原字幕将由系统在成片中按原文字、位置和时间线合成/);
-      assert.doesNotMatch(cleanPrompt, /正常台词字幕的原文、位置、排版和出现时间保持原样|原片准确字幕/);
+      assert.match(cleanPrompt, /最终成片不需要字幕，系统也不会补字幕/);
+      assert.match(cleanPrompt, /单行、多行、逐字出现、不同位置和不同字体/);
+      assert.match(cleanPrompt, /自然重建字幕遮挡的衣服、皮肤、手部、商品和背景纹理/);
+      assert.match(cleanPrompt, /不得用模糊、马赛克、色块、涂抹、裁切或覆盖条遮盖字幕/);
+      assert.doesNotMatch(cleanPrompt, /正常台词字幕的原文、位置、排版和出现时间保持原样|原字幕将由系统|原片准确字幕/);
       assert.match(cleanPrompt, /商品包装文字和场景中的真实招牌.*不得.*删除/);
     }
   }
