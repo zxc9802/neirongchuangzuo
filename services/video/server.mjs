@@ -414,8 +414,16 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const expires = task.startedAt + DAY;
     return `${config.publicOrigin}${PREFIX}/source/${task.id}/${kind}?expires=${expires}&signature=${signature(task.id, kind, expires)}`;
   }
+  async function extractSourceCaptions(task) {
+    if (task.captionsChecked) return;
+    try { task.captions = await captions.extract(file(task, 'video')); }
+    catch { task.captionCheck = { warning: isDeepReplica(task)
+      ? '原视频字幕未能提取，已请求模型保留原字幕，请预览核对文字。'
+      : '原视频字幕未能提取，将继续使用原视频人声。' }; }
+    task.captionsChecked = true;
+  }
   async function analyzeSource(task) {
-    if (isDeepReplica(task)) return;
+    if (isDeepReplica(task)) { await extractSourceCaptions(task); await save(task); return; }
     if (task.voiceEngine === 'chatterbox') {
       // Whole-track conversion uses audio directly; only legacy translation needs text.
       if (!task.targetLanguage) return;
@@ -431,11 +439,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       // A draft may already contain a partial subtitle transcript from another mode.
       delete task.captions; delete task.captionsChecked; delete task.captionCheck;
     }
-    if (!audioOnly && !task.captionsChecked) {
-      try { task.captions = await captions.extract(file(task, 'video')); }
-      catch { task.captionCheck = { warning: '原视频字幕未能提取，将继续使用原视频人声。' }; }
-      task.captionsChecked = true;
-    }
+    if (!audioOnly) await extractSourceCaptions(task);
     if (!audioOnly && (!task.speech || task.speech.source !== 'subtitles') && task.captions?.cues?.length) {
       const intervals = task.video.audio ? await speech.detect(file(task, 'video')).catch(() => []) : [];
       task.speech = captionSpeech(task.captions, intervals);
@@ -454,9 +458,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!task.captions?.cues?.length) return;
     const output = join(folder(task), 'result-caption.tmp');
     try {
-      const captionCheck = await captions.render(input, output, task.captions);
+      const captionCheck = await captions.render(input, output, task.captions, { replaceExisting: isDeepReplica(task) });
       const metadata = await probe(output);
-      if (!metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw new Error('Invalid caption render');
+      if ((task.video.audio || task.voice) && !metadata.audio || Math.abs(metadata.duration - task.actualDuration) > 0.1) throw new Error('Invalid caption render');
       await rename(output, input);
       task.captionCheck = captionCheck || { rendered: true, source: 'subtitles', cueCount: task.captions.cues.length };
     } catch {

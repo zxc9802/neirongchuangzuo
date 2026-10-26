@@ -21,6 +21,7 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
       const direct = generationBody(task);
       assert.deepEqual(direct.payload.resources, selectedImages.map(kind => task.materials[kind].id));
       assert.deepEqual(direct.payload.referVideoUrl, [task.materials.video.id]);
+      assert.equal(wan3GenerationBody(task).input.prompt, direct.prompt.replaceAll('图片', '图'));
     }
     const body = model.id === WAN3_MODEL ? wan3GenerationBody(task) : generationBody(task);
     const prompt = body.prompt || body.input.prompt;
@@ -37,7 +38,23 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
       if (replacements[kind]) assert.match(prompt, new RegExp(`${phrase}替换为(?:图片|图)${selectedImages.indexOf(kind) + 1}`));
       else assert.match(prompt, new RegExp(`不得替换${{ photo: '人物', product: '商品', background: '背景' }[kind]}`));
     }
-    assert.doesNotMatch(prompt, /唯一人物完整替换为图片1|人物外观替换为图片1|去水印/);
+    assert.doesNotMatch(prompt, /唯一人物完整替换为图片1|人物外观替换为图片1/);
+    assert.match(prompt, /同时完成原视频叠加水印去除和下列明确指定的替换/);
+    assert.match(prompt, /抖音\/TikTok.*账号ID.*@用户名.*作者昵称.*相邻角标/);
+    assert.match(prompt, /随时间移动.*从第一帧到最后一帧去除/);
+    assert.match(prompt, /自然重建被遮挡的背景.*不用模糊、马赛克、色块或裁切画面/);
+    assert.match(prompt, /去水印要求优先于背景和字幕的保留要求/);
+    assert.match(prompt, /正常台词字幕、商品包装文字和场景中的真实招牌不属于水印，不得因去水印而误删/);
+    assert.match(prompt, /未指定的非水印内容保持原样/);
+    assert.match(prompt, /正常台词字幕的原文、位置、排版和出现时间保持原样/);
+    for (const request of [generationBody({ ...task, captions: { cues: [{ start: 0, end: 4, text: '原片准确字幕' }] } }),
+      ...(isWan3Model(model.id) ? [wan3GenerationBody({ ...task, captions: { cues: [{ start: 0, end: 4, text: '原片准确字幕' }] } })] : [])]) {
+      const cleanPrompt = request.prompt || request.input.prompt;
+      assert.match(cleanPrompt, /去除视频1中画面叠加的台词字幕/);
+      assert.match(cleanPrompt, /原字幕将由系统在成片中按原文字、位置和时间线合成/);
+      assert.doesNotMatch(cleanPrompt, /正常台词字幕的原文、位置、排版和出现时间保持原样|原片准确字幕/);
+      assert.match(cleanPrompt, /商品包装文字和场景中的真实招牌.*不得.*删除/);
+    }
   }
 });
 
