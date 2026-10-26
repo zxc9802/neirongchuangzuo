@@ -38,6 +38,15 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
       if (replacements[kind]) assert.match(prompt, new RegExp(`${phrase}替换为(?:图片|图)${selectedImages.indexOf(kind) + 1}`));
       else assert.match(prompt, new RegExp(`不得替换${{ photo: '人物', product: '商品', background: '背景' }[kind]}`));
     }
+    if (replacements.photo) {
+      assert.match(prompt, new RegExp(`人物的服装也替换为(?:图片|图)${selectedImages.indexOf('photo') + 1}中可见的服装`));
+      assert.match(prompt, /款式、颜色、材质、图案和穿着层次/);
+      assert.match(prompt, /身体动作、姿态和所在位置沿用原视频/);
+      assert.doesNotMatch(prompt, /人物的服装、身体动作和所在位置保持原样|保留视频1原人物的脸部、发型、服装/);
+    } else {
+      assert.match(prompt, /保留视频1原人物的脸部、发型、服装和身份/);
+      assert.doesNotMatch(prompt, /人物的服装也替换为/);
+    }
     assert.doesNotMatch(prompt, /唯一人物完整替换为图片1|人物外观替换为图片1/);
     assert.match(prompt, /同时完成原视频叠加水印去除和下列明确指定的替换/);
     assert.match(prompt, /抖音\/TikTok.*账号ID.*@用户名.*作者昵称.*相邻角标/);

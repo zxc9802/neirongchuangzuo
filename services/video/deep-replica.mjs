@@ -1,6 +1,6 @@
 export const DEEP_IMAGE_KINDS = ['photo', 'product', 'background'];
 export const DEEP_KINDS = [...DEEP_IMAGE_KINDS, 'voice'];
-export const DEEP_LABELS = { photo: '人脸', voice: '声音', product: '商品', background: '背景' };
+export const DEEP_LABELS = { photo: '人物', voice: '声音', product: '商品', background: '背景' };
 export const isDeepReplica = task => task.mode === 'deep';
 export const preservesSourceAudio = task => isDeepReplica(task) && !task.replacements.voice;
 export const deepImageKinds = task => DEEP_IMAGE_KINDS.filter(kind => task.replacements[kind]);
@@ -13,7 +13,7 @@ export function deepGenerationBody(task, defaultModel, resource = kind => `asset
     '删除视频1画面中已有的平台和作者水印，包括抖音/TikTok、快手、小红书等平台的图标及名称、抖音号等账号ID、@用户名、作者昵称及其相邻角标。无论水印位于左上角、右上角、底部还是随时间移动，都要从第一帧到最后一帧去除，包括半透明文字和图案水印，并自然重建被遮挡的背景，不得保留、复制或新增水印，不用模糊、马赛克、色块或裁切画面的方式遮盖水印。去水印要求优先于背景保留要求。商品包装文字和场景中的真实招牌不属于水印，不得因去水印而误删；台词字幕按下列字幕要求处理，商品和背景仍按下列替换项目处理。',
     '去除视频1中画面叠加的台词字幕，包括单行、多行、逐字出现、不同位置和不同字体的字幕，从第一帧到最后一帧均不保留、重画或新增台词字幕、文字笔画或乱码。最终成片不需要字幕，系统也不会补字幕。自然重建字幕遮挡的衣服、皮肤、手部、商品和背景纹理，保持细节清晰、光影一致、跨帧连续；不得用模糊、马赛克、色块、涂抹、裁切或覆盖条遮盖字幕，不留重影、糊块或修补边界。这项字幕清理要求优先于背景保留要求；商品包装文字和场景中的真实招牌不得作为台词字幕删除。',
     task.replacements.photo
-      ? `将视频1中人物的脸部外貌和发型替换为${reference('photo')}中的人物，保持身份一致，不混合原人物五官；人物的服装、身体动作和所在位置保持原样。`
+      ? `将视频1中人物的脸部外貌和发型替换为${reference('photo')}中的人物，保持身份一致，不混合原人物五官。人物的服装也替换为${reference('photo')}中可见的服装，准确还原款式、颜色、材质、图案和穿着层次，不保留与参考服装不一致的原衣物，不新增参考图中不存在的衣服文字或装饰。服装随身体动作自然变化，褶皱、光影和遮挡合理，从第一帧到最后一帧保持服装一致；身体动作、姿态和所在位置沿用原视频，不引入人物参考图的背景或其他人物。`
       : '保留视频1原人物的脸部、发型、服装和身份，不得替换人物。',
     task.replacements.product
       ? `将视频1中展示的商品替换为${reference('product')}中的商品，准确保留参考商品的形状、颜色、包装、品牌和文字；沿用原商品的位置、运动轨迹和展示方式，保持手部握持、遮挡、透视、光影自然，逐帧保持商品一致。只替换商品，不引入商品参考图的背景或人物。`

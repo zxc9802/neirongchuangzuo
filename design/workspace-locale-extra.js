@@ -1,5 +1,7 @@
 // Static interface translations; never sent to an AI service at runtime.
 export const EXTRA_UI_COPY = {
+  "人物、声音、商品、背景可自由组合": {"en":"Combine person, voice, product and background replacements","ms":"Gabungkan penggantian individu, suara, produk dan latar belakang"},
+  "人物替换包含脸部、发型和服装，请上传能看清服装的参考图。": {"en":"Person replacement includes the face, hairstyle and clothing. Upload a reference image that clearly shows the clothing.","ms":"Penggantian individu merangkumi wajah, gaya rambut dan pakaian. Muat naik imej rujukan yang menunjukkan pakaian dengan jelas."},
   "（本机副本）": {"en":"(Local copy)","ms":"(Salinan setempat)"},
   "（冲突副本）": {"en":"(Conflict copy)","ms":"(Salinan konflik)"},
   "（错误码：{value0}）": {"en":"(Error code: {value0})","ms":"(Kod ralat: {value0})"},

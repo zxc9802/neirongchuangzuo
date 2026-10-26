@@ -16,7 +16,7 @@ const MODELS = [
   { id: WAN3_FAST_MODEL, name: 'qiya-3.0 快速版', maxDuration: 15, extendedDuration: 60, fast: true },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
-const REPLACEMENTS = { photo: '人脸', voice: '声音', product: '商品', background: '背景' };
+const REPLACEMENTS = { photo: '人物', voice: '声音', product: '商品', background: '背景' };
 const emptyReplacements = () => ({ photo: false, voice: false, product: false, background: false });
 let mode = 'classic', replacements = emptyReplacements(), modeDrafts = {};
 const deepMode = () => mode === 'deep';
@@ -185,7 +185,7 @@ function deepInputs(ctx) {
     return `<div class="replica-material ${active ? 'is-selected' : ''}"><div class="replica-material-preview"><input id="replica-${kind}" class="replica-hidden-input" type="file" accept="${kind === 'voice' ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}参考素材">${tile}<input id="replica-toggle-${kind}" class="replica-material-toggle" type="checkbox" aria-label="替换${REPLACEMENTS[kind]}" ${active ? 'checked' : ''} ${disabled ? 'disabled' : ''}>${active ? `<button type="button" class="replica-material-remove" id="replica-remove-${kind}" aria-label="取消选择" title="取消选择" ${locked ? 'disabled' : ''}><span aria-hidden="true">×</span></button>` : ''}</div><span class="replica-material-label">${title}<small>可选</small></span><span class="replica-material-name" title="${ctx.esc(name)}">${ctx.esc(name)}</span><div class="replica-material-actions"><button type="button" data-replica-select-${kind} ${disabled ? 'disabled' : ''}>从资产库选择</button></div></div>`;
   }).join('');
   const voiceSource = replacements.voice && (state.urls.voice || state.current?.sourceVoiceUrl);
-  return `<div class="replica-material-heading"><span>替换素材</span><small>已选 ${Object.values(replacements).filter(Boolean).length} / 4 项</small></div><div class="replica-materials">${cards}</div>${voiceSource ? `<audio class="replica-material-audio" src="${ctx.esc(voiceSource)}" controls preload="metadata" aria-label="声音参考试听"></audio>` : ''}${deepSource(ctx)}<button type="button" class="replica-source-library" data-replica-select-video ${locked ? 'disabled' : ''}>从资产库选择参考视频</button><p class="replica-deep-guidance">未选择的项目保留原视频内容。<br>沿用原片的动作、镜头和时长，自由组合替换内容。</p>`;
+  return `<div class="replica-material-heading"><span>替换素材</span><small>已选 ${Object.values(replacements).filter(Boolean).length} / 4 项</small></div><div class="replica-materials">${cards}</div>${voiceSource ? `<audio class="replica-material-audio" src="${ctx.esc(voiceSource)}" controls preload="metadata" aria-label="声音参考试听"></audio>` : ''}${deepSource(ctx)}<button type="button" class="replica-source-library" data-replica-select-video ${locked ? 'disabled' : ''}>从资产库选择参考视频</button><p class="replica-deep-guidance">人物替换包含脸部、发型和服装，请上传能看清服装的参考图。<br>未选择的项目保留原视频内容。<br>沿用原片的动作、镜头和时长，自由组合替换内容。</p>`;
 }
 function deepSource(ctx) {
   const source = state.urls.video || state.current?.sourceVideoUrl, saved = state.current?.video;
@@ -229,7 +229,7 @@ function generationEstimate() {
 }
 function result(ctx) {
   const task = state.current;
-  if (!task && deepMode()) return `<div class="replica-empty">${ctx.icon('video')}<h3>沿用原片表演，自选替换内容</h3><p>人脸、声音、商品、背景可自由组合<br>上传参考视频，开启需要替换的项目</p>${generationEstimate()}<span>深度复刻成片在这里预览</span></div>`;
+  if (!task && deepMode()) return `<div class="replica-empty">${ctx.icon('video')}<h3>沿用原片表演，自选替换内容</h3><p>人物、声音、商品、背景可自由组合<br>上传参考视频，开启需要替换的项目</p>${generationEstimate()}<span>深度复刻成片在这里预览</span></div>`;
   if (!task) return `<div class="replica-empty">${ctx.icon('video')}<h3>原视频的表演，照片中的人物</h3><p>保留动作、镜头与说话内容<br>人物形象跟随照片，自然表达情绪</p>${generationEstimate()}<span>成片在这里预览</span></div>`;
   if (task.resultUrl) return `<video controls playsinline preload="metadata" src="${ctx.esc(task.resultUrl)}" aria-label="人物复刻成片"></video>`;
   const message = failureMessage(task);
