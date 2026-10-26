@@ -178,8 +178,10 @@ test('asset loading paginates restaurant metadata without paid calls and keeps e
 test('the assets entry presents retention and generated type filters without an upload flow', () => {
   const ctx = { esc: value => String(value), icon: () => '', button: (action, label) => `<button data-action="${action}">${label}</button>` };
   const html = renderGeneratedAssets(ctx);
-  assert.match(html, /保留 <strong>3 天<\/strong>，请及时下载/);
-  assert.match(html, /及时下载/);
+  assert.match(html, /保留 <strong>3 天<\/strong>，移入素材文件夹后长期保留/);
+  assert.match(html, /新建文件夹/);
+  assert.match(html, /本人声音/);
+  assert.match(html, /生成视频/);
   assert.match(html, /成品类型/);
   assert.doesNotMatch(html, /type="file"|确认选择|本地上传/);
 });

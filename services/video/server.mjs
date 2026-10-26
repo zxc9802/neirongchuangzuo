@@ -1190,7 +1190,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           const temporary = join(folder(task), 'upload.tmp');
           if (DEEP_IMAGE_KINDS.includes(kind)) {
             let normalized;
-            try { normalized = imported ? bytes : await photo(bytes); }
+            try { normalized = imported && imported.mime === 'image/jpeg' ? bytes : await photo(bytes); }
             catch (cause) {
               if (kind !== 'photo' && cause.code === 'VIDEO_PHOTO_INVALID') throw error(`请上传清晰的 JPG、PNG 或 WebP ${DEEP_LABELS[kind]}图片，宽高至少 300 像素。`, 400, 'VIDEO_PHOTO_INVALID');
               throw cause;
@@ -1201,10 +1201,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           } else if (kind === 'voice') {
             await writeFile(temporary, bytes, { mode: 0o600 });
             const normalized = join(folder(task), 'voice.tmp.wav');
-            const metadata = imported ? imported.metadata : await voice(temporary, normalized);
-            if (imported) await writeFile(normalized, bytes, { mode: 0o600 });
-            const intervals = imported || task.voiceEngine === 'chatterbox' ? [] : await speech.detect(normalized).catch(() => []);
-            const voiceMetadata = { ...metadata, speechStart: imported ? metadata.speechStart : intervals[0]?.start ?? null };
+            const normalizedImport = imported && imported.mime === 'audio/wav' && imported.metadata?.origin !== 'generated';
+            const metadata = normalizedImport ? imported.metadata : await voice(temporary, normalized);
+            if (normalizedImport) await writeFile(normalized, bytes, { mode: 0o600 });
+            const intervals = normalizedImport || task.voiceEngine === 'chatterbox' ? [] : await speech.detect(normalized).catch(() => []);
+            const voiceMetadata = { ...metadata, speechStart: normalizedImport ? metadata.speechStart : intervals[0]?.start ?? null };
             const asset = materialLibrary && (imported || await materialLibrary.save(userId, { kind, path: normalized, name, metadata: voiceMetadata }));
             await rename(normalized, file(task, 'voice')); task.voice = { ...voiceMetadata, ...(asset ? { assetId: asset.id } : {}) }; delete task.speech; delete task.originalSpeech; delete task.speechConfirmedAt;
             await save(task); json(res, 200, { task: view(task) }); return;

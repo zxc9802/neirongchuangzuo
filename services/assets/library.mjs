@@ -4,11 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { normalizePhoto, probeVideo, PHOTO_LIMIT, VIDEO_LIMIT } from '../video/media.mjs';
 import { normalizeVoice, VOICE_LIMIT } from '../video/speech.mjs';
+import { editFolders, assignMaterials } from './folders.mjs';
+import { generatedSource, readGeneratedMedia } from './retain.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const TYPES = { photo: { type: 'image', mime: 'image/jpeg', ext: 'jpg', name: '图片素材' }, voice: { type: 'audio', mime: 'audio/wav', ext: 'wav', name: '参考声音' }, video: { type: 'video', mime: 'video/mp4', ext: 'mp4', name: '参考视频' } };
 const fail = (message, status = 503) => Object.assign(new Error(message), { status, code: 'ASSET_STORAGE_ERROR' });
 const validId = id => /^(photo|voice|video)-[a-f0-9]{64}$/.test(id || '');
+const formats = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'audio/wav': 'wav', 'audio/mpeg': 'mp3', 'video/mp4': 'mp4' };
 
 // A separate, private prefix has no application expiry or task-cleanup dependency.
 export function createMaterialLibrary({ env = process.env, cosClient, now = Date.now } = {}) {
@@ -37,8 +40,8 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
   }
   function view(item) {
     return { id: item.id, kind: item.kind, type: TYPES[item.kind].type, name: item.name, createdAt: item.createdAt,
-      bytes: item.bytes, duration: item.metadata?.duration, permanent: true,
-      url: `/api/assets/materials/${item.id}/media`, filename: `${item.name}.${TYPES[item.kind].ext}` };
+      bytes: item.bytes, duration: item.metadata?.duration, permanent: true, origin: item.metadata?.origin, mime: item.mime || TYPES[item.kind].mime,
+      url: `/api/assets/materials/${item.id}/media`, filename: `${item.name}.${item.ext || TYPES[item.kind].ext}` };
   }
   async function organization(userId) {
     const result = await call('getObject', { Key: prefix(userId) + 'organization.json' });
@@ -50,6 +53,23 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
     } catch { throw fail('资产排列记录无法读取，请刷新重试。'); }
   }
   const assetKey = key => typeof key === 'string' && key.length <= 220 && /^(?:material:(?:photo|voice|video)-[a-f0-9]{64}|(?:image|avatar|restaurant|video|creative-video):[a-zA-Z0-9_.:-]+)$/.test(key);
+  async function writeOrganization(userId, data) {
+    const saved = await call('putObject', { Key: prefix(userId) + 'organization.json', Body: JSON.stringify(data), ContentType: 'application/json', ACL: 'private' });
+    if (!saved) throw fail('资产整理保存失败，请重试。');
+    return data;
+  }
+  async function folders(userId, input) {
+    if (!input || !['folder-create', 'folder-rename', 'folder-move', 'folder-delete', 'assign'].includes(input.action)) throw fail('文件夹操作无效。', 400);
+    const previous = locks.get(userId) || Promise.resolve();
+    const operation = previous.catch(() => {}).then(async () => {
+      const data = await organization(userId), items = await records(userId);
+      if (input.action === 'assign') assignMaterials(data, input.ids, input.folderId, input.type, items);
+      else editFolders(data, input, items);
+      return writeOrganization(userId, data);
+    });
+    locks.set(userId, operation);
+    try { return await operation; } finally { if (locks.get(userId) === operation) locks.delete(userId); }
+  }
   async function organize(userId, input) {
     if (!input || !['delete', 'restore', 'move'].includes(input.action) || !Array.isArray(input.keys) || !input.keys.length || input.keys.length > 500 || input.keys.some(key => !assetKey(key))) throw fail('资产操作参数无效。', 400);
     if (input.action === 'move' && (!assetKey(input.target) || !['before', 'after'].includes(input.position) || input.keys.includes(input.target))) throw fail('排列位置无效。', 400);
@@ -78,27 +98,40 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
   }
   return {
     configured,
-    organization, organize,
+    organization, organize, folders,
     async list(userId, { includeDeleted = false } = {}) {
       const data = await organization(userId), positions = new Map(data.order.map((key, i) => [key, i]));
       return (await records(userId)).filter(item => includeDeleted || !data.deleted.includes(`material:${item.id}`))
         .sort((a, b) => (positions.get(`material:${a.id}`) ?? Infinity) - (positions.get(`material:${b.id}`) ?? Infinity) || b.createdAt - a.createdAt).map(view);
     },
-    async save(userId, { kind, path, name, metadata = {} }) {
+    async save(userId, { kind, path, name, metadata = {}, mime, placement }) {
       if (!TYPES[kind]) throw fail('素材类型无效。', 400);
       const bytes = await readFile(path);
-      if (!bytes.length || bytes.length > (kind === 'video' ? VIDEO_LIMIT : 20 * 1024 * 1024)) throw fail('素材大小无效。', 400);
+      if (!bytes.length || bytes.length > (kind === 'video' ? VIDEO_LIMIT : 50 * 1024 * 1024)) throw fail('素材大小无效。', 400);
+      mime ||= TYPES[kind].mime;
+      if (!formats[mime] || !mime.startsWith(TYPES[kind].type + '/')) throw fail('素材格式无效。', 400);
       const id = `${kind}-${hash(bytes)}`, base = prefix(userId);
       const previous = locks.get(userId) || Promise.resolve();
       const operation = previous.catch(() => {}).then(async () => {
         const items = await records(userId), existing = items.find(item => item.id === id);
-        if (existing) return view(existing);
+        let data;
+        if (placement) {
+          data = await organization(userId);
+          assignMaterials(data, [id], placement.folderId, TYPES[kind].type, [...items.filter(item => item.id !== id), { id, kind }]);
+          data.deleted = data.deleted.filter(key => key !== `material:${id}`);
+          if (placement.sourceKey) {
+            if (!assetKey(placement.sourceKey) || placement.sourceKey.startsWith('material:')) throw fail('成品来源无效。', 400);
+            data.retained = { ...data.retained, [placement.sourceKey]: id };
+          }
+        }
+        if (existing) { if (data) await writeOrganization(userId, data); return view(existing); }
         const title = String(name || TYPES[kind].name).replace(/\.[^.]+$/, '').replace(/[\\/\u0000-\u001f\u007f]/g, '').trim().slice(0, 80) || TYPES[kind].name;
-        const item = { id, kind, name: title, bytes: bytes.length, createdAt: now(), metadata };
-        const written = await call('putObject', { Key: base + `${id}.${TYPES[kind].ext}`, Body: bytes, ContentType: TYPES[kind].mime, ACL: 'private' });
+        const item = { id, kind, name: title, bytes: bytes.length, createdAt: now(), metadata, mime, ext: formats[mime] };
+        const written = await call('putObject', { Key: base + `${id}.${item.ext}`, Body: bytes, ContentType: mime, ACL: 'private' });
         if (!written) throw fail('素材保存失败，请重试。');
         const indexed = await call('putObject', { Key: base + 'index.json', Body: JSON.stringify([...items, item]), ContentType: 'application/json', ACL: 'private' });
         if (!indexed) throw fail('素材索引保存失败，请重试。');
+        if (data) await writeOrganization(userId, data);
         return view(item);
       });
       locks.set(userId, operation);
@@ -108,11 +141,11 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
       if (!validId(id)) throw fail('素材不存在。', 404);
       const item = (await records(userId)).find(item => item.id === id);
       if (!item) throw fail('素材不存在。', 404);
-      const result = await call('getObject', { Key: prefix(userId) + `${id}.${TYPES[item.kind].ext}` });
+      const result = await call('getObject', { Key: prefix(userId) + `${id}.${item.ext || TYPES[item.kind].ext}` });
       if (!result) throw fail('素材不存在。', 404);
       const bytes = Buffer.from(result.Body);
       if (bytes.length !== item.bytes || hash(bytes) !== id.slice(item.kind.length + 1)) throw fail('素材内容校验失败，请稍后重试。');
-      return { ...view(item), bytes, metadata: item.metadata, mime: TYPES[item.kind].mime };
+      return { ...view(item), bytes, metadata: item.metadata, mime: item.mime || TYPES[item.kind].mime };
     },
   };
 }
@@ -132,13 +165,28 @@ async function uploadBody(req, limit) {
   } finally { clearTimeout(timer); }
 }
 
-export function createMaterialHandler({ library, archiveExisting, photo = normalizePhoto, voice = normalizeVoice, probe = probeVideo }) {
+export function createMaterialHandler({ library, archiveExisting, readGenerated = readGeneratedMedia, photo = normalizePhoto, voice = normalizeVoice, probe = probeVideo }) {
   return async (req, res) => {
     const json = (status, value) => { res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'private, no-store' }); res.end(JSON.stringify(value)); };
     try {
       const userId = req.authenticatedUserId;
       if (!userId) throw fail('请先登录。', 401);
       const url = new URL(req.url, 'http://localhost');
+      if (['/api/assets/materials/folders', '/api/assets/materials/retain'].includes(url.pathname) && req.method === 'POST') {
+        let input;
+        try { input = JSON.parse((await uploadBody(req, 128 * 1024)).toString('utf8')); } catch (error) { if (error.status) throw error; throw fail('资产操作参数无效。', 400); }
+        if (url.pathname.endsWith('/folders')) { json(200, { organization: await library.folders(userId, input) }); return; }
+        const source = generatedSource(input);
+        const directory = await mkdtemp(join(tmpdir(), 'qiya-retain-'));
+        try {
+          const data = await readGenerated(req, source), path = join(directory, 'output');
+          if (data.mime.split('/')[0] !== source.type) throw fail('成品格式与目标文件夹不一致。', 400);
+          await writeFile(path, data.bytes, { mode: 0o600 });
+          const material = await library.save(userId, { kind: source.kind, path, name: input.name, mime: data.mime,
+            metadata: { origin: 'generated', sourceKey: input.key }, placement: { folderId: input.folderId, sourceKey: input.key } });
+          json(201, { material, organization: await library.organization(userId) }); return;
+        } finally { await rm(directory, { recursive: true, force: true }); }
+      }
       if (url.pathname === '/api/assets/materials/organization' && req.method === 'POST') {
         let input;
         try { input = JSON.parse((await uploadBody(req, 128 * 1024)).toString('utf8')); }

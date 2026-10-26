@@ -43,3 +43,18 @@
 #material-assets-results .generated-asset-cover.audio{aspect-ratio:auto;min-height:120px}
 #material-assets-results .generated-asset-cover.audio .generated-asset-audio{gap:5px;padding-top:22px}
 #material-assets-results .generated-asset-cover.audio .icon{width:36px;height:36px}
+.asset-category-tabs{display:flex;gap:10px;margin:22px 0;flex-wrap:wrap}
+.asset-category-tabs button{min-width:80px;min-height:42px}
+.asset-folder-heading,.asset-folder-heading>div{display:flex;align-items:center;justify-content:space-between;gap:12px;color:var(--ui-text)}
+.asset-folder-heading{margin:18px 0 12px}.asset-folder-heading strong{font-size:16px}
+.asset-folder-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px;margin-bottom:20px}
+.asset-folder-card{border:1px solid var(--ui-border);border-radius:12px;background:var(--ui-surface);min-width:0;color:var(--ui-text);overflow:hidden}
+.asset-folder-card>button{display:flex;gap:10px;align-items:center;width:100%;padding:18px 14px;text-align:left;color:inherit;background:transparent}
+.asset-folder-card>button .icon{width:27px;height:27px;color:var(--ui-text-muted,#8594a5);flex-shrink:0}
+.asset-folder-card>button span{font-size:15px;overflow-wrap:anywhere;white-space:normal;line-height:1.5}.asset-folder-card small{margin-left:auto;font-size:12px;opacity:.65;white-space:nowrap}
+.asset-folder-card>div{display:flex;gap:4px;padding:0 8px 8px}.asset-folder-card .textbutton{color:inherit;padding:6px 8px;min-height:34px;font-size:12px}
+.asset-folder-card button:hover{background:var(--ui-hover,rgba(127,127,127,.08))}
+.asset-folder-form{display:grid;gap:18px;margin:20px 0}.asset-folder-form label{display:grid;gap:8px;color:var(--ui-text);font-size:14px}
+.asset-folder-form input,.asset-folder-form select{background:var(--ui-surface);color:var(--ui-text);border:1px solid var(--ui-border);border-radius:8px;padding:12px;width:100%;min-height:44px}
+.asset-item-tools{flex-wrap:wrap}.asset-item-tools>div{flex-wrap:wrap;justify-content:flex-end}
+@media(max-width:600px){.asset-folder-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.asset-folder-card small{display:none}.asset-folder-card>button{padding:14px 10px}.asset-folder-card .textbutton{padding:6px;font-size:12px}}

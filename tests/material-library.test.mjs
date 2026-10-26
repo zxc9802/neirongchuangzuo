@@ -7,6 +7,111 @@ import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { createMaterialLibrary, createMaterialHandler } from '../services/assets/library.mjs';
 import { createVideoHandler } from '../services/video/server.mjs';
+import { assetFolders, materialFolder } from '../design/asset-organization.js';
+import { generatedSource } from '../services/assets/retain.mjs';
+
+test('folders migrate existing assets, isolate owners, prevent cycles and keep content on deletion', async t => {
+  const root = await temporary(t), path = join(root, 'photo'), cos = cloud(); await writeFile(path, 'folder-photo');
+  const library = createMaterialLibrary({ cosClient: cos }), item = await library.save('alice', { kind: 'photo', path });
+  assert.equal(assetFolders(await library.organization('alice')).length, 6);
+  assert.equal(materialFolder(item, await library.organization('alice')), 'photos');
+  let data = await library.folders('alice', { action: 'folder-create', type: 'image', name: '门店A', parentId: 'photos' });
+  const folder = data.folders.find(item => item.name === '门店A');
+  data = await library.folders('alice', { action: 'assign', ids: [item.id], type: 'image', folderId: folder.id });
+  assert.equal(data.assignments[item.id], folder.id);
+  await assert.rejects(library.folders('bob', { action: 'assign', ids: [item.id], type: 'image', folderId: 'photos' }), { status: 404 });
+  await assert.rejects(library.folders('alice', { action: 'assign', ids: [item.id], type: 'audio', folderId: 'own-voice' }), { status: 400 });
+  await assert.rejects(library.folders('alice', { action: 'folder-move', id: 'photos', parentId: folder.id }), /自身或下级/);
+  await library.folders('alice', { action: 'folder-rename', id: folder.id, name: '客户门店' });
+  await library.folders('alice', { action: 'folder-move', id: folder.id, parentId: null });
+  await assert.rejects(library.folders('alice', { action: 'folder-create', type: 'image', name: '客户门店' }), /同名/);
+  const restarted = createMaterialLibrary({ cosClient: cos });
+  assert.equal((await restarted.organization('alice')).folders.find(item => item.id === folder.id).name, '客户门店');
+  data = await restarted.folders('alice', { action: 'folder-delete', id: folder.id });
+  assert.equal(data.assignments[item.id], null);
+  assert.equal((await restarted.get('alice', item.id)).bytes.toString(), 'folder-photo');
+  await restarted.folders('alice', { action: 'folder-delete', id: 'photos' });
+  assert.ok(!assetFolders(await restarted.organization('alice')).some(item => item.id === 'photos'), 'deleted defaults never reappear');
+  assert.equal(assetFolders(await restarted.organization('bob')).length, 6);
+});
+
+test('retaining a generated output preserves format and survives expiry, restart, retry and folder deletion', async t => {
+  const root = await temporary(t), cos = cloud(), path = join(root, 'image.png'); await writeFile(path, 'original-png-bytes');
+  const library = createMaterialLibrary({ cosClient: cos }), key = 'image:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:0';
+  const args = { kind: 'photo', path, name: '成品.png', mime: 'image/png', metadata: { origin: 'generated' }, placement: { folderId: 'photos', sourceKey: key } };
+  const item = await library.save('alice', args);
+  assert.equal(item.mime, 'image/png'); assert.equal(item.filename, '成品.png');
+  assert.equal((await library.organization('alice')).retained[key], item.id);
+  await library.organize('alice', { action: 'delete', keys: [`material:${item.id}`] });
+  await library.save('alice', args);
+  assert.equal((await library.list('alice')).length, 1, 'retry restores and deduplicates');
+  await library.folders('alice', { action: 'folder-delete', id: 'photos' });
+  await rm(path);
+  const restarted = createMaterialLibrary({ cosClient: cos, now: () => Date.now() + 10 * 86400000 });
+  assert.equal((await restarted.get('alice', item.id)).bytes.toString(), 'original-png-bytes');
+  assert.equal((await restarted.list('alice'))[0].permanent, true);
+});
+
+test('retain endpoint uses only authorized local output routes and never claims failed transfers succeeded', async t => {
+  const cos = cloud(), library = createMaterialLibrary({ cosClient: cos });
+  let expired = false;
+  const handler = createMaterialHandler({ library });
+  const outputUrl = '/api/ai/media/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/result-1.png';
+  const server = createServer((req, res) => {
+    req.authenticatedUserId = req.headers.cookie === 'user=alice' ? 'alice' : undefined;
+    if (req.url === outputUrl) {
+      res.writeHead(!req.authenticatedUserId ? 401 : expired ? 410 : 200, { 'Content-Type': 'image/png' }); res.end('source-png'); return;
+    }
+    void handler(req, res);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const retain = (overrides = {}, cookie = 'user=alice') => fetch(base + '/api/assets/materials/retain', { method: 'POST', headers: { Cookie: cookie, 'Content-Type': 'application/json' }, body: JSON.stringify({ key: 'image:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:0', url: outputUrl, name: '作品', folderId: 'photos', ...overrides }) });
+  assert.equal((await retain({}, '')).status, 401);
+  assert.equal((await retain({ url: 'https://external.invalid/private' })).status, 400);
+  assert.equal((await retain({ folderId: 'own-voice' })).status, 400);
+  assert.equal((await library.list('alice')).length, 0);
+  expired = true; assert.equal((await retain()).status, 410); expired = false;
+  cos.failIndex(true); assert.equal((await retain()).status, 503);
+  cos.failIndex(false);
+  const response = await retain(); assert.equal(response.status, 201, await response.clone().text());
+  const data = await response.json();
+  assert.equal(data.material.permanent, true); assert.equal(data.material.mime, 'image/png');
+  expired = true;
+  const media = await fetch(base + data.material.url, { headers: { Cookie: 'user=alice' } });
+  assert.equal(media.status, 200); assert.equal(await media.text(), 'source-png');
+  assert.equal((await fetch(base + data.material.url)).status, 401);
+});
+
+test('generated source allowlist covers outputs but rejects originals, paths and unrelated URLs', () => {
+  const id = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  for (const [key, url, kind] of [
+    [`creative-video:${id}`, `/api/video-creator/tasks/${id}/result`, 'video'],
+    [`video:${id}`, `/api/video-replica/tasks/${id}/result`, 'video'],
+    [`avatar:${id}:audio`, `/api/tasks/${id}/media/voice`, 'voice'],
+    [`restaurant:${id}:01.jpg`, `/api/restaurant/tasks/${id}/files/01.jpg`, 'photo'],
+  ]) assert.equal(generatedSource({key,url}).kind, kind);
+  for (const url of ['/etc/passwd', '//external.invalid', `/api/ai/media/${id}/source.jpg`, `/api/ai/media/${id}/result-1.png?external=1`]) assert.throws(() => generatedSource({key:`image:${id}:0`,url}));
+});
+
+test('retained MP3 and PNG are normalized for replica use without overwriting permanent originals', async t => {
+  const app = await workspace(t), audioPath = join(app.root, 'generated.mp3'), photoPath = join(app.root, 'generated.png');
+  await writeFile(audioPath, 'original-mp3'); await writeFile(photoPath, 'original-png');
+  const audio = await app.library.save('alice', { kind: 'voice', path: audioPath, mime: 'audio/mpeg', metadata: { origin: 'generated' }, placement: { folderId: 'imitated-voice' } });
+  const photo = await app.library.save('alice', { kind: 'photo', path: photoPath, mime: 'image/png', metadata: { origin: 'generated' }, placement: { folderId: 'photos' } });
+  const id = await app.draft();
+  for (const [kind, asset] of [['voice', audio], ['photo', photo]]) {
+    const response = await app.request(`/api/video-replica/tasks/${id}/${kind}`, { method: 'POST', json: { assetId: asset.id } });
+    assert.equal(response.status, 200, await response.clone().text());
+    if (kind === 'voice') assert.equal((await response.json()).task.voice.duration, 4);
+  }
+  assert.equal((await app.library.get('alice', audio.id)).bytes.toString(), 'original-mp3');
+  assert.equal((await app.library.get('alice', photo.id)).bytes.toString(), 'original-png');
+  const result = await app.request(`/api/video-replica/tasks/${id}/photo`);
+  assert.equal(result.status, 200);
+  assert.equal(await result.text(), 'jpeg:original-png');
+});
 
 function cloud() {
   const objects = new Map(), writes = [];
