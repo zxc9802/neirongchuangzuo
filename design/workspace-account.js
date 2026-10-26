@@ -79,5 +79,5 @@ try {
 } catch {
   const main = document.querySelector('#main');
   main.textContent = '工作台暂时无法加载，请刷新页面重试。';
-  main.style.cssText = 'padding:80px 110px;font-size:16px';
+  main.style.cssText = 'padding:80px 110px;font-size:17px';
 }
