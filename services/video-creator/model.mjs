@@ -124,6 +124,7 @@ function directorSystem(skill) {
 
 export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300000, maxOutputTokens = DIRECTOR_OUTPUT_TOKENS } = {}) {
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 4096 || maxOutputTokens > 65536) throw creatorError('编导输出长度配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
+  const writingModel = config.videoDirectorModel || config.imageTextModel || config.chatModel;
   return { enabled: Boolean(config.apiKey), async generate(input, { signal, onProgress, onAttempt } = {}) {
     if (!config.apiKey) throw creatorError('编导服务尚未配置，请联系管理员。', 503, 'DIRECTOR_NOT_CONFIGURED');
     const images = input.assets.filter(a => a.type === 'image');
@@ -137,7 +138,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
     let sequence = 0, observations;
     const auxiliary = async (stage, system, userContent, validate = value => value) => {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
-      const entry = { attempt: ++sequence, stage, startedAt: Date.now(), status:'started', phase:'request', model:stage==='observation' ? config.videoObservationModel || 'gpt-6-luna' : config.imageTextModel || config.chatModel, maxOutputTokens:stage==='observation'?maxOutputTokens:Math.min(maxOutputTokens,4096), inputImageCount: stage==='observation'?images.length:0 };
+      const entry = { attempt: ++sequence, stage, startedAt: Date.now(), status:'started', phase:'request', model:stage==='observation' ? config.videoObservationModel || 'gpt-6-luna' : stage === 'narration_repair' ? writingModel : config.imageTextModel || config.chatModel, maxOutputTokens:stage==='observation'?maxOutputTokens:Math.min(maxOutputTokens,4096), inputImageCount: stage==='observation'?images.length:0 };
       const publish=()=>onAttempt?.(redactDirectorValue(entry,[config.apiKey])); await publish();
       onProgress?.(({observation:'正在识别实拍内容',narration_repair:'正在精简旁白',quality:'正在检查素材依据与宣传内容'})[stage]);
       try {
@@ -166,7 +167,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
     let budget = maxOutputTokens, correction = '';
     for (let attempt = 1; attempt <= 2; attempt++) {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
-      const record = { attempt: ++sequence, stage:'planning', startedAt: Date.now(), status: 'started', phase: 'request', model: config.imageTextModel || config.chatModel,
+      const record = { attempt: ++sequence, stage:'planning', startedAt: Date.now(), status: 'started', phase: 'request', model: writingModel,
         maxOutputTokens: budget, inputImageCount: observations ? 0 : images.length, sourceImageCount: images.length, observationModel: observations ? config.videoObservationModel || 'gpt-6-luna' : undefined, historyMessageCount: input.history.slice(-10).length, finishReason: null };
       const publish = async () => { if (onAttempt) await onAttempt(redactDirectorValue(record, [config.apiKey])); };
       await publish();

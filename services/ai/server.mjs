@@ -42,6 +42,7 @@ export function loadAIConfig(env = process.env) {
   return { apiKey: value('OPENLUX_API_KEY'), chatModel: value('OPENLUX_CHAT_MODEL') || 'gpt-6-luna',
     autoTextBilling: value('OPENLUX_TEXT_BILLING_MODE') !== 'fixed',
     imageTextModel: value('OPENLUX_IMAGE_TEXT_MODEL') || 'claude-opus-5-5',
+    videoDirectorModel: value('OPENLUX_VIDEO_DIRECTOR_MODEL') || 'doubao-seed-2-1-pro-260915',
     videoObservationModel: value('OPENLUX_VIDEO_OBSERVATION_MODEL') || 'gpt-6-luna',
     imageBillingGroup: value('OPENLUX_IMAGE_BILLING_GROUP'), imageTextBillingGroup: value('OPENLUX_IMAGE_TEXT_BILLING_GROUP'), chatBillingGroup: value('OPENLUX_CHAT_BILLING_GROUP'),
     imageModel: value('OPENLUX_IMAGE_MODEL') || 'gpt-image-2.5-sunburst-c', falImageKey: value('FAL_IMAGE_KEY'), falImageModel: value('FAL_IMAGE_MODEL') || FAL_IMAGE_MODEL, baseUrl: 'https://api.openlux.ai/v1', limits: { imageDaily: limit('AI_IMAGE_DAILY_LIMIT', null), chatDaily: limit('AI_CHAT_DAILY_LIMIT', 100), perMinute: limit('AI_REQUESTS_PER_MINUTE', 10) } };

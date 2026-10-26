@@ -27,6 +27,21 @@ function sse(payload) {
 }
 const streamResponse = payload => new Response(sse(payload), { headers: { 'content-type': 'text/event-stream', 'x-api-request-id': 'outer-receipt-id' } });
 
+test('video writing model is independent from the vision and review models', async t => {
+  const { input, output } = await setup(t); input.groundingVersion = 1;
+  output.script.shots[0].evidence = [{ assetId: 'real-photo', factIndexes: [0], use: 'scene' }];
+  const calls = [], attempts = [];
+  const model = createDirectorModel({ config: { ...config, videoDirectorModel: 'doubao-seed-2-1-pro-260915', videoObservationModel: 'gpt-6-luna' },
+    fetchImpl: async (_url, options) => {
+      const request = JSON.parse(options.body); calls.push(request);
+      return streamResponse(completion(JSON.stringify(calls.length === 1 ? { observations: [{ id: 'real-photo', kinds: ['scene'], facts: ['门店空间，暖黄灯光'], uncertain: [] }] } : calls.length === 2 ? output : { passed: true, issues: [] })));
+    } });
+  const result = await model.generate(input, { onAttempt: entry => attempts.push(entry) });
+  assert.equal(result.kind, 'script');
+  assert.deepEqual(calls.map(call => call.model), ['gpt-6-luna', 'doubao-seed-2-1-pro-260915', 'claude-opus-5-5']);
+  assert.equal(attempts.find(entry => entry.stage === 'planning').model, 'doubao-seed-2-1-pro-260915');
+});
+
 test('a request timer expiring during later validation cannot relabel a quality rejection as network timeout',()=>{
   const signal=AbortSignal.abort(new DOMException('Timeout','TimeoutError'));
   const cause=Object.assign(new Error('脚本依据不符'),{code:'DIRECTOR_INVALID_OUTPUT',outputIssue:'quality_rejected'});
