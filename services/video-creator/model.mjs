@@ -123,6 +123,7 @@ function directorSystem(skill) {
 }
 
 export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300000, maxOutputTokens = DIRECTOR_OUTPUT_TOKENS } = {}) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 1200000) throw creatorError('编导等待时限配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 4096 || maxOutputTokens > 65536) throw creatorError('编导输出长度配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
   const writingModel = config.videoDirectorModel || config.imageTextModel || config.chatModel;
   return { enabled: Boolean(config.apiKey), async generate(input, { signal, onProgress, onAttempt } = {}) {

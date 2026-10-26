@@ -8,6 +8,10 @@ import { createDirectorModel, validateDirectorResult } from '../services/video-c
 import { readDirectorResponse, directorAttemptSummary, directorFailure } from '../services/video-creator/director-response.mjs';
 
 const config = { apiKey: 'sk-private-test-key', baseUrl: 'https://model.example/v1', imageTextModel: 'claude-opus-5-5' };
+test('director allows a ten minute provider deadline but rejects invalid deadlines', () => {
+  assert.equal(createDirectorModel({ config, timeoutMs: 600000 }).enabled, true);
+  for (const timeoutMs of [0, NaN, Infinity, 1200001]) assert.throws(() => createDirectorModel({ config, timeoutMs }), { code: 'DIRECTOR_CONFIG_INVALID' });
+});
 async function setup(t) {
   const root = await mkdtemp(join(tmpdir(), 'director-diagnostics-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -50,6 +50,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   const store = createCreatorStore(storageDir), locks = new Map(), workers = new Map(), controllers = new Map(), streams = new Set();
   const meter = createApiCostMeter({ credits, config: aiConfig, fetchImpl });
   director ||= createDirectorModel({ config: aiConfig, fetchImpl: meter.fetch,
+    timeoutMs: env.VIDEO_DIRECTOR_TIMEOUT_MS ? Number(env.VIDEO_DIRECTOR_TIMEOUT_MS) : 600000,
     maxOutputTokens: env.VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS ? Number(env.VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS) : DIRECTOR_OUTPUT_TOKENS });
   provider ||= createCreatorProvider(config, fetchImpl);
   const cnyPerSecond = Number(env.VIDEO_GENERATION_CNY_PER_SECOND ?? 1);
