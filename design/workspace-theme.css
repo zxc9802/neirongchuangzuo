@@ -63,7 +63,7 @@ html:not([lang="zh-CN"]) :is(.vc-choice-grid > button, .restaurant-type-card h3,
 [data-theme="dark"] .rail .brand { color: #9cd9c8; }
 [data-theme="dark"] :is(.navitem, .rail-bottom button, .workbar button, .workbar-breadcrumb, .workbar strong) { color: var(--ui-muted); }
 [data-theme="dark"] :is(.navitem.active, .navitem:hover) { background: var(--ui-raised); color: #a6caff; }
-[data-theme="dark"] .rail :is(.navitem small, #guide-button small, #workspace-account span, #workspace-account small) { color: var(--ui-text); }
+[data-theme="dark"] .rail :is(.navitem small, #guide-button small, #workspace-account span, #workspace-account small) { color: #fff; }
 [data-theme="dark"] :is(#workspace-credits, .rail-bottom .avatar) { background: #21382f; color: #a6d8bf; border-color: #3d5b4b; }
 [data-theme="dark"] :is(.panel, .vc-layout .panel, .input-shell, .setting-button, dialog, .home-idea-box, .home-load-more, .image-result-card, .rest-panel, .agent-sidebar, .agent-composer, .generated-asset-card) { background: var(--ui-surface); border-color: var(--ui-border); color: var(--ui-text); }
 [data-theme="dark"] :is(.home-intro h1, .home-section-title h2, .home-discover-heading h2, .home-case-caption strong, .home-gallery-empty > strong, .setting-button strong, .preview-tabs > button.active, .editor-heading strong) { color: var(--ui-text); }
@@ -76,8 +76,8 @@ html:not([lang="zh-CN"]) :is(.vc-choice-grid > button, .restaurant-type-card h3,
 [data-theme="dark"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select) { color: var(--ui-text); background-color: var(--ui-surface); border-color: var(--ui-border); }
 [data-theme="dark"] :is(textarea, input)::placeholder { color: #99a7ba; }
 [data-theme="dark"] #agent-chat-input { font-size: 17px; }
-[data-theme="dark"] #agent-chat-input:not([aria-invalid="true"]) { color: var(--ui-text); }
-[data-theme="dark"] #agent-chat-input::placeholder { color: #c1cad6; }
+[data-theme="dark"] #agent-chat-input:not([aria-invalid="true"]) { color: #fff; }
+[data-theme="dark"] #agent-chat-input::placeholder { color: #e8edf4; }
 [data-theme="dark"] #home-idea { background: transparent; color: var(--ui-text); }
 [data-theme="dark"] :is(.vc-skill-sidebar, .vc-prompt-editor, .vc-composer, .vc-preview, .vc-media-dialog, .vc-task-thumb, .vc-favorites-grid, .vc-sidebar-skill.selected) { background: var(--ui-surface); color: var(--ui-text); border-color: var(--ui-border); }
 [data-theme="dark"] :is(.vc-sidebar-skill:hover, .vc-sidebar-skill.selected, .vc-icon:hover) { background: var(--ui-raised); }
