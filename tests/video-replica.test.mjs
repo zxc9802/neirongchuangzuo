@@ -13,6 +13,7 @@ import { createVideoHandler } from '../services/video/server.mjs';
 import { createVideoProvider, generationBody, parseGeneration, videoConfig, PROMPT, VideoError, PIXVERSE_MODEL, WAN_MODEL, WAN3_MODEL, WAN3_FAST_MODEL } from '../services/video/provider.mjs';
 import { wan3GenerationBody } from '../services/video/wan3.mjs';
 import { createWan3Storage } from '../services/video/wan3-storage.mjs';
+import { createSubtitleRemoval } from '../services/video/subtitle-removal.mjs';
 import { planSegments } from '../services/video/segments.mjs';
 import { normalizePhoto, downloadVideo, probeVideo } from '../services/video/media.mjs';
 import { alignmentSegments, speechTimeline, confirmSpeech } from '../services/video/speech.mjs';
@@ -57,7 +58,7 @@ async function fixture(t, options = {}) {
       photo: async () => Buffer.from('photo'), probe: async input => ({ ...META, duration: options.narration && input.endsWith('upload.tmp') ? 6 : META.duration }),
       download: async (_url, path) => writeFile(path, VIDEO),
       captions: { extract: async () => null },
-      narration: null, lipsync: null, voiceConversion: null,
+      narration: null, lipsync: null, voiceConversion: null, subtitleRemoval: null,
       providerStorage: { upload: async input => `https://fal.media/${input.split('/').at(-1)}` },
       wan3Storage: {
         upload: async (id, kind, path, type) => { state.cosUploads.push({ id, kind, path, type, bytes: await readFile(path) }); },
@@ -92,6 +93,53 @@ async function fixture(t, options = {}) {
   }
   return { root, wallet, state, call, init, upload, current, until, close, open, get base() { return base; } };
 }
+
+for (const audio of [true, false]) test(`deep replicas deliver only after full-screen cleanup and resume its receipt, audio=${audio}`, async t => {
+  let finished = false, submissions = 0, restores = 0;
+  const clean = createSubtitleRemoval({
+    provider: { assertConfigured() {}, authorize: async () => {}, submit: async () => { submissions++; return 'cleanup-paid-1'; },
+      query: async () => ({ task_id: 'cleanup-paid-1', status: finished ? 'success' : 'processing', progress: 50, metering: 4 }) },
+    storage: { assertConfigured() {}, upload: async (_id, path) => { assert.equal(await readFile(path, 'utf8'), 'audio-finalized'); },
+      submissionUrls: async () => ({ videoUrl: 'private-source', uploadUrl: 'private-destination' }), outputUrl: async () => 'https://cos.example/clean.mp4', remove: async () => {} },
+    download: async (_url, path) => writeFile(path, 'clean-video'), probe: async () => ({ ...META, audio }),
+    restoreAudio: async (input, clean, output) => { restores++; assert.equal(await readFile(input, 'utf8'), 'audio-finalized');
+      assert.equal(await readFile(clean, 'utf8'), 'clean-video'); await writeFile(output, 'clean-final'); } });
+  const app = await fixture(t, { subtitleRemoval: clean, probe: async () => ({ ...META, audio }),
+    restoreAudio: async (_input, _generated, output) => writeFile(output, 'audio-finalized') });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: {} } });
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const cleaning = await app.until(id, task => task.status === 'cleaning' && task.subtitleRemoval?.stage === 'processing');
+  assert.equal(cleaning.resultUrl, null); assert.equal(cleaning.subtitleRemoval.progress, 50);
+  assert.doesNotMatch(JSON.stringify(cleaning), /private-source|private-destination|cleanup-paid-1/);
+  await app.close(); await app.open(); finished = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.captionCheck.method, 'all_area'); assert.equal(submissions, 1); assert.equal(app.state.generations, 1); assert.equal(restores, 1);
+  assert.equal(await (await app.call(`/tasks/${id}/result`)).text(), 'clean-final');
+});
+
+test('missing cleanup configuration rejects deep start before paid generation or credit reservation', async t => {
+  const app = await fixture(t, { subtitleRemoval: createSubtitleRemoval({ env: {} }) });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: {} } });
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 503);
+  const task = await app.current(id); assert.equal(task.status, 'draft'); assert.equal(task.billing, undefined); assert.equal(app.state.generations, 0);
+});
+
+for (const uncertain of [true, false]) test(`cleanup ${uncertain ? 'uncertain' : 'failed'} remains held across restart without resubmitting`, async t => {
+  const clean = { assertConfigured() {}, advance: async task => {
+    if (uncertain) task.subtitleRemoval.submitting = true; else task.subtitleRemoval.failed = true;
+    throw new VideoError('清理任务未确认', 502, uncertain ? 'VIDEO_CLEANUP_UNCERTAIN' : 'VIDEO_CLEANUP_FAILED');
+  } };
+  const app = await fixture(t, { subtitleRemoval: clean, restoreAudio: async (_source, _generated, output) => writeFile(output, VIDEO) });
+  const id = randomUUID(); await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: {} } });
+  await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const held = await app.until(id, task => task.status === 'waiting'); assert.equal(held.canResume, false); assert.equal(held.resultUrl, null);
+  await app.close(); await app.open(); await app.call(`/tasks/${id}/resume`, { body: {} });
+  assert.equal((await app.current(id)).status, 'waiting'); assert.equal(app.state.generations, 1);
+});
 
 test('Seedance 2.0 connection matches reference project and never returns credentials', async () => {
   const config = videoConfig({ VIDEO_API_BASE_URL: 'http://provider.example:19220', VIDEO_PROJECT_CODE: 'project', VIDEO_ACCESS_KEY: 'access', VIDEO_SECRET_KEY: 'secret', TEMP_ASSET_SIGNING_SECRET: 'sign' }, 'https://workspace.example');

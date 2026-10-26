@@ -20,6 +20,7 @@ import { createWan3Provider, wan3Price, wan3Usage } from './wan3.mjs';
 import { createWan3Queue } from './wan3-queue.mjs';
 import { createWan3Storage } from './wan3-storage.mjs';
 import { createCaptionService, captionSpeech } from './captions.mjs';
+import { createSubtitleRemoval, SUBTITLE_REMOVAL_FILES } from './subtitle-removal.mjs';
 import { createNarrationService } from './narration.mjs';
 import { createVoiceConversionService } from './voice-conversion.mjs';
 import { createLipsyncService } from './lipsync.mjs';
@@ -33,7 +34,7 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const PREFIX = '/api/video-replica';
 const DAY = 86400_000;
 const MATERIAL_QUERY_RETRIES = 5;
-const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'queued', 'submitting', 'running', 'downloading', 'verifying']);
+const ACTIVE = new Set(['reserving', 'preparing', 'reviewing', 'queued', 'submitting', 'running', 'downloading', 'verifying', 'cleaning']);
 const RATIOS = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9'];
 const isFalReplacement = model => model === PIXVERSE_MODEL || model === WAN_MODEL;
 const error = (message, status = 400, code) => new VideoError(message, status, code);
@@ -58,7 +59,7 @@ async function readJSON(req) {
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
   config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo,
   photo = normalizePhoto, voice = normalizeVoice, restoreAudio = restoreSourceAudio, speech, captions = createCaptionService(env),
-  narration, lipsync, voiceConversion, localization, heygen, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
+  narration, lipsync, voiceConversion, localization, heygen, subtitleRemoval, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
   scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, prepareReference = prepareReferenceVideo,
   wan3Storage = createWan3Storage({ env }), now = Date.now, pollIntervalMs = 5000 } = {}) {
   const jobs = new Map(), locks = new Map(), processors = new Map();
@@ -69,6 +70,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   const safeMessage = value => safeVideoError(value, diagnosticSecrets);
   const wan3Queue = createWan3Queue({ jobs, save, now });
   const costMeter=createApiCostMeter({credits,config:loadAIConfig(env),fetchImpl});
+  if (subtitleRemoval === undefined) subtitleRemoval = createSubtitleRemoval({ env, fetchImpl, now, download, probe, restoreAudio });
   if (speech === undefined) speech = createSpeechService(env, costMeter.fetch);
   if (narration === undefined) narration = createNarrationService(env, { fetchImpl: costMeter.fetch, recoverReceipt: costMeter.recoverFalRequest, now });
   if (lipsync === undefined) lipsync = createLipsyncService(env, costMeter.fetch);
@@ -235,11 +237,14 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       startedAt: task.recheckStartedAt || task.startedAt, generationStartedAt: task.startedAt, lastCheckedAt: task.lastCheckedAt,
       ratio: task.ratio, video: task.video && video, targetDuration: task.targetDuration, segments: segmentView(task), queue: wan3Queue.view(task), photo: task.photo, voice: task.voice, speech: task.speech, captions: task.captions,
       captionsChecked: task.captionsChecked, captionCheck: task.captionCheck, audioCheck: task.audioCheck,
+      subtitleRemoval: task.subtitleRemoval && { stage: task.subtitleRemoval.stage, progress: task.subtitleRemoval.progress,
+        elapsedMs: task.subtitleRemoval.elapsedMs },
       error: safeMessage(task.error), code: task.code,
       recovery: task.recovery && { state: task.recovery.state, message: safeMessage(task.recovery.message), nextAttemptAt: task.recovery.nextAttemptAt },
       canResume: !expired && task.status === 'waiting' && task.recovery?.resumeStatus !== 'submitting' && !task.lipsync?.submitting
         && !(isWan3Model(task.model) && (task.segments || [task]).some(part => wan3Queue.active(part) && !segmentConfirmed(part)))
         && !task.voiceConversion?.submitting && !task.voiceConversion?.failed
+        && !task.subtitleRemoval?.submitting && !task.subtitleRemoval?.failed
         && !task.voiceConversion?.separation?.submitting && !task.voiceConversion?.separation?.failed
         && !task.languageDetection?.pending
         && !task.localization?.failed && !task.localization?.translating && !task.localization?.segments?.some(segment => segment.status === 'submitting')
@@ -350,6 +355,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     task.error = safeMessage(cause.message); task.code = cause.code; task.status = 'waiting'; await save(task);
   }
   async function recover(task, cause) {
+    if (/^VIDEO_CLEANUP_(UNCERTAIN|FAILED|INVALID|ACCOUNT|REJECTED|NOT_CONFIGURED)$/.test(cause.code || '')) {
+      const action = cause.code.endsWith('UNCERTAIN') ? 'confirm'
+        : /ACCOUNT|REJECTED|NOT_CONFIGURED/.test(cause.code) ? 'account' : 'input';
+      await hold(task, { message: cause.message, code: cause.code, recoveryAction: action }); return;
+    }
     if (['VIDEO_LANGUAGE_UNCERTAIN', 'VIDEO_LOCALIZATION_FAILED', 'VIDEO_LOCALIZATION_UNCERTAIN'].includes(cause.code)) {
       await hold(task, { message: cause.message, code: cause.code, recoveryAction: cause.code === 'VIDEO_LOCALIZATION_UNCERTAIN' ? 'confirm' : 'input' });
       task.recovery.message = cause.message; await save(task); return;
@@ -662,6 +672,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await reconcile(task);
       if (!task.cleaned) {
         await archiveTaskMaterials(task);
+        if (task.subtitleRemoval) await subtitleRemoval?.cleanup(task, () => save(task));
+        for (const name of SUBTITLE_REMOVAL_FILES) await rm(join(folder(task), name), { force: true });
         for (const kind of Object.keys(task.wan3CosMaterials || {})) {
           await wan3Storage.remove(task.id, kind);
           delete task.wan3CosMaterials[kind];
@@ -907,7 +919,15 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const metadata = await probe(aligned);
       task.actualDuration = Math.round(metadata.duration * 1000) / 1000;
       await renderCaptions(task, aligned);
-      await rename(aligned, file(task, 'result')); await complete(task);
+      if (isDeepReplica(task) && subtitleRemoval) {
+        await rename(aligned, join(folder(task), 'subtitle-input.mp4'));
+        task.status = 'cleaning'; task.subtitleRemoval = { stage: 'uploading', startedAt: now() };
+        task.recoveryDeadline = now() + 30 * 60_000;
+        await save(task);
+      } else { await rename(aligned, file(task, 'result')); await complete(task); }
+    }
+    if (task.status === 'cleaning') {
+      if (await subtitleRemoval.advance(task, folder(task), () => save(task))) await complete(task);
     }
   }
   async function processTask(task) {
@@ -1292,6 +1312,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (isDeepReplica(task)) {
             if (!task.video) throw error('请先上传参考视频。');
             for (const kind of DEEP_KINDS) if (task.replacements[kind] && !task[kind]) throw error(`请先上传${DEEP_LABELS[kind]}参考素材。`, 400, 'VIDEO_REPLACEMENT_REQUIRED');
+            subtitleRemoval?.assertConfigured();
           } else if (!task.photo || !task.video) throw error('请先上传一段参考视频和一张人物照片。');
           const voiceEngine = isDeepReplica(task) ? task.replacements.voice ? 'chatterbox' : 'seedance' : selectedVoiceEngine(body.voiceEngine ?? task.voiceEngine ?? 'seedance');
           if (voiceEngine === 'chatterbox') {

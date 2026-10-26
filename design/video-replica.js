@@ -37,7 +37,11 @@ const taskLabel = task => [WAN3_MODEL, WAN3_FAST_MODEL].includes(task.model) && 
   ? task.narrationProgress?.ready ? '正在同步口型与参考配音' : '正在完成参考声音配音'
   : task.voiceEngine === 'indextts2' && task.status === 'running' && !task.narrationProgress?.ready
     ? '正在替换人物并生成参考配音' : task.segments && task.status === 'downloading'
-    ? '正在保存并拼接分段成片' : labels[task.status] || '正在处理';
+    ? '正在保存并拼接分段成片' : task.status === 'cleaning'
+    ? task.subtitleRemoval?.stage === 'queued' ? '排队等待字幕与水印清理'
+      : task.subtitleRemoval?.stage === 'processing' ? `正在全屏清理字幕与水印（${Number(task.subtitleRemoval.progress) || 0}%）`
+        : task.subtitleRemoval?.stage === 'downloading' ? '正在保存清理后的成片' : '正在全屏清理字幕与水印'
+    : labels[task.status] || '正在处理';
 // One whole sentence per seam reason, so each is localized as a unit.
 function segmentText(task) {
   if (!task.segments) return '';
@@ -101,6 +105,7 @@ function actionMessage() {
   if (state.busy) return '';
   if (state.current?.status === 'queued') return '任务已进入队列，轮到后自动生成，无需重复提交。';
   if (state.current?.error || state.current?.recovery) return failureMessage(state.current);
+  if (state.current?.status === 'cleaning') return `${taskLabel(state.current)}，无需框选，请稍候。`;
   if (state.current?.status === 'verifying') return ['indextts2', 'chatterbox'].includes(state.current.voiceEngine) ? `${taskLabel(state.current)}，请稍候。` : '正在核对已有成片的台词与开口时间，请稍候。';
   if (state.current?.status === 'failed') return failureMessage(state.current);
   return !state.loading && !state.config?.enabled ? '人物复刻服务尚未配置，请联系管理员。' : '';

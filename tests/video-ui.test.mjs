@@ -7,6 +7,15 @@ const finiteWallet = () => ({ available: 1000, held: 0, total: 1000, unlimited: 
 const STANDARD_MODEL = 'doubao-seedance-2-0-260128', PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
 const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
 
+test('deep cleanup displays full-screen progress without a coordinate selector or early download', async t => {
+  const task = { id: 'cleanup-preview', mode: 'deep', status: 'cleaning', createdAt: Date.now(),
+    replacements: {}, subtitleRemoval: { stage: 'processing', progress: 38 } };
+  const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /正在全屏清理字幕与水印（38%）/);
+  assert.match(page.html(), /无需框选/);
+  assert.doesNotMatch(page.html(), /replica-download/);
+});
+
 test('replica keeps the source language without a selector or target in requests', async t => {
   let task; const posts = [];
   const page = await fixture(t, { apiFetch: (path, options) => {
