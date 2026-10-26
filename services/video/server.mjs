@@ -1201,7 +1201,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           } else if (kind === 'voice') {
             await writeFile(temporary, bytes, { mode: 0o600 });
             const normalized = join(folder(task), 'voice.tmp.wav');
-            const normalizedImport = imported && imported.mime === 'audio/wav' && imported.metadata?.origin !== 'generated';
+            const normalizedImport = imported && imported.mime === 'audio/wav' && !['generated', 'library-upload'].includes(imported.metadata?.origin);
             const metadata = normalizedImport ? imported.metadata : await voice(temporary, normalized);
             if (normalizedImport) await writeFile(normalized, bytes, { mode: 0o600 });
             const intervals = normalizedImport || task.voiceEngine === 'chatterbox' ? [] : await speech.detect(normalized).catch(() => []);

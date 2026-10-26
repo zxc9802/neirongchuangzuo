@@ -113,6 +113,18 @@ test('retained MP3 and PNG are normalized for replica use without overwriting pe
   assert.equal(await result.text(), 'jpeg:original-png');
 });
 
+test('full WAV library uploads are normalized when reused without shortening the stored original', async t => {
+  const app = await workspace(t), path = join(app.root, 'full.wav');
+  await writeFile(path, 'full-library-wav');
+  const audio = await app.library.save('alice', { kind: 'voice', path, mime: 'audio/wav', metadata: { origin: 'library-upload', duration: 20 } });
+  const id = await app.draft();
+  const response = await app.request(`/api/video-replica/tasks/${id}/voice`, { method: 'POST', json: { assetId: audio.id } });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).task.voice.duration, 4, 'the reference normalizer ran');
+  assert.equal((await app.library.get('alice', audio.id)).bytes.toString(), 'full-library-wav');
+  assert.equal((await app.library.get('alice', audio.id)).duration, 20);
+});
+
 function cloud() {
   const objects = new Map(), writes = [];
   let failIndex = false;
@@ -370,4 +382,42 @@ test('cloud organization failure is not acknowledged as a saved edit', async t =
   const response = await app.request('/api/assets/materials/organization', {method:'POST',json:{action:'delete',keys:[`material:${item.id}`]}});
   assert.equal(response.status, 503);
   assert.equal((await app.library.list('alice')).length, 1);
+});
+
+function uploadWav(seconds = 20) {
+  const bytes = Buffer.alloc(44 + seconds * 16000 * 2);
+  bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8); bytes.writeUInt32LE(16, 16);
+  bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22); bytes.writeUInt32LE(16000, 24); bytes.writeUInt32LE(32000, 28);
+  bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34); bytes.write('data', 36); bytes.writeUInt32LE(bytes.length - 44, 40); return bytes;
+}
+
+test('library uploads preserve full audio and image bytes, enforce folder types and reject fake files', async t => {
+  const library = createMaterialLibrary({ cosClient: cloud() });
+  const handler = createMaterialHandler({ library, voice: () => assert.fail('must not trim library audio') });
+  const server = createServer((req, res) => { req.authenticatedUserId = req.headers.cookie === 'alice' ? 'alice' : undefined; void handler(req, res); });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const upload = (kind, body, folder, cookie = 'alice') => fetch(`${base}/api/assets/materials/upload/${kind}?folderId=${folder}`, { method:'POST', headers:{ Cookie:cookie,'X-File-Name':encodeURIComponent('测试素材') }, body });
+  const wav = uploadWav();
+  assert.equal((await upload('voice', wav, 'own-voice', '')).status, 401);
+  assert.equal((await upload('voice', wav, 'photos')).status, 400);
+  assert.equal((await library.list('alice')).length, 0);
+  const response = await upload('voice', wav, 'own-voice');
+  assert.equal(response.status, 201, await response.clone().text());
+  const result = await response.json(), saved = await library.get('alice', result.material.id);
+  assert.equal(saved.duration, 20); assert.equal(saved.mime, 'audio/wav'); assert.deepEqual(saved.bytes, wav);
+  assert.equal(saved.metadata.origin, 'library-upload'); assert.equal(result.organization.assignments[saved.id], 'own-voice');
+  assert.equal((await upload('voice', wav, 'imitated-voice')).status, 201);
+  assert.equal((await library.list('alice')).length, 1);
+  const sharp = (await import('sharp')).default;
+  const png = await sharp({ create:{ width:32,height:32,channels:3,background:'red' } }).png().toBuffer();
+  const imageResponse = await upload('photo', png, 'photos'); assert.equal(imageResponse.status, 201);
+  const image = await imageResponse.json(); assert.equal(image.material.mime, 'image/png');
+  assert.deepEqual((await library.get('alice', image.material.id)).bytes, png);
+  assert.equal((await upload('photo', Buffer.from('not an image'), 'photos')).status, 400);
+  assert.equal((await upload('voice', Buffer.from('not audio'), 'own-voice')).status, 400);
+  assert.equal((await upload('video', png, 'own-video')).status, 400);
+  assert.equal((await upload('photo', Buffer.alloc(50 * 1024 * 1024), 'photos')).status, 413);
+  assert.equal((await library.list('alice')).length, 2);
 });

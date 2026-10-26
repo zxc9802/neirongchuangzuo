@@ -34,3 +34,49 @@ export function openMaterialMove(items, state, ctx) {
   ctx.openModal(generated ? '保存到素材文件夹' : '移动到文件夹', generated ? '保存成功后长期保留，不受原任务到期影响。' : '',
     `<div class="asset-folder-form"><label>目标文件夹<select id="asset-move-target">${options(assetFolders(state.organization), type, new Set(), state.folderId || (type === 'video' ? 'generated-video' : type === 'audio' ? 'imitated-voice' : 'photos'))}</select></label></div><footer class="modal-actions">${ctx.button('asset-cancel-delete','取消','secondary')}${ctx.button('asset-placement-submit', generated ? '保存并移动' : '移动', 'primary', `data-keys="${ctx.esc(JSON.stringify(items.map(item => item.key)))}" data-type="${type}"`)}</footer>`, true);
 }
+
+export function openAssetUpload(state, ctx, upload) {
+  const folders = assetFolders(state.organization), current = folders.find(folder => folder.id === state.folderId);
+  const initialType = current?.type || (state.category === 'all' ? 'image' : state.category);
+  const settings = {
+    image: { kind: 'photo', accept: '.jpg,.jpeg,.png,.webp', extensions: /\.(jpe?g|png|webp)$/i, limit: 50 * 1024 * 1024 - 1, help: 'JPG / PNG / WebP，单张小于50MB' },
+    audio: { kind: 'voice', accept: '.mp3,.wav', extensions: /\.(mp3|wav)$/i, limit: 50 * 1024 * 1024 - 1, help: 'MP3 / WAV，单个小于50MB，保留完整音频' },
+    video: { kind: 'video', accept: '.mp4,.mov', extensions: /\.(mp4|mov)$/i, limit: 300 * 1024 * 1024, help: 'MP4 / MOV，单个不超过300MB' },
+  };
+  ctx.openModal('上传素材', '上传后长期保存，可在创作时复用。', `<div class="asset-folder-form asset-upload-form"><label>${t('素材类型')}<select id="asset-upload-type">${Object.entries(ASSET_CATEGORIES).map(([type, label]) => `<option value="${type}" ${type === initialType ? 'selected' : ''}>${t(label)}</option>`).join('')}</select></label><label>${t('目标文件夹')}<select id="asset-upload-folder"></select></label><label>${t('选择文件')}<input id="asset-upload-files" type="file" multiple></label><small id="asset-upload-help"></small><ol id="asset-upload-results" aria-live="polite"></ol></div><footer class="modal-actions"><button type="button" class="primary" id="asset-upload-start">${t('开始上传')}</button></footer>`, true);
+  const typeInput = document.querySelector('#asset-upload-type'), folderInput = document.querySelector('#asset-upload-folder');
+  const filesInput = document.querySelector('#asset-upload-files'), button = document.querySelector('#asset-upload-start'), results = document.querySelector('#asset-upload-results');
+  const refresh = () => {
+    const type = typeInput.value;
+    folderInput.innerHTML = options(folders, type, new Set(), current?.type === type ? current.id : ({ image: 'photos', audio: 'own-voice', video: 'own-video' })[type]);
+    filesInput.accept = settings[type].accept; filesInput.value = '';
+    document.querySelector('#asset-upload-help').textContent = t(settings[type].help);
+    button.textContent = t('开始上传');
+    results.replaceChildren();
+  };
+  typeInput.addEventListener('change', refresh); refresh();
+  button.addEventListener('click', async () => {
+    const files = [...filesInput.files];
+    if (!files.length) { ctx.toast('请选择素材文件。'); return; }
+    const config = settings[typeInput.value], folderId = folderInput.value || null;
+    for (const control of [typeInput, folderInput, filesInput, button]) control.disabled = true;
+    results.replaceChildren();
+    const rows = files.map(file => { const row = document.createElement('li'); row.textContent = `${file.name} — ${t('等待上传')}`; results.append(row); return row; });
+    const failed = [];
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+          if (!config.extensions.test(file.name)) throw new Error(t('文件格式与所选类型不符'));
+          if (!file.size || file.size > config.limit) throw new Error(t('文件为空或超过大小限制'));
+          rows[i].textContent = `${file.name} — ${t('正在上传…')}`;
+          await upload(config.kind, file, folderId);
+          rows[i].textContent = `${file.name} — ${t('上传成功')}`;
+        } catch (error) { failed.push(file); rows[i].textContent = `${file.name} — ${t('上传失败')}：${t(error.message)}`; }
+      }
+      if (typeof DataTransfer !== 'undefined') { const transfer = new DataTransfer(); failed.forEach(file => transfer.items.add(file)); filesInput.files = transfer.files; }
+      else filesInput.value = '';
+      button.textContent = t(failed.length ? '重试失败文件' : '继续上传');
+    } finally { for (const control of [typeInput, folderInput, filesInput, button]) control.disabled = false; }
+  });
+}

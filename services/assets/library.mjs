@@ -6,12 +6,13 @@ import { normalizePhoto, probeVideo, PHOTO_LIMIT, VIDEO_LIMIT } from '../video/m
 import { normalizeVoice, VOICE_LIMIT } from '../video/speech.mjs';
 import { editFolders, assignMaterials } from './folders.mjs';
 import { generatedSource, readGeneratedMedia } from './retain.mjs';
+import { inspectAssetUpload } from './upload.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const TYPES = { photo: { type: 'image', mime: 'image/jpeg', ext: 'jpg', name: '图片素材' }, voice: { type: 'audio', mime: 'audio/wav', ext: 'wav', name: '参考声音' }, video: { type: 'video', mime: 'video/mp4', ext: 'mp4', name: '参考视频' } };
 const fail = (message, status = 503) => Object.assign(new Error(message), { status, code: 'ASSET_STORAGE_ERROR' });
 const validId = id => /^(photo|voice|video)-[a-f0-9]{64}$/.test(id || '');
-const formats = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'audio/wav': 'wav', 'audio/mpeg': 'mp3', 'video/mp4': 'mp4' };
+const formats = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'audio/wav': 'wav', 'audio/mpeg': 'mp3', 'video/mp4': 'mp4', 'video/quicktime': 'mov' };
 
 // A separate, private prefix has no application expiry or task-cleanup dependency.
 export function createMaterialLibrary({ env = process.env, cosClient, now = Date.now } = {}) {
@@ -193,15 +194,23 @@ export function createMaterialHandler({ library, archiveExisting, readGenerated 
         catch (error) { if (error.status) throw error; throw fail('资产操作参数无效。', 400); }
         json(200, { organization: await library.organize(userId, input) }); return;
       }
-      const upload = /^\/api\/assets\/materials\/(photo|voice|video)$/.exec(url.pathname);
+      const directUpload = /^\/api\/assets\/materials\/upload\/(photo|voice|video)$/.exec(url.pathname);
+      const upload = directUpload || /^\/api\/assets\/materials\/(photo|voice|video)$/.exec(url.pathname);
       if (upload && req.method === 'POST') {
         if (!library.configured) throw fail('素材云存储尚未配置，请联系管理员配置 COS 后重试。');
-        const kind = upload[1], bytes = await uploadBody(req, kind === 'video' ? VIDEO_LIMIT : kind === 'voice' ? VOICE_LIMIT : PHOTO_LIMIT);
+        const kind = upload[1], bytes = await uploadBody(req, kind === 'video' ? VIDEO_LIMIT : directUpload ? 50 * 1024 * 1024 - 1 : kind === 'voice' ? VOICE_LIMIT : PHOTO_LIMIT);
         let name;
         try { name = decodeURIComponent(req.headers['x-file-name'] || ''); } catch { throw fail('素材文件名无效。', 400); }
         const directory = await mkdtemp(join(tmpdir(), 'qiya-asset-upload-'));
         try {
           const input = join(directory, 'input'), output = join(directory, 'normalized.wav');
+          if (directUpload) {
+            await writeFile(input, bytes, { mode: 0o600 });
+            const inspected = await inspectAssetUpload(kind, bytes, input, probe);
+            const material = await library.save(userId, { kind, path: input, name, mime: inspected.mime,
+              metadata: { ...inspected.metadata, origin: 'library-upload' }, placement: { folderId: url.searchParams.get('folderId') || null } });
+            json(201, { material, organization: await library.organization(userId) }); return;
+          }
           await writeFile(input, kind === 'photo' ? await photo(bytes) : bytes, { mode: 0o600 });
           let metadata = {};
           if (kind === 'voice') metadata = await voice(input, output);

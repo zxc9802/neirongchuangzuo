@@ -2,7 +2,7 @@ import { uiLocale, t } from './workspace-preferences.js';
 import { imageTaskTitle } from './image-presets.js';
 import { digitalHumanModelLabel } from './model-labels.js';
 import { assetFolders, materialFolder, organizeAssets, relativeAssetMove } from './asset-organization.js';
-import { renderAssetFolders, openFolderEditor, openMaterialMove } from './asset-folders.js';
+import { renderAssetFolders, openFolderEditor, openMaterialMove, openAssetUpload } from './asset-folders.js';
 const RETENTION_MS = 72 * 60 * 60 * 1000;
 const TYPES = { all: '全部', image: '图片', video: '视频', audio: '音频' };
 const state = { ctx: null, category: 'all', folderId: null, type: 'all', materialType: 'all', limit: 24, materialLimit: 24, records: [], materials: [], rawRecords: [], rawMaterials: [], organization: {}, deleted: false, selection: new Set(), busy: false, dragKey: null, errors: [], loading: false, controller: null, timer: null, revision: 0 };
@@ -102,10 +102,12 @@ export function collectMaterialAssets(items = []) {
     && new RegExp(`^${item.kind}-[a-f0-9]{64}$`).test(item.id || '')
     && item.url === `/api/assets/materials/${item.id}/media` && Number.isFinite(item.createdAt));
 }
-export async function uploadSharedMaterial(kind, file, signal) {
+export async function uploadSharedMaterial(kind, file, signal, placement) {
   const cache = currentLibrary();
   const assetKind = ['product', 'background'].includes(kind) ? 'photo' : kind;
-  const response = await fetch(`/api/assets/materials/${assetKind}`, { method: 'POST', credentials: 'same-origin',
+  if (placement) cache.organizationRevision++;
+  const route = placement ? `upload/${assetKind}?folderId=${encodeURIComponent(placement.folderId || '')}` : assetKind;
+  const response = await fetch(`/api/assets/materials/${route}`, { method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': file.type || 'application/octet-stream', 'X-File-Name': encodeURIComponent(file.name) },
     body: file, signal: signal || AbortSignal.timeout(180000) });
   let data;
@@ -113,6 +115,10 @@ export async function uploadSharedMaterial(kind, file, signal) {
   if (!response.ok) throw new Error(data.error || t('素材入库失败，请重试。'));
   if (!collectMaterialAssets([data.material]).length || data.material.kind !== assetKind) throw new Error(t('素材入库失败，请重试。'));
   if (cache === libraryCache && cache.owner === globalThis.workspaceUser?.id) {
+    if (placement) {
+      if (!Array.isArray(data.organization?.order) || !Array.isArray(data.organization?.deleted)) throw new Error(t('保存结果无法确认，请刷新重试。'));
+      cache.organization = data.organization; cache.organizationRevision++;
+    }
     cache.values[5] = [data.material, ...cache.values[5].filter(item => item.id !== data.material.id)];
     if (cache.pending) cache.uploads.push(data.material);
     notifyLibrary(cache);
@@ -153,7 +159,7 @@ async function useMaterial(item, target, ctx) {
 }
 function renderMaterialResults(ctx) {
   const { esc, icon, button } = ctx, filtered = displayedMaterials();
-  return `<div class="material-assets-heading"><h2>素材库</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '图片'], ['voice', '参考声音'], ['video', '视频']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card" data-asset-key="${esc(item.key)}" data-asset-group="materials" draggable="${!state.deleted && !state.busy}">${assetTools(item, filtered, ctx)}<button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看图片' : item.kind === 'video' ? '查看视频' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon(item.type === 'video' ? 'video' : 'audio')}<small>${item.type === 'video' ? '参考视频' : '参考声音'}</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '图片' : item.kind === 'video' ? '参考视频' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', state.deleted ? '预览' : '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : state.deleted ? '暂无已删除素材' : '在复刻页面或资产弹窗上传的图片、声音和视频会自动保存到这里。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
+  return `<div class="material-assets-heading"><h2>素材库</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '图片'], ['voice', '参考声音'], ['video', '视频']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card" data-asset-key="${esc(item.key)}" data-asset-group="materials" draggable="${!state.deleted && !state.busy}">${assetTools(item, filtered, ctx)}<button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看图片' : item.kind === 'video' ? '查看视频' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon(item.type === 'video' ? 'video' : 'audio')}<small>${item.type === 'video' ? '参考视频' : '参考声音'}</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '图片' : item.kind === 'video' ? '参考视频' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', state.deleted ? '预览' : '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : state.deleted ? '暂无已删除素材' : '点击上传素材，保存图片、音频和视频。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
 }
 
 function timestamp(value) {
@@ -250,7 +256,7 @@ function renderResults(ctx) {
 }
 
 export function renderGeneratedAssets(ctx) {
-  return `<section class="generated-assets-heading"><div><span class="generated-assets-eyebrow">我的创作</span><h1>我的资产</h1></div>${ctx.button('generated-assets-refresh', ctx.icon('refresh') + '刷新资产', 'secondary')}</section><section id="asset-folder-panel">${renderAssetFolders(state, ctx)}</section><section id="asset-organization-tools">${organizationToolbar(ctx)}</section><section id="material-assets-results" aria-label="长期保存的素材">${renderMaterialResults(ctx)}</section><div id="asset-generated-section"${state.folderId ? ' hidden' : ''}><div class="material-assets-heading"><h2>生成作品</h2><span>近 3 天</span></div><div class="generated-assets-policy">${ctx.icon('clock')}<p>成品保留 <strong>3 天</strong>，移入素材文件夹后长期保留。</p></div><section id="generated-assets-results" aria-label="已生成素材">${renderResults(ctx)}</section></div>`;
+  return `<section class="generated-assets-heading"><div><span class="generated-assets-eyebrow">我的创作</span><h1>我的资产</h1></div><div class="asset-heading-actions">${ctx.button('asset-upload', '上传素材', 'primary')}${ctx.button('generated-assets-refresh', ctx.icon('refresh') + '刷新资产', 'secondary')}</div></section><section id="asset-folder-panel">${renderAssetFolders(state, ctx)}</section><section id="asset-organization-tools">${organizationToolbar(ctx)}</section><section id="material-assets-results" aria-label="长期保存的素材">${renderMaterialResults(ctx)}</section><div id="asset-generated-section"${state.folderId ? ' hidden' : ''}><div class="material-assets-heading"><h2>生成作品</h2><span>近 3 天</span></div><div class="generated-assets-policy">${ctx.icon('clock')}<p>成品保留 <strong>3 天</strong>，移入素材文件夹后长期保留。</p></div><section id="generated-assets-results" aria-label="已生成素材">${renderResults(ctx)}</section></div>`;
 }
 
 function paint() {
@@ -403,6 +409,14 @@ export function handleGeneratedAssetsAction(action, element, ctx) {
   if (ctx.mode !== 'assets') return false;
   if (action.startsWith('asset-')) {
     if (state.busy) return true;
+    if (action === 'asset-upload') {
+      const cache = currentLibrary();
+      openAssetUpload(state, ctx, async (kind, file, folderId) => {
+        if (cache !== currentLibrary() || cache.owner !== globalThis.workspaceUser?.id) throw new Error(t('账号已切换，请重新上传'));
+        await uploadSharedMaterial(kind, file, AbortSignal.any([cache.controller.signal, AbortSignal.timeout(180000)]), { folderId });
+        if (active()) { state.deleted = false; paint(); }
+      }); return true;
+    }
     if (action === 'asset-category' || action === 'asset-folder-open') {
       state.category = element.dataset.type || 'all'; state.folderId = action === 'asset-folder-open' ? element.dataset.id || null : null;
       state.materialType = 'all'; state.type = 'all'; state.selection.clear(); state.materialLimit = 24; paint(); return true;

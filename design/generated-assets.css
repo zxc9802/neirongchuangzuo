@@ -58,3 +58,8 @@
 .asset-folder-form input,.asset-folder-form select{background:var(--ui-surface);color:var(--ui-text);border:1px solid var(--ui-border);border-radius:8px;padding:12px;width:100%;min-height:44px}
 .asset-item-tools{flex-wrap:wrap}.asset-item-tools>div{flex-wrap:wrap;justify-content:flex-end}
 @media(max-width:600px){.asset-folder-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.asset-folder-card small{display:none}.asset-folder-card>button{padding:14px 10px}.asset-folder-card .textbutton{padding:6px;font-size:12px}}
+
+.asset-heading-actions { display:flex; gap:10px; flex-wrap:wrap; }
+.asset-upload-form input[type=file] { max-width:100%; }
+.asset-upload-form ol { padding-left:24px; max-height:240px; overflow:auto; overflow-wrap:anywhere; }
+.asset-upload-form li { margin:8px 0; }

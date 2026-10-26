@@ -175,7 +175,7 @@ test('asset loading paginates restaurant metadata without paid calls and keeps e
   }
 });
 
-test('the assets entry presents retention and generated type filters without an upload flow', () => {
+test('the assets entry presents retention, folders and the direct upload entry', () => {
   const ctx = { esc: value => String(value), icon: () => '', button: (action, label) => `<button data-action="${action}">${label}</button>` };
   const html = renderGeneratedAssets(ctx);
   assert.match(html, /保留 <strong>3 天<\/strong>，移入素材文件夹后长期保留/);
@@ -183,6 +183,7 @@ test('the assets entry presents retention and generated type filters without an 
   assert.match(html, /本人声音/);
   assert.match(html, /生成视频/);
   assert.match(html, /成品类型/);
+  assert.match(html, /data-action="asset-upload"/);
   assert.doesNotMatch(html, /type="file"|确认选择|本地上传/);
 });
 test('image assets use the same business title or generation-mode fallback as the work page', () => {
@@ -283,4 +284,20 @@ test('switching accounts clears cached assets and ignores late responses from th
   finishOld(Response.json({ materials: [material('voice')] })); await next;
   assert.equal(oldUpdates, count);
   assert.deepEqual((await loadAssetLibrary()).materials.map(item => item.kind), ['voice']);
+});
+
+test('direct uploads send placement and preserve its organization against a stale list response', async t => {
+  let finishList;
+  const saved = material('voice'), organization = { order: [], deleted: [], assignments: { [saved.id]: 'imitated-voice' } };
+  const calls = libraryFixture(t, (path, options) => {
+    if (options.method === 'POST') return Response.json({ material: saved, organization });
+    if (path === '/api/assets/materials') return new Promise(resolve => { finishList = resolve; });
+  });
+  const loading = loadAssetLibrary();
+  await uploadSharedMaterial('voice', new File(['full-audio'], '配音.wav'), undefined, { folderId: 'imitated-voice' });
+  assert.ok(calls.some(call => call.path === '/api/assets/materials/upload/voice?folderId=imitated-voice'));
+  finishList(Response.json({ materials: [], organization: { order: [], deleted: [] } }));
+  const snapshot = await loading;
+  assert.equal(snapshot.materials[0].id, saved.id);
+  assert.equal(snapshot.organization.assignments[saved.id], 'imitated-voice');
 });

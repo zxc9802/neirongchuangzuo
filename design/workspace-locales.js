@@ -266,6 +266,22 @@ const materialTitles = [
 ];
 
 const materialTags = [
+  ["上传后长期保存，可在创作时复用。","Keep uploads permanently for future creations.","Simpan muat naik secara kekal untuk digunakan semula."],
+  ["选择文件","Choose files","Pilih fail"],
+  ["开始上传","Start upload","Mula muat naik"],
+  ["等待上传","Waiting","Menunggu"],
+  ["正在上传…","Uploading…","Sedang memuat naik…"],
+  ["上传成功","Uploaded","Berjaya dimuat naik"],
+  ["上传失败","Upload failed","Muat naik gagal"],
+  ["继续上传","Upload more","Muat naik lagi"],
+  ["重试失败文件","Retry failed files","Cuba semula fail yang gagal"],
+  ["文件格式与所选类型不符","File format does not match the selected type","Format fail tidak sepadan dengan jenis yang dipilih"],
+  ["文件为空或超过大小限制","File is empty or exceeds the size limit","Fail kosong atau melebihi had saiz"],
+  ["账号已切换，请重新上传","Account changed. Please upload again.","Akaun telah berubah. Sila muat naik semula."],
+  ["JPG / PNG / WebP，单张小于50MB","JPG / PNG / WebP, less than 50MB each","JPG / PNG / WebP, kurang daripada 50MB setiap fail"],
+  ["MP3 / WAV，单个小于50MB，保留完整音频","MP3 / WAV, less than 50MB each. Full audio retained.","MP3 / WAV, kurang daripada 50MB setiap fail. Audio penuh disimpan."],
+  ["MP4 / MOV，单个不超过300MB","MP4 / MOV, up to 300MB each","MP4 / MOV, maksimum 300MB setiap fail"],
+  ["点击上传素材，保存图片、音频和视频。","Upload images, audio and videos here.","Muat naik gambar, audio dan video di sini."],
   ['小红书推销封面', 'Xiaohongshu cover', 'Muka depan Xiaohongshu'], ['加工宣传海报', 'Manufacturing poster', 'Poster pembuatan'],
   ['火锅菜品', 'Hotpot dishes', 'Hidangan hotpot'], ['裁剪工序', 'Cutting process', 'Proses pemotongan'],
   ['美甲细节', 'Nail art details', 'Perincian seni kuku'], ['激光切割', 'Laser cutting', 'Pemotongan laser'],
