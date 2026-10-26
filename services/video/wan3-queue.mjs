@@ -1,7 +1,9 @@
 import { isWan3Model } from './provider.mjs';
 
-const LIMIT = 5;
+const CONCURRENCY = { aggregate: 600, official: 5 };
+const REQUESTS_PER_SECOND = 5;
 const parts = task => task.segments || [task];
+const route = part => part.wan3Route === 'aggregate' ? 'aggregate' : 'official';
 
 // The video handler's durable single-writer lock owns this account-wide queue.
 // Queue tickets and request times live in task.json alongside the provider IDs.
@@ -9,7 +11,8 @@ export function createWan3Queue({ jobs, save, now = Date.now }) {
   let sequence = Promise.resolve(), order = 0, restartUntil = 0;
   const entries = () => [...jobs.values()].filter(task => isWan3Model(task.model))
     .flatMap(task => parts(task).filter(part => part.wan3Queue).map(part => ({ task, part, ticket: part.wan3Queue })));
-  const waiting = () => entries().filter(({ task, ticket }) => task.status === 'queued' && ticket.state === 'queued')
+  const waiting = provider => entries().filter(({ task, part, ticket }) => task.status === 'queued' && ticket.state === 'queued'
+      && (!provider || route(part) === provider))
     .sort((a, b) => a.ticket.order - b.ticket.order);
   function serialize(action) {
     const pending = sequence.then(action);
@@ -51,11 +54,13 @@ export function createWan3Queue({ jobs, save, now = Date.now }) {
     },
     async admit(task, part = task) {
       return serialize(async () => {
-        const ticket = part.wan3Queue, all = entries(), at = now();
+        const ticket = part.wan3Queue, all = entries(), at = now(), provider = route(part);
+        const pool = all.filter(entry => route(entry.part) === provider);
         const requests = all.flatMap(entry => entry.ticket.attempts).filter(time => time > at - 1000);
-        const cooldown = Math.max(restartUntil, ...all.map(entry => entry.ticket.retryAt || 0));
-        if (ticket.state !== 'queued' || waiting()[0]?.part !== part || at < cooldown
-          || all.filter(entry => entry.ticket.state === 'active').length >= LIMIT || requests.length >= LIMIT) return false;
+        const cooldown = Math.max(restartUntil, ...pool.map(entry => entry.ticket.retryAt || 0));
+        if (ticket.state !== 'queued' || waiting(provider)[0]?.part !== part || at < cooldown
+          || pool.filter(entry => entry.ticket.state === 'active').length >= CONCURRENCY[provider]
+          || requests.length >= REQUESTS_PER_SECOND) return false;
         ticket.state = 'active'; ticket.attempts = [...ticket.attempts.filter(time => time > at - 1000), at];
         part.providerDispatched = true; task.providerDispatched = true;
         await save(task);
@@ -79,8 +84,9 @@ export function createWan3Queue({ jobs, save, now = Date.now }) {
     },
     view(task) {
       if (!isWan3Model(task.model) || task.status !== 'queued') return undefined;
-      const queue = waiting(), index = queue.findIndex(entry => entry.task === task);
-      return { position: index < 0 ? 0 : index + 1, pending: queue.filter(entry => entry.task === task).length };
+      const pending = waiting().filter(entry => entry.task === task);
+      const queue = pending.length ? waiting(route(pending[0].part)) : [];
+      return { position: pending.length ? queue.findIndex(entry => entry.part === pending[0].part) + 1 : 0, pending: pending.length };
     },
   };
 }
