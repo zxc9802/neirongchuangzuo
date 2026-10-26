@@ -98,7 +98,7 @@ const entries = [
   ['自动', 'Auto', 'Automatik'],
   ['3:4 · 自动', '3:4 · Auto', '3:4 · Automatik'],
   ['Plus模型', 'Plus model', 'Model Plus'], ['Pro模型', 'Pro model', 'Model Pro'], ['Max模型', 'Max model', 'Model Max'],
-  ['宣传助手 · Plus模型', 'Promotion assistant · Plus model', 'Pembantu promosi · Model Plus'],
+  ['起芽助手', 'Qiya assistant', 'Pembantu Qiya'],
   ['Max模型 · 图片创作', 'Max model · Image creation', 'Model Max · Ciptaan imej'],
   ['无限积分 · {count} 张', 'Unlimited · {count} images', 'Tanpa Had · {count} imej'],
   ['图片{index}', 'Image {index}', 'Imej {index}'], ['声音{index}', 'Audio {index}', 'Audio {index}'],
