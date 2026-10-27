@@ -89,7 +89,7 @@ for (const stage of ['create', 'upload']) test(`a stalled replica ${stage} reque
   });
   const page = await fixture(t, { apiFetch: (url, options) => {
     if (!options?.method) return;
-    if (options.method === 'POST') {
+    if (url.endsWith('/tasks') && options.method === 'POST') {
       posts++; task = { id: JSON.parse(options.body).requestId, status: 'draft', createdAt: Date.now() };
       if (stage === 'upload') return Response.json({ task });
     }
@@ -164,8 +164,8 @@ test('stored replica materials prefill independent inputs and submit owned asset
   for (const kind of ['photo', 'voice']) page.useMaterial({ kind, id: `${kind}-${'a'.repeat(64)}`, name: kind === 'photo' ? '保存的形象' : '保存的声音' });
   assert.match(page.html(), /保存的形象/); assert.match(page.html(), /保存的声音/);
   page.node('#replica-submit').onclick(); await page.settle();
-  assert.equal(requests.filter(item => item.method === 'PUT').length, 1);
-  for (const kind of ['photo', 'voice']) assert.deepEqual(requests.find(item => item.path.endsWith('/' + kind)).body, { assetId: `${kind}-${'a'.repeat(64)}` });
+  assert.equal(requests.filter(item => item.method === 'PUT').length, 0);
+  for (const kind of ['video', 'photo', 'voice']) assert.deepEqual(requests.find(item => item.path.endsWith('/' + kind)).body, { assetId: `${kind}-${'a'.repeat(64)}` });
   assert.ok(requests.some(item => item.path.endsWith('/start')));
 });
 
@@ -389,6 +389,10 @@ test('a shorter local replacement is saved before downgrading a premium draft an
   const page = await fixture(t, { taskFetch: () => Response.json({ tasks: [task] }), apiFetch: (path, options) => {
     if (!options?.method) return;
     calls.push(path);
+    if (path.endsWith('/video')) {
+      assert.equal(options.method, 'POST');
+      assert.deepEqual(JSON.parse(options.body), { assetId: `video-${'a'.repeat(64)}` });
+    }
     if (path.endsWith('/video')) task = { ...task, duration: 10, estimatedPoints: 6150 };
     if (path.endsWith('/model')) task = { ...task, model: JSON.parse(options.body).model };
     if (path.endsWith('/start')) task = { ...task, status: 'running' };
@@ -638,7 +642,8 @@ test('one click uploads every selected asset then starts once without analysis o
   for (const [i, kind] of ['video', 'photo', 'voice'].entries()) page.node('#replica-' + kind).onchange({ target: { files: [files[i]] } });
   page.node('#replica-submit').onclick(); page.node('#replica-submit').onclick(); await page.settle();
   assert.deepEqual(calls.map(call => call.path), ['/api/video-replica/tasks', ...['video', 'photo', 'voice', 'start'].map(kind => `/api/video-replica/tasks/${task.id}/${kind}`)]);
-  assert.deepEqual(calls.slice(1, 4).map(call => call.body), files);
+  assert.deepEqual(calls.slice(1, 4).map(call => call.body), ['video', 'photo', 'voice'].map(kind => ({ assetId: `${kind}-${'a'.repeat(64)}` })));
+  assert.ok(calls.every(call => call.method === 'POST'), 'saved files are imported by ID, never uploaded again');
   assert.equal(calls[0].body.voiceEngine, 'chatterbox');
   assert.equal(calls[4].body.voiceEngine, 'chatterbox');
   assert.equal(calls[4].body.speechConfirmed, undefined);
@@ -976,7 +981,7 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan
     const body = options.method === 'POST' ? JSON.parse(options.body) : {};
     calls.push({ path, method: options.method, body });
     if (path.endsWith('/tasks')) task = { id: body.requestId, status: 'draft', ...body };
-    else if (options.method === 'PUT') task[path.split('/').at(-1)] = { ready: true };
+    else if (body.assetId) task[path.split('/').at(-1)] = { ready: true, assetId: body.assetId };
     else if (path.endsWith('/start')) task.status = 'running';
     return Response.json({ task });
   } });
@@ -989,7 +994,10 @@ for (const model of [STANDARD_MODEL, PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, 'wan
   const creation = calls.find(call => call.path.endsWith('/tasks')).body;
   assert.equal(creation.model, model); assert.equal(creation.mode, 'deep'); assert.equal(creation.voiceEngine, 'seedance');
   assert.deepEqual(creation.replacements, { photo: false, voice: false, product: true, background: false });
-  assert.deepEqual(calls.filter(call => call.method === 'PUT').map(call => call.path.split('/').at(-1)), ['video', 'product']);
+  const imports = calls.filter(call => call.body.assetId);
+  assert.deepEqual(imports.map(call => call.path.split('/').at(-1)), ['video', 'product']);
+  assert.deepEqual(imports.map(call => call.body.assetId), [`video-${'a'.repeat(64)}`, `photo-${'a'.repeat(64)}`]);
+  assert.equal(calls.filter(call => call.method === 'PUT').length, 0);
   assert.equal(calls.filter(call => call.path.endsWith('/start')).length, 1);
 });
 
@@ -1170,4 +1178,35 @@ test('changing the model first imports the newly chosen library video into a sav
   await page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } }); await page.settle();
   assert.deepEqual(calls.map(call => call.path.split('/').at(-1)), ['video', 'model']);
   assert.deepEqual(calls[0].body, { assetId: id });
+});
+
+test('changing models waits for the material save and stops if that save fails', async t => {
+  const task = { ...speechDraft(), model: PREMIUM_MODEL }, calls = [];
+  let finish;
+  const page = await fixture(t, { tasks: [task], assetFetch: () => new Promise(resolve => { finish = resolve; }),
+    apiFetch: (path, options) => { if (options?.method) { calls.push(path); return Response.json({ task }); } },
+  });
+  page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  const saving = page.node('#replica-video').onchange({ target: { files: [new File(['shorter'], 'short.mp4')] } });
+  const changing = page.node('#replica-models').onchange({ target: { value: STANDARD_MODEL } });
+  await page.settle();
+  assert.deepEqual(calls, []);
+  finish(Response.json({ error: '素材入库失败，请重试。' }, { status: 503 }));
+  await Promise.all([saving, changing]); await page.settle();
+  assert.deepEqual(calls, []);
+  assert.match(page.message(), /素材入库失败/);
+});
+
+test('replacing a recoverable source imports its saved material without a second file upload', async t => {
+  const task = { ...speechDraft(), status: 'failed', canReplaceSource: true }, calls = [];
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (!options?.method) return;
+    calls.push({ path, method: options.method, body: JSON.parse(options.body) });
+    task.status = 'draft'; task.canReplaceSource = false;
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  await page.node('#replica-video').onchange({ target: { files: [new File(['shorter'], 'short.mp4')] } });
+  await page.settle();
+  assert.deepEqual(calls, [{ path: `/api/video-replica/tasks/${task.id}/video`, method: 'POST', body: { assetId: `video-${'a'.repeat(64)}` } }]);
 });

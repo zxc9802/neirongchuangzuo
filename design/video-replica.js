@@ -69,7 +69,8 @@ function account() {
   }
 }
 async function request(path, options = {}) {
-  const signal = AbortSignal.timeout(options.method === 'PUT' ? 180_000 : options.method ? 60_000 : 15_000);
+  const mediaWrite = options.method === 'PUT' || options.method === 'POST' && /\/(?:video|photo|voice|product|background)$/.test(path);
+  const signal = AbortSignal.timeout(mediaWrite ? 180_000 : options.method ? 60_000 : 15_000);
   try {
     const response = await fetch(API + path, { credentials: 'same-origin', cache: 'no-store', signal, ...options });
     let data;
@@ -348,7 +349,11 @@ async function selectModel(id) {
   try {
     if (state.files.video || selectedMaterials.video) {
       const video = state.files.video;
-      remember((await request(`/tasks/${state.current.id}/video`, selectedMaterials.video ? jsonPost({ assetId: selectedMaterials.video.id }) : { method: 'PUT', headers: { 'Content-Type': video.type || 'application/octet-stream' }, body: video })).task);
+      const upload = assetUploads.get(video);
+      await upload?.promise;
+      if (upload?.error) throw upload.error;
+      const material = selectedMaterials.video || upload?.material;
+      remember((await request(`/tasks/${state.current.id}/video`, material ? jsonPost({ assetId: material.id }) : { method: 'PUT', headers: { 'Content-Type': video.type || 'application/octet-stream' }, body: video })).task);
       delete state.files.video; delete selectedMaterials.video;
     }
     remember((await request(`/tasks/${state.current.id}/model`, jsonPost({ model: id }))).task);
@@ -365,7 +370,7 @@ async function selectFile(kind, file) {
   state.files[kind] = file; state.urls[kind] = URL.createObjectURL(file); state.error = '';
   const owner = state.owner, upload = { pending: true, error: null };
   assetUploads.set(file, upload);
-  upload.promise = uploadSharedMaterial(kind, file).catch(cause => {
+  upload.promise = uploadSharedMaterial(kind, file).then(material => { upload.material = material; }).catch(cause => {
     upload.error = cause;
     if (state.owner === owner && state.files[kind] === file) state.error = cause.message;
   }).finally(() => { upload.pending = false; if (state.owner === owner && state.files[kind] === file) refresh(); });
@@ -376,7 +381,7 @@ async function selectFile(kind, file) {
   if (kind === 'video' && state.current?.canReplaceSource) {
     state.busy = true; refresh();
     try {
-      remember((await request(`/tasks/${state.current.id}/video`, { method: 'PUT', headers: { 'Content-Type': file.type || 'application/octet-stream' }, body: file })).task);
+      remember((await request(`/tasks/${state.current.id}/video`, jsonPost({ assetId: upload.material.id }))).task);
       resetFiles();
     } catch (cause) { state.error = cause.message; }
     finally { state.busy = false; refresh(); }
@@ -407,8 +412,9 @@ async function submit() {
     remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode, ...deep }))).task);
     if (state.current.status === 'draft') {
       for (const kind of inputKinds()) {
-        if (selectedMaterials[kind]) {
-          remember((await request(`/tasks/${id}/${kind}`, jsonPost({ assetId: selectedMaterials[kind].id }))).task);
+        const material = selectedMaterials[kind] || assetUploads.get(state.files[kind])?.material;
+        if (material) {
+          remember((await request(`/tasks/${id}/${kind}`, jsonPost({ assetId: material.id }))).task);
           continue;
         }
         if (!state.files[kind]) continue;

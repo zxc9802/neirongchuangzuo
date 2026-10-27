@@ -17,7 +17,7 @@ const formats = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
 // A separate, private prefix has no application expiry or task-cleanup dependency.
 export function createMaterialLibrary({ env = process.env, cosClient, now = Date.now } = {}) {
   const configured = Boolean(cosClient || env.COS_SECRET_ID && env.COS_SECRET_KEY && env.COS_BUCKET && env.COS_REGION);
-  const settings = { Bucket: env.COS_BUCKET, Region: env.COS_REGION }, locks = new Map();
+  const settings = { Bucket: env.COS_BUCKET, Region: env.COS_REGION }, locks = new Map(), transfers = new Map();
   let client;
   async function call(method, options) {
     if (!configured) throw fail('素材云存储尚未配置，请联系管理员配置 COS 后重试。');
@@ -127,9 +127,7 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
       mime ||= TYPES[kind].mime;
       if (!formats[mime] || !mime.startsWith(TYPES[kind].type + '/')) throw fail('素材格式无效。', 400);
       const id = `${kind}-${hash(bytes)}`, base = prefix(userId);
-      const previous = locks.get(userId) || Promise.resolve();
-      const operation = previous.catch(() => {}).then(async () => {
-        const items = await records(userId), existing = items.find(item => item.id === id);
+      async function placementData(items) {
         let data;
         if (placement) {
           data = await organization(userId);
@@ -140,18 +138,41 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
             data.retained = { ...data.retained, [placement.sourceKey]: id };
           }
         }
-        if (existing) { if (data) await writeOrganization(userId, data); return view(existing); }
+        return data;
+      }
+      // Only identical materials wait for each other; large uploads never hold the account index lock.
+      const transferKey = base + id, previousTransfer = transfers.get(transferKey) || Promise.resolve();
+      const transfer = previousTransfer.catch(() => {}).then(async () => {
+        const items = await records(userId), existing = items.find(item => item.id === id);
+        await placementData(items);
+        if (existing && !placement) return view(existing);
         const title = String(name || TYPES[kind].name).replace(/\.[^.]+$/, '').replace(/[\\/\u0000-\u001f\u007f]/g, '').trim().slice(0, 80) || TYPES[kind].name;
         const item = { id, kind, name: title, bytes: bytes.length, createdAt: now(), metadata, mime, ext: formats[mime] };
-        const written = await call('putObject', { Key: base + `${id}.${item.ext}`, Body: bytes, ContentType: mime, ACL: 'private' });
-        if (!written) throw fail('素材保存失败，请重试。');
-        const indexed = await call('putObject', { Key: base + 'index.json', Body: JSON.stringify([...items, item]), ContentType: 'application/json', ACL: 'private' });
-        if (!indexed) throw fail('素材索引保存失败，请重试。');
-        if (data) await writeOrganization(userId, data);
-        return view(item);
+        if (!existing) {
+          const multipart = bytes.length > 8 * 1024 * 1024;
+          const written = await call(multipart ? 'sliceUploadFile' : 'putObject', {
+            Key: base + `${id}.${item.ext}`, ContentType: mime, ACL: 'private',
+            ...(multipart ? { FilePath: path, ChunkSize: 8 * 1024 * 1024, AsyncLimit: 4 } : { Body: bytes }),
+          });
+          if (!written) throw fail('素材保存失败，请重试。');
+        }
+        const previous = locks.get(userId) || Promise.resolve();
+        const operation = previous.catch(() => {}).then(async () => {
+          // Re-read after the transfer so concurrent uploads and folder edits are preserved.
+          const latest = await records(userId), saved = latest.find(record => record.id === id);
+          const data = await placementData(latest);
+          if (!saved) {
+            const indexed = await call('putObject', { Key: base + 'index.json', Body: JSON.stringify([...latest, item]), ContentType: 'application/json', ACL: 'private' });
+            if (!indexed) throw fail('素材索引保存失败，请重试。');
+          }
+          if (data) await writeOrganization(userId, data);
+          return view(saved || item);
+        });
+        locks.set(userId, operation);
+        try { return await operation; } finally { if (locks.get(userId) === operation) locks.delete(userId); }
       });
-      locks.set(userId, operation);
-      try { return await operation; } finally { if (locks.get(userId) === operation) locks.delete(userId); }
+      transfers.set(transferKey, transfer);
+      try { return await transfer; } finally { if (transfers.get(transferKey) === transfer) transfers.delete(transferKey); }
     },
     async get(userId, id) {
       if (!validId(id)) throw fail('素材不存在。', 404);
