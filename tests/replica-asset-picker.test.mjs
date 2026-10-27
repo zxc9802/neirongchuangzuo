@@ -48,6 +48,48 @@ async function fixture(t, { fetchMedia, fetchMetadata, materials = [...assets], 
   };
 }
 
+test('enhanced editing switch is scoped to deep mode and keeps draft selections across mode changes', async t => {
+  const f = await fixture(t);
+  assert.equal(f.node('#replica-edit-mode').value, 'standard');
+  f.node('#replica-edit-mode').onchange({ target: { value: 'enhanced' } });
+  assert.equal(f.node('#replica-edit-mode').value, 'enhanced');
+  assert.equal(f.node('#replica-models option[value="wan3.0-video"]'), null);
+  f.node('#replica-mode-classic').click();
+  assert.equal(f.node('#replica-edit-mode'), null);
+  f.node('#replica-mode-deep').click();
+  assert.equal(f.node('#replica-edit-mode').value, 'enhanced');
+  assert.match(f.node('main').textContent, /原片.mp4/);
+  f.node('#replica-edit-mode').onchange({ target: { value: 'standard' } });
+  assert.ok(f.node('#replica-models option[value="wan3.0-video"]'));
+  f.node('#replica-models').onchange({ target: { value: 'wan3.0-video' } });
+  assert.equal(f.node('#replica-edit-mode option[value="enhanced"]').hasAttribute('disabled'), true);
+  f.node('#replica-new').click();
+  assert.equal(f.node('#replica-edit-mode').value, 'standard');
+});
+
+test('enhanced editing selection is submitted, restored from history and locked after submission', async t => {
+  let task;
+  const tasks = [];
+  const f = await fixture(t, { tasks, fetchMetadata: (path, options) => {
+    if (!options?.method || !path.startsWith('/api/video-replica/tasks')) return;
+    const body = options.method === 'PUT' ? {} : JSON.parse(options.body);
+    if (path === '/api/video-replica/tasks') task = { id: body.requestId, status: 'draft', createdAt: Date.now(), ...body };
+    else if (path.endsWith('/video')) task.video = { duration: 4 };
+    else if (path.endsWith('/start')) { task.status = 'running'; tasks.push(task); }
+    return Response.json({ task });
+  } });
+  await f.settle();
+  f.node('#replica-edit-mode').onchange({ target: { value: 'enhanced' } });
+  f.node('#replica-submit').click(); await f.settle();
+  assert.equal(task.editMode, 'enhanced'); assert.equal(task.mode, 'deep');
+  assert.equal(task.status, 'running');
+  assert.equal(f.node('#replica-edit-mode').hasAttribute('disabled'), true, f.node('#replica-edit-mode').outerHTML);
+  assert.match(f.node('#replica-history').textContent, /视频编辑增强 2.0/);
+  f.node('#replica-new').click();
+  f.node(`[data-replica-task="${task.id}"]`).click();
+  assert.equal(f.node('#replica-edit-mode').value, 'enhanced');
+});
+
 test('deep image previews open the clicked upload, navigate images only, and preserve replacement controls', async t => {
   const f = await fixture(t);
   const upload = async kind => f.node(`#replica-${kind}`).onchange({ target: { files: [new File(['data'], `${kind}.png`, { type: 'image/png' })] } });

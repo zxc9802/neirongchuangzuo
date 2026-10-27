@@ -11,7 +11,7 @@ import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS,
 import { safeVideoError } from './errors.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, restoreSourceAudio, downloadVideo, serveMedia } from './media.mjs';
 import { prepareReferenceVideo } from './reference-video.mjs';
-import { DEEP_IMAGE_KINDS, DEEP_KINDS, DEEP_LABELS, deepImageKinds, isDeepReplica, preservesSourceAudio } from './deep-replica.mjs';
+import { DEEP_IMAGE_KINDS, DEEP_KINDS, DEEP_LABELS, ENHANCED_EDIT_MODELS, deepImageKinds, isDeepReplica, isEnhancedEdit, preservesSourceAudio } from './deep-replica.mjs';
 import { createSpeechService, confirmSpeech, normalizeVoice, compareSpeech, VOICE_LIMIT } from './speech.mjs';
 import { createFalVideoProvider, FAL_MODEL } from './fal.mjs';
 import { createPixverseProvider } from './pixverse.mjs';
@@ -113,6 +113,13 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (!models.some(item => item.id === model && !isFalReplacement(item.id))) {
       throw error('该历史版本不支持新建深度复刻，请选择当前生成版本。', 400, 'VIDEO_MODEL_INVALID');
     }
+  }
+  function selectedEditMode(editMode = 'standard', model, mode) {
+    if (!['standard', 'enhanced'].includes(editMode)
+      || editMode === 'enhanced' && (mode !== 'deep' || !Object.hasOwn(ENHANCED_EDIT_MODELS, model))) {
+      throw error('视频编辑增强 2.0 仅支持深度复刻中的 Seedance 生成版本，请先切换编辑方式。', 400, 'VIDEO_EDIT_MODE_INVALID');
+    }
+    return editMode;
   }
   function selectedSourceAudioMode(mode = 'original', model = MODEL) {
     if (!['original', 'silent'].includes(mode) || mode === 'silent' && !MODELS.some(item => item.id === model && !isFalReplacement(item.id))) {
@@ -230,7 +237,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     const costPricing = task.billing?.mode === 'api_cost' || (!task.billing && costMeter.enabled);
     const pricingKey = task.billing?.pricingKey || task.pricingKey || (!task.billing && task.status === 'draft' ? generationPrice('video', task.model || MODEL)?.key : undefined);
     return { id: task.id, kind: 'video', status: expired ? 'expired' : task.status === 'completed' && !settled ? 'settling' : task.status,
-      ...(isDeepReplica(task) ? { mode: 'deep', replacements: task.replacements, product: task.product, background: task.background,
+      ...(isDeepReplica(task) ? { mode: 'deep', editMode: task.editMode || 'standard', replacements: task.replacements, product: task.product, background: task.background,
         sourceProductUrl: !expired && task.product ? `${PREFIX}/tasks/${task.id}/product` : null,
         sourceBackgroundUrl: !expired && task.background ? `${PREFIX}/tasks/${task.id}/background` : null } : {}),
       createdAt: task.createdAt, completedAt: task.completedAt, expiresAt: task.expiresAt, duration: task.duration, actualDuration: task.actualDuration,
@@ -752,6 +759,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           await save(task);
         }
         const material = task.materials[kind];
+        if (isEnhancedEdit(task) && DEEP_IMAGE_KINDS.includes(kind)) material.url = sourceUrl(task, kind);
         if (material.status !== 2) {
           try {
             const result = await taskProvider.queryMaterial(material.id);
@@ -1081,7 +1089,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       if (path === `${PREFIX}/config` && req.method === 'GET') {
         const availableModels = models.filter(model => !isFalReplacement(model.id)).map(model => isWan3Model(model.id)
           ? { ...model, cnyPerSecond: wan3Price(now(), model.id), description: `参考视频最多15秒 · 720P · 输入＋输出 ${wan3Price(now(), model.id)}元/秒，换声另计` } : model);
-        json(res, 200, { enabled: availableModels.some(model => model.enabled), models: availableModels,
+        json(res, 200, { enabled: availableModels.some(model => model.enabled), models: availableModels, enhancedEditing: Boolean(config.enabled),
           voiceEnabled: Boolean(voiceConversion?.enabled), voiceEngines: voiceEngines.filter(engine => engine.id === 'chatterbox'),
           voiceEngine: 'chatterbox', sourceAudioMode: 'original', model: availableModels.find(model => model.enabled)?.id || MODEL,
           prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return;
@@ -1101,10 +1109,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (body.mode !== undefined && !['classic', 'deep'].includes(body.mode)) throw error('复刻模式无效。', 400, 'VIDEO_MODE_INVALID');
           const deep = body.mode === 'deep', replacements = deep ? deepOptions(body.replacements) : undefined;
           if (deep) validateDeepModel(model);
+          const editMode = selectedEditMode(body.editMode, model, body.mode);
           // Keep explicit legacy parameters compatible; new clients convert the source voice.
           const task = { id: body.requestId, userId, model, voiceEngine: deep ? replacements.voice ? 'chatterbox' : 'seedance' : selectedVoiceEngine(body.voiceEngine ?? 'chatterbox'),
             sourceAudioMode: deep ? 'original' : selectedSourceAudioMode(body.sourceAudioMode ?? 'original', model),
-            ...(deep ? { mode: 'deep', replacements } : {}),
+            ...(deep ? { mode: 'deep', editMode, replacements } : {}),
             status: 'draft', createdAt: now(), expiresAt: now() + DAY, materials: {} };
           await save(task); jobs.set(task.id, task); json(res, 201, { task: view(task) });
         }); return;
@@ -1147,9 +1156,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (match[2] === 'options' && req.method === 'POST') {
           const body = await readJSON(req);
           if (!isDeepReplica(task) || task.status !== 'draft') throw error('只有深度复刻草稿可以调整替换项目。', 409);
-          const replacements = deepOptions(body.replacements);
+          const replacements = deepOptions(body.replacements === undefined ? task.replacements : body.replacements);
+          const editMode = selectedEditMode(body.editMode ?? task.editMode, task.model, task.mode);
           for (const kind of DEEP_KINDS) if (!replacements[kind]) { delete task[kind]; delete task.materials[kind]; }
           task.replacements = replacements;
+          task.editMode = editMode;
           task.voiceEngine = replacements.voice ? 'chatterbox' : 'seedance';
           task.sourceAudioMode = 'original';
           await save(task); json(res, 200, { task: view(task) }); return;
@@ -1159,6 +1170,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           if (task.status !== 'draft') throw error('任务已提交，不能切换生成版本。', 409);
           const model = selectedModel(body.model);
           if (isDeepReplica(task)) validateDeepModel(model);
+          selectedEditMode(task.editMode, model, task.mode);
           if (task.video) {
             videoDuration(task.video, model);
             if (segmentPlan(task.video, model) && !task.video.boundaries) {
@@ -1326,6 +1338,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           }
           const model = selectedModel(body.model ?? (models.some(model => model.id === task.model) ? task.model : MODEL));
           if (isDeepReplica(task)) validateDeepModel(model);
+          selectedEditMode(task.editMode, model, task.mode);
           if (isWan3Model(model) && task.voice && !['indextts2', 'chatterbox'].includes(voiceEngine)) throw error('Wan 3.0 换声请使用 Chatterbox 音色转换。', 400, 'VIDEO_VOICE_ENGINE_INVALID');
           const sourceAudioMode = isDeepReplica(task) ? 'original' : selectedSourceAudioMode(body.sourceAudioMode ?? task.sourceAudioMode, model);
           if (voiceEngine === 'chatterbox' && sourceAudioMode !== 'original') throw error('音色转换需要保留原视频声音。', 400, 'VIDEO_SOURCE_AUDIO_MODE_INVALID');

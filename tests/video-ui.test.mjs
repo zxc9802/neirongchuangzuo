@@ -1044,7 +1044,9 @@ test('deep layout keeps the material desk, preview and history separate and omit
   assert.match(html, /<aside class="replica-deep-history"/);
   assert.ok(html.indexOf('id="replica-product"') < html.indexOf('id="replica-photo"'));
   assert.ok(html.indexOf('id="replica-background"') < html.indexOf('id="replica-voice"'));
-  assert.doesNotMatch(html, /字幕擦除|水印擦除|画质增强|视频编辑|收藏|<textarea/);
+  assert.doesNotMatch(html, /字幕擦除|水印擦除|画质增强|收藏|<textarea/);
+  assert.match(html, /id="replica-edit-mode"/);
+  assert.match(html, /Seedance 视频编辑增强 2.0/);
   for (const id of ['replica-video', 'replica-submit', 'replica-models', 'replica-result', 'replica-history', 'replica-new']) {
     assert.equal(html.split(`id="${id}"`).length - 1, 1);
   }

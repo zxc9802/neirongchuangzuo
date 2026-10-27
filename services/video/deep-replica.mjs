@@ -2,6 +2,13 @@ export const DEEP_IMAGE_KINDS = ['photo', 'product', 'background'];
 export const DEEP_KINDS = [...DEEP_IMAGE_KINDS, 'voice'];
 export const DEEP_LABELS = { photo: '人物', voice: '声音', product: '商品', background: '背景' };
 export const isDeepReplica = task => task.mode === 'deep';
+export const ENHANCED_EDIT_MODELS = {
+  'doubao-seedance-2-0-260128': 'las-video-edit-seedance-2-0',
+  'doubao-seedance-2-0-fast-260128': 'las-video-edit-seedance-2-0-fast',
+  'doubao-seedance-2-0-mini-260615': 'las-video-edit-seedance-2-0-mini',
+  'doubao-seedance-2-5-260628': 'las-video-edit-seedance-2-5',
+};
+export const isEnhancedEdit = task => isDeepReplica(task) && task.editMode === 'enhanced';
 export const preservesSourceAudio = task => isDeepReplica(task) && !task.replacements.voice;
 export const deepImageKinds = task => DEEP_IMAGE_KINDS.filter(kind => task.replacements[kind]);
 
@@ -28,6 +35,14 @@ export function deepGenerationBody(task, defaultModel, resource = kind => `asset
       : '所有指定替换、去水印和去字幕处理从第一帧持续到最后一帧，未指定的非水印、非字幕内容保持原样。不要改变视频速度或重新设计口型。',
   ];
   if (task.video?.duration) instructions.push(`视频1实际时长为${task.video.duration.toFixed(3)}秒，动作严格对应原视频时刻，不延伸或重复片段。`);
+  if (isEnhancedEdit(task)) {
+    const template = images.length === 0 ? 'basic' : images.length > 1 ? 'general'
+      : images[0] === 'photo' ? 'replace/person_replace' : 'replace/subject_replace';
+    return { modelId: ENHANCED_EDIT_MODELS[task.model || defaultModel], abilityType: 'UPDATE_VIDEO', prompt: instructions.join('\n'),
+      payload: { params: { video_url: resource('video'), template: { id: template },
+        image_urls: images.map(kind => task.materials[kind].url), resolution: '720p', ratio: 'adaptive', duration: -1,
+        use_asset_api: true, allow_fallback: false, generate_audio: false, watermark: false } } };
+  }
   return { modelId: task.model || defaultModel, abilityType: 'VIDEO', prompt: instructions.join('\n'),
     payload: { params: { mode: 'fusion_video', resolution: '720p', scale: 'adaptive', duration: -1, generateAudio: false },
       resources: images.map(resource), referVideoUrl: [resource('video')] } };

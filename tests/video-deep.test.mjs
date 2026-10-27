@@ -8,8 +8,44 @@ import { generationBody, createVideoProvider, MODELS, PIXVERSE_MODEL, WAN3_MODEL
 import { wan3GenerationBody } from '../services/video/wan3.mjs';
 import { restoreSourceAudio, probeVideo } from '../services/video/media.mjs';
 
+import { ENHANCED_EDIT_MODELS } from '../services/video/deep-replica.mjs';
+
 const models = MODELS.filter(model => model.id !== PIXVERSE_MODEL);
 const kinds = ['photo', 'product', 'background', 'voice'];
+for (const [model, modelId] of Object.entries(ENHANCED_EDIT_MODELS)) test(`enhanced ${model}: templates and references follow all 16 replacement combinations`, () => {
+  for (let mask = 0; mask < 16; mask++) {
+    const replacements = Object.fromEntries(kinds.map((kind, bit) => [kind, Boolean(mask & (1 << bit))]));
+    const images = kinds.slice(0, 3).filter(kind => replacements[kind]);
+    const task = { mode: 'deep', editMode: 'enhanced', model, replacements, video: { duration: 4 },
+      materials: Object.fromEntries(['video', ...images].map(kind => [kind, { id: kind + '-asset', url: `https://workspace.example/${kind}?signature=test` }])) };
+    const body = generationBody(task);
+    assert.equal(body.modelId, modelId); assert.equal(body.abilityType, 'UPDATE_VIDEO');
+    assert.deepEqual(body.payload, { params: { video_url: 'asset://video-asset',
+      template: { id: images.length === 0 ? 'basic' : images.length > 1 ? 'general' : images[0] === 'photo' ? 'replace/person_replace' : 'replace/subject_replace' },
+      image_urls: images.map(kind => task.materials[kind].url), resolution: '720p', ratio: 'adaptive', duration: -1,
+      use_asset_api: true, allow_fallback: false, generate_audio: false, watermark: false } });
+    assert.equal(body.prompt, generationBody({ ...task, editMode: 'standard' }).prompt);
+  }
+});
+
+test('enhanced submit and polling reuse Seedance credentials and the platform task ID', async () => {
+  const requests = [], credentials = { base: 'https://provider.example', project: 'test-project', access: 'test-access', secret: 'test-secret' };
+  const provider = createVideoProvider({ video: credentials, material: credentials }, async (url, options) => {
+    requests.push({ url: String(url), headers: options.headers, body: JSON.parse(options.body) });
+    return Response.json(new URL(url).pathname.endsWith('/generate')
+      ? { success: true, data: { taskId: 'platform-id', task_id: 'upstream-id' } }
+      : { success: true, taskId: 'platform-id', status: 2, message: 'https://cdn.example/extensionless-result' });
+  });
+  const task = { mode: 'deep', editMode: 'enhanced', replacements: {}, materials: { video: { id: 'video-asset' } } };
+  const result = await provider.generate(task);
+  assert.equal(result.taskId, 'platform-id');
+  assert.equal((await provider.query(result.taskId, task)).url, 'https://cdn.example/extensionless-result');
+  assert.deepEqual(requests[1].body, { taskId: 'platform-id', abilityType: 'UPDATE_VIDEO' });
+  for (const request of requests) assert.deepEqual(request.headers, { 'Content-Type': 'application/json',
+    projectCode: 'test-project', 'X-Access-Key': 'test-access', 'X-Secret-Key': 'test-secret' });
+  await provider.query('legacy-id', { mode: 'deep' });
+  assert.deepEqual(requests[2].body, { taskId: 'legacy-id', abilityType: 'VIDEO' });
+});
 for (const model of models) test(`deep ${model.id}: all 16 combinations map only enabled images to the right references`, () => {
   for (let mask = 0; mask < 16; mask++) {
     const replacements = Object.fromEntries(kinds.map((kind, bit) => [kind, Boolean(mask & (1 << bit))]));

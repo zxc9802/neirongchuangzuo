@@ -2992,6 +2992,68 @@ for (const uncertain of [false, true]) test(`deep separation ${uncertain ? 'unce
 });
 
 const DEEP_MODELS = ['doubao-seedance-2-0-260128', PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, WAN3_MODEL];
+test('enhanced editing is opt-in, validates models, and changes without clearing draft assets', async t => {
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true } });
+  assert.equal((await (await app.call('/config')).json()).enhancedEditing, true);
+  for (const body of [{ editMode: 'enhanced' }, { mode: 'deep', editMode: 'unknown' },
+    { mode: 'deep', model: WAN3_MODEL, editMode: 'enhanced' }]) {
+    const response = await app.call('/tasks', { body: { requestId: randomUUID(), ...body } });
+    assert.equal(response.status, 400); assert.equal((await response.json()).code, 'VIDEO_EDIT_MODE_INVALID');
+  }
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: { photo: true } } });
+  await app.upload(id);
+  assert.equal((await app.current(id)).editMode, 'standard');
+  const response = await app.call(`/tasks/${id}/options`, { body: { editMode: 'enhanced' } });
+  assert.equal(response.status, 200);
+  const edited = (await response.json()).task;
+  assert.equal(edited.editMode, 'enhanced'); assert.equal(edited.replacements.photo, true); assert.ok(edited.photo);
+  for (const endpoint of ['model', 'start']) assert.equal((await app.call(`/tasks/${id}/${endpoint}`, { body: { model: WAN3_MODEL } })).status, 400);
+  await app.close(); await app.open();
+  assert.equal((await app.current(id)).editMode, 'enhanced');
+  assert.equal((await app.call(`/tasks/${id}/options`, { body: { editMode: 'standard' } })).status, 200);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.body.abilityType, 'VIDEO');
+  assert.equal((await app.call(`/tasks/${id}/options`, { body: { editMode: 'enhanced' } })).status, 409);
+});
+
+for (const duration of [4, 20]) test(`enhanced ${duration}s completes through provider HTTP and recovers without resubmitting`, async t => {
+  const requests = [], credentials = { base: 'https://provider.example', project: 'project', access: 'access', secret: 'secret' };
+  let done = false, restores = 0, submitted = 0;
+  const provider = createVideoProvider({ video: credentials, material: credentials }, async (url, options) => {
+    const body = JSON.parse(options.body), path = new URL(url).pathname; requests.push({ path, body });
+    if (path.endsWith('/material/create')) return Response.json({ data: { materialId: body.name + '-asset', status: 2 } });
+    if (path.endsWith('/generate')) return Response.json({ success: true, data: { taskId: `platform-${++submitted}`, task_id: 'not-the-platform-id' } });
+    assert.equal(path, '/openApi/queryResult'); assert.equal(body.abilityType, 'UPDATE_VIDEO'); assert.match(body.taskId, /^platform-/);
+    return Response.json({ success: true, status: done ? 2 : 1, ...(done ? { message: 'https://cdn.example/result.mp4' } : {}) });
+  });
+  const app = await fixture(t, { provider, probe: async () => ({ ...META, duration }),
+    scenes: async () => ({ cuts: [] }), cutSegment: async (_input, output) => writeFile(output, VIDEO),
+    joinSegments: async (_inputs, _spans, output) => { await writeFile(output, VIDEO); return { ...META, duration }; },
+    restoreAudio: async (_source, _generated, output) => { restores++; await writeFile(output, VIDEO); } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', editMode: 'enhanced', replacements: { photo: true } } });
+  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running' && (!task.segments || task.segments.submitted === task.segments.total));
+  const expected = duration === 4 ? 1 : 2;
+  assert.equal(submitted, expected);
+  const generations = requests.filter(request => request.path.endsWith('/generate')).map(request => request.body);
+  for (const [index, body] of generations.entries()) {
+    assert.equal(body.abilityType, 'UPDATE_VIDEO'); assert.equal(body.modelId, 'las-video-edit-seedance-2-0');
+    assert.equal(body.payload.params.video_url, `asset://replica-${duration === 4 ? 'video' : `segment-${index}`}-asset`);
+    assert.equal(body.payload.params.template.id, 'replace/person_replace');
+    const image = new URL(body.payload.params.image_urls[0]);
+    assert.match(image.pathname, new RegExp(`/source/${id}/photo$`)); assert.ok(image.searchParams.get('signature'));
+    const served = await fetch(app.base + image.pathname + image.search);
+    assert.equal(served.status, 200); assert.deepEqual(Buffer.from(await served.arrayBuffer()), Buffer.from('photo'));
+  }
+  await app.close(); await app.open(); done = true;
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.editMode, 'enhanced'); assert.ok(completed.resultUrl);
+  assert.equal(completed.billing.status, 'settled'); assert.equal(restores, 1); assert.equal(submitted, expected);
+});
+
 for (const model of DEEP_MODELS) for (const selected of [[], ['photo'], ['product'], ['background'], ['voice'], ['photo', 'voice', 'product', 'background']]) {
   test(`deep ${model} completes with ${selected.join('+') || 'all original'} and preserves options across restart`, async t => {
     const replacements = Object.fromEntries(['photo', 'voice', 'product', 'background'].map(kind => [kind, selected.includes(kind)]));

@@ -1,5 +1,5 @@
 import { providerFailure, readProviderResponse, safeVideoError } from './errors.mjs';
-import { DEEP_IMAGE_KINDS, deepGenerationBody, isDeepReplica } from './deep-replica.mjs';
+import { DEEP_IMAGE_KINDS, deepGenerationBody, isDeepReplica, isEnhancedEdit } from './deep-replica.mjs';
 
 export const MODEL = 'doubao-seedance-2-0-260128';
 export const PIXVERSE_MODEL = 'fal-ai/pixverse/swap';
@@ -149,6 +149,6 @@ export function createVideoProvider(config, fetchImpl = fetch) {
         new VideoError(providerFailure(body, secrets) || '模型服务拒绝请求。', 502, 'VIDEO_PROVIDER_REJECTED'), { providerNotDispatched: true });
       return result;
     },
-    async query(id) { return parseGeneration(await call('video', '/openApi/queryResult', { taskId: id, abilityType: 'VIDEO' }), secrets); },
+    async query(id, task = {}) { return parseGeneration(await call('video', '/openApi/queryResult', { taskId: id, abilityType: isEnhancedEdit(task) ? 'UPDATE_VIDEO' : 'VIDEO' }), secrets); },
   };
 }
