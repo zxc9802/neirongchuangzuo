@@ -1453,7 +1453,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   handler.archiveMaterials = async userId => {
     await ready;
     for (const task of jobs.values()) {
-      if (task.userId !== userId || task.cleaned) continue;
+      if (task.userId !== userId || task.cleaned || !['photo', 'voice'].some(kind => task[kind] && !task[kind].assetId)) continue;
       await serialize(task.id, () => archiveTaskMaterials(task));
     }
   };

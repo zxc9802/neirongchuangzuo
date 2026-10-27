@@ -266,7 +266,7 @@ test('failed sources retry on reopening instead of caching an empty library as a
   assert.equal((await loadAssetLibrary()).errors.length, 1);
   fail = false;
   const retried = await loadAssetLibrary();
-  assert.equal(retried.errors.length, 0); assert.equal(retried.materials.length, 1); assert.equal(calls.length, 12);
+  assert.equal(retried.errors.length, 0); assert.equal(retried.materials.length, 1); assert.equal(calls.length, 7, 'only the failed source is retried');
 });
 
 test('switching accounts clears cached assets and ignores late responses from the previous account', async t => {
@@ -334,4 +334,47 @@ test('renaming preserves default ordering and rejects a late save after account 
   globalThis.workspaceUser = { id: crypto.randomUUID() };
   finishRename(Response.json({ material: { ...second, name: '另一名称' }, organization: { order: [], deleted: [] } }));
   await assert.rejects(pending, /账号已切换/);
+});
+
+for (const [type, expected] of [
+  ['image', ['/api/assets/materials', '/api/ai/images', '/api/restaurant/tasks']],
+  ['audio', ['/api/assets/materials', '/api/tasks']],
+  ['video', ['/api/assets/materials', '/api/tasks', '/api/video-replica/tasks', '/api/video-creator/tasks']],
+]) test(`${type} picker requests only relevant sources and shares their cache with the full library`, async t => {
+  const calls = libraryFixture(t);
+  await loadAssetLibrary(undefined, { type });
+  assert.deepEqual(calls.map(call => call.path.split('?')[0]), expected);
+  await loadAssetLibrary();
+  assert.equal(calls.length, 6, 'opening all assets requests only sources not already cached');
+  await loadAssetLibrary(undefined, { type });
+  assert.equal(calls.length, 6);
+});
+
+test('an audio picker finishes while an unrelated image source is still pending', async t => {
+  let finish, imageLoad;
+  libraryFixture(t, path => path.startsWith('/api/restaurant/') ? new Promise(resolve => { finish = resolve; }) : null);
+  try {
+    imageLoad = loadAssetLibrary(undefined, { type: 'image' });
+    await settleLibrary();
+    let audioFinished = false;
+    const audioLoad = loadAssetLibrary(undefined, { type: 'audio' }).then(value => { audioFinished = true; return value; });
+    await settleLibrary();
+    assert.equal(audioFinished, true);
+    assert.equal((await audioLoad).loading, false);
+  } finally { finish?.(Response.json({ tasks: [] })); await imageLoad; }
+});
+
+test('restaurant assets appear after the first page while later pages are still loading', async t => {
+  t.mock.method(Date, 'now', () => now);
+  let finish, snapshot;
+  libraryFixture(t, path => path.startsWith('/api/restaurant/')
+    ? path.includes('cursor=') ? new Promise(resolve => { finish = resolve; }) : Response.json({ tasks: [restaurant()], nextCursor: 'older' }) : null);
+  const pending = loadAssetLibrary(undefined, { type: 'image', onUpdate: value => { snapshot = value; } });
+  try {
+    await settleLibrary();
+    assert.equal(snapshot.records.length, 1, 'the first page is usable without waiting for the last page');
+    assert.equal(snapshot.loading, true);
+  } finally { finish?.(Response.json({ tasks: [], nextCursor: null })); await pending; }
+  assert.equal(snapshot.records.length, 1);
+  assert.equal(snapshot.loading, false);
 });

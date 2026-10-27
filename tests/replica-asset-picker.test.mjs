@@ -321,3 +321,36 @@ test('picker does not claim the library is empty before its metadata arrives', a
   finish(Response.json({ materials: [] })); await f.settle();
   assert.match(f.node('#replica-asset-picker').textContent, /暂无可用素材/);
 });
+
+test('opening image and voice pickers fetches only their sources and reuses the shared material list', async t => {
+  const f = await fixture(t), start = f.calls.length;
+  await f.open('photo');
+  assert.deepEqual(f.calls.slice(start).map(call => call.path.split('?')[0]), ['/api/assets/materials', '/api/ai/images', '/api/restaurant/tasks']);
+  f.node('#rap-cancel').click();
+  const afterImages = f.calls.length;
+  await f.open('voice');
+  assert.deepEqual(f.calls.slice(afterImages).map(call => call.path), ['/api/tasks?completed=true']);
+  assert.ok(f.node(`[data-rap-key="${voiceId}"]`));
+});
+
+test('picker uses small previews and retains loaded image nodes through selection and late library updates', async t => {
+  let finish;
+  const f = await fixture(t, { fetchMetadata: path => path.startsWith('/api/restaurant/') ? new Promise(resolve => { finish = resolve; }) : null });
+  await f.open('background');
+  const card = f.node(`[data-rap-key="${photoId}"]`), image = card.querySelector('img');
+  assert.equal(image.getAttribute('src'), `/api/assets/materials/${photoId}/media?thumbnail=1`);
+  assert.equal(image.getAttribute('loading'), 'eager');
+  const generated = f.node('[data-rap-key^="image:"] img');
+  assert.equal(generated.getAttribute('src'), `/api/ai/media/${generatedId}/result-1.png?thumbnail=1`);
+  card.click();
+  assert.equal(f.node(`[data-rap-key="${photoId}"] img`), image);
+  assert.equal(card.getAttribute('aria-pressed'), 'true');
+  finish(Response.json({ tasks: [] })); await f.settle();
+  assert.equal(f.node(`[data-rap-key="${photoId}"] img`), image);
+  assert.equal(f.node('[data-rap-key^="image:"] img'), generated);
+  await f.node('#rap-confirm').onclick();
+  assert.equal(f.dialog.open, false);
+  assert.equal(f.node('#replica-preview-background img').getAttribute('src'), `/api/assets/materials/${photoId}/media?thumbnail=1`);
+  f.node('#replica-preview-background').click();
+  assert.equal(f.node('#replica-image-full').getAttribute('src'), `/api/assets/materials/${photoId}/media`);
+});

@@ -4,6 +4,7 @@ import { loadAIConfig } from '../ai/server.mjs';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { createRestaurantStore, FILES_TTL_MS } from './store.mjs';
 import { createRestaurantMedia } from './media.mjs';
+import { createThumbnailCache, sendThumbnail } from '../assets/thumbnails.mjs';
 import * as images from './images.mjs';
 import * as promotion from './promotion.mjs';
 import { foodScene, foodPhotoPlan } from './scenes.mjs';
@@ -55,6 +56,7 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
   store: injectedStore, media: injectedMedia, model: injectedModel, providerLedger, credits, mediaEnv = process.env, imageProcessor = images, promotionalProcessor = promotion, subjectMasker: injectedMasker, packageDailyLimit = Number(process.env.RESTAURANT_PACKAGE_DAILY_LIMIT || 20), cleanupIntervalMs = 60_000,
   requireAuth = process.env.NODE_ENV === 'production', logger = console, styleRecipes = createStyleRecipes(), galleryConcurrency = GALLERY_CONCURRENCY } = {}) {
   const galleryQueue = createGalleryQueue(galleryConcurrency);
+  const thumbnails = createThumbnailCache();
   const costMeter = createApiCostMeter({credits,config,fetchImpl});
   fetchImpl = costMeter.fetch;
   const store = injectedStore ?? createRestaurantStore({ dataDir, databaseUrl, now, packageDailyLimit });
@@ -1091,6 +1093,15 @@ export function createRestaurantHandler({ dataDir = resolve('.data/restaurant'),
           const file = original ?? preview ?? (task.status === 'completed' ? task.files?.find(item => item.filename === name) : null);
           if (!file) throw new RestaurantError('文件不存在或尚未允许交付。', 404, 'FILE_NOT_FOUND');
           if (file.expired || file.expiresAt <= now()) throw new RestaurantError('文件已过期，请及时下载新任务的结果。', 410, 'FILES_EXPIRED');
+          if (url.searchParams.get('thumbnail') === '1' && /^image\/(jpeg|png|webp)$/.test(file.mime) && !url.searchParams.has('download')) {
+            const bytes = await thumbnails(JSON.stringify([userId, id, file.key]), async () => {
+              const originalBytes = await media.get(userId, id, file.key);
+              if (!originalBytes) throw new RestaurantError('文件已过期或不可用。', 410, 'FILES_EXPIRED');
+              return originalBytes;
+            });
+            if (file.expiresAt <= now()) throw new RestaurantError('文件已过期，请及时下载新任务的结果。', 410, 'FILES_EXPIRED');
+            sendThumbnail(req, res, bytes); return true;
+          }
           const bytes = await media.get(userId, id, file.key);
           if (!bytes) throw new RestaurantError('文件已过期或不可用。', 410, 'FILES_EXPIRED');
           res.writeHead(200, { 'Content-Type': file.mime, 'Content-Length': bytes.length, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': `${original || preview ? 'inline' : 'attachment'}; filename="${file.filename}"` }); res.end(bytes); return true;

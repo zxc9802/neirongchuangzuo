@@ -1,4 +1,4 @@
-import { loadAssetLibrary, uploadSharedMaterial } from './generated-assets.js';
+import { assetThumbnailUrl, loadAssetLibrary, uploadSharedMaterial } from './generated-assets.js';
 import { t } from './workspace-preferences.js';
 
 const TYPES = { video: 'video', voice: 'audio', photo: 'image', product: 'image', background: 'image' };
@@ -13,7 +13,7 @@ export async function openReplicaAssetPicker(ctx, kind, onSelect) {
   ctx.openModal(t(TITLES[kind]), t('选择一个素材，确认后填入当前复刻。'), `<section id="replica-asset-picker">
     <div class="rap-heading"><strong>${t('我的资产')}</strong><span>${t(type === 'image' ? '图片' : type === 'audio' ? '声音' : '视频')}</span></div>
     <div class="rap-toolbar"><label class="rap-search">${ctx.icon('search')}<input id="rap-search" type="search" placeholder="${t('按文件名搜索素材')}" aria-label="${t('按文件名搜索素材')}"></label><div class="rap-filters" role="group" aria-label="${t('素材来源')}">${[['all', '全部'], ['uploaded', '我上传的'], ['generated', 'AI生成的']].map(([value, label]) => `<button type="button" data-rap-filter="${value}" aria-pressed="${value === 'all'}">${t(label)}</button>`).join('')}</div></div>
-    <p id="rap-status" role="status">${t('正在读取资产…')}</p><div id="rap-grid" class="rap-grid"></div>
+    <p id="rap-status" role="status">${t('正在读取资产…')}</p><div id="rap-grid" class="rap-grid"><label class="rap-upload">${ctx.icon('plus')}<strong>${t('上传素材')}</strong><small>${t('支持本地文件上传')}</small><input id="rap-upload" type="file" accept="${ACCEPT[type]}"></label><p class="rap-empty" hidden></p></div>
     <footer class="modal-actions"><span id="rap-count"></span><button id="rap-cancel" type="button" class="secondary">${t('取消')}</button><button id="rap-confirm" type="button" class="primary" disabled>${t('确认选择')}</button></footer>
   </section>`, true);
   const dialog = document.querySelector('#modal'), root = document.querySelector('#replica-asset-picker');
@@ -24,11 +24,28 @@ export async function openReplicaAssetPicker(ctx, kind, onSelect) {
   function paint() {
     if (!current()) return;
     const visible = items.filter(item => (!item.expires || item.expires > Date.now()) && (filter === 'all' || item.origin === filter) && `${item.name} ${item.filename || ''}`.toLocaleLowerCase().includes(query));
-    $('#rap-grid').innerHTML = `<label class="rap-upload">${ctx.icon('plus')}<strong>${t('上传素材')}</strong><small>${t('支持本地文件上传')}</small><input id="rap-upload" type="file" accept="${ACCEPT[type]}" ${busy ? 'disabled' : ''}></label>` + visible.map(item => `<button type="button" class="rap-item" data-rap-key="${ctx.esc(item.key)}" aria-pressed="${selected === item.key}" ${busy ? 'disabled' : ''}><span class="rap-cover">${type === 'image' ? `<img src="${ctx.esc(item.url)}" alt="" loading="lazy">` : ctx.icon(type === 'audio' ? 'audio' : 'video')}<span class="rap-check" aria-hidden="true">${selected === item.key ? '✓' : ''}</span></span><strong title="${ctx.esc(item.name)}" data-no-i18n>${ctx.esc(item.name)}</strong><small>${t(item.origin === 'generated' ? 'AI生成的' : '我上传的')}</small></button>`).join('') + (!visible.length && !loading ? `<p class="rap-empty">${t(query ? '没有找到匹配素材' : '暂无可用素材，可从本地上传。')}</p>` : '');
+    const grid = $('#rap-grid'), existing = new Map([...grid.querySelectorAll('[data-rap-key]')].map(node => [node.dataset.rapKey, node]));
+    let previous = $('.rap-upload');
+    visible.forEach((item, index) => {
+      let card = existing.get(item.key);
+      if (!card) {
+        card = document.createElement('button'); card.type = 'button'; card.className = 'rap-item'; card.dataset.rapKey = item.key;
+        card.innerHTML = `<span class="rap-cover">${type === 'image' ? `<img src="${ctx.esc(assetThumbnailUrl(item))}" alt="" loading="${index < 7 ? 'eager' : 'lazy'}" decoding="async" width="320" height="320">` : ctx.icon(type === 'audio' ? 'audio' : 'video')}<span class="rap-check" aria-hidden="true"></span></span><strong title="${ctx.esc(item.name)}" data-no-i18n>${ctx.esc(item.name)}</strong><small>${t(item.origin === 'generated' ? 'AI生成的' : '我上传的')}</small>`;
+      }
+      card.setAttribute('aria-pressed', String(selected === item.key)); card.disabled = busy;
+      card.querySelector('.rap-check').textContent = selected === item.key ? '✓' : '';
+      if (previous.nextElementSibling !== card) previous.after(card);
+      previous = card; existing.delete(item.key);
+    });
+    for (const card of existing.values()) card.remove();
+    $('.rap-empty').hidden = visible.length > 0 || loading;
+    $('.rap-empty').textContent = visible.length || loading ? '' : t(query ? '没有找到匹配素材' : '暂无可用素材，可从本地上传。');
+    $('#rap-upload').disabled = busy;
     $('#rap-count').textContent = t('已选 {count}/1', { count: selected ? 1 : 0 });
     $('#rap-confirm').disabled = !selected || busy;
     $('#rap-upload').onchange = async event => {
       const file = event.target.files[0]; if (!file || busy) return;
+      event.target.value = '';
       if (!validFile(file)) return;
       busy = true; $('#rap-status').textContent = t('正在保存素材到资产库…'); paint();
       try {
@@ -78,7 +95,7 @@ export async function openReplicaAssetPicker(ctx, kind, onSelect) {
   };
   paint();
   try {
-    await loadAssetLibrary(controller.signal, { onUpdate(library) {
+    await loadAssetLibrary(controller.signal, { type, onUpdate(library) {
       if (!current()) return;
       loading = library.loading;
       items = [...items.filter(item => item.file),

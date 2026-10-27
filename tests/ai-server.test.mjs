@@ -10,6 +10,7 @@ import { createPreviewServer } from '../preview.mjs';
 import { createAIHandler, downloadImage, isPublicAddress, loadAIConfig } from '../services/ai/server.mjs';
 import { createRequestLedger } from '../services/ai/request-ledger.mjs';
 import { request } from 'node:http';
+import sharp from 'sharp';
 
 const CONFIG = { apiKey: 'test-secret', chatModel: 'gpt-6-luna', imageModel: 'gpt-image-2.5-sunburst-c', baseUrl: 'https://mock.invalid/v1' };
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZ6kAAAAASUVORK5CYII=', 'base64');
@@ -621,6 +622,25 @@ async function seedTask(storageDir, overrides = {}) {
   await writeFile(join(storageDir, id, 'result-1.png'), PNG);
   return task;
 }
+
+test('generated image thumbnails support revalidation and still enforce the original expiry', async t => {
+  const storageDir = await storage(t), task = await seedTask(storageDir);
+  const original = await sharp({ create: { width: 1600, height: 1200, channels: 3, background: '#456789' } }).png().toBuffer();
+  await writeFile(join(storageDir, task.id, 'result-1.png'), original);
+  let clock = Date.parse(task.completedAt) + 1000;
+  const app = await server(t, { storageDir, now: () => clock, cleanupIntervalMs: 0 });
+  const url = app.base + task.images[0].url;
+  const first = await fetch(url + '?thumbnail=1');
+  assert.equal(first.status, 200);
+  assert.equal(first.headers.get('content-type'), 'image/webp');
+  const meta = await sharp(Buffer.from(await first.arrayBuffer())).metadata();
+  assert.equal(meta.width, 320); assert.equal(meta.height, 240);
+  const headers = { 'If-None-Match': first.headers.get('etag') };
+  assert.equal((await fetch(url + '?thumbnail=1', { headers })).status, 304);
+  assert.deepEqual(Buffer.from(await (await fetch(url + '?thumbnail=1&download=1')).arrayBuffer()), original);
+  clock = Date.parse(task.completedAt) + 72 * 60 * 60 * 1000;
+  assert.equal((await fetch(url + '?thumbnail=1', { headers })).status, 410);
+});
 
 test('completed images expire exactly 72 hours after completion across list, detail and media; duplicate IDs stay spent after restart', async t => {
   let clock = Date.parse('2026-09-01T00:00:00.000Z');

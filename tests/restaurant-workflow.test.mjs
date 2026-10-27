@@ -112,6 +112,14 @@ test('deleting a completed task removes downloads and retains spent points and d
   const completed = await app.wait(id, ['completed', 'failed']);
   assert.equal(completed.status, 'completed', completed.error);
   const original = completed.sourceImages[0].filename;
+  const image = completed.files.find(file => file.role === 'image');
+  const thumbnailPath = `/tasks/${id}/files/${image.filename}?thumbnail=1`;
+  const thumbnail = await app.api(thumbnailPath);
+  assert.equal(thumbnail.status, 200);
+  const previewMeta = await sharp(thumbnail.body).metadata();
+  assert.equal(previewMeta.format, 'webp');
+  assert.ok(previewMeta.width <= 320 && previewMeta.height <= 320);
+  assert.equal((await app.api(thumbnailPath, undefined, 'other')).status, 404);
   const balance = (await app.credits.snapshot('owner')).balance;
   assert.equal((await app.api(`/tasks/${id}`, undefined, 'other', 'DELETE')).status, 200);
   assert.equal((await app.api(`/tasks/${id}`)).status, 200);
@@ -119,6 +127,7 @@ test('deleting a completed task removes downloads and retains spent points and d
   assert.equal((await app.api(`/tasks/${id}`, undefined, 'owner', 'DELETE')).status, 200);
   assert.equal((await app.api(`/tasks/${id}`)).status, 404);
   assert.equal((await app.api(`/tasks/${id}/files/${original}`)).status, 404);
+  assert.equal((await app.api(thumbnailPath)).status, 404, 'cached previews cannot outlive a deleted task');
   assert.equal((await app.api(`/tasks/${id}/files/package.zip`)).status, 404);
   assert.equal((await app.api('/tasks')).body.tasks.some(task => task.id === id), false);
   assert.equal((await app.credits.snapshot('owner')).balance, balance);

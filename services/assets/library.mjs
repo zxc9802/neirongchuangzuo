@@ -7,6 +7,7 @@ import { normalizeVoice, VOICE_LIMIT } from '../video/speech.mjs';
 import { editFolders, assignMaterials } from './folders.mjs';
 import { generatedSource, readGeneratedMedia } from './retain.mjs';
 import { inspectAssetUpload } from './upload.mjs';
+import { createThumbnailCache, sendThumbnail } from './thumbnails.mjs';
 
 const hash = value => createHash('sha256').update(value).digest('hex');
 const TYPES = { photo: { type: 'image', mime: 'image/jpeg', ext: 'jpg', name: '图片素材' }, voice: { type: 'audio', mime: 'audio/wav', ext: 'wav', name: '参考声音' }, video: { type: 'video', mime: 'video/mp4', ext: 'mp4', name: '参考视频' } };
@@ -18,6 +19,7 @@ const formats = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp',
 export function createMaterialLibrary({ env = process.env, cosClient, now = Date.now } = {}) {
   const configured = Boolean(cosClient || env.COS_SECRET_ID && env.COS_SECRET_KEY && env.COS_BUCKET && env.COS_REGION);
   const settings = { Bucket: env.COS_BUCKET, Region: env.COS_REGION }, locks = new Map(), transfers = new Map();
+  const thumbnails = createThumbnailCache(), indexes = new Map();
   let client;
   async function call(method, options) {
     if (!configured) throw fail('素材云存储尚未配置，请联系管理员配置 COS 后重试。');
@@ -30,7 +32,7 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
     if (typeof userId !== 'string' || !userId) throw fail('请先登录。', 401);
     return `workspace-assets/users/${hash(userId)}/`;
   }
-  async function records(userId) {
+  async function readRecords(userId) {
     const result = await call('getObject', { Key: prefix(userId) + 'index.json' });
     if (!result) return [];
     try {
@@ -38,6 +40,21 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
       if (!Array.isArray(items) || items.some(item => !validId(item.id) || !TYPES[item.kind] || !item.id.startsWith(item.kind + '-') || !Number.isFinite(item.createdAt))) throw new Error();
       return items;
     } catch { throw fail('素材索引暂时无法读取，请稍后重试。'); }
+  }
+  function rememberIndex(base, entry) {
+    indexes.delete(base); indexes.set(base, entry);
+    while (indexes.size > 128) indexes.delete(indexes.keys().next().value);
+    return entry.promise;
+  }
+  function records(userId, fresh = false) {
+    const base = prefix(userId), cached = indexes.get(base);
+    if (!fresh && cached && cached.expiresAt > now()) return cached.promise;
+    const entry = { expiresAt: Infinity, promise: null };
+    entry.promise = readRecords(userId).then(items => { entry.expiresAt = now() + 5000; return items; }).catch(error => {
+      if (indexes.get(base) === entry) indexes.delete(base);
+      throw error;
+    });
+    return rememberIndex(base, entry);
   }
   function view(item) {
     return { id: item.id, kind: item.kind, type: TYPES[item.kind].type, name: item.name, createdAt: item.createdAt,
@@ -63,7 +80,7 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
     if (!input || !['folder-create', 'folder-rename', 'folder-move', 'folder-delete', 'assign'].includes(input.action)) throw fail('文件夹操作无效。', 400);
     const previous = locks.get(userId) || Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
-      const data = await organization(userId), items = await records(userId);
+      const data = await organization(userId), items = await records(userId, true);
       if (input.action === 'assign') assignMaterials(data, input.ids, input.folderId, input.type, items);
       else editFolders(data, input, items);
       return writeOrganization(userId, data);
@@ -78,7 +95,7 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
     const previous = locks.get(userId) || Promise.resolve();
     const operation = previous.catch(() => {}).then(async () => {
       const data = await organization(userId), keys = [...new Set(input.keys)];
-      const ownMaterials = new Set((await records(userId)).map(item => `material:${item.id}`));
+      const ownMaterials = new Set((await records(userId, true)).map(item => `material:${item.id}`));
       if ([...keys, ...(input.target ? [input.target] : [])].some(key => key.startsWith('material:') && !ownMaterials.has(key))) throw fail('素材不存在。', 404);
       if (input.action === 'delete') data.deleted = [...new Set([...data.deleted, ...keys])];
       else if (input.action === 'restore') data.deleted = data.deleted.filter(key => !keys.includes(key));
@@ -105,19 +122,21 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
       if (typeof name !== 'string' || !name.trim() || name.trim().length > 80 || /[\\/<>:"|?*\u0000-\u001f\u007f]/.test(name)) throw fail('请输入1—80个字符的素材名称，不含文件路径或特殊符号。', 400);
       const previous = locks.get(userId) || Promise.resolve();
       const operation = previous.catch(() => {}).then(async () => {
-        const items = await records(userId), item = items.find(item => item.id === id);
+        const items = await records(userId, true), item = items.find(item => item.id === id);
         if (!item) throw fail('素材不存在。', 404);
-        item.name = name.trim();
-        const saved = await call('putObject', { Key: prefix(userId) + 'index.json', Body: JSON.stringify(items), ContentType: 'application/json', ACL: 'private' });
+        const renamed = { ...item, name: name.trim() };
+        const updated = items.map(record => record.id === id ? renamed : record);
+        const saved = await call('putObject', { Key: prefix(userId) + 'index.json', Body: JSON.stringify(updated), ContentType: 'application/json', ACL: 'private' });
         if (!saved) throw fail('素材名称保存失败，请重试。');
-        return view(item);
+        rememberIndex(prefix(userId), { expiresAt: now() + 5000, promise: Promise.resolve(updated) });
+        return view(renamed);
       });
       locks.set(userId, operation);
       try { return await operation; } finally { if (locks.get(userId) === operation) locks.delete(userId); }
     },
     async list(userId, { includeDeleted = false } = {}) {
       const data = await organization(userId);
-      return (await records(userId)).filter(item => includeDeleted || !data.deleted.includes(`material:${item.id}`))
+      return (await records(userId, true)).filter(item => includeDeleted || !data.deleted.includes(`material:${item.id}`))
         .sort((a, b) => b.createdAt - a.createdAt).map(view);
     },
     async save(userId, { kind, path, name, metadata = {}, mime, placement }) {
@@ -143,7 +162,7 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
       // Only identical materials wait for each other; large uploads never hold the account index lock.
       const transferKey = base + id, previousTransfer = transfers.get(transferKey) || Promise.resolve();
       const transfer = previousTransfer.catch(() => {}).then(async () => {
-        const items = await records(userId), existing = items.find(item => item.id === id);
+        const items = await records(userId, true), existing = items.find(item => item.id === id);
         await placementData(items);
         if (existing && !placement) return view(existing);
         const title = String(name || TYPES[kind].name).replace(/\.[^.]+$/, '').replace(/[\\/\u0000-\u001f\u007f]/g, '').trim().slice(0, 80) || TYPES[kind].name;
@@ -159,11 +178,12 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
         const previous = locks.get(userId) || Promise.resolve();
         const operation = previous.catch(() => {}).then(async () => {
           // Re-read after the transfer so concurrent uploads and folder edits are preserved.
-          const latest = await records(userId), saved = latest.find(record => record.id === id);
+          const latest = await records(userId, true), saved = latest.find(record => record.id === id);
           const data = await placementData(latest);
           if (!saved) {
             const indexed = await call('putObject', { Key: base + 'index.json', Body: JSON.stringify([...latest, item]), ContentType: 'application/json', ACL: 'private' });
             if (!indexed) throw fail('素材索引保存失败，请重试。');
+            rememberIndex(base, { expiresAt: now() + 5000, promise: Promise.resolve([...latest, item]) });
           }
           if (data) await writeOrganization(userId, data);
           return view(saved || item);
@@ -183,6 +203,11 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
       const bytes = Buffer.from(result.Body);
       if (bytes.length !== item.bytes || hash(bytes) !== id.slice(item.kind.length + 1)) throw fail('素材内容校验失败，请稍后重试。');
       return { ...view(item), bytes, metadata: item.metadata, mime: item.mime || TYPES[item.kind].mime };
+    },
+    async thumbnail(userId, id) {
+      if (!validId(id) || !id.startsWith('photo-')) throw fail('素材不存在。', 404);
+      // Original media remains available to task references; cache entries are isolated by owner.
+      return thumbnails(prefix(userId) + id, async () => (await this.get(userId, id)).bytes);
     },
   };
 }
@@ -271,6 +296,9 @@ export function createMaterialHandler({ library, archiveExisting, readGenerated 
       }
       const match = /^\/api\/assets\/materials\/((?:photo|voice|video)-[a-f0-9]{64})\/media$/.exec(url.pathname);
       if (!match) throw fail('素材不存在。', 404);
+      if (url.searchParams.get('thumbnail') === '1' && !url.searchParams.has('download')) {
+        sendThumbnail(req, res, await library.thumbnail(userId, match[1])); return;
+      }
       const item = await library.get(userId, match[1]), size = item.bytes.length;
       let start = 0, end = size - 1;
       if (req.headers.range) {

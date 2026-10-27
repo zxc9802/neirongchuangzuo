@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import sharp from 'sharp';
 import { createMaterialLibrary, createMaterialHandler } from '../services/assets/library.mjs';
 import { createVideoHandler } from '../services/video/server.mjs';
 import { assetFolders, materialFolder } from '../design/asset-organization.js';
@@ -223,7 +224,7 @@ test('a failed cloud index is not reported as saved and retry repairs it without
   await assert.rejects(createMaterialLibrary({ env: {} }).save('alice', { kind: 'photo', path }), /尚未配置/);
 });
 
-async function workspace(t, { enabled = true, legacy = false } = {}) {
+async function workspace(t, { enabled = true, legacy = false, videoProbe } = {}) {
   const root = await temporary(t), cos = cloud(); let now = Date.now();
   const library = createMaterialLibrary(enabled ? { cosClient: cos, now: () => now } : { env: {} });
   if (legacy) {
@@ -237,7 +238,7 @@ async function workspace(t, { enabled = true, legacy = false } = {}) {
   const handler = createVideoHandler({ storageDir: join(root, 'video'), materialLibrary: library, now: () => now, pollIntervalMs: 20,
     config: { enabled: true, publicOrigin: 'https://workspace.example', signingSecret: 'test-only' },
     photo: async bytes => Buffer.concat([Buffer.from('jpeg:'), bytes]),
-    probe: async () => ({ duration: 5, width: 640, height: 640, audio: true }),
+    probe: videoProbe || (async () => ({ duration: 5, width: 640, height: 640, audio: true })),
     voice: async (input, output) => { await writeFile(output, Buffer.concat([Buffer.from('wav:'), await readFile(input)])); return { duration: 4 }; },
     speech: { enabled: true, detect: async () => [{ start: 0.2 }] }, captions: { extract: async () => null },
     narration: null, lipsync: null, voiceConversion: null,
@@ -462,4 +463,108 @@ test('library uploads preserve full audio and image bytes, enforce folder types 
   assert.equal((await upload('video', png, 'own-video')).status, 400);
   assert.equal((await upload('photo', Buffer.alloc(50 * 1024 * 1024), 'photos')).status, 413);
   assert.equal((await library.list('alice')).length, 2);
+});
+
+test('media reads reuse the listed index, refresh after five seconds and see newly saved assets immediately', async t => {
+  const root = await temporary(t), path = join(root, 'photo.jpg'), voice = join(root, 'voice.wav'), cos = cloud();
+  await writeFile(path, 'photo'); await writeFile(voice, 'voice');
+  const writer = createMaterialLibrary({ cosClient: cos });
+  const photo = await writer.save('alice', { kind: 'photo', path });
+  let clock = 1000, indexReads = 0;
+  const getObject = cos.getObject;
+  cos.getObject = (options, done) => { if (options.Key.endsWith('/index.json')) indexReads++; getObject(options, done); };
+  const reader = createMaterialLibrary({ cosClient: cos, now: () => clock });
+  await reader.list('alice');
+  await Promise.all(Array.from({ length: 8 }, () => reader.get('alice', photo.id)));
+  assert.equal(indexReads, 1, 'one list plus eight previews need only one cloud index read');
+  clock += 5001;
+  await Promise.all(Array.from({ length: 8 }, () => reader.get('alice', photo.id)));
+  assert.equal(indexReads, 2, 'expired lookups share one in-flight cloud read');
+  const saved = await reader.save('alice', { kind: 'voice', path: voice });
+  const afterSave = indexReads;
+  assert.equal((await reader.get('alice', saved.id)).bytes.toString(), 'voice');
+  assert.equal(indexReads, afterSave, 'successful uploads replace the cached index immediately');
+  await assert.rejects(reader.get('bob', photo.id), { status: 404 });
+});
+
+test('writes refresh a stale index and explicit listing discovers assets saved by another instance', async t => {
+  const root = await temporary(t), path = join(root, 'photo.jpg'), cos = cloud();
+  await writeFile(path, 'photo');
+  const first = createMaterialLibrary({ cosClient: cos }), second = createMaterialLibrary({ cosClient: cos });
+  assert.deepEqual(await first.list('alice'), []);
+  const photo = await second.save('alice', { kind: 'photo', path });
+  const voice = await first.save('alice', { kind: 'voice', path });
+  const items = await second.list('alice');
+  assert.deepEqual(new Set(items.map(item => item.id)), new Set([photo.id, voice.id]));
+  assert.equal((await first.list('alice')).length, 2);
+});
+
+test('an older in-flight list cannot replace the index populated by a successful upload', async t => {
+  const root = await temporary(t), path = join(root, 'photo.jpg'), cos = cloud();
+  await writeFile(path, 'photo');
+  const library = createMaterialLibrary({ cosClient: cos });
+  await library.save('alice', { kind: 'photo', path });
+  let finish, reads = 0;
+  const getObject = cos.getObject;
+  cos.getObject = (options, done) => {
+    if (options.Key.endsWith('/index.json') && ++reads === 1) {
+      const bytes = Buffer.from(cos.objects.get(options.Key));
+      finish = () => done(null, { Body: bytes }); return;
+    }
+    getObject(options, done);
+  };
+  const oldList = library.list('alice');
+  try {
+    await new Promise(resolve => setImmediate(resolve));
+    const saved = await library.save('alice', { kind: 'voice', path });
+    finish(); await oldList;
+    const count = reads;
+    assert.equal((await library.get('alice', saved.id)).id, saved.id);
+    assert.equal(reads, count);
+  } finally { finish?.(); await oldList; }
+});
+
+test('opening saved assets does not queue behind a busy task whose photos are already archived', async t => {
+  let release, entered;
+  const gate = new Promise(resolve => { release = resolve; }), started = new Promise(resolve => { entered = resolve; });
+  const app = await workspace(t, { videoProbe: async () => { entered(); await gate; return { duration: 5, width: 640, height: 640, audio: true }; } });
+  const id = await app.draft();
+  assert.equal((await app.request(`/api/video-replica/tasks/${id}/photo`, { method: 'PUT', body: 'photo' })).status, 200);
+  const uploading = app.request(`/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: Buffer.from([0, 0, 0, 16, ...Buffer.from('ftypisom0000')]) });
+  let listing, timer;
+  try {
+    await Promise.race([started, uploading.then(response => { throw new Error(`upload finished before probe: ${response.status}`); })]);
+    listing = app.request('/api/assets/materials');
+    const result = await Promise.race([listing, new Promise(resolve => { timer = setTimeout(() => resolve(null), 500); })]);
+    assert.ok(result, 'asset listing must finish before the video processing lock is released');
+    assert.equal((await result.json()).materials.length, 1);
+  } finally { clearTimeout(timer); release(); await uploading; await listing; }
+});
+
+test('material thumbnails are small, cached per owner, revalidated and never replace the original', async t => {
+  const app = await workspace(t), path = join(app.root, 'large.jpg');
+  const original = await sharp({ create: { width: 2048, height: 1536, channels: 3, background: '#567890' } }).jpeg({ quality: 95 }).toBuffer();
+  await writeFile(path, original);
+  const item = await app.library.save('alice', { kind: 'photo', path });
+  const url = item.url + '?thumbnail=1';
+  const requests = [], getObject = app.cos.getObject;
+  app.cos.getObject = (options, done) => { requests.push(options.Key); getObject(options, done); };
+  const responses = await Promise.all(Array.from({ length: 4 }, () => app.request(url)));
+  for (const response of responses) {
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/webp');
+    const bytes = Buffer.from(await response.arrayBuffer()), meta = await sharp(bytes).metadata();
+    assert.equal(meta.width, 320); assert.equal(meta.height, 240);
+    assert.ok(bytes.length < original.length / 4);
+  }
+  assert.equal(requests.filter(key => key.endsWith('.jpg')).length, 1, 'concurrent previews fetch the original only once');
+  const etag = responses[0].headers.get('etag'); assert.ok(etag);
+  assert.equal(responses[0].headers.get('cache-control'), 'private, no-cache');
+  assert.equal(responses[0].headers.get('vary'), 'Cookie');
+  const cached = await app.request(url, { headers: { 'If-None-Match': etag } });
+  assert.equal(cached.status, 304); assert.equal((await cached.arrayBuffer()).byteLength, 0);
+  assert.equal(requests.filter(key => key.endsWith('.jpg')).length, 1);
+  assert.equal((await app.request(url, { owner: 'bob', headers: { 'If-None-Match': etag } })).status, 404);
+  assert.equal((await app.request(url, { owner: '' })).status, 401);
+  assert.deepEqual(Buffer.from(await (await app.request(item.url)).arrayBuffer()), original);
 });

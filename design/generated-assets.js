@@ -5,24 +5,32 @@ import { assetFolders, materialFolder, organizeAssets } from './asset-organizati
 import { renderAssetFolders, openFolderEditor, openMaterialMove, openAssetUpload } from './asset-folders.js';
 const RETENTION_MS = 72 * 60 * 60 * 1000;
 const TYPES = { all: '全部', image: '图片', video: '视频', audio: '音频' };
+const LIBRARY_SOURCES = ['图片', '数字人', '餐饮图文', '人物复刻', 'AI视频', '长期素材'];
+const LIBRARY_TYPES = { all: [5, 0, 1, 2, 3, 4], image: [5, 0, 2], audio: [5, 1], video: [5, 1, 3, 4] };
 const state = { ctx: null, category: 'all', folderId: null, type: 'all', materialType: 'all', limit: 24, materialLimit: 24, records: [], materials: [], rawRecords: [], rawMaterials: [], organization: {}, deleted: false, selection: new Set(), busy: false, errors: [], loading: false, controller: null, timer: null, revision: 0 };
 let libraryCache;
 function currentLibrary() {
   const owner = globalThis.workspaceUser?.id;
   if (!libraryCache || libraryCache.owner !== owner) {
     libraryCache?.controller.abort();
-    libraryCache = { owner, values: [[], [], [], [], [], []], organization: { order: [], deleted: [] }, organizationRevision: 0, errors: [], loadedAt: 0, pending: null, uploads: [], listeners: new Set(), controller: new AbortController() };
+    libraryCache = { owner, values: [[], [], [], [], [], []], organization: { order: [], deleted: [] }, organizationRevision: 0, errors: [], loadedAt: [], pending: [], uploads: [], listeners: new Set(), controller: new AbortController() };
   }
   return libraryCache;
 }
-function librarySnapshot(cache, loading = Boolean(cache.pending)) {
-  const [images, avatars, restaurant, videos, creativeVideos, materials] = cache.values;
+function librarySnapshot(cache, indices = LIBRARY_TYPES.all, loading = indices.some(index => cache.pending[index])) {
+  const [images, avatars, restaurant, videos, creativeVideos, materials] = cache.values.map((items, index) => indices.includes(index) ? items : []);
   const rawMaterials = materials.map(item => ({ ...item, key: `material:${item.id}` }));
   const rawRecords = collectGeneratedAssets(images, avatars, Date.now(), restaurant, videos, creativeVideos).filter(item => !cache.organization.retained?.[item.key]);
   return { rawMaterials, rawRecords, organization: cache.organization,
-    materials: organizeAssets(rawMaterials, cache.organization), records: organizeAssets(rawRecords, cache.organization), errors: cache.errors.filter(Boolean), loading };
+    materials: organizeAssets(rawMaterials, cache.organization), records: organizeAssets(rawRecords, cache.organization), errors: indices.map(index => cache.errors[index]).filter(Boolean), loading };
 }
-function notifyLibrary(cache) { for (const listener of cache.listeners) listener(librarySnapshot(cache)); }
+function notifyLibrary(cache) { for (const listener of cache.listeners) listener(); }
+
+export function assetThumbnailUrl(item) {
+  const url = item.url || '';
+  return item.type === 'image' && /^\/api\/(?:assets\/materials\/|ai\/media\/|restaurant\/tasks\/)/.test(url)
+    ? url + (url.includes('?') ? '&' : '?') + 'thumbnail=1' : url;
+}
 
 function displayedMaterials() { return organizeAssets(state.rawMaterials, state.organization, state.deleted).filter(item => (state.category === 'all' || item.type === state.category) && (!state.folderId || materialFolder(item, state.organization) === state.folderId) && (state.materialType === 'all' || item.kind === state.materialType)); }
 function displayedRecords() { return organizeAssets(state.rawRecords.filter(item => item.expires > Date.now() && !state.organization.retained?.[item.key]), state.organization, state.deleted).filter(item => !state.folderId && (state.category === 'all' || item.type === state.category) && (state.type === 'all' || item.type === state.type)); }
@@ -65,7 +73,7 @@ function applyLibraryResult(cache, data) {
     cache.values[5] = cache.values[5].some(item => item.id === data.material.id)
       ? cache.values[5].map(item => item.id === data.material.id ? data.material : item)
       : [data.material, ...cache.values[5]];
-    if (cache.pending) cache.uploads.push(data.material);
+    if (cache.pending[5]) cache.uploads.push(data.material);
   }
   Object.assign(state, librarySnapshot(cache));
   if (state.folderId && !assetFolders(state.organization).some(folder => folder.id === state.folderId)) state.folderId = null;
@@ -125,7 +133,7 @@ async function placeAssets(items, folderId, type, ctx) {
       saved++; state.selection.delete(item.key);
     }
     state.selection.clear(); ctx.toast('已保存到素材文件夹');
-  } catch (error) { if (cache === libraryCache) { ctx.toast(`${saved ? '部分素材已保存。' : ''}${error.message || '保存失败，请重试。'}`); cache.loadedAt = 0; } }
+  } catch (error) { if (cache === libraryCache) { ctx.toast(`${saved ? '部分素材已保存。' : ''}${error.message || '保存失败，请重试。'}`); cache.loadedAt[5] = 0; } }
   finally { if (cache === libraryCache) { state.busy = false; paint(); } }
 }
 function confirmAssetDelete(keys, ctx) {
@@ -155,7 +163,7 @@ export async function uploadSharedMaterial(kind, file, signal, placement) {
       cache.organization = data.organization; cache.organizationRevision++;
     }
     cache.values[5] = [data.material, ...cache.values[5].filter(item => item.id !== data.material.id)];
-    if (cache.pending) cache.uploads.push(data.material);
+    if (cache.pending[5]) cache.uploads.push(data.material);
     notifyLibrary(cache);
   }
   return data.material;
@@ -194,7 +202,7 @@ async function useMaterial(item, target, ctx) {
 }
 function renderMaterialResults(ctx) {
   const { esc, icon, button } = ctx, filtered = displayedMaterials();
-  return `<div class="material-assets-heading"><h2>素材库</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '图片'], ['voice', '参考声音'], ['video', '视频']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card" data-asset-key="${esc(item.key)}" data-asset-group="materials" draggable="false">${assetTools(item, ctx)}<button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看图片' : item.kind === 'video' ? '查看视频' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon(item.type === 'video' ? 'video' : 'audio')}<small>${item.type === 'video' ? '参考视频' : '参考声音'}</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '图片' : item.kind === 'video' ? '参考视频' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', state.deleted ? '预览' : '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : state.deleted ? '暂无已删除素材' : '点击上传素材，保存图片、音频和视频。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
+  return `<div class="material-assets-heading"><h2>素材库</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '图片'], ['voice', '参考声音'], ['video', '视频']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card" data-asset-key="${esc(item.key)}" data-asset-group="materials" draggable="false">${assetTools(item, ctx)}<button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看图片' : item.kind === 'video' ? '查看视频' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(assetThumbnailUrl(item))}" alt="${esc(item.name)}" loading="lazy" decoding="async">` : `<span class="generated-asset-audio">${icon(item.type === 'video' ? 'video' : 'audio')}<small>${item.type === 'video' ? '参考视频' : '参考声音'}</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '图片' : item.kind === 'video' ? '参考视频' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', state.deleted ? '预览' : '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : state.deleted ? '暂无已删除素材' : '点击上传素材，保存图片、音频和视频。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
 }
 
 function timestamp(value) {
@@ -287,7 +295,7 @@ function renderResults(ctx) {
   const errors = state.errors.length ? `<div class="generated-assets-errors" role="status">${state.errors.map(error => `<p>${esc(error)}</p>`).join('')}${button('generated-assets-refresh', '重新加载', 'textbutton')}</div>` : '';
   if (state.loading && !records.length) return filters + `<div class="generated-assets-empty" role="status">${icon('clock')}<h2>正在读取生成的作品</h2></div>`;
   if (!filtered.length) return filters + errors + `<div class="generated-assets-empty">${icon('folder')}<h2>${state.deleted ? '暂无已删除作品' : records.length ? `近 3 天还没有${TYPES[state.type]}成品` : state.errors.length ? '暂时没有可展示的成品' : '近 3 天还没有生成作品'}</h2>${button('generated-assets-create', '去生成图片 ' + icon('arrow'), 'primary')}</div>`;
-  return filters + errors + `<div class="generated-assets-grid">${filtered.slice(0, state.limit).map(record => `<article class="generated-asset-card" data-asset-key="${esc(record.key)}" data-asset-group="records" draggable="false">${assetTools(record, ctx)}<button class="generated-asset-cover ${record.type}" data-action="generated-asset-preview" data-key="${esc(record.key)}" aria-label="${record.type === 'image' ? '查看图片' : record.type === 'video' ? '播放视频' : '试听配音'}：${esc(record.title)}">${record.type === 'image' ? `<img src="${esc(record.url)}" alt="${esc(record.title)}" loading="lazy">` : record.type === 'video' ? `<video src="${esc(record.url)}" preload="metadata" muted playsinline aria-hidden="true"></video><span class="generated-asset-play">${icon('play')}</span>` : `<span class="generated-asset-audio">${icon('audio')}<small>生成配音</small></span>`}<span class="generated-asset-kind">${esc(record.source)} · ${TYPES[record.type]}</span></button><div class="generated-asset-copy"><h2 title="${esc(record.title)}">${esc(record.title)}</h2>${record.modelLabel ? `<p class="generated-asset-model">生成模型：${esc(record.modelLabel)}</p>` : ''}<time datetime="${new Date(record.completed).toISOString()}">${dateLabel(record.completed)} 生成</time><div class="generated-asset-footer"><span class="generated-asset-expiry ${record.expires - Date.now() <= 24 * 3600000 ? 'soon' : ''}" title="${dateLabel(record.expires)} 到期">${remainingLabel(record.expires)}</span><a href="${esc(record.download)}" download="${esc(record.filename)}" class="generated-asset-download" aria-label="下载${TYPES[record.type]}：${esc(record.title)}">${icon('save')}下载</a></div><small class="generated-asset-deadline">${dateLabel(record.expires)} 到期清理</small></div></article>`).join('')}</div>${filtered.length > state.limit ? `<div class="generated-assets-more">${button('generated-assets-more', '加载更多作品', 'secondary')}</div>` : ''}`;
+  return filters + errors + `<div class="generated-assets-grid">${filtered.slice(0, state.limit).map(record => `<article class="generated-asset-card" data-asset-key="${esc(record.key)}" data-asset-group="records" draggable="false">${assetTools(record, ctx)}<button class="generated-asset-cover ${record.type}" data-action="generated-asset-preview" data-key="${esc(record.key)}" aria-label="${record.type === 'image' ? '查看图片' : record.type === 'video' ? '播放视频' : '试听配音'}：${esc(record.title)}">${record.type === 'image' ? `<img src="${esc(assetThumbnailUrl(record))}" alt="${esc(record.title)}" loading="lazy" decoding="async">` : record.type === 'video' ? `<video src="${esc(record.url)}" preload="metadata" muted playsinline aria-hidden="true"></video><span class="generated-asset-play">${icon('play')}</span>` : `<span class="generated-asset-audio">${icon('audio')}<small>生成配音</small></span>`}<span class="generated-asset-kind">${esc(record.source)} · ${TYPES[record.type]}</span></button><div class="generated-asset-copy"><h2 title="${esc(record.title)}">${esc(record.title)}</h2>${record.modelLabel ? `<p class="generated-asset-model">生成模型：${esc(record.modelLabel)}</p>` : ''}<time datetime="${new Date(record.completed).toISOString()}">${dateLabel(record.completed)} 生成</time><div class="generated-asset-footer"><span class="generated-asset-expiry ${record.expires - Date.now() <= 24 * 3600000 ? 'soon' : ''}" title="${dateLabel(record.expires)} 到期">${remainingLabel(record.expires)}</span><a href="${esc(record.download)}" download="${esc(record.filename)}" class="generated-asset-download" aria-label="下载${TYPES[record.type]}：${esc(record.title)}">${icon('save')}下载</a></div><small class="generated-asset-deadline">${dateLabel(record.expires)} 到期清理</small></div></article>`).join('')}</div>${filtered.length > state.limit ? `<div class="generated-assets-more">${button('generated-assets-more', '加载更多作品', 'secondary')}</div>` : ''}`;
 }
 
 export function renderGeneratedAssets(ctx) {
@@ -335,52 +343,63 @@ async function fetchMaterials(signal) {
   if (!Array.isArray(data.materials)) throw new Error('长期素材列表暂时无法读取。');
   return { materials: collectMaterialAssets(data.allMaterials || data.materials), organization: data.organization || { order: [], deleted: [] } };
 }
-async function fetchRestaurantTasks(signal) {
+async function fetchRestaurantTasks(signal, onPage) {
   const tasks = [], cursors = new Set();
   const after = Date.now() - RETENTION_MS;
   let cursor;
   do {
     const page = await fetchTaskPage('/api/restaurant/tasks?limit=50&completed=true&completedAfter=' + after + (cursor ? '&cursor=' + encodeURIComponent(cursor) : ''), signal, '餐饮图文');
     tasks.push(...page.tasks);
+    onPage?.(tasks);
     cursor = page.nextCursor;
     if (cursor && (typeof cursor !== 'string' || cursors.has(cursor))) throw new Error('餐饮图文作品分页暂时无法读取，请刷新重试。');
     if (cursor) cursors.add(cursor);
   } while (cursor);
   return tasks;
 }
-export async function loadAssetLibrary(signal, { onUpdate, force = false } = {}) {
-  const cache = currentLibrary(), refresh = force || Date.now() - cache.loadedAt >= 30000;
-  const update = snapshot => { if (!signal?.aborted && cache.owner === globalThis.workspaceUser?.id) onUpdate?.(snapshot); };
+export async function loadAssetLibrary(signal, { onUpdate, force = false, type = 'all' } = {}) {
+  const cache = currentLibrary(), indices = LIBRARY_TYPES[type] || LIBRARY_TYPES.all;
+  const refresh = indices.filter(index => !cache.pending[index] && (force || !cache.loadedAt[index] || Date.now() - cache.loadedAt[index] >= 30000));
+  const update = loading => { if (!signal?.aborted && cache.owner === globalThis.workspaceUser?.id) onUpdate?.(librarySnapshot(cache, indices, loading)); };
   const detach = () => cache.listeners.delete(update);
-  if (signal?.aborted) return librarySnapshot(cache);
+  if (signal?.aborted) return librarySnapshot(cache, indices);
   cache.listeners.add(update); signal?.addEventListener('abort', detach, { once: true });
-  update(librarySnapshot(cache, Boolean(cache.pending) || refresh));
-  if (!cache.pending && refresh) {
+  update(indices.some(index => cache.pending[index]) || refresh.length > 0);
+  if (refresh.length) {
     // A dialog closing detaches its listener; other pickers can reuse the same requests.
     const requestSignal = AbortSignal.any([cache.controller.signal, AbortSignal.timeout(120000)]);
     const organizationRevision = cache.organizationRevision;
-    const sources = ['图片', '数字人', '餐饮图文', '人物复刻', 'AI视频', '长期素材'];
-    cache.errors = []; cache.uploads = [];
-    cache.pending = Promise.allSettled([
-      fetchTasks('/api/ai/images?completed=true', requestSignal, sources[0]), fetchTasks('/api/tasks?completed=true', requestSignal, sources[1]), fetchRestaurantTasks(requestSignal),
-      fetchTasks('/api/video-replica/tasks?completed=true', requestSignal, sources[3]), fetchTasks('/api/video-creator/tasks?completed=true', requestSignal, sources[4]), fetchMaterials(requestSignal),
-    ].map(async (request, index) => {
-      try {
-        const value = await request;
+    const loaders = [
+      () => fetchTasks('/api/ai/images?completed=true', requestSignal, LIBRARY_SOURCES[0]),
+      () => fetchTasks('/api/tasks?completed=true', requestSignal, LIBRARY_SOURCES[1]),
+      () => fetchRestaurantTasks(requestSignal, tasks => {
+        cache.values[2] = [...new Map([...cache.values[2], ...tasks].map(task => [task.id, task])).values()];
+        notifyLibrary(cache);
+      }),
+      () => fetchTasks('/api/video-replica/tasks?completed=true', requestSignal, LIBRARY_SOURCES[3]),
+      () => fetchTasks('/api/video-creator/tasks?completed=true', requestSignal, LIBRARY_SOURCES[4]),
+      () => fetchMaterials(requestSignal),
+    ];
+    for (const index of refresh) {
+      cache.errors[index] = '';
+      if (index === 5) cache.uploads = [];
+      cache.pending[index] = Promise.resolve().then(loaders[index]).then(value => {
         if (index === 5) {
           cache.values[index] = [...new Map([...value.materials, ...cache.uploads].map(item => [item.id, item])).values()];
           if (cache.organizationRevision === organizationRevision) cache.organization = value.organization;
         } else cache.values[index] = value;
-      } catch (error) {
-        cache.errors[index] = ['AbortError', 'TimeoutError'].includes(error?.name) ? `${t(sources[index])}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(error?.message) ? error.message : `${t(sources[index])}作品暂时无法读取。`;
-      }
-      notifyLibrary(cache);
-    })).then(() => {
-      cache.loadedAt = cache.errors.some(Boolean) ? 0 : Date.now(); cache.pending = null; cache.uploads = [];
-      notifyLibrary(cache);
-    });
+        cache.loadedAt[index] = Date.now();
+      }).catch(error => {
+        cache.loadedAt[index] = 0;
+        cache.errors[index] = ['AbortError', 'TimeoutError'].includes(error?.name) ? `${t(LIBRARY_SOURCES[index])}作品读取超时，请刷新重试。` : /[\u3400-\u9fff]/.test(error?.message) ? error.message : `${t(LIBRARY_SOURCES[index])}作品暂时无法读取。`;
+      }).finally(() => {
+        cache.pending[index] = null;
+        if (index === 5) cache.uploads = [];
+        notifyLibrary(cache);
+      });
+    }
   }
-  try { await cache.pending; return librarySnapshot(cache); }
+  try { await Promise.all(indices.map(index => cache.pending[index])); return librarySnapshot(cache, indices); }
   finally { detach(); signal?.removeEventListener('abort', detach); }
 }
 async function load(force = false) {

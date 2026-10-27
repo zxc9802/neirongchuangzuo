@@ -14,6 +14,7 @@ import { imageWithFallback, FAL_IMAGE_MODEL } from './image-fallback.mjs';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { CreditsError } from '../credits/store.mjs';
 import { readCompletionStream } from '../restaurant/model-stream.mjs';
+import { createThumbnailCache, sendThumbnail } from '../assets/thumbnails.mjs';
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const MB = 1024 * 1024;
@@ -167,6 +168,7 @@ async function downloadResult(url, hops, signal) {
 }
 
 export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROOT, '.data', 'ai'), credits, fetchImpl = fetch, downloadImpl = downloadImage, now = Date.now, cleanupIntervalMs = 60_000, bodyTimeoutMs = 30_000, logger = console, retentionOptions = {}, rateLimitWait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+  const thumbnails = createThumbnailCache();
   const costMeter = createApiCostMeter({credits,config,fetchImpl});
   fetchImpl = costMeter.fetch;
   let jobs = new Map(); let busy = false; let chatCount = 0; let closing = false;
@@ -510,8 +512,11 @@ export function createAIHandler({ config = loadAIConfig(), storageDir = join(ROO
         if (task.billing?.source === 'workspace' && task.billing.status !== 'settled') throw new ApiError('积分结算尚未完成，请稍后查询原任务。', 503, 'CREDITS_SETTLEMENT_PENDING');
         if (task && retention.isExpired(task)) throw new ApiError('这份素材已超过 3 天保留期，无法继续下载。', 410, 'RESULT_EXPIRED');
         if (!task || task.kind === 'chat' || task.status !== 'completed' || !task.images.some(image => image.filename === media[2])) throw new ApiError('未找到这张作品。', 404);
-        const bytes = await readFile(await retention.resultPath(task.id, media[2]));
+        const thumbnail = url.searchParams.get('thumbnail') === '1' && !url.searchParams.has('download');
+        const load = async () => readFile(await retention.resultPath(task.id, media[2]));
+        const bytes = thumbnail ? await thumbnails(JSON.stringify([task.userId, task.id, media[2]]), load) : await load();
         if (retention.isExpired(task)) throw new ApiError('这份素材已超过 3 天保留期，无法继续下载。', 410, 'RESULT_EXPIRED');
+        if (thumbnail) { sendThumbnail(req, res, bytes); return true; }
         res.writeHead(200, { 'Content-Type': imageType(bytes).mime, 'Content-Length': bytes.length, 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', ...(url.searchParams.has('download') ? { 'Content-Disposition': `attachment; filename="${media[2]}"` } : {}) });
         res.end(req.method === 'HEAD' ? undefined : bytes); return true;
       }

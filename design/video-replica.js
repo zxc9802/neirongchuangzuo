@@ -2,7 +2,7 @@ import { uiLocale, t } from './workspace-preferences.js';
 import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malaysian-prices.js';
 import { openReplicaAssetPicker } from './replica-asset-picker.js';
-import { uploadSharedMaterial } from './generated-assets.js';
+import { assetThumbnailUrl, uploadSharedMaterial } from './generated-assets.js';
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
@@ -193,7 +193,7 @@ function deepInputs(ctx) {
     const title = kind === 'photo' ? '人物' : REPLACEMENTS[kind];
     const name = active ? selected?.name || (saved ? '已上传' : '待添加素材') : '';
     const tile = source && kind !== 'voice'
-      ? `<button type="button" id="replica-preview-${kind}" class="replica-material-tile replica-material-zoom" aria-label="放大预览${title}" title="放大预览${title}"><img src="${ctx.esc(source)}" alt="${ctx.esc(title)}参考素材"></button>${disabled ? '' : `<label for="replica-${kind}" class="replica-material-add" title="更换${title}参考素材" aria-label="更换${title}参考素材">+</label>`}`
+      ? `<button type="button" id="replica-preview-${kind}" class="replica-material-tile replica-material-zoom" aria-label="放大预览${title}" title="放大预览${title}"><img src="${ctx.esc(assetThumbnailUrl({ type: 'image', url: source }))}" alt="${ctx.esc(title)}参考素材" decoding="async"></button>${disabled ? '' : `<label for="replica-${kind}" class="replica-material-add" title="更换${title}参考素材" aria-label="更换${title}参考素材">+</label>`}`
       : `<label for="replica-${kind}" class="replica-material-tile ${disabled ? 'is-disabled' : ''}" title="${ctx.esc(selected?.name || `添加${title}参考素材`)}">${ctx.icon(kind === 'photo' ? 'avatar' : kind === 'voice' ? 'audio' : kind === 'product' ? 'store' : 'image')}<span class="replica-material-add" aria-hidden="true">+</span></label>`;
     return `<div class="replica-material ${active ? 'is-selected' : ''}"><div class="replica-material-preview"><input id="replica-${kind}" class="replica-hidden-input" type="file" accept="${kind === 'voice' ? 'audio/mpeg,audio/wav,.mp3,.wav' : 'image/jpeg,image/png,image/webp'}" ${disabled ? 'disabled' : ''} aria-label="上传${title}参考素材">${tile}<input id="replica-toggle-${kind}" class="replica-material-toggle" type="checkbox" aria-label="替换${REPLACEMENTS[kind]}" ${active ? 'checked' : ''} ${disabled ? 'disabled' : ''}>${active ? `<button type="button" class="replica-material-remove" id="replica-remove-${kind}" aria-label="取消选择" title="取消选择" ${locked ? 'disabled' : ''}><span aria-hidden="true">×</span></button>` : ''}</div><span class="replica-material-label">${title}<small>可选</small></span><span class="replica-material-name" title="${ctx.esc(name)}">${ctx.esc(name)}</span><div class="replica-material-actions"><button type="button" data-replica-select-${kind} ${disabled ? 'disabled' : ''}>从资产库选择</button></div></div>`;
   }).join('');
