@@ -7,7 +7,7 @@ import { costPoints } from '../credits/costs.mjs';
 import { generationPrice, generationPoints } from '../../design/malaysian-prices.js';
 import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
-import { createVideoProvider, videoConfig, VideoError, MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, isWan3Model } from './provider.mjs';
+import { createVideoProvider, videoConfig, VideoError, MODEL, MINIMAX_MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, isWan3Model } from './provider.mjs';
 import { safeVideoError } from './errors.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, restoreSourceAudio, downloadVideo, serveMedia } from './media.mjs';
 import { prepareReferenceVideo } from './reference-video.mjs';
@@ -87,7 +87,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     : task.model === PIXVERSE_MODEL ? pixverseProvider : task.model === FAL_MODEL ? falProvider : provider;
   const models = MODELS.map(model => ({ ...model, enabled: Boolean(isFalReplacement(model.id)
     ? config.falEnabled && (!credits || costMeter.enabled) : isWan3Model(model.id)
-      ? config.wan3Enabled : config.enabled) }));
+      ? config.wan3Enabled : config.enabled && (model.id !== MINIMAX_MODEL || !credits || costMeter.enabled)) }));
   const voiceEngines = [{ id: 'seedance', name: 'Seedance 2.0', enabled: Boolean(config.enabled) },
     { id: 'indextts2', name: 'IndexTTS2', enabled: Boolean(narration?.enabled && lipsync?.enabled) },
     { id: 'chatterbox', name: 'Chatterbox 音色转换', enabled: Boolean(voiceConversion?.enabled) }];
@@ -134,7 +134,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
   }
   const generationReceipt = task => isWan3Model(task.model) ? 'wan3' : 'seedance';
   const costPrepared = task => isWan3Model(task.model) ? task.wan3CostPrepared : task.seedanceCostPrepared;
-  const generationQuote = task => (isWan3Model(task.model) ? task.video.duration + task.duration : task.duration) * cnyPerSecond(task);
+  const generationQuote = task => (isWan3Model(task.model) || task.model === MINIMAX_MODEL ? task.video.duration + task.duration : task.duration) * cnyPerSecond(task);
   async function prepareGenerationCost(task) {
     const record = await credits.prepareCostCall({ userId: task.userId, taskId: task.billingTaskId || task.id,
       receiptId: generationReceipt(task), quoteCny: generationQuote(task), provider: isWan3Model(task.model) ? 'dashscope' : 'video-replica',
@@ -269,7 +269,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       voiceEngine: task.voiceEngine || (task.model === FAL_MODEL ? undefined : 'seedance'), narrationProgress: task.narration && { ready: task.narration.ready,
         completed: task.narration.segments.filter(segment => segment.status === 'ready').length, total: task.narration.segments.length },
       model: task.model || MODEL, modelName: task.model === FAL_MODEL ? '极速模型' : task.model === WAN_MODEL ? 'Wan 2.2 人物替换' : models.find(model => model.id === (task.model || MODEL))?.name,
-      resolution: task.model === FAL_MODEL ? '768p' : '720p',
+      resolution: task.model === FAL_MODEL ? '768p' : models.find(model => model.id === (task.model || MODEL))?.resolution || '720p',
       sourceVideoUrl: !expired && task.video ? `${PREFIX}/tasks/${task.id}/video` : null,
       sourcePhotoUrl: !expired && task.photo ? `${PREFIX}/tasks/${task.id}/photo` : null,
       sourceVoiceUrl: !expired && task.voice ? `${PREFIX}/tasks/${task.id}/voice` : null,
@@ -587,7 +587,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     if (result.failed) { task.failureReasonCheckedAt = now(); await fail(task, generationFailure(result), 'VIDEO_GENERATION_FAILED'); return; }
     if (task.billing?.mode==='api_cost' && task.seedanceCostPrepared && (result.completed || result.url)) {
-      await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',costCny:task.duration * cnyPerSecond(task),
+      await credits.finishCostCall({userId:task.userId,taskId:task.billingTaskId||task.id,receiptId:'seedance',costCny:generationQuote(task),
         ...(task.providerId?{providerRequestId:task.providerId}:{})});
     }
     if (result.falQueue) task.falQueue = result.falQueue;
@@ -765,8 +765,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const videoKinds = task.segments ? task.segments.map(segment => `segment-${segment.index}`) : ['video'];
       for (const kind of videoKinds) if (!task.materials[kind]) await prepareVideoReference(task, kind);
       for (const kind of [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), ...videoKinds, ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
-        if (!task.materials[kind] || wan3Aggregate) {
-          task.materials[kind] = isWan3Model(task.model)
+        if (!task.materials[kind] || wan3Aggregate || task.model === MINIMAX_MODEL) {
+          task.materials[kind] = task.model === MINIMAX_MODEL ? { id: sourceUrl(task, kind), status: 2 } : isWan3Model(task.model)
             ? wan3Aggregate ? await wan3AggregateMaterial(task, kind)
               : await wan3Provider.upload(materialFile(task, kind), mime(kind), task.model)
             : isFalReplacement(task.model)

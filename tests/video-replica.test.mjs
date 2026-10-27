@@ -27,6 +27,50 @@ const META = { duration: 4, width: 512, height: 800, audio: true };
 const PREMIUM_MODEL = 'doubao-seedance-2-5-260628';
 const FAST_MODEL = 'doubao-seedance-2-0-fast-260128', MINI_MODEL = 'doubao-seedance-2-0-mini-260615';
 const TEST_BALANCE = 100_000;
+
+for (const [sourceDuration, generatedDuration] of [[3.5, 4], [5, 15], [15, 15]]) test(`MiniMax-H3 ${sourceDuration}s uses direct sources and bills input plus ${generatedDuration}s output once`, async t => {
+  const app = await fixture(t, { costMode: true, probe: async () => ({ ...META, duration: sourceDuration }) }), id = randomUUID();
+  const response = await app.call('/tasks', { body: { requestId: id, model: 'MiniMax-H3', voiceEngine: 'seedance' } });
+  assert.equal(response.status, 201); await app.upload(id);
+  const points = Math.ceil((sourceDuration + generatedDuration) * 0.5 * 125);
+  const draft = await app.current(id);
+  assert.equal(draft.duration, generatedDuration); assert.equal(draft.resolution, '768P'); assert.equal(draft.estimatedPoints, points);
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.creates.length, 0);
+  assert.equal(app.state.body.modelId, 'MiniMax-H3');
+  assert.equal(app.state.body.payload.params.duration, generatedDuration);
+  assert.equal(app.state.body.payload.params.resolution, '768P');
+  for (const source of [...app.state.body.payload.resources, ...app.state.body.payload.referVideoUrl]) {
+    const url = new URL(source); assert.equal(url.origin, CONFIG.publicOrigin);
+    assert.equal((await fetch(app.base + url.pathname + url.search)).status, 200);
+  }
+  await app.close(); await app.open();
+  app.state.done = true;
+  const done = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(done.billing.mode, 'api_cost'); assert.equal(done.billing.costCny, (sourceDuration + generatedDuration) * 0.5);
+  assert.equal(done.billing.chargedPoints, points); assert.equal(app.state.generations, 1);
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - points);
+});
+
+test('MiniMax-H3 rejects long references and enhanced editing before billing', async t => {
+  const app = await fixture(t, { costMode: true, probe: async () => ({ ...META, duration: 16 }) });
+  const invalid = await app.call('/tasks', { body: { requestId: randomUUID(), model: 'MiniMax-H3', mode: 'deep', editMode: 'enhanced' } });
+  assert.equal(invalid.status, 400); assert.equal((await invalid.json()).code, 'VIDEO_EDIT_MODE_INVALID');
+  const id = randomUUID();
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model: 'MiniMax-H3', mode: 'deep', replacements: {} } })).status, 201);
+  const upload = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
+  assert.equal(upload.status, 400); assert.equal((await upload.json()).code, 'VIDEO_DURATION_INVALID');
+  assert.equal((await app.wallet.snapshot('alice')).held, 0); assert.equal(app.state.generations, 0);
+});
+
+test('MiniMax-H3 is unavailable with legacy flat-rate credits', async t => {
+  const app = await fixture(t);
+  const config = await (await app.call('/config')).json();
+  assert.equal(config.models.find(model => model.id === 'MiniMax-H3').enabled, false);
+  const response = await app.call('/tasks', { body: { requestId: randomUUID(), model: 'MiniMax-H3' } });
+  assert.equal(response.status, 503); assert.equal(app.state.generations, 0);
+});
 const REPLICA_PRICES = [
   ['doubao-seedance-2-0-260128', 'qiya-2.0', 1],
   [PREMIUM_MODEL, 'qiya-2.5', 1.5],
@@ -813,11 +857,11 @@ test('all four Seedance editions are offered and removed models cannot start or 
   const app = await fixture(t, { costMode: true, config: { ...CONFIG, falEnabled: true, falKey: 'private-fal-key' } });
   const config = await (await app.call('/config')).json();
   assert.deepEqual(config.models.slice(0, 4).map(model => [model.id, model.name, model.cnyPerSecond]), REPLICA_PRICES);
-  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [false, 15], [false, 15]]);
+  assert.deepEqual(config.models.map(model => [model.enabled, model.maxDuration]), [[true, 15], [true, 30], [true, 15], [true, 15], [false, 15], [false, 15], [true, 15]]);
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '单段最多15秒，整条最多60秒，1元/秒');
   assert.equal(config.models[1].description, '单段最多30秒，整条最多60秒，1.5元/秒');
-  assert.deepEqual(config.models.map(model => model.extendedDuration), [60, 60, 60, 60, 60, 60]);
+  assert.deepEqual(config.models.map(model => model.extendedDuration), [60, 60, 60, 60, 60, 60, undefined]);
   assert.equal(config.model, 'doubao-seedance-2-0-260128');
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
   const id = await app.init(); await app.upload(id);

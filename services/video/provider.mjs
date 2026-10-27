@@ -2,6 +2,7 @@ import { providerFailure, readProviderResponse, safeVideoError } from './errors.
 import { DEEP_IMAGE_KINDS, deepGenerationBody, isDeepReplica, isEnhancedEdit } from './deep-replica.mjs';
 
 export const MODEL = 'doubao-seedance-2-0-260128';
+export const MINIMAX_MODEL = 'MiniMax-H3';
 export const PIXVERSE_MODEL = 'fal-ai/pixverse/swap';
 // Retained for recovery and settlement of tasks submitted before removal.
 export const WAN_MODEL = 'fal-ai/wan/v2.2-14b/animate/replace';
@@ -17,6 +18,7 @@ export const MODELS = [
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', description: '单段最多15秒，整条最多60秒，0.5元/秒', cnyPerSecond: 0.5, maxDuration: 15, extendedDuration: 60, durations: DURATIONS, resolution: '720p' },
   { id: WAN3_MODEL, name: 'qiya-3.0', description: '单段最多15秒 · 整条最多60秒 · 720P · 输入与输出均计费', cnyPerSecond: 0.6, maxDuration: 15, extendedDuration: 60, durations: DURATIONS, resolution: '720p' },
   { id: WAN3_FAST_MODEL, name: 'qiya-3.0 快速版', description: '生成速度加快，积分消耗增加50%', cnyPerSecond: 0.9, maxDuration: 15, extendedDuration: 60, durations: DURATIONS, resolution: '720p' },
+  { id: MINIMAX_MODEL, name: 'MiniMax-H3', description: '768P · 生成4或15秒 · 输入、输出视频各0.5元/秒；前5张图片免费，超出每张0.20元', cnyPerSecond: 0.5, maxDuration: 15, durations: [4, 15], resolution: '768P' },
   { id: PIXVERSE_MODEL, name: 'PixVerse Swap', description: '最长30秒 · 720p · 按实际费用，配音口型另计', maxDuration: 30, durations: Array.from({ length: 29 }, (_, i) => i + 2), resolution: '720p' },
 ];
 export const PROMPT = '编辑视频1。同时完成两项编辑：人物替换和原视频叠加水印去除。将视频1中的唯一人物完整替换为图片1中的人物。删除视频1画面中已有的平台和作者水印，包括抖音/TikTok、快手、小红书等平台的图标及名称、抖音号等账号ID、@用户名、作者昵称及其相邻角标；这些叠加标记属于水印，不属于需要保留的台词字幕或场景标识。无论水印位于左上角、右上角、底部还是随时间移动，都要从第一帧到最后一帧去除，包括半透明文字和图案水印，并自然重建被遮挡的背景，不得保留、复制或新增水印，不用模糊、马赛克、色块或裁切画面的方式遮盖水印。去水印要求优先于下文的背景、字幕和口型保留要求。图片1是人物外貌的唯一参考，头部、脸型、五官及其比例、眉眼、鼻子、嘴唇、耳朵、下颌轮廓、发际线和发型都必须采用图片1；不得保留视频1原人物的脸部特征，不得混合两个人的五官，不能只换衣服而保留原脸。人物的服装采用图片1，去掉原人物与图片1不一致的服装、配饰和衣服文字，不新增图片1中不存在的装饰。替换从第一帧开始并保持到最后一帧。沿用视频1的动作、表情变化、说话节奏、位置和镜头运动，不增加动作、不重复片段、不延伸表演。人物以外的场景、商品及包装、背景标识和已有字幕保持原样，但上述保留要求仅适用于非水印内容；保留正常台词字幕的原文、位置、排版和出现时间，不重画字幕。正常台词字幕、商品包装文字和场景中的真实招牌不属于水印，须保持原样。';
@@ -54,8 +56,15 @@ export function videoConfig(env = {}, publicOrigin) {
   return config;
 }
 export function generationBody(task) {
-  const resource = kind => isWan3Model(task.model) ? task.materials[kind].id : `asset://${task.materials[kind].id}`;
-  if (isDeepReplica(task)) return deepGenerationBody(task, MODEL, resource);
+  const minimax = task.model === MINIMAX_MODEL;
+  if (minimax && ![4, 15].includes(task.duration)) throw new VideoError('MiniMax-H3 仅支持生成 4 秒或 15 秒视频。', 400, 'VIDEO_DURATION_INVALID');
+  const settings = { resolution: minimax ? '768P' : '720p', duration: minimax ? task.duration : -1 };
+  const resource = kind => minimax || isWan3Model(task.model) ? task.materials[kind].id : `asset://${task.materials[kind].id}`;
+  if (isDeepReplica(task)) {
+    const body = deepGenerationBody(task, MODEL, resource);
+    Object.assign(body.payload.params, settings);
+    return body;
+  }
   // Separate audio services consume the source after the visual edit.
   const voiceConversion = task.voice && task.voiceEngine === 'chatterbox';
   const separateNarration = task.voice && ['indextts2', 'chatterbox'].includes(task.voiceEngine);
@@ -75,7 +84,7 @@ export function generationBody(task) {
   }
   return { modelId: task.model || MODEL, abilityType: 'VIDEO', prompt: PROMPT + lengthPrompt + captionPrompt + voicePrompt,
     // Video editing follows the source; fixed ratio/duration values are rejected by Seedance.
-    payload: { params: { mode: 'fusion_video', resolution: '720p', scale: 'adaptive', duration: -1, generateAudio: !voiceConversion && !(task.sourceAudioMode === 'silent' && separateNarration) },
+    payload: { params: { mode: 'fusion_video', ...settings, scale: 'adaptive', generateAudio: !voiceConversion && !(task.sourceAudioMode === 'silent' && separateNarration) },
       resources: [resource('photo')], referVideoUrl: [resource('video')],
       ...(task.voice && !separateNarration ? { referAudioUrl: [resource('voice')] } : {}) } };
 }

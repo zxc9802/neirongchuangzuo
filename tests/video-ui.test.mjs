@@ -16,6 +16,20 @@ test('deep cleanup displays full-screen progress without a coordinate selector o
   assert.doesNotMatch(page.html(), /replica-download/);
 });
 
+test('MiniMax-H3 can be selected with 768P pricing and cannot enable Seedance enhanced editing', async t => {
+  const page = await fixture(t, { apiFetch: path => path.endsWith('/config') ? Response.json({ enabled: true,
+    models: [{ id: 'MiniMax-H3', enabled: true }] }) : undefined });
+  page.recover(); await page.poll();
+  page.node('#replica-models').onchange({ target: { value: 'MiniMax-H3' } }); await page.settle();
+  assert.match(page.html(), /option value="MiniMax-H3"[^>]*selected/);
+  assert.match(page.html(), /768P.*4或15秒.*输入、输出视频各0.5元\/秒/);
+  assert.match(page.html(), /2–15 秒/); assert.doesNotMatch(page.html(), /历史版本，仅供查看已有成片/);
+  assert.match(page.html(), /生成时间受视频时长和排队情况影响/);
+  page.node('#replica-mode-deep').onclick(); page.rebind();
+  page.node('#replica-models').onchange({ target: { value: 'MiniMax-H3' } }); await page.settle();
+  assert.match(page.html(), /option value="enhanced"[^>]*disabled/);
+});
+
 test('replica keeps the source language without a selector or target in requests', async t => {
   let task; const posts = [];
   const page = await fixture(t, { apiFetch: (path, options) => {

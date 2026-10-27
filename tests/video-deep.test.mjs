@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { generationBody, createVideoProvider, MODELS, PIXVERSE_MODEL, WAN3_MODEL, isWan3Model } from '../services/video/provider.mjs';
+import { generationBody, createVideoProvider, MODELS, PIXVERSE_MODEL, WAN3_MODEL, MINIMAX_MODEL, isWan3Model } from '../services/video/provider.mjs';
 import { wan3GenerationBody } from '../services/video/wan3.mjs';
 import { restoreSourceAudio, probeVideo } from '../services/video/media.mjs';
 
@@ -50,9 +50,9 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
   for (let mask = 0; mask < 16; mask++) {
     const replacements = Object.fromEntries(kinds.map((kind, bit) => [kind, Boolean(mask & (1 << bit))]));
     const selectedImages = kinds.slice(0, 3).filter(kind => replacements[kind]);
-    const task = { mode: 'deep', model: model.id, replacements, video: { duration: 4 },
+    const task = { mode: 'deep', model: model.id, duration: 4, replacements, video: { duration: 4 },
       voiceEngine: replacements.voice ? 'chatterbox' : 'seedance', ...(replacements.voice ? { voice: {} } : {}),
-      materials: Object.fromEntries(['video', ...selectedImages].map(kind => [kind, { id: isWan3Model(model.id) ? `https://workspace.example/${kind}?signature=test` : kind + '-asset' }])) };
+      materials: Object.fromEntries(['video', ...selectedImages].map(kind => [kind, { id: (isWan3Model(model.id) || model.id === MINIMAX_MODEL) ? `https://workspace.example/${kind}?signature=test` : kind + '-asset' }])) };
     if (isWan3Model(model.id)) {
       const direct = generationBody(task);
       assert.deepEqual(direct.payload.resources, selectedImages.map(kind => task.materials[kind].id));
@@ -65,8 +65,8 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
       assert.deepEqual(body.input.media, [...selectedImages.map(kind => ({ type: 'reference_image', url: task.materials[kind].id })), { type: 'reference_video', url: task.materials.video.id }]);
       assert.equal(body.parameters.audio, false);
     } else {
-      assert.deepEqual(body.payload.resources, selectedImages.map(kind => isWan3Model(model.id) ? task.materials[kind].id : `asset://${kind}-asset`));
-      assert.deepEqual(body.payload.referVideoUrl, [isWan3Model(model.id) ? task.materials.video.id : 'asset://video-asset']);
+      assert.deepEqual(body.payload.resources, selectedImages.map(kind => (isWan3Model(model.id) || model.id === MINIMAX_MODEL) ? task.materials[kind].id : `asset://${kind}-asset`));
+      assert.deepEqual(body.payload.referVideoUrl, [(isWan3Model(model.id) || model.id === MINIMAX_MODEL) ? task.materials.video.id : 'asset://video-asset']);
       assert.equal(body.payload.params.generateAudio, false);
       assert.equal(body.payload.referAudioUrl, undefined);
     }

@@ -6,6 +6,7 @@ import { uploadSharedMaterial } from './generated-assets.js';
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
+const MINIMAX_MODEL = 'MiniMax-H3';
 const WAN3_MODEL = 'wan3.0-video', WAN3_FAST_MODEL = 'wan3.0-video-prime';
 const MODELS = [
   { id: DEFAULT_MODEL, name: 'qiya-2.0', maxDuration: 15, extendedDuration: 60 },
@@ -14,6 +15,7 @@ const MODELS = [
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, extendedDuration: 60 },
   { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, extendedDuration: 60 },
   { id: WAN3_FAST_MODEL, name: 'qiya-3.0 快速版', maxDuration: 15, extendedDuration: 60, fast: true },
+  { id: MINIMAX_MODEL, name: 'MiniMax-H3', maxDuration: 15 },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
 const REPLACEMENTS = { photo: '人物', voice: '声音', product: '商品', background: '背景' };
@@ -126,17 +128,18 @@ function modelName(task) {
 }
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
-  const wan3 = [WAN3_MODEL, WAN3_FAST_MODEL].includes(selected.id);
+  const wan3 = [WAN3_MODEL, WAN3_FAST_MODEL].includes(selected.id), minimax = selected.id === MINIMAX_MODEL;
+  const enhancedSupported = selected.id.startsWith('doubao-seedance-');
   const fast = wan3 ? `<div class="replica-fast-option"><label for="replica-wan3-fast"><input id="replica-wan3-fast" type="checkbox" aria-describedby="replica-wan3-fast-hint" ${selected.fast ? 'checked' : ''} ${locked || !state.config?.models?.find(model => model.id === WAN3_FAST_MODEL)?.enabled ? 'disabled' : ''}>快速版</label><span id="replica-wan3-fast-hint">选择快速版后生成速度加快，但是积分消耗增加50%</span></div>` : '';
   const price = generationPrice('video', selected.id);
-  const description = price ? `单段最多 ${selected.maxDuration} 秒，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
+  const description = minimax ? '768P · 按原片时长选择生成4或15秒 · 输入、输出视频各0.5元/秒；前5张图片免费，超出每张0.20元' : price ? `单段最多 ${selected.maxDuration} 秒，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
   const automatic = selected.extendedDuration ? `<p class="replica-model-description">${ctx.esc(`自动识别原视频时长，超过 ${selected.maxDuration} 秒自动分段，支持整条最长 ${selected.extendedDuration} 秒。`)}</p>` : '';
-  const editing = deepMode() ? `<div class="replica-model-setting"><label for="replica-edit-mode">编辑方式</label><select id="replica-edit-mode" class="replica-models" aria-describedby="replica-edit-hint" ${locked || !state.config?.enabled ? 'disabled' : ''}><option value="standard" ${editMode === 'standard' ? 'selected' : ''}>标准复刻</option><option value="enhanced" ${editMode === 'enhanced' ? 'selected' : ''} ${state.config?.enhancedEditing === false || wan3 ? 'disabled' : ''}>Seedance 视频编辑增强 2.0</option></select><p id="replica-edit-hint" class="replica-model-description">${wan3 ? '视频编辑增强 2.0 可在 qiya-2.0、2.5、2.0-f1、20-m1 下使用。' : editMode === 'enhanced' ? '根据替换内容自动选择编辑模板，保留原视频动作与镜头。' : '使用当前复刻流程，可切换增强版对比效果。'}</p></div>` : '';
-  return `${editing}<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.filter(model => !model.fast && !(deepMode() && editMode === 'enhanced' && model.id === WAN3_MODEL)).map(model => {
+  const editing = deepMode() ? `<div class="replica-model-setting"><label for="replica-edit-mode">编辑方式</label><select id="replica-edit-mode" class="replica-models" aria-describedby="replica-edit-hint" ${locked || !state.config?.enabled ? 'disabled' : ''}><option value="standard" ${editMode === 'standard' ? 'selected' : ''}>标准复刻</option><option value="enhanced" ${editMode === 'enhanced' ? 'selected' : ''} ${state.config?.enhancedEditing === false || !enhancedSupported ? 'disabled' : ''}>Seedance 视频编辑增强 2.0</option></select><p id="replica-edit-hint" class="replica-model-description">${!enhancedSupported ? '视频编辑增强 2.0 可在 qiya-2.0、2.5、2.0-f1、20-m1 下使用。' : editMode === 'enhanced' ? '根据替换内容自动选择编辑模板，保留原视频动作与镜头。' : '使用当前复刻流程，可切换增强版对比效果。'}</p></div>` : '';
+  return `${editing}<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.filter(model => !model.fast && !(deepMode() && editMode === 'enhanced' && !model.id.startsWith('doubao-seedance-'))).map(model => {
     const configured = state.config?.models?.find(item => item.id === model.id);
-    const unavailable = !state.config?.enabled || configured?.enabled === false || model.id === 'wan3.0-video' && !configured?.enabled;
+    const unavailable = !state.config?.enabled || configured?.enabled === false || [WAN3_MODEL, MINIMAX_MODEL].includes(model.id) && !configured?.enabled;
     return `<option value="${model.id}" ${selected.id === model.id || selected.fast && model.id === WAN3_MODEL ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
-  }).join('')}</select>${fast}<p id="replica-model-description" class="replica-model-description" title="${ctx.esc(MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p>${automatic}</div>`;
+  }).join('')}</select>${fast}<p id="replica-model-description" class="replica-model-description" title="${ctx.esc(minimax ? '按输入视频与生成视频的时长分别计费' : MALAYSIAN_PRICE_NOTE)}">${ctx.esc(description)}</p>${automatic}</div>`;
 }
 function slot(kind, ctx) {
   const video = kind === 'video', voice = kind === 'voice', extra = ['product', 'background'].includes(kind), title = video ? '参考视频' : voice ? '声音参考' : extra ? `${REPLACEMENTS[kind]}参考图` : '目标人物照片', selected = state.files[kind] || selectedMaterials[kind];
@@ -243,7 +246,7 @@ async function selectEditMode(next) {
 function generationEstimate() {
   const model = selectedModel();
   if (!MODELS.some(item => item.id === model.id)) return '';
-  if ([WAN3_MODEL, WAN3_FAST_MODEL].includes(model.id)) return '<p class="replica-time-estimate">生成时间受视频时长和排队情况影响，请留意任务进度。</p>';
+  if ([WAN3_MODEL, WAN3_FAST_MODEL, MINIMAX_MODEL].includes(model.id)) return '<p class="replica-time-estimate">生成时间受视频时长和排队情况影响，请留意任务进度。</p>';
   return '<p class="replica-time-estimate">生成时间约为 5–10 分钟</p>';
 }
 function result(ctx) {
