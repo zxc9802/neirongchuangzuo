@@ -867,7 +867,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (!task.voiceConversion?.ready) throw error('换声结果尚未就绪。', 502, 'VIDEO_CONVERSION_PENDING');
         const background = task.voiceConversion.preserveBackground ? join(folder(task), 'separated-background.wav') : undefined;
         if (background && !task.voiceConversion.separation?.ready) throw error('背景声音轨尚未就绪。', 502, 'VIDEO_CONVERSION_PENDING');
-        await voiceConversion.mux(generated, join(folder(task), 'converted-voice.wav'), aligned, task.actualDuration, background);
+        await voiceConversion.mux(generated, join(folder(task), 'converted-voice.wav'), aligned, task.actualDuration,
+          background, background ? join(folder(task), 'separated-vocals.wav') : undefined);
         task.audioCheck = { engine: 'chatterbox', referenceApplied: true, emotionSource: 'original-video', tempoAdjusted: false,
           lipSync: 'needs_preview', backgroundAudioPreserved: Boolean(background),
           warning: background ? '已替换人声并混回原背景声，未调整语速；请试听检查音乐、人声残留和口型。'

@@ -151,10 +151,26 @@ export function createVoiceConversionService(env = {}, { fetchImpl = fetch, down
   return { enabled: Boolean(key), advance, mux: muxConvertedVoice };
 }
 
-async function muxConvertedVoice(video, audio, output, duration, background) {
+// Duplicate mono speech at unity gain; keep stereo stems in their existing channels.
+const VOICE_STEREO = 'aresample=48000,pan=stereo|FL=FL+FC|FR=FR+FC';
+
+async function voiceLoudness(path, duration) {
+  const { stderr } = await run('ffmpeg', ['-hide_banner', '-nostats', '-nostdin', '-i', path, '-map', '0:a:0', '-vn',
+    '-af', `${VOICE_STEREO},apad,atrim=duration=${duration},loudnorm=print_format=json`, '-f', 'null', '-'],
+  { timeout: 120_000, maxBuffer: 1024 * 1024 });
+  return Number(JSON.parse(stderr.slice(stderr.lastIndexOf('{'), stderr.lastIndexOf('}') + 1)).input_i);
+}
+
+async function muxConvertedVoice(video, audio, output, duration, background, originalVoice) {
   if (!background) return muxNarration(video, audio, output, duration);
+  const [originalLoudness, convertedLoudness] = await Promise.all([
+    voiceLoudness(originalVoice, duration), voiceLoudness(audio, duration),
+  ]);
+  // Silence and clips too short to measure must not produce an infinite gain.
+  const gain = Number.isFinite(originalLoudness) && Number.isFinite(convertedLoudness)
+    ? originalLoudness - convertedLoudness : 0;
   await run('ffmpeg', ['-v', 'error', '-nostdin', '-y', '-i', video, '-i', audio, '-i', background,
-    '-filter_complex', '[1:a:0]aresample=48000,aformat=channel_layouts=stereo,apad[voice];'
+    '-filter_complex', `[1:a:0]${VOICE_STEREO},volume=${gain}dB,apad[voice];`
       + '[2:a:0]aresample=48000,aformat=channel_layouts=stereo,apad[background];'
       + '[voice][background]amix=inputs=2:normalize=0,alimiter=limit=0.98:level=0:latency=1[mixed]',
     '-map', '0:v:0', '-map', '[mixed]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',

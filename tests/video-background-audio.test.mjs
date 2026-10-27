@@ -96,7 +96,8 @@ test('deep conversion separates once, converts only speech, and restores stereo 
   const video = join(f.folder, 'generated.mp4'), output = join(f.folder, 'result.mp4');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=25:d=4',
     '-f', 'lavfi', '-i', 'sine=frequency=1760:duration=4', '-c:v', 'libx264', '-c:a', 'aac', video]);
-  await f.service.mux(video, join(f.folder, 'converted-voice.wav'), output, 4, join(f.folder, 'separated-background.wav'));
+  await f.service.mux(video, join(f.folder, 'converted-voice.wav'), output, 4,
+    join(f.folder, 'separated-background.wav'), join(f.folder, 'separated-vocals.wav'));
   const frames = path => execFileSync('ffmpeg', ['-v', 'error', '-i', path, '-map', '0:v:0', '-f', 'framemd5', '-']).toString();
   assert.equal(frames(output), frames(video));
   for (const [start, seconds, speaking] of [[.05, .3, false], [1, 1, true], [3.5, .4, false]]) {
@@ -112,6 +113,57 @@ test('deep conversion separates once, converts only speech, and restores stereo 
   const meta = JSON.parse(execFileSync('ffprobe', ['-v', 'error', '-show_entries', 'format=duration:stream=codec_type,channels', '-of', 'json', output]));
   assert.equal(Number(meta.format.duration), 4);
   assert.equal(meta.streams.find(s => s.codec_type === 'audio').channels, 2);
+});
+
+test('deep mix matches original voice loudness without attenuating mono speech or changing stereo music', async t => {
+  const f = await fixture(t);
+  const video = join(f.folder, 'generated.mp4'), output = join(f.folder, 'result.mp4');
+  const reference = join(f.folder, 'separated-vocals.wav'), voice = join(f.folder, 'converted-voice.wav');
+  const music = join(f.folder, 'separated-background.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=25:d=4', '-c:v', 'libx264', video]);
+  await writeFile(music, background);
+  for (const [sourceChannels, voiceChannels, gain] of [[2, 1, .25], [1, 1, .25], [2, 2, 2]]) {
+    await writeFile(reference, wav(Array(sourceChannels).fill(speech)));
+    await writeFile(voice, wav(Array(voiceChannels).fill(t => gain * speech(t))));
+    await f.service.mux(video, voice, output, 4, music, reference);
+    const samples = pcm(output, 1, 1);
+    for (const channel of [0, 1]) {
+      const differenceDb = 20 * Math.log10(amplitude(samples, 440, channel) / .12);
+      assert(Math.abs(differenceDb) < .5, `voice must match original within 0.5 dB; got ${differenceDb.toFixed(2)} dB (${sourceChannels}/${voiceChannels}/${gain})`);
+    }
+    for (const [hz, channel] of [[880, 0], [1320, 1]])
+      assert(Math.abs(20 * Math.log10(amplitude(samples, hz, channel) / .12)) < .5, 'background level stays unchanged');
+    assert(amplitude(pcm(output, .05, .3), 440, 0) < .005, 'leading silence stays aligned');
+    assert(amplitude(pcm(output, 3.5, .4), 440, 0) < .005, 'trailing silence stays aligned');
+  }
+  assert.equal(f.posts.length, 0, 'loudness matching is local and needs no new generation');
+});
+
+test('deep loudness matching keeps silent stems finite and handles short speech and boosted peaks', async t => {
+  const f = await fixture(t);
+  const video = join(f.folder, 'generated.mp4'), output = join(f.folder, 'result.mp4');
+  const reference = join(f.folder, 'separated-vocals.wav'), voice = join(f.folder, 'converted-voice.wav');
+  const music = join(f.folder, 'separated-background.wav');
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=25:d=4', '-c:v', 'libx264', video]);
+  await writeFile(music, background);
+  for (const [source, converted, expected] of [[() => 0, t => speech(t) / 4, .03], [speech, () => 0, 0]]) {
+    await writeFile(reference, wav([source])); await writeFile(voice, wav([converted]));
+    await f.service.mux(video, voice, output, 4, music, reference);
+    const samples = pcm(output, 1, 1);
+    assert(Math.abs(amplitude(samples, 440, 0) - expected) < .005);
+    assert(Math.abs(amplitude(samples, 880, 0) - .12) < .005);
+  }
+  await writeFile(reference, wav([t => tone(440, t)], .2));
+  await writeFile(voice, wav([t => tone(440, t)], .2));
+  await f.service.mux(video, voice, output, 4, music, reference);
+  assert(Math.abs(amplitude(pcm(output, .05, .1), 440, 0) - .12) < .01);
+  assert(amplitude(pcm(output, 3.5, .4), 880, 0) > .10, 'short speech does not truncate music');
+  await writeFile(reference, wav([speech]));
+  await writeFile(voice, wav([t => speech(t) * (t >= 1.5 && t < 1.52 ? 8 : .1)]));
+  await f.service.mux(video, voice, output, 4, music, reference);
+  const samples = pcm(output, 1, 1);
+  const peak = samples.reduce((maximum, sample) => Math.max(maximum, Math.abs(sample)), 0);
+  assert(Number.isFinite(peak) && peak < 1.02, `limiter bounds boosted peaks, allowing AAC overshoot; got ${peak}`);
 });
 
 test('separation failures never fall back to whole-track conversion or replay an uncertain paid submission', async t => {
@@ -172,8 +224,8 @@ test('short voice output does not cut off music and a missing background cannot 
   await f.advance(); await f.advance(); await f.advance();
   const video = join(f.folder, 'generated.mp4'), output = join(f.folder, 'result.mp4'), music = join(f.folder, 'separated-background.wav');
   execFileSync('ffmpeg', ['-v', 'error', '-y', '-f', 'lavfi', '-i', 'color=s=160x240:r=25:d=4', '-c:v', 'libx264', video]);
-  await f.service.mux(video, join(f.folder, 'converted-voice.wav'), output, 4, music);
+  await f.service.mux(video, join(f.folder, 'converted-voice.wav'), output, 4, music, join(f.folder, 'separated-vocals.wav'));
   assert(amplitude(pcm(output, 3.5, .4), 880, 0) > .10);
   await rm(music);
-  await assert.rejects(f.service.mux(video, join(f.folder, 'converted-voice.wav'), output, 4, music));
+  await assert.rejects(f.service.mux(video, join(f.folder, 'converted-voice.wav'), output, 4, music, join(f.folder, 'separated-vocals.wav')));
 });
