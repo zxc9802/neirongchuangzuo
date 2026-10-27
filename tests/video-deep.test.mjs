@@ -76,14 +76,29 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
     }
     if (replacements.background) {
       assert.doesNotMatch(prompt, /保留视频1原商品|主体人物及明确作为主体展示的商品|未指定的非水印、非字幕内容保持原样/);
+      assert.match(prompt, new RegExp(`完整保留(?:图片|图)${selectedImages.indexOf('background') + 1}中已有的全部内容`));
+      assert.match(prompt, /前景、中景和远景/);
+      assert.match(prompt, /数量、外观、相对位置、大小比例和空间层次/);
+      assert.match(prompt, /图中已有的人物和商品.*无论是否启用人物或商品替换.*保留/);
+      assert.match(prompt, /清除要求仅针对原视频场景，不适用于新背景图/);
+      assert.match(prompt, /不能为了沿用原视频构图、露出人物全身或脚部而删除、挪走或裁掉新背景图内容/);
+      assert.match(prompt, /前景物件可自然遮挡人物身体、腿脚和商品/);
+      assert.match(prompt, /不得把已有桌面或其他物件改成空地、地板或空白/);
+      assert.doesNotMatch(prompt, /不引入背景参考图中的额外人物或商品|保持原镜头运动和主体构图|镜头顺序、构图/);
+      assert.match(prompt, /不得保留、搬入、拼接或混合原视频背景中的任何物件/);
+      if (replacements.product) assert.match(prompt, /沿用原商品相对人物的位置、运动轨迹和展示方式/);
       if (!replacements.product) assert.match(prompt, /未提供商品参考图/);
     } else {
       assert.match(prompt, /未指定的非水印、非字幕内容保持原样/);
+      assert.match(prompt, /镜头顺序、构图/);
+      assert.doesNotMatch(prompt, /新背景图内容|前景物件可自然遮挡/);
     }
     if (replacements.photo) {
       assert.match(prompt, new RegExp(`人物的服装也替换为(?:图片|图)${selectedImages.indexOf('photo') + 1}中可见的服装`));
       assert.match(prompt, /款式、颜色、材质、图案和穿着层次/);
-      assert.match(prompt, /身体动作、姿态和所在位置沿用原视频/);
+      assert.match(prompt, replacements.background
+        ? /身体动作和姿态沿用原视频，人物位置、尺度和前后遮挡适配新背景图的完整场景/
+        : /身体动作、姿态和所在位置沿用原视频/);
       assert.doesNotMatch(prompt, /人物的服装、身体动作和所在位置保持原样|保留视频1原人物的脸部、发型、服装/);
     } else {
       assert.match(prompt, /保留视频1原人物的脸部、发型、服装和身份/);
