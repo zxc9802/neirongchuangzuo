@@ -10,6 +10,47 @@ import { createVideoHandler } from '../services/video/server.mjs';
 import { assetFolders, materialFolder } from '../design/asset-organization.js';
 import { generatedSource } from '../services/assets/retain.mjs';
 
+test('material rename persists without changing content, folder, order or ownership', async t => {
+  const app = await workspace(t);
+  for (const kind of ['photo', 'voice', 'video']) {
+    const path = join(app.root, `rename-${kind}`); await writeFile(path, `original-${kind}`);
+    const item = await app.library.save('alice', { kind, path, name: '原素材', placement: { folderId: kind === 'photo' ? 'photos' : kind === 'voice' ? 'own-voice' : 'own-video' } });
+    const organization = await app.library.organization('alice');
+    const response = await app.request('/api/assets/materials/rename', { method: 'POST', json: { id: item.id, name: '  客户素材 2.0  ' } });
+    assert.equal(response.status, 200);
+    const renamed = (await response.json()).material;
+    assert.equal(renamed.name, '客户素材 2.0');
+    assert.equal(renamed.filename, `客户素材 2.0.${kind === 'photo' ? 'jpg' : kind === 'voice' ? 'wav' : 'mp4'}`);
+    assert.equal(renamed.id, item.id); assert.equal(renamed.url, item.url); assert.equal(renamed.createdAt, item.createdAt);
+    assert.deepEqual(await app.library.organization('alice'), organization);
+    const restarted = createMaterialLibrary({ cosClient: app.cos });
+    assert.equal((await restarted.get('alice', item.id)).bytes.toString(), `original-${kind}`);
+    assert.equal((await restarted.get('alice', item.id)).name, renamed.name);
+    await assert.rejects(restarted.rename('bob', { id: item.id, name: '改名' }), { status: 404 });
+    for (const name of ['', '   ', '../名字', 'a'.repeat(81), 'bad\nname']) {
+      assert.equal((await app.request('/api/assets/materials/rename', { method: 'POST', json: { id: item.id, name } })).status, 400);
+    }
+    app.cos.failIndex(true);
+    assert.equal((await app.request('/api/assets/materials/rename', { method: 'POST', json: { id: item.id, name: '不应保存' } })).status, 503);
+    app.cos.failIndex(false);
+    assert.equal((await restarted.get('alice', item.id)).name, renamed.name);
+  }
+});
+
+test('new uploads lead the library despite legacy ordering, including after restart and rename', async t => {
+  const root = await temporary(t), cos = cloud(); let time = 1000;
+  const library = createMaterialLibrary({ cosClient: cos, now: () => time++ }), items = [];
+  for (const name of ['old', 'middle', 'new']) {
+    const path = join(root, name); await writeFile(path, name);
+    items.push(await library.save('alice', { kind: 'photo', path, name }));
+  }
+  const [old, middle, newest] = items, keys = items.map(item => `material:${item.id}`);
+  await library.organize('alice', { action: 'move', keys: [keys[0]], target: keys[2], position: 'before', order: keys });
+  const restarted = createMaterialLibrary({ cosClient: cos });
+  await restarted.rename('alice', { id: old.id, name: 'renamed old' });
+  assert.deepEqual((await restarted.list('alice')).map(item => item.id), [newest.id, middle.id, old.id]);
+});
+
 test('folders migrate existing assets, isolate owners, prevent cycles and keep content on deletion', async t => {
   const root = await temporary(t), path = join(root, 'photo'), cos = cloud(); await writeFile(path, 'folder-photo');
   const library = createMaterialLibrary({ cosClient: cos }), item = await library.save('alice', { kind: 'photo', path });
@@ -354,9 +395,10 @@ test('asset deletion survives backfill and restart, can be restored, and does no
   assert.ok((await restarted.list('alice')).some(value => value.id === item.id));
 });
 
-test('relative sorting preserves surrounding assets, persists, and concurrent delete does not overwrite it', async t => {
+test('legacy order persists for compatibility but listing uses saved time; deletion remains isolated', async t => {
   const app = await workspace(t), keys = [];
   for (const name of ['a', 'b', 'c', 'd']) {
+    app.advance(1);
     const r = await app.request('/api/assets/materials/voice', { method: 'POST', body: name });
     keys.push(`material:${(await r.json()).material.id}`);
   }

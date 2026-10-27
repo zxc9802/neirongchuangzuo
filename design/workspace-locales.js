@@ -8,6 +8,10 @@ export const LANGUAGES = [
 
 // Only interface copy is translated. Prompts, uploads and generated content keep their original language.
 const entries = [
+  ["重命名素材", "Rename material", "Namakan semula bahan"],
+  ["素材名称", "Material name", "Nama bahan"],
+  ["账号已切换，请重新操作", "Account changed. Please try again.", "Akaun telah bertukar. Sila cuba lagi."],
+  ["请输入1—80个字符的素材名称，不含文件路径或特殊符号。", "Enter a name of 1–80 characters without paths or special symbols.", "Masukkan nama sepanjang 1–80 aksara tanpa laluan fail atau simbol khas."],
   ["人物", "People", "Individu"],
   ["素材库", "Material library", "Pustaka bahan"],
   ["，移入素材文件夹后长期保留。", ", or keep permanently in a material folder.", ", atau simpan kekal dalam folder bahan."],
@@ -61,6 +65,7 @@ const entries = [
   ["删除所选", "Delete selected", "Padam yang dipilih"],
   ["恢复所选", "Restore selected", "Pulihkan yang dipilih"],
   ["拖动卡片调整顺序", "Drag cards to reorder", "Seret kad untuk menyusun semula"],
+  ["最新在前", "Newest first", "Terbaharu dahulu"],
   ["删除的生成作品仍按原到期时间清理", "Deleted generated files keep their original expiry", "Fail terjana yang dipadam mengekalkan tarikh luput asal"],
   ["删除资产", "Delete assets", "Padam aset"],
   ["已移入已删除", "Moved to Deleted", "Dialihkan ke Dipadam"],

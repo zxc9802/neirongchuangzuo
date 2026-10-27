@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets, bindGeneratedAssets, disposeGeneratedAssets, collectMaterialAssets, materialDestinations, handleGeneratedAssetsAction, loadAssetLibrary, uploadSharedMaterial } from '../design/generated-assets.js';
+import { collectGeneratedAssets, generatedAssetWindow, renderGeneratedAssets, bindGeneratedAssets, disposeGeneratedAssets, collectMaterialAssets, materialDestinations, handleGeneratedAssetsAction, loadAssetLibrary, uploadSharedMaterial, renameSharedMaterial } from '../design/generated-assets.js';
 
 const now = Date.parse('2026-09-30T06:00:00Z');
 const hour = 3600000;
@@ -300,4 +300,38 @@ test('direct uploads send placement and preserve its organization against a stal
   const snapshot = await loading;
   assert.equal(snapshot.materials[0].id, saved.id);
   assert.equal(snapshot.organization.assignments[saved.id], 'imitated-voice');
+});
+
+test('renaming updates picker cache and survives an older list response', async t => {
+  let finishList;
+  const original = material('photo'), renamed = { ...original, name: '门头新名称', filename: '门头新名称.jpg' };
+  libraryFixture(t, (path, options) => {
+    if (path === '/api/assets/materials/rename') {
+      assert.deepEqual(JSON.parse(options.body), { id: original.id, name: renamed.name });
+      return Response.json({ material: renamed, organization: { order: [], deleted: [] } });
+    }
+    if (path === '/api/assets/materials') return new Promise(resolve => { finishList = resolve; });
+  });
+  let latest;
+  const loading = loadAssetLibrary(undefined, { onUpdate: snapshot => { latest = snapshot; } });
+  await renameSharedMaterial(original.id, renamed.name);
+  assert.equal(latest.materials[0].name, renamed.name);
+  finishList(Response.json({ materials: [original] })); await loading;
+  assert.equal((await loadAssetLibrary()).materials[0].filename, renamed.filename);
+});
+
+test('renaming preserves default ordering and rejects a late save after account switch', async t => {
+  const first = material('voice'), second = material('photo'); let finishRename;
+  libraryFixture(t, (path, options) => {
+    if (path === '/api/assets/materials' && options.method !== 'POST') return Response.json({ materials: [first, second] });
+    if (path.endsWith('/rename')) return finishRename === null ? new Promise(resolve => { finishRename = resolve; })
+      : Response.json({ material: { ...second, name: '新名称' }, organization: { order: [], deleted: [] } });
+  });
+  await loadAssetLibrary(); await renameSharedMaterial(second.id, '新名称');
+  assert.deepEqual((await loadAssetLibrary()).materials.map(item => item.id), [first.id, second.id]);
+  finishRename = null;
+  const pending = renameSharedMaterial(second.id, '另一名称');
+  globalThis.workspaceUser = { id: crypto.randomUUID() };
+  finishRename(Response.json({ material: { ...second, name: '另一名称' }, organization: { order: [], deleted: [] } }));
+  await assert.rejects(pending, /账号已切换/);
 });

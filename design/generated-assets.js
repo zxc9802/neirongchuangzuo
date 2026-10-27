@@ -1,11 +1,11 @@
 import { uiLocale, t } from './workspace-preferences.js';
 import { imageTaskTitle } from './image-presets.js';
 import { digitalHumanModelLabel } from './model-labels.js';
-import { assetFolders, materialFolder, organizeAssets, relativeAssetMove } from './asset-organization.js';
+import { assetFolders, materialFolder, organizeAssets } from './asset-organization.js';
 import { renderAssetFolders, openFolderEditor, openMaterialMove, openAssetUpload } from './asset-folders.js';
 const RETENTION_MS = 72 * 60 * 60 * 1000;
 const TYPES = { all: '全部', image: '图片', video: '视频', audio: '音频' };
-const state = { ctx: null, category: 'all', folderId: null, type: 'all', materialType: 'all', limit: 24, materialLimit: 24, records: [], materials: [], rawRecords: [], rawMaterials: [], organization: {}, deleted: false, selection: new Set(), busy: false, dragKey: null, errors: [], loading: false, controller: null, timer: null, revision: 0 };
+const state = { ctx: null, category: 'all', folderId: null, type: 'all', materialType: 'all', limit: 24, materialLimit: 24, records: [], materials: [], rawRecords: [], rawMaterials: [], organization: {}, deleted: false, selection: new Set(), busy: false, errors: [], loading: false, controller: null, timer: null, revision: 0 };
 let libraryCache;
 function currentLibrary() {
   const owner = globalThis.workspaceUser?.id;
@@ -26,13 +26,14 @@ function notifyLibrary(cache) { for (const listener of cache.listeners) listener
 
 function displayedMaterials() { return organizeAssets(state.rawMaterials, state.organization, state.deleted).filter(item => (state.category === 'all' || item.type === state.category) && (!state.folderId || materialFolder(item, state.organization) === state.folderId) && (state.materialType === 'all' || item.kind === state.materialType)); }
 function displayedRecords() { return organizeAssets(state.rawRecords.filter(item => item.expires > Date.now() && !state.organization.retained?.[item.key]), state.organization, state.deleted).filter(item => !state.folderId && (state.category === 'all' || item.type === state.category) && (state.type === 'all' || item.type === state.type)); }
-function assetTools(item, items, ctx) {
-  const key = ctx.esc(item.key), index = items.findIndex(value => value.key === item.key), disabled = state.busy ? 'disabled' : '';
-  return `<div class="asset-item-tools"><label><input type="checkbox" data-asset-select="${key}" aria-label="选择：${ctx.esc(item.name || item.title)}" ${state.selection.has(item.key) ? 'checked' : ''} ${disabled}>选择</label><div>${state.deleted ? ctx.button('asset-restore', '恢复', 'textbutton', `data-key="${key}" ${disabled}`) : `${ctx.button('asset-move-prev', '前移', 'textbutton', `data-key="${key}" ${disabled || index === 0 ? 'disabled' : ''}`)}${ctx.button('asset-move-next', '后移', 'textbutton', `data-key="${key}" ${disabled || index === items.length - 1 ? 'disabled' : ''}`)}${ctx.button('asset-place', item.permanent ? '移动' : '存为素材', 'textbutton', `data-key="${key}" ${disabled}`)}${ctx.button('asset-delete', '删除', 'textbutton', `data-key="${key}" ${disabled}`)}`}</div></div>`;
+function assetTools(item, ctx) {
+  const key = ctx.esc(item.key), disabled = state.busy ? 'disabled' : '';
+  const rename = item.permanent ? ctx.button('asset-rename', '重命名', 'textbutton', `data-key="${key}" ${disabled}`) : '';
+  return `<div class="asset-item-tools"><label><input type="checkbox" data-asset-select="${key}" aria-label="选择：${ctx.esc(item.name || item.title)}" ${state.selection.has(item.key) ? 'checked' : ''} ${disabled}>选择</label><div>${state.deleted ? ctx.button('asset-restore', '恢复', 'textbutton', `data-key="${key}" ${disabled}`) : `${rename}${ctx.button('asset-place', item.permanent ? '移动' : '存为素材', 'textbutton', `data-key="${key}" ${disabled}`)}${ctx.button('asset-delete', '删除', 'textbutton', `data-key="${key}" ${disabled}`)}`}</div></div>`;
 }
 function organizationToolbar(ctx) {
   const disabled = state.busy ? 'disabled' : '', hasSelection = state.selection.size > 0;
-  return `<div class="asset-organization-toolbar"><div>${ctx.button('asset-view-active', '全部资产', state.deleted ? 'secondary' : 'primary', disabled)}${ctx.button('asset-view-deleted', '已删除', state.deleted ? 'primary' : 'secondary', disabled)}</div><div>${ctx.button('asset-select-page', '选择当前展示', 'secondary', disabled)}${hasSelection ? `<span>已选 ${state.selection.size} 项</span>${ctx.button(state.deleted ? 'asset-restore-selected' : 'asset-delete-selected', state.deleted ? '恢复所选' : '删除所选', 'secondary', disabled)}${!state.deleted ? ctx.button('asset-place-selected', '移动到文件夹', 'secondary', disabled) : ''}${ctx.button('asset-clear-selection', '取消选择', 'textbutton', disabled)}` : ''}<span role="status">${state.busy ? '正在保存…' : state.deleted ? '删除的生成作品仍按原到期时间清理' : '拖动卡片调整顺序'}</span></div></div>`;
+  return `<div class="asset-organization-toolbar"><div>${ctx.button('asset-view-active', '全部资产', state.deleted ? 'secondary' : 'primary', disabled)}${ctx.button('asset-view-deleted', '已删除', state.deleted ? 'primary' : 'secondary', disabled)}</div><div>${ctx.button('asset-select-page', '选择当前展示', 'secondary', disabled)}${hasSelection ? `<span>已选 ${state.selection.size} 项</span>${ctx.button(state.deleted ? 'asset-restore-selected' : 'asset-delete-selected', state.deleted ? '恢复所选' : '删除所选', 'secondary', disabled)}${!state.deleted ? ctx.button('asset-place-selected', '移动到文件夹', 'secondary', disabled) : ''}${ctx.button('asset-clear-selection', '取消选择', 'textbutton', disabled)}` : ''}<span role="status">${state.busy ? '正在保存…' : state.deleted ? '删除的生成作品仍按原到期时间清理' : '最新在前'}</span></div></div>`;
 }
 async function updateOrganization(input, ctx) {
   if (state.busy) return;
@@ -54,14 +55,16 @@ async function assetRequest(path, input) {
   const response = await fetch('/api/assets/materials/' + path, { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: AbortSignal.timeout(240000) });
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || '保存失败，请重试。');
-  if (!Array.isArray(data.organization?.order) || !Array.isArray(data.organization?.deleted) || path === 'retain' && !collectMaterialAssets([data.material]).length) throw new Error('保存结果无法确认，请刷新重试。');
+  if (!Array.isArray(data.organization?.order) || !Array.isArray(data.organization?.deleted) || ['retain', 'rename'].includes(path) && !collectMaterialAssets([data.material]).length) throw new Error('保存结果无法确认，请刷新重试。');
   return data;
 }
 function applyLibraryResult(cache, data) {
   if (cache !== libraryCache || cache.owner !== globalThis.workspaceUser?.id) return false;
   cache.organization = data.organization; cache.organizationRevision++;
   if (data.material) {
-    cache.values[5] = [data.material, ...cache.values[5].filter(item => item.id !== data.material.id)];
+    cache.values[5] = cache.values[5].some(item => item.id === data.material.id)
+      ? cache.values[5].map(item => item.id === data.material.id ? data.material : item)
+      : [data.material, ...cache.values[5]];
     if (cache.pending) cache.uploads.push(data.material);
   }
   Object.assign(state, librarySnapshot(cache));
@@ -73,6 +76,38 @@ async function folderRequest(input, ctx) {
   try { if (applyLibraryResult(cache, await assetRequest('folders', input))) { state.selection.clear(); ctx.toast('已保存'); } }
   catch (error) { if (cache === libraryCache) ctx.toast(error.message || '保存失败，请重试。'); }
   finally { if (cache === libraryCache) { state.busy = false; paint(); } }
+}
+export async function renameSharedMaterial(id, name) {
+  const cache = currentLibrary();
+  cache.organizationRevision++;
+  const data = await assetRequest('rename', { id, name });
+  if (data.material.id !== id) throw new Error('保存结果无法确认，请刷新重试。');
+  if (!applyLibraryResult(cache, data)) throw new Error(t('账号已切换，请重新操作'));
+  return data.material;
+}
+function openMaterialRename(item, ctx) {
+  ctx.openModal('重命名素材', '', `<form id="asset-rename-form" class="asset-folder-form"><label>素材名称<input id="asset-rename-name" maxlength="80" required value="${ctx.esc(item.name)}" autocomplete="off"></label><p id="asset-rename-error" role="alert"></p><footer class="modal-actions">${ctx.button('asset-cancel-delete', '取消', 'secondary')}<button type="submit" class="primary">${t('保存')}</button></footer></form>`, true);
+  const form = document.querySelector('#asset-rename-form'), input = document.querySelector('#asset-rename-name');
+  input?.focus(); input?.select();
+  const owner = currentLibrary();
+  form?.addEventListener('submit', async event => {
+    event.preventDefault();
+    if (state.busy) return;
+    const message = form.querySelector('[role="alert"]'), name = input.value.trim();
+    if (!name || /[\\/<>:"|?*\u0000-\u001f\u007f]/.test(name)) { message.textContent = t('请输入1—80个字符的素材名称，不含文件路径或特殊符号。'); return; }
+    if (owner !== currentLibrary()) { message.textContent = t('账号已切换，请重新操作'); return; }
+    state.busy = true; paint();
+    form.querySelectorAll('button,input').forEach(el => { el.disabled = true; }); message.textContent = '';
+    try {
+      await renameSharedMaterial(item.id, name);
+      if (form.isConnected) form.closest('dialog')?.close();
+      ctx.toast('已保存');
+    } catch (error) { message.textContent = t(error.message || '保存失败，请重试。'); }
+    finally {
+      form.querySelectorAll('button,input').forEach(el => { el.disabled = false; });
+      if (owner === currentLibrary()) { state.busy = false; paint(); }
+    }
+  });
 }
 async function placeAssets(items, folderId, type, ctx) {
   if (!items.length) return;
@@ -159,7 +194,7 @@ async function useMaterial(item, target, ctx) {
 }
 function renderMaterialResults(ctx) {
   const { esc, icon, button } = ctx, filtered = displayedMaterials();
-  return `<div class="material-assets-heading"><h2>素材库</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '图片'], ['voice', '参考声音'], ['video', '视频']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card" data-asset-key="${esc(item.key)}" data-asset-group="materials" draggable="${!state.deleted && !state.busy}">${assetTools(item, filtered, ctx)}<button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看图片' : item.kind === 'video' ? '查看视频' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon(item.type === 'video' ? 'video' : 'audio')}<small>${item.type === 'video' ? '参考视频' : '参考声音'}</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '图片' : item.kind === 'video' ? '参考视频' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', state.deleted ? '预览' : '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : state.deleted ? '暂无已删除素材' : '点击上传素材，保存图片、音频和视频。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
+  return `<div class="material-assets-heading"><h2>素材库</h2><span>长期保存，随时复用</span></div><div class="generated-assets-filters" role="group" aria-label="长期素材类型">${[['all', '全部素材'], ['photo', '图片'], ['voice', '参考声音'], ['video', '视频']].map(([kind, name]) => button('material-filter', name, state.materialType === kind ? 'selected' : '', `data-kind="${kind}" aria-pressed="${state.materialType === kind}"`)).join('')}</div>${filtered.length ? `<div class="generated-assets-grid">${filtered.slice(0, state.materialLimit).map(item => `<article class="generated-asset-card" data-asset-key="${esc(item.key)}" data-asset-group="materials" draggable="false">${assetTools(item, ctx)}<button class="generated-asset-cover ${item.type}" data-action="material-preview" data-id="${esc(item.id)}" aria-label="${item.kind === 'photo' ? '查看图片' : item.kind === 'video' ? '查看视频' : '试听声音'}：${esc(item.name)}">${item.kind === 'photo' ? `<img src="${esc(item.url)}" alt="${esc(item.name)}" loading="lazy">` : `<span class="generated-asset-audio">${icon(item.type === 'video' ? 'video' : 'audio')}<small>${item.type === 'video' ? '参考视频' : '参考声音'}</small></span>`}<span class="generated-asset-kind">${item.kind === 'photo' ? '图片' : item.kind === 'video' ? '参考视频' : '参考声音'}</span></button><div class="generated-asset-copy"><h2>${esc(item.name)}</h2><time>${dateLabel(item.createdAt)} 保存</time><div class="generated-asset-footer"><span class="material-permanent">长期保留</span>${button('material-preview', state.deleted ? '预览' : '使用到…', 'secondary', `data-id="${esc(item.id)}"`)}</div></div></article>`).join('')}</div>` : `<p class="material-assets-empty">${state.loading ? '正在读取已保存的素材…' : state.deleted ? '暂无已删除素材' : '点击上传素材，保存图片、音频和视频。'}</p>`}${filtered.length > state.materialLimit ? button('material-more', '加载更多素材', 'secondary') : ''}`;
 }
 
 function timestamp(value) {
@@ -252,7 +287,7 @@ function renderResults(ctx) {
   const errors = state.errors.length ? `<div class="generated-assets-errors" role="status">${state.errors.map(error => `<p>${esc(error)}</p>`).join('')}${button('generated-assets-refresh', '重新加载', 'textbutton')}</div>` : '';
   if (state.loading && !records.length) return filters + `<div class="generated-assets-empty" role="status">${icon('clock')}<h2>正在读取生成的作品</h2></div>`;
   if (!filtered.length) return filters + errors + `<div class="generated-assets-empty">${icon('folder')}<h2>${state.deleted ? '暂无已删除作品' : records.length ? `近 3 天还没有${TYPES[state.type]}成品` : state.errors.length ? '暂时没有可展示的成品' : '近 3 天还没有生成作品'}</h2>${button('generated-assets-create', '去生成图片 ' + icon('arrow'), 'primary')}</div>`;
-  return filters + errors + `<div class="generated-assets-grid">${filtered.slice(0, state.limit).map(record => `<article class="generated-asset-card" data-asset-key="${esc(record.key)}" data-asset-group="records" draggable="${!state.deleted && !state.busy}">${assetTools(record, filtered, ctx)}<button class="generated-asset-cover ${record.type}" data-action="generated-asset-preview" data-key="${esc(record.key)}" aria-label="${record.type === 'image' ? '查看图片' : record.type === 'video' ? '播放视频' : '试听配音'}：${esc(record.title)}">${record.type === 'image' ? `<img src="${esc(record.url)}" alt="${esc(record.title)}" loading="lazy">` : record.type === 'video' ? `<video src="${esc(record.url)}" preload="metadata" muted playsinline aria-hidden="true"></video><span class="generated-asset-play">${icon('play')}</span>` : `<span class="generated-asset-audio">${icon('audio')}<small>生成配音</small></span>`}<span class="generated-asset-kind">${esc(record.source)} · ${TYPES[record.type]}</span></button><div class="generated-asset-copy"><h2 title="${esc(record.title)}">${esc(record.title)}</h2>${record.modelLabel ? `<p class="generated-asset-model">生成模型：${esc(record.modelLabel)}</p>` : ''}<time datetime="${new Date(record.completed).toISOString()}">${dateLabel(record.completed)} 生成</time><div class="generated-asset-footer"><span class="generated-asset-expiry ${record.expires - Date.now() <= 24 * 3600000 ? 'soon' : ''}" title="${dateLabel(record.expires)} 到期">${remainingLabel(record.expires)}</span><a href="${esc(record.download)}" download="${esc(record.filename)}" class="generated-asset-download" aria-label="下载${TYPES[record.type]}：${esc(record.title)}">${icon('save')}下载</a></div><small class="generated-asset-deadline">${dateLabel(record.expires)} 到期清理</small></div></article>`).join('')}</div>${filtered.length > state.limit ? `<div class="generated-assets-more">${button('generated-assets-more', '加载更多作品', 'secondary')}</div>` : ''}`;
+  return filters + errors + `<div class="generated-assets-grid">${filtered.slice(0, state.limit).map(record => `<article class="generated-asset-card" data-asset-key="${esc(record.key)}" data-asset-group="records" draggable="false">${assetTools(record, ctx)}<button class="generated-asset-cover ${record.type}" data-action="generated-asset-preview" data-key="${esc(record.key)}" aria-label="${record.type === 'image' ? '查看图片' : record.type === 'video' ? '播放视频' : '试听配音'}：${esc(record.title)}">${record.type === 'image' ? `<img src="${esc(record.url)}" alt="${esc(record.title)}" loading="lazy">` : record.type === 'video' ? `<video src="${esc(record.url)}" preload="metadata" muted playsinline aria-hidden="true"></video><span class="generated-asset-play">${icon('play')}</span>` : `<span class="generated-asset-audio">${icon('audio')}<small>生成配音</small></span>`}<span class="generated-asset-kind">${esc(record.source)} · ${TYPES[record.type]}</span></button><div class="generated-asset-copy"><h2 title="${esc(record.title)}">${esc(record.title)}</h2>${record.modelLabel ? `<p class="generated-asset-model">生成模型：${esc(record.modelLabel)}</p>` : ''}<time datetime="${new Date(record.completed).toISOString()}">${dateLabel(record.completed)} 生成</time><div class="generated-asset-footer"><span class="generated-asset-expiry ${record.expires - Date.now() <= 24 * 3600000 ? 'soon' : ''}" title="${dateLabel(record.expires)} 到期">${remainingLabel(record.expires)}</span><a href="${esc(record.download)}" download="${esc(record.filename)}" class="generated-asset-download" aria-label="下载${TYPES[record.type]}：${esc(record.title)}">${icon('save')}下载</a></div><small class="generated-asset-deadline">${dateLabel(record.expires)} 到期清理</small></div></article>`).join('')}</div>${filtered.length > state.limit ? `<div class="generated-assets-more">${button('generated-assets-more', '加载更多作品', 'secondary')}</div>` : ''}`;
 }
 
 export function renderGeneratedAssets(ctx) {
@@ -374,35 +409,10 @@ export function bindGeneratedAssets(ctx) {
     const toolbar = document.querySelector('#asset-organization-tools');
     if (toolbar) toolbar.innerHTML = organizationToolbar(ctx);
   }, { signal: eventController.signal });
-  root?.addEventListener('dragstart', event => {
-    const card = event.target.closest?.('[data-asset-key]');
-    if (!card || state.deleted || state.busy || event.target.closest('input, audio, video, a')) { event.preventDefault(); return; }
-    state.dragKey = card.dataset.assetKey;
-    event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', state.dragKey);
-    card.classList.add('asset-dragging');
-  }, { signal: eventController.signal });
-  root?.addEventListener('dragover', event => {
-    const card = event.target.closest?.('[data-asset-key]');
-    if (!card || !state.dragKey || state.busy || card.dataset.assetKey === state.dragKey) return;
-    if (card.dataset.assetKey.startsWith('material:') !== state.dragKey.startsWith('material:')) return;
-    event.preventDefault(); event.dataTransfer.dropEffect = 'move';
-    root.querySelectorAll('.asset-drop-target').forEach(node => node.classList.remove('asset-drop-target'));
-    card.classList.add('asset-drop-target');
-  }, { signal: eventController.signal });
-  root?.addEventListener('drop', event => {
-    const target = event.target.closest?.('[data-asset-key]')?.dataset.assetKey, key = state.dragKey;
-    if (!key || !target || target === key || state.busy || target.startsWith('material:') !== key.startsWith('material:')) return;
-    event.preventDefault();
-    const items = key.startsWith('material:') ? displayedMaterials() : displayedRecords();
-    if (!items.some(item => item.key === target)) return;
-    void updateOrganization({ action: 'move', keys: [key], target, position: items.findIndex(item => item.key === key) < items.findIndex(item => item.key === target) ? 'after' : 'before' }, ctx);
-    state.dragKey = null;
-  }, { signal: eventController.signal });
-  root?.addEventListener('dragend', () => { state.dragKey = null; root.querySelectorAll('.asset-drop-target,.asset-dragging').forEach(node => node.classList.remove('asset-drop-target', 'asset-dragging')); }, { signal: eventController.signal });
   void load();
 }
 export function disposeGeneratedAssets() {
-  eventController?.abort(); state.selection.clear(); state.deleted = false; state.category = 'all'; state.folderId = null; state.busy = false; state.dragKey = null; state.rawMaterials = []; state.rawRecords = []; state.organization = {};
+  eventController?.abort(); state.selection.clear(); state.deleted = false; state.category = 'all'; state.folderId = null; state.busy = false; state.rawMaterials = []; state.rawRecords = []; state.organization = {};
   state.revision++; state.controller?.abort(); state.controller = null; clearTimeout(state.timer); state.loading = false; state.ctx = null; state.records = []; state.materials = []; state.errors = [];
 }
 export function handleGeneratedAssetsAction(action, element, ctx) {
@@ -410,12 +420,29 @@ export function handleGeneratedAssetsAction(action, element, ctx) {
   if (action.startsWith('asset-')) {
     if (state.busy) return true;
     if (action === 'asset-upload') {
-      const cache = currentLibrary();
+      const cache = currentLibrary(), pageController = eventController;
+      let uploadedKey;
+      const current = () => active() && cache === libraryCache && cache.owner === globalThis.workspaceUser?.id && !pageController?.signal.aborted;
+      const reveal = () => {
+        if (!current() || !uploadedKey) return;
+        document.querySelector(`[data-asset-key="${uploadedKey}"]`)?.scrollIntoView?.({ block: 'center', behavior: 'smooth' });
+      };
       openAssetUpload(state, ctx, async (kind, file, folderId) => {
         if (cache !== currentLibrary() || cache.owner !== globalThis.workspaceUser?.id) throw new Error(t('账号已切换，请重新上传'));
-        await uploadSharedMaterial(kind, file, AbortSignal.any([cache.controller.signal, AbortSignal.timeout(180000)]), { folderId });
-        if (active()) { state.deleted = false; paint(); }
-      }); return true;
+        const material = await uploadSharedMaterial(kind, file, AbortSignal.any([cache.controller.signal, AbortSignal.timeout(180000)]), { folderId });
+        if (cache !== libraryCache || cache.owner !== globalThis.workspaceUser?.id) throw new Error(t('账号已切换，请重新上传'));
+        if (current()) {
+          Object.assign(state, librarySnapshot(cache));
+          state.deleted = false; state.category = material.type; state.folderId = materialFolder(material, state.organization);
+          state.materialType = 'all'; state.type = 'all'; state.selection.clear();
+          uploadedKey = `material:${material.id}`;
+          state.materialLimit = Math.max(state.materialLimit, displayedMaterials().findIndex(item => item.key === uploadedKey) + 1);
+          paint();
+          if (!document.querySelector('#modal')?.open) reveal();
+        }
+      });
+      document.querySelector('#modal')?.addEventListener('close', reveal, { once: true });
+      return true;
     }
     if (action === 'asset-category' || action === 'asset-folder-open') {
       state.category = element.dataset.type || 'all'; state.folderId = action === 'asset-folder-open' ? element.dataset.id || null : null;
@@ -445,13 +472,10 @@ export function handleGeneratedAssetsAction(action, element, ctx) {
     const items = [...displayedMaterials(), ...displayedRecords()];
     const keys = action.endsWith('-selected') ? [...state.selection].filter(key => items.some(item => item.key === key)) : items.some(item => item.key === key) ? [key] : [];
     if (!keys.length) return true;
+    if (action === 'asset-rename') { const item = items.find(item => item.key === key && item.permanent); if (item) openMaterialRename(item, ctx); return true; }
     if (action === 'asset-place' || action === 'asset-place-selected') { openMaterialMove(items.filter(item => keys.includes(item.key)), state, ctx); return true; }
     if (action === 'asset-delete' || action === 'asset-delete-selected') { confirmAssetDelete(keys, ctx); return true; }
     if (action === 'asset-restore' || action === 'asset-restore-selected') { void updateOrganization({ action: 'restore', keys }, ctx); return true; }
-    if (action === 'asset-move-prev' || action === 'asset-move-next') {
-      const move = relativeAssetMove(key.startsWith('material:') ? displayedMaterials() : displayedRecords(), key, action === 'asset-move-prev' ? -1 : 1);
-      if (move) void updateOrganization(move, ctx); return true;
-    }
     return false;
   }
   if (action === 'material-filter') { if (['all', 'photo', 'voice', 'video'].includes(element.dataset.kind)) state.materialType = element.dataset.kind; state.materialLimit = 24; state.selection.clear(); paint(); return true; }

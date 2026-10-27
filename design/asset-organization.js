@@ -1,8 +1,8 @@
 export function organizeAssets(items, organization = {}, deleted = false) {
   const removed = new Set(organization.deleted || []);
-  const positions = new Map((organization.order || []).map((key, i) => [key, i]));
+  const time = item => Number.isFinite(item.createdAt) ? item.createdAt : Number.isFinite(item.completed) ? item.completed : 0;
   return items.filter(item => removed.has(item.key) === deleted)
-    .sort((a, b) => (positions.get(a.key) ?? Infinity) - (positions.get(b.key) ?? Infinity) || 0);
+    .sort((a, b) => time(b) - time(a));
 }
 
 export function relativeAssetMove(items, key, direction) {

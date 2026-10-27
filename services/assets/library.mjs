@@ -100,10 +100,25 @@ export function createMaterialLibrary({ env = process.env, cosClient, now = Date
   return {
     configured,
     organization, organize, folders,
+    async rename(userId, { id, name } = {}) {
+      if (!validId(id)) throw fail('素材不存在。', 404);
+      if (typeof name !== 'string' || !name.trim() || name.trim().length > 80 || /[\\/<>:"|?*\u0000-\u001f\u007f]/.test(name)) throw fail('请输入1—80个字符的素材名称，不含文件路径或特殊符号。', 400);
+      const previous = locks.get(userId) || Promise.resolve();
+      const operation = previous.catch(() => {}).then(async () => {
+        const items = await records(userId), item = items.find(item => item.id === id);
+        if (!item) throw fail('素材不存在。', 404);
+        item.name = name.trim();
+        const saved = await call('putObject', { Key: prefix(userId) + 'index.json', Body: JSON.stringify(items), ContentType: 'application/json', ACL: 'private' });
+        if (!saved) throw fail('素材名称保存失败，请重试。');
+        return view(item);
+      });
+      locks.set(userId, operation);
+      try { return await operation; } finally { if (locks.get(userId) === operation) locks.delete(userId); }
+    },
     async list(userId, { includeDeleted = false } = {}) {
-      const data = await organization(userId), positions = new Map(data.order.map((key, i) => [key, i]));
+      const data = await organization(userId);
       return (await records(userId)).filter(item => includeDeleted || !data.deleted.includes(`material:${item.id}`))
-        .sort((a, b) => (positions.get(`material:${a.id}`) ?? Infinity) - (positions.get(`material:${b.id}`) ?? Infinity) || b.createdAt - a.createdAt).map(view);
+        .sort((a, b) => b.createdAt - a.createdAt).map(view);
     },
     async save(userId, { kind, path, name, metadata = {}, mime, placement }) {
       if (!TYPES[kind]) throw fail('素材类型无效。', 400);
@@ -173,10 +188,14 @@ export function createMaterialHandler({ library, archiveExisting, readGenerated 
       const userId = req.authenticatedUserId;
       if (!userId) throw fail('请先登录。', 401);
       const url = new URL(req.url, 'http://localhost');
-      if (['/api/assets/materials/folders', '/api/assets/materials/retain'].includes(url.pathname) && req.method === 'POST') {
+      if (['/api/assets/materials/folders', '/api/assets/materials/retain', '/api/assets/materials/rename'].includes(url.pathname) && req.method === 'POST') {
         let input;
         try { input = JSON.parse((await uploadBody(req, 128 * 1024)).toString('utf8')); } catch (error) { if (error.status) throw error; throw fail('资产操作参数无效。', 400); }
         if (url.pathname.endsWith('/folders')) { json(200, { organization: await library.folders(userId, input) }); return; }
+        if (url.pathname.endsWith('/rename')) {
+          if (!input || typeof input !== 'object') throw fail('资产操作参数无效。', 400);
+          json(200, { material: await library.rename(userId, input), organization: await library.organization(userId) }); return;
+        }
         const source = generatedSource(input);
         const directory = await mkdtemp(join(tmpdir(), 'qiya-retain-'));
         try {
