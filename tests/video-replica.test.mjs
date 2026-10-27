@@ -3346,7 +3346,7 @@ test('Wan without COS configuration pauses before any generation and remains pau
   assert.equal((await app.current(id)).status, 'waiting'); assert.equal(app.state.generations, 0);
 });
 
-test('Wan refreshes queued COS signatures after a long wait and removes temporary objects on expiry', async t => {
+test('Wan refreshes queued COS signatures and deletes completed inputs before owner media expire', async t => {
   let at = Date.now();
   const app = await fixture(t, { now: () => at, config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true } });
   const id = await app.init(); await app.upload(id);
@@ -3363,14 +3363,145 @@ test('Wan refreshes queued COS signatures after a long wait and removes temporar
   await app.until(id, task => task.status === 'running');
   assert.notEqual(app.state.body.payload.resources[0], firstUrl);
   assert.equal(app.state.cosUploads.length, 2);
-  app.state.done = true; await app.until(id, task => task.status === 'completed');
   assert.equal(app.state.cosDeletes.length, 0);
+  app.state.done = true; await app.until(id, task => task.status === 'completed' && app.state.cosDeletes.length === 2);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
   at += 3 * 86400_000 + 1;
   await app.until(id, task => task.status === 'expired' && app.state.cosDeletes.length === 2);
+  for (let i = 0; i < 100; i++) {
+    if (JSON.parse(await readFile(path, 'utf8')).cleaned) break;
+    await delay(10);
+  }
   await app.close();
   assert.deepEqual(app.state.cosDeletes, [{ id, kind: 'photo' }, { id, kind: 'video' }]);
   const expired = JSON.parse(await readFile(path, 'utf8'));
   assert.equal(expired.cleaned, true); assert.deepEqual(expired.wan3CosMaterials, {});
+});
+
+test('temporary COS inputs survive every segment and postprocessing, then disappear with the final result retained', async t => {
+  let finishCleanup = false, subtitleDeletes = 0, joins = 0, restores = 0;
+  const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    probe: async () => ({ ...META, duration: 20 }), scenes: async () => ({ cuts: [] }),
+    cutSegment: async (_input, output) => writeFile(output, VIDEO),
+    joinSegments: async (inputs, _segments, output) => {
+      assert.equal(inputs.length, 2); assert.equal(app.state.cosDeletes.length, 0); joins++;
+      await writeFile(output, VIDEO); return { ...META, duration: 20 };
+    },
+    restoreAudio: async (_source, _generated, output) => {
+      assert.equal(app.state.cosDeletes.length, 0); restores++; await writeFile(output, VIDEO);
+    },
+    subtitleRemoval: {
+      assertConfigured() {},
+      advance: async (task, folder, save) => {
+        assert.equal(app.state.cosDeletes.length, 0);
+        if (!finishCleanup) return false;
+        await writeFile(join(folder, 'result.mp4'), VIDEO);
+        task.subtitleRemoval.ready = true; await save(); return true;
+      },
+      cleanup: async (task, save) => { subtitleDeletes++; task.subtitleRemoval.storageCleaned = true; await save(); },
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, mode: 'deep', replacements: { photo: true, product: true, background: true } } });
+  await app.upload(id);
+  for (const kind of ['product', 'background']) assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/${kind}`, { method: 'PUT', body: VIDEO })).status, 200);
+  await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running');
+  app.state.done = true;
+  await app.until(id, task => task.status === 'cleaning');
+  assert.equal(joins, 1); assert.equal(restores, 1);
+  assert.equal(app.state.cosDeletes.length, 0); assert.equal(subtitleDeletes, 0);
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 409);
+  finishCleanup = true;
+  const completed = await app.until(id, task => task.status === 'completed' && app.state.cosDeletes.length === 5 && subtitleDeletes === 1);
+  assert.equal(completed.billing.status, 'settled');
+  assert.deepEqual(app.state.cosDeletes.map(item => item.kind).sort(), ['photo', 'product', 'background', 'segment-0', 'segment-1'].sort());
+  for (const kind of ['photo', 'product', 'background']) assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/${kind}`)).arrayBuffer()), Buffer.from('photo'));
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+  assert.equal(app.state.generations, 2);
+});
+
+test('failed COS deletion retains a playable completed task, retries after restart, and never repeats successful deletes', async t => {
+  let at = Date.now(), failing = true; const attempts = [];
+  const app = await fixture(t, { now: () => at, config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    wan3Storage: {
+      upload: async () => {}, url: async (_id, kind) => `https://bucket.example/${kind}?signature=test`,
+      remove: async (id, kind) => { attempts.push({ id, kind }); if (kind === 'photo' && failing) throw new Error('COS temporarily unavailable'); },
+    } });
+  const id = await app.init(); await app.upload(id);
+  await app.call(`/tasks/${id}/start`, { body: { model: WAN3_MODEL } });
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed' && attempts.length === 2);
+  assert.equal(completed.error, ''); assert.equal(completed.billing.status, 'settled'); assert.ok(completed.resultUrl);
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  assert.deepEqual(saved.wan3CosMaterials, { photo: true }); assert.equal(saved.cosCleanupRetryAt, at + 60_000);
+  failing = false; await app.open(); await delay(80);
+  assert.equal(attempts.length, 2, 'a restart keeps the retry cooldown');
+  at += 60_001;
+  await app.until(id, task => task.status === 'completed' && attempts.length === 3);
+  assert.deepEqual(attempts, [{ id, kind: 'photo' }, { id, kind: 'video' }, { id, kind: 'photo' }]);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+  await app.close();
+  const cleaned = JSON.parse(await readFile(path, 'utf8'));
+  assert.deepEqual(cleaned.wan3CosMaterials, {}); assert.equal(cleaned.cosCleanupRetryAt, undefined);
+  await app.open(); await delay(50);
+  assert.equal(attempts.length, 3); assert.equal(app.state.generations, 1);
+});
+
+test('completed-task cleanup retries subtitle COS deletion without changing the delivered result', async t => {
+  let at = Date.now(), failing = true, attempts = 0;
+  const app = await fixture(t, { now: () => at,
+    restoreAudio: async (_source, _generated, output) => writeFile(output, VIDEO),
+    subtitleRemoval: {
+      assertConfigured() {},
+      advance: async (task, folder, save) => {
+        await writeFile(join(folder, 'result.mp4'), VIDEO);
+        task.subtitleRemoval.ready = true; await save(); return true;
+      },
+      cleanup: async (task, save) => {
+        attempts++; if (failing) throw new Error('COS delete failed');
+        task.subtitleRemoval.storageCleaned = true; await save();
+      },
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', editMode: 'enhanced', replacements: { photo: true } } });
+  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'running'); app.state.done = true;
+  const completed = await app.until(id, task => task.status === 'completed' && attempts === 1);
+  assert.ok(completed.resultUrl); assert.equal(completed.error, '');
+  await app.close(); failing = false; await app.open(); await delay(50); assert.equal(attempts, 1);
+  at += 60_001; await app.until(id, task => task.status === 'completed' && attempts === 2);
+  assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
+  assert.equal(app.state.generations, 1);
+});
+
+test('uncertain and cancelled COS inputs remain until expiry, with expired cleanup retrying independently', async t => {
+  let at = Date.now(), failing = true; const attempts = [];
+  const app = await fixture(t, { now: () => at, uncertain: true, config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true },
+    wan3Storage: {
+      upload: async () => {}, url: async (_id, kind) => `https://bucket.example/${kind}?signature=test`,
+      remove: async (id, kind) => { attempts.push({ id, kind }); if (failing) throw new Error('COS offline'); },
+    } });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, model: WAN3_MODEL, mode: 'deep', replacements: { photo: true } } });
+  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.until(id, task => task.status === 'waiting');
+  await app.close(); await app.open(); await delay(50); assert.equal(attempts.length, 0);
+  await app.call(`/tasks/${id}/cancel`, { body: {} }); await delay(50); assert.equal(attempts.length, 0);
+  at += 3 * 86400_000 + 1;
+  await app.until(id, task => task.status === 'expired' && attempts.length === 2);
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json');
+  const expired = JSON.parse(await readFile(path, 'utf8'));
+  assert.notEqual(expired.cleaned, true); assert.deepEqual(expired.wan3CosMaterials, { photo: true, video: true });
+  failing = false; await app.open(); await delay(50); assert.equal(attempts.length, 2);
+  at += 60_001; await app.until(id, task => task.status === 'expired' && attempts.length === 4);
+  await app.close();
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).cleaned, true);
+  assert.equal(app.state.generations, 1);
+  await app.open();
 });
 
 test('Wan ambiguous submission holds without aggregate retry or official fallback across restart', async t => {

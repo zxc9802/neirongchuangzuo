@@ -532,6 +532,23 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
     return { id: await wan3Storage.url(task.id, kind), status: 2 };
   }
+  async function cleanupTemporaryMaterials(task) {
+    if (task.cosCleanupRetryAt > now()) return false;
+    let pending = false;
+    for (const kind of Object.keys(task.wan3CosMaterials || {})) {
+      try { await wan3Storage.remove(task.id, kind); }
+      catch { pending = true; continue; }
+      delete task.wan3CosMaterials[kind];
+      await save(task);
+    }
+    if (subtitleRemoval && task.subtitleRemoval && !task.subtitleRemoval.storageCleaned) {
+      try { await subtitleRemoval.cleanup(task, () => save(task)); }
+      catch { pending = true; }
+    }
+    if (pending) { task.cosCleanupRetryAt = now() + 60_000; await save(task); }
+    else if (task.cosCleanupRetryAt) { delete task.cosCleanupRetryAt; await save(task); }
+    return !pending;
+  }
   async function wan3Input(task, part = task) {
     const input = part === task ? task : segmentTask(task, part);
     // Also convert saved, unsubmitted aggregate jobs from the old material-ID flow.
@@ -679,13 +696,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       await reconcile(task);
       if (!task.cleaned) {
         await archiveTaskMaterials(task);
-        if (task.subtitleRemoval) await subtitleRemoval?.cleanup(task, () => save(task));
+        if (!await cleanupTemporaryMaterials(task)) return;
         for (const name of SUBTITLE_REMOVAL_FILES) await rm(join(folder(task), name), { force: true });
-        for (const kind of Object.keys(task.wan3CosMaterials || {})) {
-          await wan3Storage.remove(task.id, kind);
-          delete task.wan3CosMaterials[kind];
-          await save(task);
-        }
         for (const name of ['photo.jpg', 'product.jpg', 'background.jpg', 'source.mp4', 'source-clean.mp4', 'source-clean.mp4.captions.json', 'source-silent.mp4', 'reference.wav', 'voice.tmp.wav', 'generated.mp4', 'result.mp4', 'result.mp4.borders.mp4', 'result-caption.tmp', 'result-caption.tmp.captions.json', 'upload.tmp', 'result.tmp', 'result.tmp.download.json', 'verification-source.json', 'verification-generated.json', 'verification-aligned.json', 'source.mp4.asr.wav', 'source.mp4.vad.pcm', 'reference.wav.vad.pcm', 'voice.tmp.wav.vad.pcm', 'generated.mp4.asr.wav', 'generated.mp4.vad.pcm', 'result.tmp.asr.wav', 'result.tmp.vad.pcm', 'result.tmp.aligned.pcm']) await rm(join(folder(task), name), { force: true });
         await rm(join(folder(task), 'narration'), { recursive: true, force: true });
         await rm(join(folder(task), 'localization'), { recursive: true, force: true });
@@ -711,7 +723,11 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       return;
     }
-    if (['completed', 'failed', 'expired', 'cancelled'].includes(task.status)) { await reconcile(task); return; }
+    if (['completed', 'failed', 'expired', 'cancelled'].includes(task.status)) {
+      await reconcile(task);
+      if (task.status === 'completed') await cleanupTemporaryMaterials(task);
+      return;
+    }
     if (!ACTIVE.has(task.status)) return;
     if (task.status === 'preparing') {
       await analyzeSource(task);
@@ -977,6 +993,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       task.completedAt = now();
       task.expiresAt = now() + 3 * DAY;
       await save(task); await reconcile(task);
+      await cleanupTemporaryMaterials(task);
   }
   async function tick() {
     if (closing || fatal) return;

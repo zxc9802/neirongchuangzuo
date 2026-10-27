@@ -69,7 +69,7 @@ export function createSubtitleRemoval({ env = process.env, fetchImpl = fetch, no
         warning: '已完成全屏字幕与水印清理，请预览核对是否有残留文字。' };
       state.ready = true; state.stage = 'completed'; state.completedAt = now(); state.elapsedMs = now() - state.startedAt;
       await save();
-      // A storage cleanup outage must not hide a verified local result; expiry cleanup retries it.
+      // A storage cleanup outage must not hide a verified local result; completed-task cleanup retries it.
       await cleanup(task, save).catch(() => {});
       return true;
     },
