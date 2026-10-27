@@ -36,7 +36,13 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
     }
     for (const [kind, phrase] of [['photo', '脸部外貌和发型'], ['product', '中展示的商品'], ['background', '的场景背景']]) {
       if (replacements[kind]) assert.match(prompt, new RegExp(`${phrase}替换为(?:图片|图)${selectedImages.indexOf(kind) + 1}`));
-      else assert.match(prompt, new RegExp(`不得替换${{ photo: '人物', product: '商品', background: '背景' }[kind]}`));
+      else if (kind !== 'product' || !replacements.background) assert.match(prompt, new RegExp(`不得替换${{ photo: '人物', product: '商品', background: '背景' }[kind]}`));
+    }
+    if (replacements.background) {
+      assert.doesNotMatch(prompt, /保留视频1原商品|主体人物及明确作为主体展示的商品|未指定的非水印、非字幕内容保持原样/);
+      if (!replacements.product) assert.match(prompt, /未提供商品参考图/);
+    } else {
+      assert.match(prompt, /未指定的非水印、非字幕内容保持原样/);
     }
     if (replacements.photo) {
       assert.match(prompt, new RegExp(`人物的服装也替换为(?:图片|图)${selectedImages.indexOf('photo') + 1}中可见的服装`));
@@ -54,7 +60,6 @@ for (const model of models) test(`deep ${model.id}: all 16 combinations map only
     assert.match(prompt, /自然重建被遮挡的背景.*不用模糊、马赛克、色块或裁切画面/);
     assert.match(prompt, /去水印要求优先于背景保留要求/);
     assert.match(prompt, /商品包装文字和场景中的真实招牌不属于水印，不得因去水印而误删/);
-    assert.match(prompt, /未指定的非水印、非字幕内容保持原样/);
     for (const request of [body, generationBody({ ...task, captions: { cues: [{ start: 0, end: 4, text: '原片准确字幕' }] } }),
       ...(isWan3Model(model.id) ? [wan3GenerationBody({ ...task, captions: { cues: [{ start: 0, end: 4, text: '原片准确字幕' }] } })] : [])]) {
       const cleanPrompt = request.prompt || request.input.prompt;
