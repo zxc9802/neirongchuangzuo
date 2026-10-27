@@ -3104,6 +3104,7 @@ test('enhanced editing is opt-in, validates models, and changes without clearing
 
 for (const duration of [4, 20]) test(`enhanced ${duration}s completes through provider HTTP and recovers without resubmitting`, async t => {
   const requests = [], credentials = { base: 'https://provider.example', project: 'project', access: 'access', secret: 'secret' };
+  const prepared = Buffer.from('prepared video reference');
   let done = false, restores = 0, submitted = 0;
   const provider = createVideoProvider({ video: credentials, material: credentials }, async (url, options) => {
     const body = JSON.parse(options.body), path = new URL(url).pathname; requests.push({ path, body });
@@ -3113,6 +3114,7 @@ for (const duration of [4, 20]) test(`enhanced ${duration}s completes through pr
     return Response.json({ success: true, status: done ? 2 : 1, ...(done ? { message: 'https://cdn.example/result.mp4' } : {}) });
   });
   const app = await fixture(t, { provider, probe: async () => ({ ...META, duration }),
+    prepareReference: async (_input, output) => { await writeFile(output, prepared); return { compressed: true }; },
     scenes: async () => ({ cuts: [] }), cutSegment: async (_input, output) => writeFile(output, VIDEO),
     joinSegments: async (_inputs, _spans, output) => { await writeFile(output, VIDEO); return { ...META, duration }; },
     restoreAudio: async (_source, _generated, output) => { restores++; await writeFile(output, VIDEO); } });
@@ -3122,10 +3124,17 @@ for (const duration of [4, 20]) test(`enhanced ${duration}s completes through pr
   await app.until(id, task => task.status === 'running' && (!task.segments || task.segments.submitted === task.segments.total));
   const expected = duration === 4 ? 1 : 2;
   assert.equal(submitted, expected);
+  assert.equal(requests.filter(request => request.path.startsWith('/openApi/material/')).length, 0);
   const generations = requests.filter(request => request.path.endsWith('/generate')).map(request => request.body);
   for (const [index, body] of generations.entries()) {
     assert.equal(body.abilityType, 'UPDATE_VIDEO'); assert.equal(body.modelId, 'las-video-edit-seedance-2-0');
-    assert.equal(body.payload.params.video_url, `asset://replica-${duration === 4 ? 'video' : `segment-${index}`}-asset`);
+    const video = new URL(body.payload.params.video_url);
+    assert.equal(video.origin, CONFIG.publicOrigin);
+    assert.equal(video.pathname, `/api/video-replica/source/${id}/${duration === 4 ? 'video' : `segment-${index}`}`);
+    assert.ok(video.searchParams.get('signature')); assert.equal(body.payload.params.use_asset_api, true);
+    const source = await fetch(app.base + video.pathname + video.search);
+    assert.equal(source.status, 200); assert.equal(source.headers.get('content-type'), 'video/mp4');
+    assert.deepEqual(Buffer.from(await source.arrayBuffer()), prepared);
     assert.equal(body.payload.params.template.id, 'replace/person_replace');
     const image = new URL(body.payload.params.image_urls[0]);
     assert.match(image.pathname, new RegExp(`/source/${id}/photo$`)); assert.ok(image.searchParams.get('signature'));
@@ -3136,6 +3145,22 @@ for (const duration of [4, 20]) test(`enhanced ${duration}s completes through pr
   const completed = await app.until(id, task => task.status === 'completed');
   assert.equal(completed.editMode, 'enhanced'); assert.ok(completed.resultUrl);
   assert.equal(completed.billing.status, 'settled'); assert.equal(restores, 1); assert.equal(submitted, expected);
+});
+
+test('enhanced tasks restored during material review use HTTPS sources without querying old asset IDs', async t => {
+  const app = await fixture(t, { queryMaterial: async () => assert.fail('Enhanced editing must not query old material reviews') });
+  const id = randomUUID();
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', editMode: 'enhanced', replacements: { photo: true } } });
+  await app.upload(id); await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  Object.assign(saved, { status: 'reviewing', startedAt: Date.now(),
+    materials: { photo: { id: 'old-photo', status: 1 }, video: { id: 'old-video', status: 1 } } });
+  await writeFile(path, JSON.stringify(saved)); await app.open();
+  await app.until(id, task => task.status === 'running');
+  assert.equal(app.state.creates.length, 0); assert.equal(app.state.generations, 1);
+  const video = new URL(app.state.body.payload.params.video_url);
+  assert.equal(video.origin, CONFIG.publicOrigin); assert.equal(video.pathname, `/api/video-replica/source/${id}/video`);
+  assert.equal((await fetch(app.base + video.pathname + video.search)).status, 200);
 });
 
 for (const model of DEEP_MODELS) for (const selected of [[], ['photo'], ['product'], ['background'], ['voice'], ['photo', 'voice', 'product', 'background']]) {

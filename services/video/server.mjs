@@ -765,7 +765,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const videoKinds = task.segments ? task.segments.map(segment => `segment-${segment.index}`) : ['video'];
       for (const kind of videoKinds) if (!task.materials[kind]) await prepareVideoReference(task, kind);
       for (const kind of [...(isDeepReplica(task) ? deepImageKinds(task) : ['photo']), ...videoKinds, ...(task.voice && !['indextts2', 'chatterbox'].includes(task.voiceEngine) ? ['voice'] : [])]) {
-        if (!task.materials[kind] || wan3Aggregate || task.model === MINIMAX_MODEL) {
+        if (isEnhancedEdit(task)) task.materials[kind] = { url: sourceUrl(task, kind), status: 2 };
+        else if (!task.materials[kind] || wan3Aggregate || task.model === MINIMAX_MODEL) {
           task.materials[kind] = task.model === MINIMAX_MODEL ? { id: sourceUrl(task, kind), status: 2 } : isWan3Model(task.model)
             ? wan3Aggregate ? await wan3AggregateMaterial(task, kind)
               : await wan3Provider.upload(materialFile(task, kind), mime(kind), task.model)
@@ -775,7 +776,6 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           await save(task);
         }
         const material = task.materials[kind];
-        if (isEnhancedEdit(task) && DEEP_IMAGE_KINDS.includes(kind)) material.url = sourceUrl(task, kind);
         if (material.status !== 2) {
           try {
             const result = await taskProvider.queryMaterial(material.id);

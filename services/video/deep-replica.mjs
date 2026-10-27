@@ -39,7 +39,7 @@ export function deepGenerationBody(task, defaultModel, resource = kind => `asset
     const template = images.length === 0 ? 'basic' : images.length > 1 ? 'general'
       : images[0] === 'photo' ? 'replace/person_replace' : 'replace/subject_replace';
     return { modelId: ENHANCED_EDIT_MODELS[task.model || defaultModel], abilityType: 'UPDATE_VIDEO', prompt: instructions.join('\n'),
-      payload: { params: { video_url: resource('video'), template: { id: template },
+      payload: { params: { video_url: task.materials.video.url, template: { id: template },
         image_urls: images.map(kind => task.materials[kind].url), resolution: '720p', ratio: 'adaptive', duration: -1,
         use_asset_api: true, allow_fallback: false, generate_audio: false, watermark: false } } };
   }

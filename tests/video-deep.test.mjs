@@ -20,7 +20,7 @@ for (const [model, modelId] of Object.entries(ENHANCED_EDIT_MODELS)) test(`enhan
       materials: Object.fromEntries(['video', ...images].map(kind => [kind, { id: kind + '-asset', url: `https://workspace.example/${kind}?signature=test` }])) };
     const body = generationBody(task);
     assert.equal(body.modelId, modelId); assert.equal(body.abilityType, 'UPDATE_VIDEO');
-    assert.deepEqual(body.payload, { params: { video_url: 'asset://video-asset',
+    assert.deepEqual(body.payload, { params: { video_url: task.materials.video.url,
       template: { id: images.length === 0 ? 'basic' : images.length > 1 ? 'general' : images[0] === 'photo' ? 'replace/person_replace' : 'replace/subject_replace' },
       image_urls: images.map(kind => task.materials[kind].url), resolution: '720p', ratio: 'adaptive', duration: -1,
       use_asset_api: true, allow_fallback: false, generate_audio: false, watermark: false } });
@@ -36,9 +36,10 @@ test('enhanced submit and polling reuse Seedance credentials and the platform ta
       ? { success: true, data: { taskId: 'platform-id', task_id: 'upstream-id' } }
       : { success: true, taskId: 'platform-id', status: 2, message: 'https://cdn.example/extensionless-result' });
   });
-  const task = { mode: 'deep', editMode: 'enhanced', replacements: {}, materials: { video: { id: 'video-asset' } } };
+  const task = { mode: 'deep', editMode: 'enhanced', replacements: {}, materials: { video: { url: 'https://workspace.example/video?signature=test' } } };
   const result = await provider.generate(task);
   assert.equal(result.taskId, 'platform-id');
+  assert.equal(requests[0].body.payload.params.video_url, task.materials.video.url);
   assert.equal((await provider.query(result.taskId, task)).url, 'https://cdn.example/extensionless-result');
   assert.deepEqual(requests[1].body, { taskId: 'platform-id', abilityType: 'UPDATE_VIDEO' });
   for (const request of requests) assert.deepEqual(request.headers, { 'Content-Type': 'application/json',
