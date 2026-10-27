@@ -53,8 +53,8 @@ for (const [sourceDuration, generatedDuration] of [[3.5, 4], [5, 15], [15, 15]])
   assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - points);
 });
 
-test('MiniMax-H3 rejects long references and enhanced editing before billing', async t => {
-  const app = await fixture(t, { costMode: true, probe: async () => ({ ...META, duration: 16 }) });
+test('MiniMax-H3 rejects references over 60 seconds and enhanced editing before billing', async t => {
+  const app = await fixture(t, { costMode: true, probe: async () => ({ ...META, duration: 61 }) });
   const invalid = await app.call('/tasks', { body: { requestId: randomUUID(), model: 'MiniMax-H3', mode: 'deep', editMode: 'enhanced' } });
   assert.equal(invalid.status, 400); assert.equal((await invalid.json()).code, 'VIDEO_EDIT_MODE_INVALID');
   const id = randomUUID();
@@ -861,7 +861,7 @@ test('all four Seedance editions are offered and removed models cannot start or 
   assert.deepEqual(config.models[1].durations, [4, 5, 6, 8, 10, 12, 15, 20, 25, 30]);
   assert.equal(config.models[0].description, '单段最多15秒，整条最多60秒，1元/秒');
   assert.equal(config.models[1].description, '单段最多30秒，整条最多60秒，1.5元/秒');
-  assert.deepEqual(config.models.map(model => model.extendedDuration), [60, 60, 60, 60, 60, 60, undefined]);
+  assert.deepEqual(config.models.map(model => model.extendedDuration), [60, 60, 60, 60, 60, 60, 60]);
   assert.equal(config.model, 'doubao-seedance-2-0-260128');
   assert.ok(!JSON.stringify(config).includes('private-fal-key'));
   const id = await app.init(); await app.upload(id);
@@ -2056,6 +2056,46 @@ async function segmentedDraft(app, model = PREMIUM_MODEL) {
   await app.upload(id); await uploadVoice(app, id);
   return id;
 }
+
+for (const duration of [15.367, 60]) for (const mode of ['classic', 'deep'])
+test(`MiniMax-H3 ${mode} splits ${duration}s, rejoins the full source and bills all input/output seconds once`, async t => {
+  const model = 'MiniMax-H3', app = await segmentedReplica(t, { model, duration,
+    generate: async task => ({ taskId: 'minimax-' + new URL(task.materials.video.id).pathname.split('/').at(-1) }),
+    query: async id => calls.finished.has(id) ? { completed: true, url: `https://cdn.example/${id}.mp4` } : {} });
+  const { calls } = app, id = randomUUID(), total = Math.ceil(duration / 15);
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model, mode,
+    ...(mode === 'deep' ? { replacements: { photo: true, voice: true } } : {}) } })).status, 201);
+  await app.upload(id); await uploadVoice(app, id);
+  // The fixture's speech pause at 10.3s takes precedence over a cheaper fixed cut.
+  const draft = await app.current(id), outputSeconds = duration === 15.367 ? 30 : 60;
+  const costCny = Math.round((duration + outputSeconds) * .5 * 1e6) / 1e6, points = Math.ceil(costCny * 125);
+  assert.equal(draft.segments.total, total); assert.equal(draft.duration, outputSeconds);
+  assert.equal(draft.estimatedPoints, points); assert.equal(draft.resolution, '768P');
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.until(id, task => task.status === 'running');
+  assert.equal(calls.generations.length, total); assert.equal(calls.creates.length, 0);
+  for (const [index, generation] of calls.generations.entries()) {
+    assert.ok(generation.source >= 4 && generation.source <= 15);
+    assert.ok([4, 15].includes(generation.duration));
+    assert.equal(generation.body.payload.params.duration, generation.duration);
+    assert.equal(generation.body.payload.params.resolution, '768P');
+    const url = new URL(generation.material); assert.ok(url.pathname.endsWith(`/segment-${index}`));
+    assert.deepEqual(generation.body.payload.referVideoUrl, [url.href]);
+    assert.equal((await fetch(app.base + url.pathname + url.search)).status, 200);
+  }
+  await app.close(); await app.open();
+  calls.finished.add('minimax-segment-0');
+  await app.until(id, task => task.segments.completed === 1);
+  for (let index = 1; index < total; index++) calls.finished.add(`minimax-segment-${index}`);
+  const done = await app.until(id, task => task.status === 'completed' && task.billing.status === 'settled');
+  assert.equal(calls.generations.length, total); assert.equal(calls.conversions, 1); assert.equal(calls.joins.length, 1);
+  assert.equal(calls.joins[0].spans[0][0], 0); assert.equal(calls.joins[0].spans.at(-1)[1], duration);
+  assert.deepEqual(calls.muxes, [duration]); assert.equal(done.actualDuration, duration);
+  assert.equal(done.billing.costCny, costCny); assert.equal(done.billing.chargedPoints, points);
+  assert.equal((await app.wallet.reservation('alice', id)).costItems.seedance.costMicros, Math.round(costCny * 1e6));
+  assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - points);
+  assert.equal((await app.wallet.snapshot('alice')).held, 0);
+});
 
 for (const model of [PREMIUM_MODEL, WAN3_MODEL]) test(`${model} exposes a failed part's upstream reason and restores it for old held tasks`, async t => {
   let queries = 0;

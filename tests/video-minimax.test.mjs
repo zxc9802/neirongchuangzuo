@@ -1,9 +1,29 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createVideoProvider, generationBody } from '../services/video/provider.mjs';
+import { createVideoProvider, generationBody, MODELS } from '../services/video/provider.mjs';
+import { planSegments } from '../services/video/segments.mjs';
 
 const model = 'MiniMax-H3';
 const materials = Object.fromEntries(['photo', 'video', 'voice'].map(kind => [kind, { id: `https://workspace.example/${kind}?signature=test` }]));
+
+test('MiniMax-H3 splits references through 60 seconds into legal 4/15-second requests without dropping the tail', () => {
+  const selected = MODELS.find(item => item.id === model);
+  assert.equal(selected.extendedDuration, 60);
+  for (const duration of [15.001, 15.367, 16, 19, 20, 30, 30.04, 39, 45.04, 60]) {
+    const { segments } = planSegments(duration, { maxSegment: selected.maxDuration, durations: selected.durations, fps: 30 });
+    assert.equal(segments.length, Math.ceil(duration / 15));
+    assert.equal(segments[0].start, 0); assert.equal(segments.at(-1).end, duration);
+    if (duration === 15.367) assert.equal(segments.reduce((sum, part) => sum + part.duration, 0), 19);
+    for (const [index, part] of segments.entries()) {
+      const span = Math.round((part.end - part.start) * 1000) / 1000;
+      assert.ok(span >= 4 && span <= 15);
+      assert.ok([4, 15].includes(part.duration)); assert.ok(part.duration >= span - 0.05);
+      if (index) assert.equal(part.start, segments[index - 1].end);
+      const body = generationBody({ model, mode: 'deep', replacements: { photo: true }, duration: part.duration, video: { duration: span }, materials });
+      assert.equal(body.payload.params.duration, part.duration); assert.equal(body.payload.params.resolution, '768P');
+    }
+  }
+});
 
 for (const duration of [4, 15]) for (const mode of ['classic', 'deep']) test(`MiniMax-H3 ${mode} sends 768P, ${duration}s and direct references`, () => {
   const task = { model, mode, duration, video: { duration: 3.9 }, materials,

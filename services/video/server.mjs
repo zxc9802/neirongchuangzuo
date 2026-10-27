@@ -668,7 +668,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (isWan3Model(task.model)) await finishWan3Cost(task, {});
     if (task.billing?.mode === 'api_cost' && task.seedanceCostPrepared) {
       await credits.finishCostCall({ userId: task.userId, taskId: task.billingTaskId || task.id, receiptId: 'seedance',
-        costCny: task.duration * cnyPerSecond(task), providerRequestId: task.segments[0].providerId });
+        costCny: generationQuote(task), providerRequestId: task.segments[0].providerId });
     }
     task.status = 'downloading'; task.error = ''; delete task.code; await save(task);
   }

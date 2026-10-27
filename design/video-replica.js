@@ -15,7 +15,7 @@ const MODELS = [
   { id: 'doubao-seedance-2-0-mini-260615', name: 'qiya-20-m1', maxDuration: 15, extendedDuration: 60 },
   { id: 'wan3.0-video', name: 'qiya-3.0', maxDuration: 15, extendedDuration: 60 },
   { id: WAN3_FAST_MODEL, name: 'qiya-3.0 快速版', maxDuration: 15, extendedDuration: 60, fast: true },
-  { id: MINIMAX_MODEL, name: 'MiniMax-H3', maxDuration: 15 },
+  { id: MINIMAX_MODEL, name: 'MiniMax-H3', maxDuration: 15, extendedDuration: 60 },
 ];
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
 const REPLACEMENTS = { photo: '人物', voice: '声音', product: '商品', background: '背景' };
@@ -132,7 +132,7 @@ function modelPicker(ctx) {
   const enhancedSupported = selected.id.startsWith('doubao-seedance-');
   const fast = wan3 ? `<div class="replica-fast-option"><label for="replica-wan3-fast"><input id="replica-wan3-fast" type="checkbox" aria-describedby="replica-wan3-fast-hint" ${selected.fast ? 'checked' : ''} ${locked || !state.config?.models?.find(model => model.id === WAN3_FAST_MODEL)?.enabled ? 'disabled' : ''}>快速版</label><span id="replica-wan3-fast-hint">选择快速版后生成速度加快，但是积分消耗增加50%</span></div>` : '';
   const price = generationPrice('video', selected.id);
-  const description = minimax ? '768P · 按原片时长选择生成4或15秒 · 输入、输出视频各0.5元/秒；前5张图片免费，超出每张0.20元' : price ? `单段最多 ${selected.maxDuration} 秒，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
+  const description = minimax ? '768P · 每段按原片时长选择生成4或15秒 · 输入、输出视频各0.5元/秒；前5张图片免费，超出每张0.20元' : price ? `单段最多 ${selected.maxDuration} 秒，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
   const automatic = selected.extendedDuration ? `<p class="replica-model-description">${ctx.esc(`自动识别原视频时长，超过 ${selected.maxDuration} 秒自动分段，支持整条最长 ${selected.extendedDuration} 秒。`)}</p>` : '';
   const editing = deepMode() ? `<div class="replica-model-setting"><label for="replica-edit-mode">编辑方式</label><select id="replica-edit-mode" class="replica-models" aria-describedby="replica-edit-hint" ${locked || !state.config?.enabled ? 'disabled' : ''}><option value="standard" ${editMode === 'standard' ? 'selected' : ''}>标准复刻</option><option value="enhanced" ${editMode === 'enhanced' ? 'selected' : ''} ${state.config?.enhancedEditing === false || !enhancedSupported ? 'disabled' : ''}>Seedance 视频编辑增强 2.0</option></select><p id="replica-edit-hint" class="replica-model-description">${!enhancedSupported ? '视频编辑增强 2.0 可在 qiya-2.0、2.5、2.0-f1、20-m1 下使用。' : editMode === 'enhanced' ? '根据替换内容自动选择编辑模板，保留原视频动作与镜头。' : '使用当前复刻流程，可切换增强版对比效果。'}</p></div>` : '';
   return `${editing}<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.filter(model => !model.fast && !(deepMode() && editMode === 'enhanced' && !model.id.startsWith('doubao-seedance-'))).map(model => {
