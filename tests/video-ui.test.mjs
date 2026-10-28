@@ -16,7 +16,7 @@ test('deep cleanup displays full-screen progress without a coordinate selector o
   assert.doesNotMatch(page.html(), /replica-download/);
 });
 
-test('MiniMax-H3 can be selected with 768P pricing in deep replica', async t => {
+test('MiniMax-H3 remains available in classic mode but cannot be selected in deep mode', async t => {
   const page = await fixture(t, { apiFetch: path => path.endsWith('/config') ? Response.json({ enabled: true,
     models: [{ id: 'MiniMax-H3', enabled: true }] }) : undefined });
   page.recover(); await page.poll();
@@ -27,8 +27,21 @@ test('MiniMax-H3 can be selected with 768P pricing in deep replica', async t => 
   assert.match(page.html(), /超过 15 秒自动分段，支持整条最长 60 秒/);
   assert.match(page.html(), /生成时间受视频时长和排队情况影响/);
   page.node('#replica-mode-deep').onclick(); page.rebind();
+  assert.doesNotMatch(page.html(), /option value="MiniMax-H3"/);
+  assert.match(page.html(), new RegExp(`option value="${STANDARD_MODEL}"[^>]*selected`));
   page.node('#replica-models').onchange({ target: { value: 'MiniMax-H3' } }); await page.settle();
+  assert.match(page.html(), new RegExp(`option value="${STANDARD_MODEL}"[^>]*selected`));
   assert.doesNotMatch(page.html(), /replica-edit-mode|Seedance 视频编辑增强 2.0/);
+  page.node('#replica-mode-classic').onclick(); page.rebind();
+  assert.match(page.html(), /option value="MiniMax-H3"[^>]*selected/);
+});
+
+for (const status of ['draft', 'completed']) test(`historical deep MiniMax-H3 ${status} is visible only as a disabled model option`, async t => {
+  const task = { id: 'legacy-deep-minimax', mode: 'deep', model: 'MiniMax-H3', status, replacements: {}, createdAt: Date.now(),
+    ...(status === 'completed' ? { resultUrl: '/legacy-result.mp4' } : {}) };
+  const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /option value="MiniMax-H3" selected disabled>MiniMax-H3（历史版本）/);
+  if (status === 'completed') assert.match(page.html(), /href="\/legacy-result.mp4\?download=1"/);
 });
 
 test('replica keeps the source language without a selector or target in requests', async t => {

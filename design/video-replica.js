@@ -129,12 +129,13 @@ function modelName(task) {
 }
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
+  const models = MODELS.filter(model => !deepMode() || model.id !== MINIMAX_MODEL);
   const wan3 = [WAN3_MODEL, WAN3_FAST_MODEL].includes(selected.id), minimax = selected.id === MINIMAX_MODEL;
   const fast = wan3 ? `<div class="replica-fast-option"><label for="replica-wan3-fast"><input id="replica-wan3-fast" type="checkbox" aria-describedby="replica-wan3-fast-hint" ${selected.fast ? 'checked' : ''} ${locked || !state.config?.models?.find(model => model.id === WAN3_FAST_MODEL)?.enabled ? 'disabled' : ''}>快速版</label><span id="replica-wan3-fast-hint">选择快速版后生成速度加快，但是积分消耗增加50%</span></div>` : '';
   const price = generationPrice('video', selected.id);
   const description = minimax ? '768P · 每段按原片时长选择生成4或15秒 · 输入、输出视频各0.5元/秒；前5张图片免费，超出每张0.20元' : price ? `单段最多 ${selected.maxDuration} 秒，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
   const automatic = selected.extendedDuration ? `<p class="replica-model-description">${ctx.esc(`自动识别原视频时长，超过 ${selected.maxDuration} 秒自动分段，支持整条最长 ${selected.extendedDuration} 秒。`)}</p>` : '';
-  return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.filter(model => !model.fast).map(model => {
+  return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!models.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${models.filter(model => !model.fast).map(model => {
     const configured = state.config?.models?.find(item => item.id === model.id);
     const unavailable = !state.config?.enabled || configured?.enabled === false || [WAN3_MODEL, MINIMAX_MODEL].includes(model.id) && !configured?.enabled;
     return `<option value="${model.id}" ${selected.id === model.id || selected.fast && model.id === WAN3_MODEL ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
@@ -327,7 +328,7 @@ export function renderVideoReplica(ctx) {
       <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
 async function selectModel(id) {
-  if (state.busy || state.current && state.current.status !== 'draft' || !MODELS.some(model => model.id === id) || !state.config?.enabled) return;
+  if (state.busy || state.current && state.current.status !== 'draft' || !MODELS.some(model => model.id === id) || deepMode() && id === MINIMAX_MODEL || !state.config?.enabled) return;
   if (selectedModel().id === id) return;
   if (!state.current) {
     state.model = id;

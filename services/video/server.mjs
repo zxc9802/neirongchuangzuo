@@ -110,6 +110,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     return Object.fromEntries(DEEP_KINDS.map(kind => [kind, value[kind] === true]));
   }
   function validateDeepModel(model) {
+    if (model === MINIMAX_MODEL) throw error('深度复刻已不再支持 MiniMax-H3，请选择其他生成版本。', 400, 'VIDEO_MODEL_INVALID');
     if (!models.some(item => item.id === model && !isFalReplacement(item.id))) {
       throw error('该历史版本不支持新建深度复刻，请选择当前生成版本。', 400, 'VIDEO_MODEL_INVALID');
     }

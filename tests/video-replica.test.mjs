@@ -55,13 +55,38 @@ for (const [sourceDuration, generatedDuration] of [[3.5, 4], [5, 15], [15, 15]])
 
 test('MiniMax-H3 rejects references over 60 seconds and enhanced editing before billing', async t => {
   const app = await fixture(t, { costMode: true, probe: async () => ({ ...META, duration: 61 }) });
-  const invalid = await app.call('/tasks', { body: { requestId: randomUUID(), model: 'MiniMax-H3', mode: 'deep', editMode: 'enhanced' } });
+  const invalid = await app.call('/tasks', { body: { requestId: randomUUID(), model: 'MiniMax-H3', mode: 'classic', editMode: 'enhanced' } });
   assert.equal(invalid.status, 400); assert.equal((await invalid.json()).code, 'VIDEO_EDIT_MODE_INVALID');
   const id = randomUUID();
-  assert.equal((await app.call('/tasks', { body: { requestId: id, model: 'MiniMax-H3', mode: 'deep', replacements: {} } })).status, 201);
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model: 'MiniMax-H3', mode: 'classic' } })).status, 201);
   const upload = await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO });
   assert.equal(upload.status, 400); assert.equal((await upload.json()).code, 'VIDEO_DURATION_INVALID');
   assert.equal((await app.wallet.snapshot('alice')).held, 0); assert.equal(app.state.generations, 0);
+});
+
+test('deep MiniMax-H3 creation, model changes and legacy draft starts are rejected before billing', async t => {
+  const app = await fixture(t, { costMode: true });
+  const rejected = async response => {
+    assert.equal(response.status, 400); assert.equal((await response.json()).code, 'VIDEO_MODEL_INVALID');
+  };
+  for (const editMode of ['standard', 'enhanced']) {
+    await rejected(await app.call('/tasks', { body: { requestId: randomUUID(), mode: 'deep', model: 'MiniMax-H3', editMode } }));
+  }
+  const id = randomUUID();
+  assert.equal((await app.call('/tasks', { body: { requestId: id, mode: 'deep' } })).status, 201);
+  assert.equal((await fetch(app.base + `/api/video-replica/tasks/${id}/video`, { method: 'PUT', body: VIDEO })).status, 200);
+  const originalModel = (await app.current(id)).model;
+  for (const action of ['model', 'start']) await rejected(await app.call(`/tasks/${id}/${action}`, { body: { model: 'MiniMax-H3' } }));
+  assert.equal((await app.current(id)).model, originalModel);
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.model = 'MiniMax-H3'; await writeFile(path, JSON.stringify(saved)); await app.open();
+  await rejected(await app.call(`/tasks/${id}/start`, { body: {} }));
+  assert.equal((await app.current(id)).status, 'draft');
+  assert.equal((await app.call(`/tasks/${id}/model`, { body: { model: originalModel } })).status, 200);
+  assert.equal((await app.current(id)).model, originalModel);
+  const wallet = await app.wallet.snapshot('alice');
+  assert.equal(wallet.held, 0); assert.equal(wallet.available, TEST_BALANCE); assert.equal(app.state.generations, 0);
 });
 
 test('MiniMax-H3 is unavailable with legacy flat-rate credits', async t => {
@@ -2058,13 +2083,12 @@ async function segmentedDraft(app, model = PREMIUM_MODEL) {
 }
 
 for (const duration of [15.367, 60]) for (const mode of ['classic', 'deep'])
-test(`MiniMax-H3 ${mode} splits ${duration}s, rejoins the full source and bills all input/output seconds once`, async t => {
+test(`MiniMax-H3 ${mode === 'deep' ? 'historical deep' : mode} splits ${duration}s, rejoins the full source and bills all input/output seconds once`, async t => {
   const model = 'MiniMax-H3', app = await segmentedReplica(t, { model, duration,
     generate: async task => ({ taskId: 'minimax-' + new URL(task.materials.video.id).pathname.split('/').at(-1) }),
     query: async id => calls.finished.has(id) ? { completed: true, url: `https://cdn.example/${id}.mp4` } : {} });
   const { calls } = app, id = randomUUID(), total = Math.ceil(duration / 15);
-  assert.equal((await app.call('/tasks', { body: { requestId: id, model, mode,
-    ...(mode === 'deep' ? { replacements: { photo: true, voice: true } } : {}) } })).status, 201);
+  assert.equal((await app.call('/tasks', { body: { requestId: id, model, mode: 'classic' } })).status, 201);
   await app.upload(id); await uploadVoice(app, id);
   // The fixture's speech pause at 10.3s takes precedence over a cheaper fixed cut.
   const draft = await app.current(id), outputSeconds = duration === 15.367 ? 30 : 60;
@@ -2083,7 +2107,14 @@ test(`MiniMax-H3 ${mode} splits ${duration}s, rejoins the full source and bills 
     assert.deepEqual(generation.body.payload.referVideoUrl, [url.href]);
     assert.equal((await fetch(app.base + url.pathname + url.search)).status, 200);
   }
-  await app.close(); await app.open();
+  await app.close();
+  if (mode === 'deep') {
+    // Recover an already-submitted historical task without creating a new deep MiniMax task.
+    const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+    saved.mode = 'deep'; saved.replacements = { photo: true, voice: true, product: false, background: false };
+    await writeFile(path, JSON.stringify(saved));
+  }
+  await app.open();
   calls.finished.add('minimax-segment-0');
   await app.until(id, task => task.segments.completed === 1);
   for (let index = 1; index < total; index++) calls.finished.add(`minimax-segment-${index}`);
