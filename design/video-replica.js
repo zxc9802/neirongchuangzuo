@@ -20,7 +20,7 @@ const MODELS = [
 const DEFAULT_VOICE = { voiceEngine: 'chatterbox', sourceAudioMode: 'original' };
 const REPLACEMENTS = { photo: '人物', voice: '声音', product: '商品', background: '背景' };
 const emptyReplacements = () => ({ photo: false, voice: false, product: false, background: false });
-let mode = 'classic', editMode = 'standard', replacements = emptyReplacements(), modeDrafts = {};
+let mode = 'classic', replacements = emptyReplacements(), modeDrafts = {};
 const deepMode = () => mode === 'deep';
 const inputKinds = () => deepMode() ? ['video', ...Object.keys(REPLACEMENTS).filter(kind => replacements[kind])] : ['video', 'photo', 'voice'];
 const LANGUAGES = [{ id: 'zh', name: '中文' }, { id: 'en', name: '英语' }, { id: 'ms', name: '马来语' }];
@@ -64,7 +64,7 @@ function account() {
   const owner = globalThis.workspaceUser?.id || 'local-dev';
   if (state.owner !== owner) {
     for (const draft of Object.values(modeDrafts)) for (const url of Object.values(draft.urls)) if (url.startsWith('blob:')) URL.revokeObjectURL(url);
-    modeDrafts = {}; mode = 'classic'; editMode = 'standard'; replacements = emptyReplacements();
+    modeDrafts = {}; mode = 'classic'; replacements = emptyReplacements();
     resetFiles(); state = { owner, config: null, tasks: [], current: null, model: DEFAULT_MODEL, files: {}, urls: {}, busy: false, error: '', pollError: '', loading: true };
   }
 }
@@ -85,7 +85,7 @@ async function request(path, options = {}) {
 function jsonPost(body = {}) { return { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }; }
 function remember(task) {
   state.current = task;
-  if (task.mode === 'deep') { replacements = { ...task.replacements }; editMode = task.editMode || 'standard'; }
+  if (task.mode === 'deep') replacements = { ...task.replacements };
   state.model = task.model || state.model;
   state.tasks = [task, ...state.tasks.filter(item => item.id !== task.id)].sort((a, b) => b.createdAt - a.createdAt);
   observeCreditTask(task);
@@ -130,13 +130,11 @@ function modelName(task) {
 function modelPicker(ctx) {
   const selected = selectedModel(), locked = state.busy || state.current && state.current.status !== 'draft';
   const wan3 = [WAN3_MODEL, WAN3_FAST_MODEL].includes(selected.id), minimax = selected.id === MINIMAX_MODEL;
-  const enhancedSupported = selected.id.startsWith('doubao-seedance-');
   const fast = wan3 ? `<div class="replica-fast-option"><label for="replica-wan3-fast"><input id="replica-wan3-fast" type="checkbox" aria-describedby="replica-wan3-fast-hint" ${selected.fast ? 'checked' : ''} ${locked || !state.config?.models?.find(model => model.id === WAN3_FAST_MODEL)?.enabled ? 'disabled' : ''}>快速版</label><span id="replica-wan3-fast-hint">选择快速版后生成速度加快，但是积分消耗增加50%</span></div>` : '';
   const price = generationPrice('video', selected.id);
   const description = minimax ? '768P · 每段按原片时长选择生成4或15秒 · 输入、输出视频各0.5元/秒；前5张图片免费，超出每张0.20元' : price ? `单段最多 ${selected.maxDuration} 秒，RM ${price.rmPerSecond}/秒（${price.pointsPerSecond} 积分/秒）` : '历史版本，仅供查看已有成片';
   const automatic = selected.extendedDuration ? `<p class="replica-model-description">${ctx.esc(`自动识别原视频时长，超过 ${selected.maxDuration} 秒自动分段，支持整条最长 ${selected.extendedDuration} 秒。`)}</p>` : '';
-  const editing = deepMode() ? `<div class="replica-model-setting"><label for="replica-edit-mode">编辑方式</label><select id="replica-edit-mode" class="replica-models" aria-describedby="replica-edit-hint" ${locked || !state.config?.enabled ? 'disabled' : ''}><option value="standard" ${editMode === 'standard' ? 'selected' : ''}>标准复刻</option><option value="enhanced" ${editMode === 'enhanced' ? 'selected' : ''} ${state.config?.enhancedEditing === false || !enhancedSupported ? 'disabled' : ''}>Seedance 视频编辑增强 2.0</option></select><p id="replica-edit-hint" class="replica-model-description">${!enhancedSupported ? '视频编辑增强 2.0 可在 qiya-2.0、2.5、2.0-f1、20-m1 下使用。' : editMode === 'enhanced' ? '根据替换内容自动选择编辑模板，保留原视频动作与镜头。' : '使用当前复刻流程，可切换增强版对比效果。'}</p></div>` : '';
-  return `${editing}<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.filter(model => !model.fast && !(deepMode() && editMode === 'enhanced' && !model.id.startsWith('doubao-seedance-'))).map(model => {
+  return `<div class="replica-model-setting"><label for="replica-models">生成版本</label><select id="replica-models" class="replica-models" aria-describedby="replica-model-description" ${locked || !state.config?.enabled ? 'disabled' : ''}>${!MODELS.some(model => model.id === selected.id) ? `<option value="${ctx.esc(selected.id)}" selected disabled>${ctx.esc(selected.name)}（历史版本）</option>` : ''}${MODELS.filter(model => !model.fast).map(model => {
     const configured = state.config?.models?.find(item => item.id === model.id);
     const unavailable = !state.config?.enabled || configured?.enabled === false || [WAN3_MODEL, MINIMAX_MODEL].includes(model.id) && !configured?.enabled;
     return `<option value="${model.id}" ${selected.id === model.id || selected.fast && model.id === WAN3_MODEL ? 'selected' : ''} ${unavailable ? 'disabled' : ''}>${ctx.esc(model.name)}</option>`;
@@ -211,13 +209,12 @@ function renderDeepReplica(ctx) {
 }
 function switchMode(next) {
   if (state.busy || !['classic', 'deep'].includes(next) || mode === next) return;
-  modeDrafts[mode] = { current: state.current, model: state.model, files: state.files, urls: state.urls, selectedMaterials, replacements, editMode };
+  modeDrafts[mode] = { current: state.current, model: state.model, files: state.files, urls: state.urls, selectedMaterials, replacements };
   mode = next;
   const draft = modeDrafts[mode];
   state.current = draft?.current || null; state.model = draft?.model || DEFAULT_MODEL;
   state.files = draft?.files || {}; state.urls = draft?.urls || {};
   selectedMaterials = draft?.selectedMaterials || {}; replacements = draft?.replacements || emptyReplacements();
-  editMode = draft?.editMode || 'standard';
   state.error = ''; refresh();
 }
 async function toggleReplacement(kind, enabled) {
@@ -232,15 +229,6 @@ async function toggleReplacement(kind, enabled) {
   if (!state.current) { replacements = next; clear(); state.error = ''; refresh(); return; }
   state.busy = true; state.error = ''; refresh();
   try { remember((await request(`/tasks/${state.current.id}/options`, jsonPost({ replacements: next }))).task); clear(); }
-  catch (cause) { state.error = cause.message; }
-  finally { state.busy = false; refresh(); }
-}
-async function selectEditMode(next) {
-  if (!deepMode() || state.busy || state.current && state.current.status !== 'draft'
-    || !['standard', 'enhanced'].includes(next) || next === 'enhanced' && [WAN3_MODEL, WAN3_FAST_MODEL].includes(selectedModel().id)) return;
-  if (!state.current) { editMode = next; state.error = ''; refresh(); return; }
-  state.busy = true; state.error = ''; refresh();
-  try { remember((await request(`/tasks/${state.current.id}/options`, jsonPost({ editMode: next }))).task); }
   catch (cause) { state.error = cause.message; }
   finally { state.busy = false; refresh(); }
 }
@@ -406,7 +394,7 @@ async function submit() {
     }
     const id = state.current?.id || crypto.randomUUID();
     const model = selectedModel().id, { voiceEngine, sourceAudioMode } = deepMode() && !replacements.voice ? { voiceEngine: 'seedance', sourceAudioMode: 'original' } : DEFAULT_VOICE;
-    const deep = deepMode() ? { mode: 'deep', editMode, replacements } : {};
+    const deep = deepMode() ? { mode: 'deep', replacements } : {};
     // Keep the request ID before networking so an uncertain response can be retried safely.
     if (!state.current) state.current = { id, status: 'draft', createdAt: Date.now(), model, ...deep };
     remember((await request('/tasks', jsonPost({ requestId: id, model, voiceEngine, sourceAudioMode, ...deep }))).task);
@@ -501,8 +489,6 @@ export function bindVideoReplica(ctx) {
   context = ctx;
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
   document.querySelector('#replica-models').onchange = event => { void selectModel(event.target.value); };
-  const editing = document.querySelector('#replica-edit-mode');
-  if (editing) editing.onchange = event => { void selectEditMode(event.target.value); };
   const fast = document.querySelector('#replica-wan3-fast');
   if (fast) fast.onchange = event => { void selectModel(event.target.checked ? WAN3_FAST_MODEL : WAN3_MODEL); };
   for (const kind of deepMode() ? ['video', ...Object.keys(REPLACEMENTS)] : inputKinds()) document.querySelector(`#replica-${kind}`).onchange = async event => {
@@ -539,13 +525,13 @@ export function bindVideoReplica(ctx) {
   const resume = document.querySelector('#replica-resume'); if (resume) resume.onclick = () => { void recoverTask('resume'); };
   const cancel = document.querySelector('#replica-cancel'); if (cancel) cancel.onclick = () => { void recoverTask('cancel'); };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
-  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; editMode = 'standard'; replacements = emptyReplacements(); state.error = ''; refresh(); };
+  document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; replacements = emptyReplacements(); state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };
   document.querySelector('#replica-history').onclick = event => {
     const button = event.target.closest('[data-replica-task]'); if (!button || state.busy) return;
     const task = state.tasks.find(task => task.id === button.dataset.replicaTask); if (!task) return;
     switchMode(task.mode === 'deep' ? 'deep' : 'classic');
-    resetFiles(); state.current = task; replacements = task.replacements ? { ...task.replacements } : emptyReplacements(); editMode = task.editMode || 'standard'; state.model = task.model || DEFAULT_MODEL; state.error = ''; refresh();
+    resetFiles(); state.current = task; replacements = task.replacements ? { ...task.replacements } : emptyReplacements(); state.model = task.model || DEFAULT_MODEL; state.error = ''; refresh();
   };
   if (!timer) { void poll(); timer = setInterval(() => { void poll(); }, 5000); }
 }

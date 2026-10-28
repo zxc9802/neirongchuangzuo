@@ -16,7 +16,7 @@ test('deep cleanup displays full-screen progress without a coordinate selector o
   assert.doesNotMatch(page.html(), /replica-download/);
 });
 
-test('MiniMax-H3 can be selected with 768P pricing and cannot enable Seedance enhanced editing', async t => {
+test('MiniMax-H3 can be selected with 768P pricing in deep replica', async t => {
   const page = await fixture(t, { apiFetch: path => path.endsWith('/config') ? Response.json({ enabled: true,
     models: [{ id: 'MiniMax-H3', enabled: true }] }) : undefined });
   page.recover(); await page.poll();
@@ -28,7 +28,7 @@ test('MiniMax-H3 can be selected with 768P pricing and cannot enable Seedance en
   assert.match(page.html(), /生成时间受视频时长和排队情况影响/);
   page.node('#replica-mode-deep').onclick(); page.rebind();
   page.node('#replica-models').onchange({ target: { value: 'MiniMax-H3' } }); await page.settle();
-  assert.match(page.html(), /option value="enhanced"[^>]*disabled/);
+  assert.doesNotMatch(page.html(), /replica-edit-mode|Seedance 视频编辑增强 2.0/);
 });
 
 test('replica keeps the source language without a selector or target in requests', async t => {
@@ -1068,13 +1068,20 @@ test('deep layout keeps the material desk, preview and history separate and omit
   assert.ok(html.indexOf('id="replica-product"') < html.indexOf('id="replica-photo"'));
   assert.ok(html.indexOf('id="replica-background"') < html.indexOf('id="replica-voice"'));
   assert.doesNotMatch(html, /字幕擦除|水印擦除|画质增强|收藏|<textarea/);
-  assert.match(html, /id="replica-edit-mode"/);
-  assert.match(html, /Seedance 视频编辑增强 2.0/);
+  assert.doesNotMatch(html, /replica-edit-mode|Seedance 视频编辑增强 2.0/);
   for (const id of ['replica-video', 'replica-submit', 'replica-models', 'replica-result', 'replica-history', 'replica-new']) {
     assert.equal(html.split(`id="${id}"`).length - 1, 1);
   }
   page.node('#replica-mode-classic').onclick();
   assert.match(page.html(), /class="replica-uploads"/); assert.doesNotMatch(page.html(), /replica-deep-studio/);
+});
+
+test('historical enhanced replicas remain identifiable without an editing selector', async t => {
+  const task = { id: 'legacy-enhanced', status: 'completed', createdAt: Date.now(), mode: 'deep', editMode: 'enhanced', model: STANDARD_MODEL,
+    replacements: { photo: true, voice: false, product: false, background: false }, resultUrl: '/old-result.mp4' };
+  const page = await fixture(t, { tasks: [task] }); page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  assert.match(page.html(), /视频编辑增强 2.0/);
+  assert.doesNotMatch(page.html(), /replica-edit-mode|option value="enhanced"/);
 });
 
 test('selecting a deep thumbnail file enables that replacement and preserves it through mode switching', async t => {

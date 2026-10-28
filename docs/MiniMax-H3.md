@@ -1,6 +1,6 @@
 # MiniMax-H3 手动验证
 
-在「人物 1:1 复刻」的「生成版本」选择 **MiniMax-H3**。原版复刻和深度复刻的标准模式均可使用；Seedance 视频编辑增强模式不支持此模型。
+在「人物 1:1 复刻」的「生成版本」选择 **MiniMax-H3**。原版复刻和深度复刻均可使用。
 
 - 沿用 `VIDEO_API_BASE_URL`、`VIDEO_PROJECT_CODE`、`VIDEO_ACCESS_KEY`、`VIDEO_SECRET_KEY`，无需新增模型密钥。
 - 使用 `/openApi/generate`，`modelId: MiniMax-H3`、`abilityType: VIDEO`、`resolution: 768P`。

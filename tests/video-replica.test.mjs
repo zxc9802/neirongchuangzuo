@@ -3076,11 +3076,11 @@ for (const uncertain of [false, true]) test(`deep separation ${uncertain ? 'unce
 });
 
 const DEEP_MODELS = ['doubao-seedance-2-0-260128', PREMIUM_MODEL, FAST_MODEL, MINI_MODEL, WAN3_MODEL];
-test('enhanced editing is opt-in, validates models, and changes without clearing draft assets', async t => {
+test('enhanced editing rejects new tasks and restores old drafts as standard without losing assets', async t => {
   const app = await fixture(t, { config: { ...CONFIG, wan3Enabled: true } });
-  assert.equal((await (await app.call('/config')).json()).enhancedEditing, true);
+  assert.equal((await (await app.call('/config')).json()).enhancedEditing, false);
   for (const body of [{ editMode: 'enhanced' }, { mode: 'deep', editMode: 'unknown' },
-    { mode: 'deep', model: WAN3_MODEL, editMode: 'enhanced' }]) {
+    ...DEEP_MODELS.map(model => ({ mode: 'deep', model, editMode: 'enhanced' }))]) {
     const response = await app.call('/tasks', { body: { requestId: randomUUID(), ...body } });
     assert.equal(response.status, 400); assert.equal((await response.json()).code, 'VIDEO_EDIT_MODE_INVALID');
   }
@@ -3089,18 +3089,27 @@ test('enhanced editing is opt-in, validates models, and changes without clearing
   await app.upload(id);
   assert.equal((await app.current(id)).editMode, 'standard');
   const response = await app.call(`/tasks/${id}/options`, { body: { editMode: 'enhanced' } });
-  assert.equal(response.status, 200);
-  const edited = (await response.json()).task;
-  assert.equal(edited.editMode, 'enhanced'); assert.equal(edited.replacements.photo, true); assert.ok(edited.photo);
-  for (const endpoint of ['model', 'start']) assert.equal((await app.call(`/tasks/${id}/${endpoint}`, { body: { model: WAN3_MODEL } })).status, 400);
-  await app.close(); await app.open();
-  assert.equal((await app.current(id)).editMode, 'enhanced');
-  assert.equal((await app.call(`/tasks/${id}/options`, { body: { editMode: 'standard' } })).status, 200);
+  assert.equal(response.status, 400); assert.equal((await response.json()).code, 'VIDEO_EDIT_MODE_INVALID');
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.editMode = 'enhanced'; await writeFile(path, JSON.stringify(saved)); await app.open();
+  const restored = await app.current(id);
+  assert.equal(restored.editMode, 'standard'); assert.equal(restored.replacements.photo, true); assert.ok(restored.photo);
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).editMode, 'standard');
   await app.call(`/tasks/${id}/start`, { body: {} });
   await app.until(id, task => task.status === 'running');
   assert.equal(app.state.body.abilityType, 'VIDEO');
   assert.equal((await app.call(`/tasks/${id}/options`, { body: { editMode: 'enhanced' } })).status, 409);
 });
+
+// Recreate an already-submitted task from before enhanced editing was retired.
+async function startLegacyEnhanced(app, id) {
+  assert.equal((await app.call(`/tasks/${id}/start`, { body: {} })).status, 202);
+  await app.close();
+  const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
+  assert.equal(saved.status, 'preparing');
+  saved.editMode = 'enhanced'; await writeFile(path, JSON.stringify(saved)); await app.open({ pollIntervalMs: 15 });
+}
 
 for (const duration of [4, 20]) test(`enhanced ${duration}s completes through provider HTTP and recovers without resubmitting`, async t => {
   const requests = [], credentials = { base: 'https://provider.example', project: 'project', access: 'access', secret: 'secret' };
@@ -3117,10 +3126,10 @@ for (const duration of [4, 20]) test(`enhanced ${duration}s completes through pr
     prepareReference: async (_input, output) => { await writeFile(output, prepared); return { compressed: true }; },
     scenes: async () => ({ cuts: [] }), cutSegment: async (_input, output) => writeFile(output, VIDEO),
     joinSegments: async (_inputs, _spans, output) => { await writeFile(output, VIDEO); return { ...META, duration }; },
-    restoreAudio: async (_source, _generated, output) => { restores++; await writeFile(output, VIDEO); } });
+    restoreAudio: async (_source, _generated, output) => { restores++; await writeFile(output, VIDEO); }, pollIntervalMs: 60_000 });
   const id = randomUUID();
-  await app.call('/tasks', { body: { requestId: id, mode: 'deep', editMode: 'enhanced', replacements: { photo: true } } });
-  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: { photo: true } } });
+  await app.upload(id); await startLegacyEnhanced(app, id);
   await app.until(id, task => task.status === 'running' && (!task.segments || task.segments.submitted === task.segments.total));
   const expected = duration === 4 ? 1 : 2;
   assert.equal(submitted, expected);
@@ -3141,7 +3150,7 @@ for (const duration of [4, 20]) test(`enhanced ${duration}s completes through pr
     const served = await fetch(app.base + image.pathname + image.search);
     assert.equal(served.status, 200); assert.deepEqual(Buffer.from(await served.arrayBuffer()), Buffer.from('photo'));
   }
-  await app.close(); await app.open(); done = true;
+  await app.close(); await app.open({ pollIntervalMs: 15 }); done = true;
   const completed = await app.until(id, task => task.status === 'completed');
   assert.equal(completed.editMode, 'enhanced'); assert.ok(completed.resultUrl);
   assert.equal(completed.billing.status, 'settled'); assert.equal(restores, 1); assert.equal(submitted, expected);
@@ -3150,10 +3159,10 @@ for (const duration of [4, 20]) test(`enhanced ${duration}s completes through pr
 test('enhanced tasks restored during material review use HTTPS sources without querying old asset IDs', async t => {
   const app = await fixture(t, { queryMaterial: async () => assert.fail('Enhanced editing must not query old material reviews') });
   const id = randomUUID();
-  await app.call('/tasks', { body: { requestId: id, mode: 'deep', editMode: 'enhanced', replacements: { photo: true } } });
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: { photo: true } } });
   await app.upload(id); await app.close();
   const path = join(app.root, 'video', id, 'task.json'), saved = JSON.parse(await readFile(path, 'utf8'));
-  Object.assign(saved, { status: 'reviewing', startedAt: Date.now(),
+  Object.assign(saved, { status: 'reviewing', editMode: 'enhanced', startedAt: Date.now(),
     materials: { photo: { id: 'old-photo', status: 1 }, video: { id: 'old-video', status: 1 } } });
   await writeFile(path, JSON.stringify(saved)); await app.open();
   await app.until(id, task => task.status === 'running');
@@ -3561,7 +3570,7 @@ test('failed COS deletion retains a playable completed task, retries after resta
 
 test('completed-task cleanup retries subtitle COS deletion without changing the delivered result', async t => {
   let at = Date.now(), failing = true, attempts = 0;
-  const app = await fixture(t, { now: () => at,
+  const app = await fixture(t, { now: () => at, pollIntervalMs: 60_000,
     restoreAudio: async (_source, _generated, output) => writeFile(output, VIDEO),
     subtitleRemoval: {
       assertConfigured() {},
@@ -3575,12 +3584,12 @@ test('completed-task cleanup retries subtitle COS deletion without changing the 
       },
     } });
   const id = randomUUID();
-  await app.call('/tasks', { body: { requestId: id, mode: 'deep', editMode: 'enhanced', replacements: { photo: true } } });
-  await app.upload(id); await app.call(`/tasks/${id}/start`, { body: {} });
+  await app.call('/tasks', { body: { requestId: id, mode: 'deep', replacements: { photo: true } } });
+  await app.upload(id); await startLegacyEnhanced(app, id);
   await app.until(id, task => task.status === 'running'); app.state.done = true;
   const completed = await app.until(id, task => task.status === 'completed' && attempts === 1);
   assert.ok(completed.resultUrl); assert.equal(completed.error, '');
-  await app.close(); failing = false; await app.open(); await delay(50); assert.equal(attempts, 1);
+  await app.close(); failing = false; await app.open({ pollIntervalMs: 15 }); await delay(50); assert.equal(attempts, 1);
   at += 60_001; await app.until(id, task => task.status === 'completed' && attempts === 2);
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
   assert.equal(app.state.generations, 1);
