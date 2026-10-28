@@ -25,11 +25,15 @@ RUN python3 -m venv /opt/lipsync \
     && /opt/lipsync/bin/pip install --no-cache-dir -r /tmp/face-lipsync/requirements.txt \
     && /opt/lipsync/bin/python /tmp/face-lipsync/download_models.py /opt/lipsync/models
 ENV LIPSYNC_PYTHON=/opt/lipsync/bin/python LIPSYNC_MODEL_DIR=/opt/lipsync/models
-COPY --from=builder /app /app
-RUN python3 -m venv /opt/mix-venv \
-    && /opt/mix-venv/bin/pip install --no-cache-dir -r services/mix/python/requirements.txt -r services/video/requirements.txt \
+COPY services/mix/python/requirements.txt /tmp/mix-requirements.txt
+COPY services/video/requirements.txt /tmp/video-requirements.txt
+RUN export PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10 PIP_RESUME_RETRIES=10 \
+    && python3 -m venv /opt/mix-venv \
+    && /opt/mix-venv/bin/pip install --no-cache-dir --upgrade pip==26.2.2 \
+    && /opt/mix-venv/bin/pip install --no-cache-dir -r /tmp/mix-requirements.txt -r /tmp/video-requirements.txt \
     && /opt/mix-venv/bin/pip install --no-cache-dir --no-deps rapidocr-onnxruntime==1.4.4
 ENV MIX_PYTHON_BIN=/opt/mix-venv/bin/python
+COPY --from=builder /app /app
 WORKDIR /app/services/digital-human
 RUN npx remotion browser ensure
 RUN mkdir -p .runtime/jobs .runtime/uploads .runtime/provider-input .runtime/state
