@@ -30,6 +30,8 @@ class RemoteCatalog:
         records, vectors = [], []
         rows = broker_for(self.root).indexed_clips(self.config['device_id'])
         for row in sorted(rows, key=lambda item: item['id']):
+            if row['description'] is None:
+                continue
             clip_id = row['id']
             if not re.fullmatch(r'[a-f0-9]{64}', clip_id):
                 raise ValueError('本地素材片段标识无效')

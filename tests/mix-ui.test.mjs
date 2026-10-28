@@ -897,7 +897,7 @@ test('indexing can restore before TTS is configured and BFCache pageshow reconne
 
 const cloudHealth = { configured: true, voice_configured: true, default_voice_configured: true, material_library: { configured: true, missing: [] } };
 
-test('local-first health keeps COS originals untouched and waits for durable descriptions before manual generation', async () => {
+test('local materials can generate from ready clips while remaining descriptions and analysis continue', async () => {
   let progress = { total: 2, vectorized: 2, described: 1, ready: 1, analyzing: 0, describing: 1, failed: 0 };
   const f = await fixture({ files: 2, health: { ...cloudHealth, material_mode: 'local', material_progress: true },
     fetchProgress: () => Response.json(progress) });
@@ -909,8 +909,22 @@ test('local-first health keeps COS originals untouched and waits for durable des
     assert.equal(f.calls.some(call => call.url.startsWith('/api/mix/materials')), false);
     assert.match(f.mod.renderMixMaterials(), /云端向量：2 \/ 2/);
     assert.match(f.mod.renderMixMaterials(), /云端画面描述：1 \/ 2/);
-    assert.match(f.mod.mixReadiness(f.ctx), /素材正在分析/);
-    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, false);
+    assert.match(f.nodes['#studio-generation-hint'].textContent, /1 个片段可供匹配/);
+    assert.match(f.mod.renderMixMaterials(), /已就绪 1 个片段/);
+    client._report({ error: 'bad.mov：分析失败' });
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    assert.match(f.mod.renderMixMaterials(), /bad.mov：分析失败/);
+    f.ctx.configs.mix.prompt = '';
+    f.mod.bindMixMaterials(f.ctx);
+    assert.match(f.mod.mixReadiness(f.ctx), /填写宣传文案/);
+    f.ctx.configs.mix.prompt = '用已完成的素材制作。';
+    f.mod.bindMixMaterials(f.ctx);
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, false);
+    progress = { ...progress, ready: 0, described: 0 };
+    await client._pollProgress(client.generation);
+    assert.notEqual(f.mod.mixReadiness(f.ctx), '');
     progress = { ...progress, described: 2, ready: 2, describing: 0 };
     await client._pollProgress(client.generation);
     assert.equal(f.mod.mixReadiness(f.ctx), '');
@@ -918,6 +932,53 @@ test('local-first health keeps COS originals untouched and waits for durable des
     assert.equal(f.calls.some(call => call.url === '/api/mix/jobs' && call.method === 'POST'), false);
     client._report({ progressError: '云端进度暂时无法更新，正在重连' });
     assert.match(f.mod.mixReadiness(f.ctx), /正在确认云端分析进度/);
+  } finally { f.restore(); }
+});
+
+test('one unreadable indexed original blocks matching even when other originals are readable', async () => {
+  const f = await fixture({ files: 2 });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const { client } = f.mod.getMixState();
+    const entry = Object.values(client.record.manifest)[1];
+    client.unreadableFiles.add(entry.assetId);
+    client._report();
+    assert.match(f.mod.mixReadiness(f.ctx), /原文件无法读取/);
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
+    client.unreadableFiles.clear();
+    client.files.delete(entry.relativePath);
+    client._report();
+    assert.match(f.mod.mixReadiness(f.ctx), /原文件无法读取/);
+  } finally { f.restore(); }
+});
+
+test('entering copy and starting submits once while other local clips are still being analyzed', async () => {
+  const progress = { total: 3, vectorized: 2, described: 1, ready: 1, analyzing: 1, describing: 1, failed: 0 };
+  const f = await fixture({ files: 3, useShared: true,
+    health: { ...cloudHealth, material_mode: 'local', material_progress: true },
+    fetchProgress: () => Response.json(progress),
+    fetchJob: (url, options) => Response.json(url === '/api/mix/jobs' && options.method !== 'POST'
+      ? { jobs: [] } : { id, state: 'matching' }) });
+  try {
+    f.ctx.configs.mix.prompt = '';
+    await f.mod.initializeMixMaterials(f.ctx);
+    const { client } = f.mod.getMixState();
+    Object.values(client.record.manifest)[2].clips[0].state = 'pending';
+    client._report();
+    assert.equal(client.status.processing, true);
+    bindStudio('mix', f.ctx);
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
+    f.nodes['#studio-prompt'].value = '用已分析完成的真实素材制作。';
+    f.nodes['#studio-prompt'].input({ target: f.nodes['#studio-prompt'] });
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, false);
+    assert.equal(f.calls.filter(call => call.method === 'POST' && call.url === '/api/mix/jobs').length, 0);
+    f.mod.handleMixMaterialAction('studio-generate', { dataset: {} }, f.ctx);
+    await settle(() => f.mod.getMixState().job?.state === 'matching');
+    f.mod.handleMixMaterialAction('studio-generate', { dataset: {} }, f.ctx);
+    const submissions = f.calls.filter(call => call.method === 'POST' && call.url === '/api/mix/jobs');
+    assert.equal(submissions.length, 1);
+    assert.equal(JSON.parse(submissions[0].body).text, f.ctx.configs.mix.prompt);
+    assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, true);
   } finally { f.restore(); }
 });
 

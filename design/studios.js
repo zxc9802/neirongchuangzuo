@@ -1,5 +1,5 @@
 import { markdownText } from './markdown.js';
-import { getMixState, renderMixMaterials, renderMixAudio, renderMixProgress, bindMixMaterials, mixReadiness, mixFolderLocked, mixUploadLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
+import { getMixState, renderMixMaterials, renderMixAudio, renderMixProgress, bindMixMaterials, mixReadiness, mixReadyClipCount, mixFolderLocked, mixUploadLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
 
 import { estimatedSpeechSeconds, videoCreditEstimateText } from './workspace-credits.js';
 
@@ -77,7 +77,7 @@ function mixInspector(ctx) {
       <div id="mix-audio-settings">${renderMixAudio(ctx)}</div>
       ${button('settings', `<span>成片规格</span><strong>${esc(c.ratio)} · ${esc(c.quality)}</strong>${icon('chevron')}`, 'studio-setting-link')}
     </div>
-    <footer class="studio-inspector-footer"><span id="mix-credit-estimate" class="credit-estimate">${esc(videoCreditEstimateText(estimatedSpeechSeconds(c.prompt)))}</span>${button('studio-generate', icon('star') + '开始智能混剪', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}<span id="studio-generation-hint">${esc(hint || `${mix.status.indexed} 个片段可供匹配`)}</span></footer>
+    <footer class="studio-inspector-footer"><span id="mix-credit-estimate" class="credit-estimate">${esc(videoCreditEstimateText(estimatedSpeechSeconds(c.prompt)))}</span>${button('studio-generate', icon('star') + '开始智能混剪', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}<span id="studio-generation-hint">${esc(hint || `${mixReadyClipCount()} 个片段可供匹配`)}</span></footer>
   </aside>`;
 }
 

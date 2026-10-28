@@ -343,11 +343,14 @@ const root = globalThis;
   }
 
   const isVideo = name => /\.(mp4|m4v|mov|webm|mkv|avi|wmv|mpeg|mpg|mts|m2ts|3gp|flv|ts)$/i.test(name);
-  async function* directoryFiles(handle, guard, prefix = '') {
+  async function* directoryFiles(handle, guard, onError, prefix = '') {
     for await (const child of handle.values()) {
       guard();
       const relativePath = prefix + child.name;
-      if (child.kind === 'directory') yield* directoryFiles(child, guard, relativePath + '/');
+      if (child.kind === 'directory') {
+        try { yield* directoryFiles(child, guard, onError, relativePath + '/'); }
+        catch (error) { guard(); onError(relativePath, error); }
+      }
       else if (child.kind === 'file' && isVideo(child.name)) yield { relativePath, handle: child };
     }
   }
@@ -482,7 +485,9 @@ const root = globalThis;
     }
 
     _error(path, error) {
-      this.errors.set(path, error.message || String(error));
+      this.errors.set(path, error.name === 'NotFoundError'
+        ? '文件或文件夹无法读取，可能已移动、删除或共享盘已断开；请检查后重新扫描'
+        : error.message || String(error));
       this._report({ error: [...this.errors].map(([name, message]) => name + '：' + message).join('\n'),
         needsPermission: this.status.needsPermission || ['NotAllowedError', 'SecurityError'].includes(error.name) });
     }
@@ -727,7 +732,10 @@ const root = globalThis;
       try {
         try {
           if (this.record.handle) {
-            for await (const item of directoryFiles(this.record.handle, () => this._guard(token))) candidates.push(item);
+            for await (const item of directoryFiles(this.record.handle, () => this._guard(token), (path, error) => {
+              complete = false;
+              this._error(path, error);
+            })) candidates.push(item);
           } else {
             for (const file of this.selectedFiles) {
               const path = file.webkitRelativePath || file.name;

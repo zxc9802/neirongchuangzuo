@@ -32,6 +32,24 @@ class FakeBroker:
 
 
 class RemoteCatalogTests(unittest.TestCase):
+    def test_matching_skips_vectors_until_their_descriptions_are_ready(self):
+        from remote_catalog import RemoteCatalog
+        with tempfile.TemporaryDirectory() as temp:
+            broker = FakeBroker(temp)
+            rows = broker.indexed_clips('e' * 32)
+            rows[0]['description'] = None
+            broker.indexed_clips = lambda device: rows
+            with patch('remote_catalog.broker_for', return_value=broker):
+                catalog = RemoteCatalog({'root': temp, 'device_id': 'e' * 32, 'job_id': 'f' * 32})
+                clips = catalog.searcher()(np.array([1., 0.]), 10)
+                self.assertEqual([clip['id'] for clip in clips], [9])
+                rows[0]['description'] = '园区散步'
+                self.assertEqual(catalog.searcher()(np.array([1., 0.]), 1)[0]['id'], 7)
+                for row in rows:
+                    row['description'] = None
+                with self.assertRaisesRegex(ValueError, '尚未整理完成'):
+                    catalog.searcher()
+
     def test_waiting_for_next_candidate_group_reuses_paid_retrieval_and_visual_checks(self):
         from matcher import choose_match
         progress, calls = {}, []

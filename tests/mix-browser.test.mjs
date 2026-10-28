@@ -1348,6 +1348,29 @@ test('unclassified file read errors wait behind normal clips and compatibility r
   } finally { controller.stop(); release?.(); Date.now = originalNow; }
 });
 
+test('an unavailable subfolder does not hide later videos or revoke its saved analysis', async () => {
+  const backend = server();
+  const handle = { name: '素材', queryPermission: async () => 'granted', async *values() {
+    yield { kind: 'directory', name: 'missing', async *values() {
+      throw Object.assign(new Error('A requested file or directory could not be found'), { name: 'NotFoundError' });
+    } };
+    yield { kind: 'file', name: 'good.mp4', async getFile() { return videoFile('good.mp4'); } };
+  } };
+  const old = { relativePath: 'missing/old.mp4', assetId: 'b'.repeat(64), clips: [] };
+  const store = memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32), handle,
+    manifest: { [old.relativePath]: old }, uploads: {}, deferredRevocations: [] });
+  const controller = new BrowserMaterials({ store, api: backend.api, readDuration: async () => 2,
+    sampleFrames: async () => ['frame'] });
+  try {
+    await controller.restore();
+    assert.ok(controller.files.has('good.mp4'));
+    assert.ok(controller.record.manifest[old.relativePath]);
+    assert.match(controller.status.error, /missing.*无法读取/);
+    assert.equal(controller.scanning, false);
+    assert.equal(controller.status.scanned, 1);
+  } finally { controller.stop(); }
+});
+
 test('failed file handles get three tail retries and can later recover manually', async () => {
   const backend = server(), originalNow = Date.now;
   let now = originalNow(), reads = 0, broken = true;

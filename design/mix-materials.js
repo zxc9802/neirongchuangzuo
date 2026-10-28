@@ -162,6 +162,22 @@ function refreshPreview(catalogChanged = false) {
   else state.ctx?.refresh?.();
 }
 
+function localIndexedEntries() {
+  return Object.values(state.client?.record?.manifest || {}).filter(entry => entry.clips?.some(clip => clip.state === 'indexed'));
+}
+
+function readableEntry(entry) {
+  return state.client.files.has(entry.relativePath) && !state.client.unreadableFiles?.has(entry.assetId);
+}
+
+export function mixReadyClipCount() {
+  if (state.client?.mode === 'cloud') return state.status.indexed || 0;
+  const entries = localIndexedEntries();
+  if (!entries.every(readableEntry)) return 0;
+  const indexed = entries.reduce((count, entry) => count + entry.clips.filter(clip => clip.state === 'indexed').length, 0);
+  return state.client?.trackProgress ? Math.min(indexed, state.status.cloud?.ready || 0) : indexed;
+}
+
 function folderReadiness() {
   if (!state.health?.configured) return '生成服务尚未配置完成';
   if (state.client?.mode === 'cloud') return state.client.scanning ? '素材正在上传，请稍候'
@@ -170,14 +186,12 @@ function folderReadiness() {
   if (state.status.needsPermission) return '请重新连接素材文件夹';
   if (!state.status.connected) return '先选择素材文件夹';
   if (state.client?.scanning) return '正在扫描本地素材，请稍候';
-  const readable = Object.values(state.client?.record?.manifest || {}).some(entry =>
-    state.client.files.has(entry.relativePath) && entry.clips?.some(clip => clip.state === 'indexed'));
-  if (state.status.indexed && !readable) return '请重新扫描可读取的素材';
+  if (localIndexedEntries().some(entry => !readableEntry(entry))) return '已分析素材的原文件无法读取，请检查素材文件夹后重新扫描';
   if (state.client?.trackProgress && (!state.status.cloud || state.status.progressError)) return '正在确认云端分析进度，请稍候';
-  if (state.status.processing || state.status.cloud?.ready < state.status.cloud?.total) return '素材正在分析，完成后可开始混剪';
+  if (mixReadyClipCount() > 0) return '';
   if (state.status.error) return '部分素材分析失败，请重试';
-  if (!state.status.indexed) return '请先完成素材分析';
-  return readable ? '' : '请重新扫描可读取的素材';
+  if (state.status.processing || state.status.cloud?.ready < state.status.cloud?.total) return '素材正在分析，首批片段就绪后即可开始混剪';
+  return '请先完成素材分析';
 }
 
 function cloudJob(job = state.job) {
@@ -376,11 +390,14 @@ export function renderMixMaterials() {
   }
   const cloud = status.cloud, stages = status.stages || {};
   const processing = status.processing || !status.error && cloud?.ready < cloud?.total;
+  const ready = mixReadyClipCount();
   const text = status.needsPermission ? '请重新连接素材文件夹（原文件夹），已保存的云端分析可继续使用'
     : status.uploadTotal ? '正在按需传输视频片段，请保持网页连接'
     : status.connected ? state.client?.scanning ? '正在扫描本地素材'
       : state.client?.trackProgress && (!cloud || status.progressError) ? '正在确认云端分析进度'
-      : processing ? '素材正在分析，完成后可手动开始混剪'
+      : localIndexedEntries().some(entry => !readableEntry(entry)) ? '已分析素材的原文件无法读取，请检查素材文件夹后重新扫描'
+      : ready && (processing || status.error || cloud?.ready < cloud?.total) ? `已就绪 ${ready} 个片段，可先开始混剪${processing ? '；其余素材正在分析' : '；未完成素材可重试'}`
+      : processing ? '素材正在分析，首批片段就绪后即可开始混剪'
       : status.error ? '部分素材分析失败，请重试' : status.total ? '素材分析完成' : '未找到可用的视频素材'
     : '原片保留本地，云端保存分析结果；制作时按需传输片段。';
   const meter = (label, value, total) => `<small>${label}：${value} / ${total}</small><progress max="${total || 1}" value="${value}" aria-label="${label}进度"></progress>`;
@@ -445,7 +462,7 @@ function updateStatus() {
   const generate = root.querySelector('[data-action="studio-generate"]');
   if (generate) { generate.disabled = !!hint; generate.title = hint; }
   const hintNode = root.querySelector('#studio-generation-hint');
-  if (hintNode) hintNode.textContent = hint || `${state.status.indexed} 个片段可供匹配`;
+  if (hintNode) hintNode.textContent = hint || `${mixReadyClipCount()} 个片段可供匹配`;
   const estimate = root.querySelector('#mix-credit-estimate');
   if (estimate) estimate.textContent = videoCreditEstimateText(estimatedSpeechSeconds(state.ctx?.configs?.mix?.prompt));
   const timingNode = root.querySelector('#mix-timing-hint');
