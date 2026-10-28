@@ -380,6 +380,11 @@ function videoFile(path, modified = 1, content = 'video') {
 function directory(name, files, permission = 'granted') {
   return { name, kind: 'directory', queryPermission: async () => permission,
     async isSameEntry(other) { return this === other; },
+    async getFileHandle(name) {
+      const file = files.find(file => file.name === name);
+      if (!file) throw Object.assign(new Error('missing file'), { name: 'NotFoundError' });
+      return { getFile: async () => file };
+    },
     async *values() {
       for (const file of files) yield { kind: 'file', name: file.name, async getFile() { return file; } };
     } };
@@ -416,7 +421,7 @@ async function eventually(predicate) {
   assert.fail('controller did not finish expected work');
 }
 
-test('restore scans a granted directory and reuses indexed unchanged clips', async () => {
+test('restore reuses indexed clips without enumerating or decoding the saved directory', async () => {
   assert.equal(typeof BrowserMaterials?.prototype.restore, 'function');
   const file = videoFile('a.mp4');
   const old = await helpers.inspectFile('a.mp4', file, null, async () => 2);
@@ -425,6 +430,7 @@ test('restore scans a granted directory and reuses indexed unchanged clips', asy
     handle: directory('素材', [file]), manifest: { 'a.mp4': old }, deferredRevocations: [], uploads: {} });
   const backend = server();
   backend.states.set(old.clips[0].id, 'indexed');
+  store.value.handle.values = async function* () { assert.fail('login must not enumerate the directory'); };
   let connected;
   const controller = new BrowserMaterials({ api: backend.api, store,
     readDuration: async () => { throw new Error('unchanged file decoded'); }, onConnected: id => { connected = id; } });
@@ -434,6 +440,8 @@ test('restore scans a granted directory and reuses indexed unchanged clips', asy
     assert.equal(controller.folderName, '素材');
     assert.equal(controller.deviceId, '1'.repeat(32));
     assert.equal(controller.status.indexed, 1);
+    assert.equal(controller.status.scanned, 0);
+    assert.equal(controller.scanning, false);
     assert.equal(backend.calls.filter(call => call.path.endsWith('/analyze')).length, 0);
   } finally { controller.stop(); }
 });
@@ -450,6 +458,73 @@ test('restoration with expired or unavailable permission asks for an explicit re
     assert.equal(controller.deviceId, '');
     assert.equal(backend.calls.length, 0);
     controller.stop();
+  }
+});
+
+test('repeated logins read only previews, then serve an unpreviewed video on demand', async () => {
+  const files = Array.from({ length: 32 }, (_, n) => videoFile(`video-${n}.mp4`));
+  const manifest = {};
+  const backend = server();
+  for (const file of files) {
+    const item = await helpers.inspectFile(file.name, file, null, async () => 2);
+    item.clips[0].state = 'indexed';
+    backend.states.set(item.clips[0].id, 'indexed');
+    manifest[file.name] = item;
+  }
+  const handle = directory('素材', files);
+  handle.values = async function* () { assert.fail('login enumerated the directory'); };
+  const store = memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32), handle, manifest, uploads: {} });
+  for (let login = 0; login < 2; login++) {
+    const controller = new BrowserMaterials({ api: backend.api, store,
+      readDuration: async () => { assert.fail('login decoded a saved video'); },
+      sampleFrames: async file => { assert.equal(file, files[30]); return ['frame']; } });
+    controller._schedule = () => {};
+    let transfers = 0;
+    controller._sendLarge = async (_request, _entry, file) => { assert.equal(file, files[31]); transfers++; };
+    try {
+      await controller.restore();
+      assert.equal(controller.files.size, 30);
+      assert.equal(controller.canRead(manifest['video-31.mp4']), true);
+      await controller._serve({ id: '8'.repeat(32), asset_id: manifest['video-31.mp4'].assetId,
+        kind: 'source', start: 0, end: 2 }, controller.generation);
+      assert.equal(transfers, 1);
+      assert.equal(controller.files.size, 31);
+      assert.equal(backend.calls.some(call => call.path.endsWith('/analyze')), false);
+      if (login === 1) {
+        const pending = manifest['video-30.mp4'].clips[0];
+        pending.state = 'pending';
+        backend.states.set(pending.id, 'pending');
+        await controller._cycle(controller.generation);
+        await Promise.all(controller.workers.values());
+        assert.equal(pending.state, 'indexed', 'background analysis must also read outside the preview list');
+        assert.equal(backend.calls.filter(call => call.path.endsWith('/analyze')).length, 1);
+      }
+    } finally { controller.stop(); }
+  }
+});
+
+test('cached files are version checked before preview, analysis or transfer', async () => {
+  for (const changed of [true, false]) {
+    const old = await helpers.inspectFile('a.mp4', videoFile('a.mp4'), null, async () => 2);
+    old.clips[0].state = 'indexed';
+    const handle = directory('素材', changed ? [videoFile('a.mp4', 2)] : []);
+    const backend = server();
+    backend.states.set(old.clips[0].id, 'indexed');
+    const controller = new BrowserMaterials({ api: backend.api,
+      store: memoryStore({ folderKey: 'a'.repeat(64), name: '素材', deviceId: '1'.repeat(32), handle,
+        manifest: { 'a.mp4': old }, uploads: {} }),
+      sampleFrames: async () => { assert.fail('stale original sampled'); } });
+    controller._schedule = () => {};
+    controller._sendLarge = async () => { assert.fail('stale original transferred'); };
+    try {
+      await controller.restore();
+      assert.equal(controller.canRead(old), false);
+      assert.equal(controller.files.size, 0);
+      assert.match(controller.status.error, changed ? /已修改.*扫描新增/ : /无法读取/);
+      await assert.rejects(controller._serve({ id: '8'.repeat(32), asset_id: old.assetId,
+        kind: 'source', start: 0, end: 2 }, controller.generation));
+      assert.equal(backend.calls.some(call => call.path.endsWith('/analyze') || call.method === 'DELETE'), false);
+    } finally { controller.stop(); }
   }
 });
 
@@ -516,6 +591,7 @@ test('decode errors remain visible and incomplete scans do not revoke missing as
     readDuration: async () => { throw new Error('请转换为 MP4'); } });
   try {
     await controller.restore();
+    await controller.scan();
     assert.match(controller.status.error, /bad.mp4.*MP4/);
     assert.equal(store.value.manifest['old.mp4'].assetId, old.assetId);
     assert.equal(backend.calls.some(call => call.method === 'DELETE'), false);
@@ -1363,6 +1439,7 @@ test('an unavailable subfolder does not hide later videos or revoke its saved an
     sampleFrames: async () => ['frame'] });
   try {
     await controller.restore();
+    await controller.scan();
     assert.ok(controller.files.has('good.mp4'));
     assert.ok(controller.record.manifest[old.relativePath]);
     assert.match(controller.status.error, /missing.*无法读取/);

@@ -28,6 +28,14 @@ async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchMate
     manifest[name].clips.forEach(clip => { clip.state = 'indexed'; });
   }
   const handle = { name: '素材', kind: 'directory', queryPermission: async () => 'granted',
+    async getDirectoryHandle(name) {
+      assert.equal(name, 'sub');
+      return { async getFileHandle(name) {
+        const item = videos.find(({ file }) => file.name === name);
+        if (!item) throw Object.assign(new Error('missing file'), { name: 'NotFoundError' });
+        return { getFile: async () => item.file };
+      } };
+    },
     async *values() { yield { name: 'sub', kind: 'directory', async *values() {
       for (const { file } of videos) yield { name: file.name, kind: 'file', getFile: async () => file };
     } }; } };
@@ -205,7 +213,7 @@ test('queued and running video repairs remain in the upload progress until their
     assert.match(html, /素材正在分析/);
     assert.match(html, /画面准备/);
     assert.doesNotMatch(html, /素材上传完成/);
-    assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+    assert.match(html, /data-action="mix-scan"[^>]*>扫描新增 \/ 修改 \/ 重试/);
     assert.doesNotMatch(html, /data-action="mix-disconnect"/);
     client.repairs.get('bad.mov').attempted = true;
     client.workers.set('repair:bad.mov', Promise.resolve());
@@ -217,7 +225,7 @@ test('queued and running video repairs remain in the upload progress until their
     client._report({ error: 'bad.mov：视频无法转换' });
     html = f.nodes['#mix-material-status'].innerHTML;
     assert.doesNotMatch(html, /素材上传完成|素材正在上传/);
-    assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+    assert.match(html, /data-action="mix-scan"[^>]*>扫描新增 \/ 修改 \/ 重试/);
   } finally { f.restore(); }
 });
 
@@ -235,7 +243,7 @@ test('an exhausted analysis failure exposes a retry action instead of an endless
     client._report({ error: 'video-0.mp4：不支持的视频' });
     const html = f.nodes['#mix-material-status'].innerHTML;
     assert.doesNotMatch(html, /素材正在上传|素材上传完成/);
-    assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+    assert.match(html, /data-action="mix-scan"[^>]*>扫描新增 \/ 修改 \/ 重试/);
   } finally { f.restore(); }
 });
 
@@ -255,7 +263,7 @@ test('manual retry is available during automatic retry backoff and reuses comple
     assert.equal(client.status.processing, true);
     const html = f.nodes['#mix-material-status'].innerHTML;
     assert.match(html, /素材正在分析/);
-    assert.match(html, /data-action="mix-scan"[^>]*>重试未完成素材/);
+    assert.match(html, /data-action="mix-scan"[^>]*>扫描新增 \/ 修改 \/ 重试/);
     assert.doesNotMatch(html, /data-action="mix-disconnect"/);
     const analyzed = [], originalFetch = globalThis.fetch;
     client.sampleFrames = async () => ['frame'];
@@ -580,20 +588,55 @@ test('completed render updates preview panels without replacing the copy editor'
   } finally { f.restore(); }
 });
 
-test('recursive restoration indexes every file while displaying a small catalog and upload completion', async () => {
+test('saved catalog restoration enables mixing without scanning or reading the entire library', async () => {
   const f = await fixture({ files: 36 });
   try {
+    f.databases.get('workbench-browser-materials:account-a').handle.values = async function* () {
+      assert.fail('login must not enumerate the directory');
+    };
     assert.equal(typeof f.mod.initializeMixMaterials, 'function');
     await f.mod.initializeMixMaterials(f.ctx);
     await settle(() => f.mod.getMixState().status.indexed === 36 && f.mod.getMixState().media.length === 30);
     const state = f.mod.getMixState();
     assert.equal(state.fileCount, 36);
+    assert.equal(state.client.files.size, 30);
+    assert.equal(state.status.scanned, 0);
+    assert.equal(state.client.scanning, false);
     assert.equal(state.status.connected, true);
     assert.equal(Object.keys(f.databases.get('workbench-browser-materials:account-a').manifest).length, 36);
     assert.match(f.mod.renderMixMaterials(f.ctx), /mix-material-status/);
     assert.match(f.nodes['#mix-material-status'].innerHTML, /素材分析完成/);
     assert.equal(f.nodes['[data-action="studio-generate"]'].disabled, false);
   } finally { f.restore(); }
+});
+
+test('slow preview reads do not lock mixing and logout discards their late result', async () => {
+  const f = await fixture();
+  let release, started = false;
+  const pending = new Promise(resolve => { release = resolve; });
+  try {
+    const handle = f.databases.get('workbench-browser-materials:account-a').handle;
+    const openDirectory = handle.getDirectoryHandle;
+    handle.getDirectoryHandle = async name => {
+      const directory = await openDirectory(name);
+      const openFile = directory.getFileHandle;
+      directory.getFileHandle = async fileName => {
+        const fileHandle = await openFile(fileName);
+        return { async getFile() { started = true; await pending; return fileHandle.getFile(); } };
+      };
+      return directory;
+    };
+    const restoring = f.mod.initializeMixMaterials(f.ctx);
+    await settle(() => started && !f.nodes['[data-action="studio-generate"]'].disabled);
+    const { client } = f.mod.getMixState();
+    assert.equal(client.scanning, false);
+    assert.equal(client.files.size, 0);
+    assert.equal(f.mod.mixReadiness(f.ctx), '');
+    f.mod.stopMixMaterials();
+    release();
+    await restoring;
+    assert.equal(client.files.size, 0, 'a stopped restore must not populate the old account');
+  } finally { release?.(); f.restore(); }
 });
 
 test('saved jobs resume polling without submitting another render request', async () => {
@@ -948,6 +991,9 @@ test('one unreadable indexed original blocks matching even when other originals 
     client.unreadableFiles.clear();
     client.files.delete(entry.relativePath);
     client._report();
+    assert.equal(f.mod.mixReadiness(f.ctx), '', 'an unloaded cached file remains available on demand');
+    client.record.handle.getDirectoryHandle = async () => { throw Object.assign(new Error('missing'), { name: 'NotFoundError' }); };
+    await assert.rejects(client._readFile(entry, client.generation));
     assert.match(f.mod.mixReadiness(f.ctx), /原文件无法读取/);
   } finally { f.restore(); }
 });

@@ -397,6 +397,11 @@ const root = globalThis;
     get deviceId() { return this.active && this.connected ? this.record?.deviceId || '' : ''; }
     get folderName() { return this.record?.name || ''; }
 
+    canRead(entry) {
+      return !this.unreadableFiles.has(entry.assetId) &&
+        (this.files.has(entry.relativePath) || this.restoredCatalog && !!this.record?.handle);
+    }
+
     _guard(token) {
       if (this.ownerKey !== accountStorageKey('workbench-browser-materials')) this.stop();
       if (!this.active || token !== this.generation) throw stopped();
@@ -444,7 +449,7 @@ const root = globalThis;
     _report(value = {}) {
       const entries = Object.values(this.record?.manifest || {});
       const clips = entries.flatMap(entry => entry.clips || []);
-      const readable = entry => this.files.has(entry.relativePath) && !this.unreadableFiles.has(entry.assetId);
+      const readable = entry => this.canRead(entry);
       const processing = !!this.scanning || !!this.workers.size || [...this.repairs.values()].some(item =>
         !item.attempted || item.failed && this.attempts.get('repair:' + item.relativePath) < MAX_ATTEMPTS) ||
         entries.some(entry => readable(entry) && entry.clips.some(clip => this.registered.has(clip.id) &&
@@ -452,7 +457,8 @@ const root = globalThis;
             (this.attempts.get(clip.id) || 0) < MAX_ATTEMPTS)));
       this.status = { ...this.status, ...value, connected: this.connected, folderName: this.folderName,
         indexed: clips.filter(clip => clip.state === 'indexed').length, total: clips.length, processing,
-        scanning: !!this.scanning, prepared: clips.filter(clip => this.prepared?.has(clip.id) || clip.state === 'indexed').length,
+        scanning: !!this.scanning, restoring: !!this.restoring,
+        prepared: clips.filter(clip => this.prepared?.has(clip.id) || clip.state === 'indexed').length,
         stages: Object.fromEntries(Object.entries(this.stages || {}).map(([name, pool]) =>
           [name, { active: pool.active, limit: pool.limit, waiting: pool.waiting.length }])),
         follower: !this.leading,
@@ -571,7 +577,7 @@ const root = globalThis;
         }
         await this._connect(token);
         this._guard(token);
-        await this._scan(token);
+        await this._restoreCatalog(token);
       } catch (error) { if (this.active && token === this.generation && !isAbort(error)) this._error('素材文件夹', error); }
     }
 
@@ -618,7 +624,7 @@ const root = globalThis;
         this._report({ error: '', needsPermission: false });
         await this._connect(token);
         this._guard(token);
-        await this._scan(token);
+        await this._restoreCatalog(token);
       } catch (error) { if (this.active && token === this.generation && !isAbort(error)) this._error('素材文件夹', error); }
     }
 
@@ -688,10 +694,86 @@ const root = globalThis;
       await this._scan(token);
     }
 
+    async _restoreCatalog(token) {
+      const entries = Object.values(this.record.manifest);
+      if (!entries.length) return this._scan(token);
+      this._guard(token);
+      this.files.clear();
+      this.originalFiles.clear();
+      this.unreadableFiles.clear();
+      this.registered.clear();
+      this.repairs.clear();
+      this.attempts.clear();
+      this.retryAfter.clear();
+      this.errors.clear();
+      this.restoredCatalog = true;
+      this.restoring = true;
+      this.processingDeferred = false;
+      this._report({ error: '', scanned: 0, scanTotal: 0, uploadBytes: 0, uploadTotal: 0 });
+      try {
+        // Synchronize saved clip states without walking or decoding the local directory.
+        await this._register(entries.flatMap(entry => entry.clips || []), token);
+        this.lastStateCheck = Date.now();
+      } catch (error) {
+        this._guard(token);
+        this.restoredCatalog = false;
+        throw error;
+      } finally {
+        if (this.active && token === this.generation) {
+          this.restoring = false;
+          this._ready();
+          this._schedule(0, token);
+        }
+      }
+      // Only the visible preview list needs Files now; analysis and renders read on demand.
+      const previews = entries.slice(0, 30);
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(FRAME_WORKERS, previews.length) }, async () => {
+        while (cursor < previews.length) {
+          this._guard(token);
+          try { await this._readFile(previews[cursor++], token); }
+          catch (error) { this._guard(token); }
+          this._report();
+        }
+      }));
+    }
+
+    async _readFile(entry, token) {
+      this._guard(token);
+      if (this.files.has(entry.relativePath)) return this.files.get(entry.relativePath);
+      try {
+        const parts = entry.relativePath.split('/');
+        let handle = this.record.handle;
+        for (const name of parts.slice(0, -1)) {
+          handle = await readLocal(() => handle.getDirectoryHandle(name), this.abort.signal);
+          this._guard(token);
+        }
+        const fileHandle = await readLocal(() => handle.getFileHandle(parts.at(-1)), this.abort.signal);
+        this._guard(token);
+        const file = await readLocal(() => fileHandle.getFile(), this.abort.signal);
+        this._guard(token);
+        if (file.size !== entry.size || file.lastModified !== entry.lastModified) {
+          throw new Error('原视频已修改，请点击“扫描新增 / 修改”更新素材后重试');
+        }
+        await readLocal(() => file.slice(0, 1).arrayBuffer(), this.abort.signal);
+        this._guard(token);
+        this.files.set(entry.relativePath, file);
+        this.originalFiles.set(entry.relativePath, file);
+        this.unreadableFiles.delete(entry.assetId);
+        return file;
+      } catch (error) {
+        this._guard(token);
+        this.unreadableFiles.add(entry.assetId);
+        this._error(entry.relativePath, error);
+        throw error;
+      }
+    }
+
     async _scan(token) {
       this._guard(token);
       clearTimeout(this.timer);
       this.scanning = true;
+      this.restoredCatalog = false;
       this.registered.clear();
       this.unreadableFiles.clear();
       this.repairs.clear();
@@ -857,6 +939,7 @@ const root = globalThis;
       clearTimeout(this.timer);
       clearTimeout(this.progressTimer);
       this.scanning = false;
+      this.restoring = false;
       // restore/choose/scan restart synchronously; a stop that leaves this tab disconnected hands processing over.
       queueMicrotask(() => this._unlead());
     }
@@ -934,14 +1017,14 @@ const root = globalThis;
     }
 
     async _cycle(token) {
-      if (!this.active || token !== this.generation || this.cycleToken === token) return;
+      if (!this.active || this.restoring || token !== this.generation || this.cycleToken === token) return;
       this.cycleToken = token;
       try {
         this._guard(token);
         if (this.leading) this._startRequests(token);
         if (Date.now() - this.lastStateCheck >= 30000) {
           // A following tab only mirrors the server state that the processing tab produces.
-          const busy = Object.values(this.record.manifest).filter(entry => this.files.has(entry.relativePath))
+          const busy = Object.values(this.record.manifest).filter(entry => this.canRead(entry))
             .flatMap(entry => entry.clips.filter(clip => this.registered.has(clip.id) && !this.workers.has(clip.id) &&
               (this.leading ? clip.state === 'indexing' || clip.state === 'indexed' && this.status.cloud?.ready < this.status.cloud?.total : clip.state !== 'indexed')));
           await this._register(busy, token);
@@ -951,7 +1034,7 @@ const root = globalThis;
         }
         if (!this.leading) return;
         const candidates = Object.values(this.record.manifest)
-          .filter(item => this.files.has(item.relativePath) && !this.unreadableFiles.has(item.assetId))
+          .filter(item => this.canRead(item))
           .flatMap(item => item.clips.filter(clip => this.registered.has(clip.id) && !this.workers.has(clip.id) &&
             ['pending', 'error'].includes(clip.state)).map(clip => ({ item, clip })));
         const fresh = candidates.filter(({ clip }) => !this.attempts.has(clip.id));
@@ -961,7 +1044,7 @@ const root = globalThis;
           const repairs = [...this.repairs.values()];
           const repairing = [...this.workers.keys()].some(key => key.startsWith('repair:'));
           const firstPassBusy = [...this.workers.keys()].some(key => !key.startsWith('repair:') && this.attempts.get(key) === 1) ||
-            Object.values(this.record.manifest).some(item => this.files.has(item.relativePath) && !this.unreadableFiles.has(item.assetId) &&
+            Object.values(this.record.manifest).some(item => this.canRead(item) &&
               item.clips.some(clip => this.registered.has(clip.id) && clip.state === 'indexing'));
           const failedRepairs = repairs.filter(item => item.failed && this.attempts.get('repair:' + item.relativePath) < MAX_ATTEMPTS);
           const repair = repairs.find(item => !item.attempted) || (!firstPassBusy && failedRepairs
@@ -1057,6 +1140,7 @@ const root = globalThis;
     async _analyzeClip(item, clip, token) {
       this._report({ text: '并行读取素材画面：' + item.relativePath });
       try {
+        await this._readFile(item, token);
         let payload, prepared;
         if (!this._serverDecoder(item)) {
           try { payload = { clip_id: clip.id, frames: await this._sample(item, clip.start, clip.end, token) }; }
@@ -1156,7 +1240,7 @@ const root = globalThis;
 
     async _serve(request, token) {
       const entry = Object.values(this.record.manifest).find(value => value.assetId === request.asset_id);
-      const file = entry && this.files.get(entry.relativePath);
+      const file = entry && await this._readFile(entry, token);
       if (!file) throw new Error('请求的原视频不可读取或版本已改变，请重新扫描素材文件夹');
       const path = this._devicePath('/requests/' + request.id);
       this._report({ text: '正在传输素材：' + entry.relativePath });
