@@ -2,16 +2,18 @@
 
 The UI defaults to local originals (`/health.material_mode=local`) even with a configured COS library. Browser frame extraction runs at most five tasks, cloud analysis eight, and WASM compatibility decoding two. The authenticated device `/progress` route reports durable vector/description/completion counts every three seconds; new generation waits for preparation and an explicit user action. SQLite remains authoritative and per-device FAISS snapshots under `local-materials/indexes` are rebuilt from it. Keep `DATA_DIR` on persistent storage.
 
-COS settings remain available for existing cloud assets and historical cloud jobs; changing the default does not delete them:
+Users can switch between local and COS materials in the remix sidebar. The account-scoped choice survives reloads; switching never uploads a local directory automatically. Existing local jobs retain their browser transfer client while the user browses or uploads cloud materials. COS settings are:
 
 ```dotenv
 MIX_MATERIAL_COS_SECRET_ID=
 MIX_MATERIAL_COS_SECRET_KEY=
-MIX_MATERIAL_COS_BUCKET=hunjianx-1410143389
+MIX_MATERIAL_COS_BUCKET=hj-1410143389
 MIX_MATERIAL_COS_REGION=ap-singapore
+MIX_MATERIAL_COS_LEGACY_BUCKET=hunjianx-1410143389
+MIX_MATERIAL_COS_LEGACY_REGION=ap-singapore
 ```
 
-These are separate from restaurant/digital-human `COS_*` and remix `MIX_AUDIO_COS_*` settings. Local development reads the ignored root `.env.local`; production reads deployment environment variables only. Set `MIX_PYTHON_BIN` to the installed Python environment in local development. The existing Python requirements already include the COS SDK and FAISS; Docker installs them automatically.
+The Node gateway reuses asset-library `COS_SECRET_ID / COS_SECRET_KEY` when both dedicated remix credentials are empty, and `COS_REGION` when the dedicated region is empty. Buckets remain independent from assets and audio. Each asset and staging object records its bucket and region, so changing the upload bucket preserves historical originals, proxies and jobs without copying objects. The legacy settings only backfill pre-existing records without a location. Local development reads the ignored root `.env.local`; production reads deployment environment variables only. Set `MIX_PYTHON_BIN` to the installed Python environment in local development. The existing Python requirements already include the COS SDK and FAISS; Docker installs them automatically.
 
 With `CREDITS_BILLING_MODE=api_cost`, remixing uses the shared account wallet at 125 points/CNY. Both first-time material analysis and generation calls are metered. OpenLux charges are reconciled against the exact request ID in its token logs (or its returned embedding quota), including the actual auto-routed group. 302 reranking and IndexTTS charges require the matching `/dashboard/api-record` receipt. API keys must permit those read-only billing queries. Quotes are temporary safety holds; neither token estimates nor an account-wide balance difference is used as a final charge. Confirmed API expenses remain charged even if the video later fails. Unlimited accounts keep receipts without deductions.
 

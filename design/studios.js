@@ -1,5 +1,5 @@
 import { markdownText } from './markdown.js';
-import { getMixState, renderMixMaterials, renderMixAudio, renderMixProgress, bindMixMaterials, mixReadiness, mixReadyClipCount, mixFolderLocked, mixUploadLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
+import { getMixState, renderMixMaterials, renderMixMaterialModes, renderMixAudio, renderMixProgress, bindMixMaterials, mixReadiness, mixReadyClipCount, mixFolderLocked, mixUploadLocked, mixJobLabel, safeMixArtifactUrl } from './mix-materials.js';
 
 import { estimatedSpeechSeconds, videoCreditEstimateText } from './workspace-credits.js';
 
@@ -36,6 +36,7 @@ function mixMaterials(media, ctx) {
   return `<section class="studio-materials" aria-labelledby="mix-material-title">
     <div class="studio-section-head"><h2 id="mix-material-title">实拍素材 <span>${mix.fileCount}</span></h2>${button(cloud ? 'mix-upload-videos' : 'mix-choose-folder', icon('plus'), 'studio-square-button', `aria-label="${cloud ? '上传视频素材' : '选择素材文件夹'}" ${locked || `title="${cloud ? '上传视频素材' : '选择素材文件夹'}"`}`)}</div>
     <div class="studio-section-tab"><span class="active">视频素材</span><small>${mix.fileCount > 30 ? '预览前 30 个' : '包含子文件夹'}</small></div>
+    ${renderMixMaterialModes()}
     ${button('mix-choose-folder', icon('folder') + `<span class="mix-folder-label">${cloud ? '上传素材文件夹' : mix.status.needsPermission ? '重新连接素材文件夹' : mix.status.connected ? '更换素材文件夹' : '选择本地素材文件夹'}</span>`, 'studio-add-material', locked)}
     ${renderMixMaterials()}
     ${media.length ? `<div class="studio-media-list">${media.map((asset, index) => `<button class="studio-media-item ${asset.id === activeId ? 'selected' : ''}" data-action="studio-select-clip" data-id="${esc(asset.id)}" aria-pressed="${asset.id === activeId}">

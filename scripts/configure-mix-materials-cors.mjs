@@ -1,7 +1,8 @@
 import COS from 'cos-nodejs-sdk-v5';
 import { loadWorkspaceSettings } from '../services/runtime-settings.mjs';
+import { mixMaterialEnvironment } from '../services/mix/material-config.mjs';
 
-const env = loadWorkspaceSettings();
+const env = mixMaterialEnvironment(loadWorkspaceSettings());
 const names = ['MIX_MATERIAL_COS_SECRET_ID', 'MIX_MATERIAL_COS_SECRET_KEY', 'MIX_MATERIAL_COS_BUCKET', 'MIX_MATERIAL_COS_REGION'];
 if (names.some(name => !env[name])) throw new Error('请先配置服务端 MIX_MATERIAL_COS_* 环境变量。');
 const origins = new Set();

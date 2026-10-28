@@ -13,7 +13,7 @@ const emptyStatus = () => ({ text: '选择素材文件夹', error: '', scanned: 
 const emptyAudio = () => ({ voice: [], music: [], configured: null, missing: [], busy: false, loading: false, error: '', progress: null });
 const audioBindings = new WeakSet();
 const state = { ownerKey: null, ctx: null, client: null, status: emptyStatus(), health: null, media: [], fileCount: 0,
-  materialsExpanded: false, materialPage: 0,
+  materialsExpanded: false, materialPage: 0, switchingMode: false, localTransfer: null,
   audio: emptyAudio(),
   job: null, jobs: [], pending: null, busy: false, error: '', jobError: '', view: 'materials', revision: 0, started: false,
   timer: null, loading: null, refreshPanels: null, controllers: new Set(), urls: new Map() };
@@ -46,6 +46,7 @@ export function stopMixMaterials() {
   state.revision++;
   state.started = false;
   state.client?.stop();
+  state.localTransfer?.stop();
   state.client = null;
   clearTimeout(state.timer);
   clearTimeout(state.statusTimer);
@@ -57,7 +58,7 @@ export function stopMixMaterials() {
   state.urls.clear();
   if (state.ctx?.configs?.mix) Object.assign(state.ctx.configs.mix, { voice_id: '', music_id: '', music: false });
   Object.assign(state, { ownerKey: null, status: emptyStatus(), health: null, media: [], fileCount: 0, job: null,
-    jobs: [], pending: null, busy: false, error: '', jobError: '', view: 'materials', loading: null, refreshPanels: null, audio: emptyAudio(), materialsExpanded: false, materialPage: 0 });
+    jobs: [], pending: null, busy: false, error: '', jobError: '', view: 'materials', loading: null, refreshPanels: null, audio: emptyAudio(), materialsExpanded: false, materialPage: 0, switchingMode: false, localTransfer: null });
   updateAudio();
   updateStatus();
 }
@@ -196,7 +197,18 @@ function folderReadiness() {
 }
 
 function cloudJob(job = state.job) {
-  return job?.source === 'cloud' || !job?.source && state.client?.mode === 'cloud';
+  return job?.source === 'cloud' || !job?.source && !job?.device_id && state.client?.mode === 'cloud';
+}
+
+const materialMode = () => state.client?.mode === 'cloud' ? 'cloud' : 'local';
+const activeLocalJob = () => state.jobs.some(job => !terminal(job) && (job.source === 'browser' || job.device_id));
+const modeLocked = () => !state.health || state.switchingMode || state.busy || state.audio.busy || state.client?.scanning || !!(state.pending && !state.pending.id);
+
+export function renderMixMaterialModes() {
+  return `<div class="mix-material-modes" role="group" aria-label="素材存放方式">${[['local', '本地素材'], ['cloud', 'COS 云端']].map(([mode, label]) => {
+    const unavailable = mode === 'cloud' && !state.health?.material_library?.configured;
+    return `<button data-action="mix-material-mode" data-mode="${mode}" aria-pressed="${materialMode() === mode}" ${modeLocked() || unavailable ? 'disabled' : ''} title="${unavailable ? '云端素材库尚未配置完成' : mode === 'cloud' ? '选择文件上传，完成后可脱离本机制作' : '使用本机原片，制作时保持网页连接'}">${label}</button>`;
+  }).join('')}</div>`;
 }
 
 function resumeReadiness(job = state.job) {
@@ -454,6 +466,10 @@ function updateStatus() {
   if (typeof document === 'undefined') return;
   const root = document.querySelector('.mix-studio');
   if (!root) return;
+  root.querySelectorAll('[data-action="mix-material-mode"]').forEach(button => {
+    button.disabled = modeLocked() || button.dataset.mode === 'cloud' && !state.health?.material_library?.configured;
+    button.setAttribute('aria-pressed', String(button.dataset.mode === materialMode()));
+  });
   const footer = root.querySelector('#mix-material-status');
   if (footer) footer.innerHTML = renderMixMaterials().replace(/^<div[^>]*>|<\/div>$/g, '');
   const folderLabel = root.querySelector('.studio-add-material .mix-folder-label');
@@ -506,6 +522,7 @@ function acceptJob(job, revision) {
   state.job = job; observeCreditTask(job);
   state.jobError = '';
   state.jobs = [job, ...state.jobs.filter(item => item.id !== job.id)].slice(0, 20);
+  maintainLocalTransfer(revision);
   state.pending = { id: job.id };
   try { remember(state.pending); } catch { state.error = '浏览器无法保存任务编号，重新打开时可在制作记录中查看。'; }
   if (complete(job) && !previous) state.view = 'result';
@@ -595,6 +612,74 @@ async function resumeJob() {
   }
 }
 
+function createMaterialClient(mode, revision) {
+  const MaterialClient = mode === 'cloud' ? CloudMaterials : BrowserMaterials;
+  const client = new MaterialClient({ api: request,
+    ...(MaterialClient === BrowserMaterials ? { fetch: (path, options) => request(path, options, true), trackProgress: !!state.health?.material_progress } : {}),
+    onStatus: status => {
+      try { guard(revision); } catch { return; }
+      if (state.client !== client) return;
+      const billed = status.indexed > state.status.indexed || state.status.processing && !status.processing;
+      state.status = { ...status };
+      const paint = () => {
+        state.statusTimer = null;
+        try { guard(revision); } catch { return; }
+        if (state.client !== client) return;
+        const changed = catalog();
+        updateStatus();
+        if (changed) refreshPreview(true);
+      };
+      // Coalesce parallel decode/model completions instead of rebuilding the UI per frame.
+      if (typeof globalThis.window?.requestAnimationFrame === 'function') {
+        if (!state.statusTimer) state.statusTimer = setTimeout(paint, 200);
+      } else paint();
+      if (billed && workspaceCreditsState().snapshot?.pricing?.mode === 'api_cost') void refreshWorkspaceCredits({ afterCurrent: true });
+    } });
+  return client;
+}
+
+function maintainLocalTransfer(revision) {
+  if (!state.health || materialMode() !== 'cloud') return;
+  if (!activeLocalJob()) {
+    state.localTransfer?.stop();
+    state.localTransfer = null;
+  } else if (!state.localTransfer) {
+    const client = state.localTransfer = createMaterialClient('local', revision);
+    client.restore().catch(error => {
+      if (state.revision === revision && state.localTransfer === client && error.name !== 'AbortError') {
+        state.jobError = message(error); updateStatus();
+      }
+    });
+  }
+}
+
+async function selectMaterialMode(mode, persist = false) {
+  const revision = state.revision;
+  guard(revision);
+  state.switchingMode = true;
+  const previous = state.client;
+  if (previous && materialMode() === 'local' && activeLocalJob()) state.localTransfer = previous;
+  else previous?.stop();
+  clearTimeout(state.statusTimer); state.statusTimer = null;
+  for (const item of state.urls.values()) URL.revokeObjectURL(item.url);
+  state.urls.clear();
+  const retained = mode === 'local' ? state.localTransfer : null;
+  state.client = retained || createMaterialClient(mode, revision);
+  if (retained) state.localTransfer = null;
+  state.status = retained ? { ...retained.status } : emptyStatus();
+  state.media = []; state.fileCount = 0; state.materialPage = 0; state.materialsExpanded = false;
+  state.error = '';
+  try {
+    if (persist) localStorage.setItem(accountStorageKey('mix-material-mode'), mode);
+    catalog(); updateStatus(); refreshPreview(true);
+    if (!retained) await state.client.restore();
+    guard(revision);
+    maintainLocalTransfer(revision);
+  } finally {
+    if (state.revision === revision) { state.switchingMode = false; updateStatus(); refreshPreview(true); }
+  }
+}
+
 let lifecycleBound = false;
 export function initializeMixMaterials(ctx) {
   state.ctx = ctx;
@@ -626,28 +711,11 @@ export function initializeMixMaterials(ctx) {
         guard(revision);
         state.health = health;
         state.error = '';
-        const MaterialClient = health.material_mode !== 'local' && health.material_library?.configured ? CloudMaterials : BrowserMaterials;
-        state.client = new MaterialClient({ api: request,
-          ...(MaterialClient === BrowserMaterials ? { fetch: (path, options) => request(path, options, true), trackProgress: !!health.material_progress } : {}),
-          onStatus: status => {
-            try { guard(revision); } catch { return; }
-            const billed = status.indexed > state.status.indexed || state.status.processing && !status.processing;
-            state.status = { ...status };
-            const paint = () => {
-              state.statusTimer = null;
-              try { guard(revision); } catch { return; }
-              const changed = catalog();
-              updateStatus();
-              if (changed) refreshPreview(true);
-            };
-            // Coalesce parallel decode/model completions instead of rebuilding the UI per frame.
-            if (typeof globalThis.window?.requestAnimationFrame === 'function') {
-              if (!state.statusTimer) state.statusTimer = setTimeout(paint, 200);
-            } else paint();
-            if (billed && workspaceCreditsState().snapshot?.pricing?.mode === 'api_cost') void refreshWorkspaceCredits({ afterCurrent: true });
-          } });
-        updateAudio(); updateStatus(); refreshPreview(true);
-        await state.client.restore();
+        let preferred;
+        try { preferred = localStorage.getItem(accountStorageKey('mix-material-mode')); } catch { /* Default mode still works. */ }
+        const cloud = health.material_library?.configured && (preferred === 'cloud' || preferred !== 'local' && health.material_mode !== 'local');
+        await selectMaterialMode(cloud ? 'cloud' : 'local');
+        updateAudio();
       })(),
       loadAudio(),
       (async () => {
@@ -705,6 +773,17 @@ export function handleMixMaterialAction(action, el, ctx) {
     ctx.toast('正在加载素材库，请稍候'); return true;
   }
   switch (action) {
+    case 'mix-material-mode': {
+      const mode = el.dataset.mode;
+      if (!['local', 'cloud'].includes(mode) || mode === materialMode()) break;
+      if (modeLocked()) { ctx.toast('当前上传、扫描或提交尚未完成，请稍候再切换'); break; }
+      if (mode === 'cloud' && !state.health?.material_library?.configured) { ctx.toast('云端素材库尚未配置完成'); break; }
+      const revision = state.revision;
+      selectMaterialMode(mode, true).catch(error => {
+        if (revision === state.revision && error.name !== 'AbortError') { state.error = message(error); updateStatus(); }
+      });
+      break;
+    }
     case 'mix-materials-previous':
     case 'mix-materials-next':
       state.materialPage = Math.max(0, state.materialPage + (action === 'mix-materials-next' ? 1 : -1));

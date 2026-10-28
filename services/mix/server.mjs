@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createMixCreditsBridge } from './credits-bridge.mjs';
+import { mixMaterialEnvironment } from './material-config.mjs';
 
 const PYTHON_ROOT = fileURLToPath(new URL('./python/', import.meta.url));
 const hash = value => createHash('sha256').update(value).digest('hex');
@@ -66,7 +67,7 @@ export function createMixHandler({ dataDir, env = process.env, serviceUrl, token
       child = spawn(env.MIX_PYTHON_BIN || (process.platform === 'win32' ? 'python' : 'python3'),
         ['-m', 'uvicorn', 'app:create_app', '--factory', '--host', '127.0.0.1', '--port', String(port), '--log-level', 'warning', '--no-access-log'],
         { cwd: PYTHON_ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore'],
-          env: { ...env, DATA_DIR: dataDir, MIXER_API_TOKEN: token, PYTHONUNBUFFERED: '1',
+          env: { ...mixMaterialEnvironment(env), DATA_DIR: dataDir, MIXER_API_TOKEN: token, PYTHONUNBUFFERED: '1',
             MIX_CREDITS_ENABLED: creditBridge ? '1' : '0', MIX_CREDITS_URL: creditsUrl || '',
             MIX_API_COST_ENABLED: credits?.costMode ? '1' : '0' } });
       let ended = false;

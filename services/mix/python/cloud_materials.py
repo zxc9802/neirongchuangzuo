@@ -51,6 +51,7 @@ class CloudMaterials:
         self.path = self.folder / 'materials.sqlite3'
         self.env = os.environ if env is None else env
         self.client = client
+        self.region_clients = {}
         self.lock = shared_lock(self.path)
         with self.connect() as db:
             db.execute('PRAGMA journal_mode=WAL')
@@ -67,7 +68,14 @@ class CloudMaterials:
                     vector BLOB, description TEXT, UNIQUE(asset_id,start));
                 CREATE TABLE IF NOT EXISTS staging_cleanup (key TEXT PRIMARY KEY, expires REAL NOT NULL);
             ''')
-            add_columns(db, 'assets', {'fingerprint': 'TEXT'})
+            add_columns(db, 'assets', {'fingerprint': 'TEXT', 'bucket': 'TEXT', 'region': 'TEXT'})
+            add_columns(db, 'staging_cleanup', {'bucket': 'TEXT', 'region': 'TEXT'})
+            # Existing objects stay in their original bucket when new uploads change destination.
+            legacy_bucket = self.env.get('MIX_MATERIAL_COS_LEGACY_BUCKET') or self.env.get(COS_ENV[2])
+            legacy_region = self.env.get('MIX_MATERIAL_COS_LEGACY_REGION') or self.env.get(COS_ENV[3])
+            for table in ('assets', 'staging_cleanup'):
+                db.execute(f'UPDATE {table} SET bucket=coalesce(bucket,?),region=coalesce(region,?) '
+                           'WHERE bucket IS NULL OR region IS NULL', (legacy_bucket, legacy_region))
             db.execute('CREATE UNIQUE INDEX IF NOT EXISTS assets_fingerprint ON assets(owner,fingerprint)')
 
     @contextmanager
@@ -84,9 +92,15 @@ class CloudMaterials:
         missing = [name for name in COS_ENV if not self.env.get(name, '').strip()]
         return {'configured': not missing, 'missing': missing}
 
-    def cos(self):
+    def cos(self, region=None):
         if not self.status()['configured']:
             raise RuntimeError('素材库 COS 配置缺失：' + ', '.join(self.status()['missing']))
+        if region and region != self.env[COS_ENV[3]]:
+            from qcloud_cos import CosConfig, CosS3Client
+            if region not in self.region_clients:
+                self.region_clients[region] = CosS3Client(CosConfig(
+                    Region=region, SecretId=self.env[COS_ENV[0]], SecretKey=self.env[COS_ENV[1]], Scheme='https', Timeout=30))
+            return self.region_clients[region]
         if self.client is None:
             from qcloud_cos import CosConfig, CosS3Client
             self.client = CosS3Client(CosConfig(
@@ -134,7 +148,7 @@ class CloudMaterials:
             fingerprint = fingerprint.lower()
         if type(reuse_legacy) is not bool or (reuse_legacy and fingerprint is None):
             raise ValueError('旧版素材复用须确认原文件未修改并提交视频文件标识')
-        cos = self.cos()
+        self.cos()
         with self.lock:
             ticket, finished = None, False
             with self.connect() as db:
@@ -159,7 +173,7 @@ class CloudMaterials:
                     if item['state'] == 'uploading':
                         from qcloud_cos.cos_exception import CosServiceError
                         try:
-                            head = cos.head_object(Bucket=self.bucket, Key=item['upload_key'])
+                            head = self.cos(item['region']).head_object(Bucket=item['bucket'], Key=item['upload_key'])
                         except CosServiceError as error:
                             if error.get_status_code() != 404:
                                 raise
@@ -170,19 +184,19 @@ class CloudMaterials:
                 else:
                     ident = uuid.uuid4().hex
                     prefix = f'mix-materials/{owner}/{ident}/'
-                    item = {'id': ident, 'upload_key': prefix + 'upload' + ext,
+                    item = {'id': ident, 'upload_key': prefix + 'upload' + ext, 'bucket': self.bucket, 'region': self.env[COS_ENV[3]],
                             'key': prefix + 'source' + ext, 'state': 'uploading'}
-                    db.execute('INSERT INTO assets(id,owner,name,bytes,upload_key,key,state,created,updated,fingerprint) '
-                               "VALUES(?,?,?,?,?,?,'uploading',?,?,?)",
-                               (ident, owner, name, size, item['upload_key'], item['key'], now, now, fingerprint))
+                    db.execute('INSERT INTO assets(id,owner,name,bytes,upload_key,key,state,created,updated,fingerprint,bucket,region) '
+                               "VALUES(?,?,?,?,?,?,'uploading',?,?,?,?,?)",
+                               (ident, owner, name, size, item['upload_key'], item['key'], now, now, fingerprint, item['bucket'], item['region']))
                 if item['state'] == 'uploading':
                     content_type = 'video/webm' if ext == '.webm' else 'video/quicktime' if ext == '.mov' else 'video/mp4'
                     headers = {'Content-Type': content_type, 'x-cos-acl': 'private'}
-                    url = cos.get_presigned_url(Bucket=self.bucket, Key=item['upload_key'], Method='PUT',
+                    url = self.cos(item['region']).get_presigned_url(Bucket=item['bucket'], Key=item['upload_key'], Method='PUT',
                                                Expired=UPLOAD_TTL, Headers={**headers, 'Content-Length': str(size)})
                     db.execute('UPDATE assets SET updated=? WHERE id=?', (now, item['id']))
-                    db.execute('INSERT INTO staging_cleanup VALUES(?,?) ON CONFLICT(key) DO UPDATE SET expires=excluded.expires',
-                               (item['upload_key'], now + UPLOAD_TTL + 300))
+                    db.execute('INSERT INTO staging_cleanup(key,expires,bucket,region) VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET expires=excluded.expires',
+                               (item['upload_key'], now + UPLOAD_TTL + 300, item['bucket'], item['region']))
                     ticket = {'id': item['id'], 'upload_url': url, 'headers': headers}
             if finished:
                 self._delete_staging(item)
@@ -192,15 +206,15 @@ class CloudMaterials:
         if int(head['Content-Length']) != item['bytes']:
             raise ValueError('视频大小与上传记录不一致，请重新上传')
         # A still-valid upload URL must never be able to replace an indexed original.
-        result = self.cos().copy_object(Bucket=self.bucket, Key=item['key'],
-            CopySource={'Bucket': self.bucket, 'Region': self.env[COS_ENV[3]], 'Key': item['upload_key']},
+        result = self.cos(item['region']).copy_object(Bucket=item['bucket'], Key=item['key'],
+            CopySource={'Bucket': item['bucket'], 'Region': item['region'], 'Key': item['upload_key']},
             CopySourceIfMatch=head['ETag'], ACL='private')
         db.execute("UPDATE assets SET state='queued',etag=?,updated=? WHERE id=?",
                    (result['ETag'], time.time(), item['id']))
 
     def _delete_staging(self, item):
         try:
-            self.cos().delete_object(Bucket=self.bucket, Key=item['upload_key'])
+            self.cos(item['region']).delete_object(Bucket=item['bucket'], Key=item['upload_key'])
         except Exception:
             pass  # The expiring staging cleanup retries this deletion.
 
@@ -213,7 +227,7 @@ class CloudMaterials:
                     return self.public(item)
                 if time.time() - item['updated'] > UPLOAD_TTL:
                     raise ValueError('上传凭据已过期，请重新上传素材')
-                head = self.cos().head_object(Bucket=self.bucket, Key=item['upload_key'])
+                head = self.cos(item['region']).head_object(Bucket=item['bucket'], Key=item['upload_key'])
                 self._finish_upload(item, head, db)
             self._delete_staging(item)
             return self.public(self.get(owner, ident))
@@ -245,7 +259,7 @@ class CloudMaterials:
                     return target
             temporary = target.with_name(uuid.uuid4().hex + '.download')
             try:
-                self.cos().download_file(Bucket=self.bucket, Key=item['key'],
+                self.cos(item['region']).download_file(Bucket=item['bucket'], Key=item['key'],
                                          DestFilePath=str(temporary), IfMatch=item['etag'],
                                          DumpRecordDir=str(target.parent), DisableTempDestFilePath=True)
                 actual = digest(temporary)
@@ -263,7 +277,7 @@ class CloudMaterials:
         if type(clip_id) is not int or clip_id <= 0:
             raise ValueError('素材片段标识无效')
         with self.connect() as db:
-            row = db.execute('SELECT c.* FROM clips c JOIN assets a ON c.asset_id=a.id '
+            row = db.execute('SELECT c.*,a.bucket,a.region FROM clips c JOIN assets a ON c.asset_id=a.id '
                              "WHERE c.id=? AND a.owner=? AND a.state='ready'", (clip_id, owner)).fetchone()
         if row is None:
             raise KeyError('素材片段不存在')
@@ -275,7 +289,7 @@ class CloudMaterials:
                 return target
             temporary = target.with_name(uuid.uuid4().hex + '.download')
             try:
-                self.cos().download_file(Bucket=self.bucket, Key=row['key'], DestFilePath=str(temporary),
+                self.cos(row['region']).download_file(Bucket=row['bucket'], Key=row['key'], DestFilePath=str(temporary),
                                          DumpRecordDir=str(target.parent), DisableTempDestFilePath=True)
                 if digest(temporary) != row['sha256']:
                     raise ValueError('素材代理视频校验失败')
@@ -299,7 +313,7 @@ class CloudMaterials:
         if not proxy.is_file() or not clip['sha256'] or digest(proxy) != clip['sha256']:
             media.proxy(source, start, end-start, proxy)
             with proxy.open('rb') as body:
-                self.cos().put_object(Bucket=self.bucket, Key=clip['key'], Body=body,
+                self.cos(item['region']).put_object(Bucket=item['bucket'], Key=clip['key'], Body=body,
                                       ContentType='video/mp4', ACL='private')
             with self.connect() as db:
                 db.execute('UPDATE clips SET sha256=? WHERE id=?', (digest(proxy), clip['id']))
@@ -384,7 +398,7 @@ class CloudMaterials:
         item = self.get(owner, ident)
         if item['state'] in ('uploading', 'deleting'):
             raise KeyError('素材尚不可预览')
-        return self.cos().get_presigned_url(Bucket=self.bucket, Key=item['key'], Method=method, Expired=1800)
+        return self.cos(item['region']).get_presigned_url(Bucket=item['bucket'], Key=item['key'], Method=method, Expired=1800)
 
     def delete(self, owner, ident):
         with self.lock:
@@ -400,7 +414,7 @@ class CloudMaterials:
                 db.execute("UPDATE assets SET state='deleting' WHERE id=?", (ident,))
                 keys = [row['key'] for row in db.execute('SELECT key FROM clips WHERE asset_id=?', (ident,))]
             for key in keys + [item['upload_key'], item['key']]:
-                self.cos().delete_object(Bucket=self.bucket, Key=key)
+                self.cos(item['region']).delete_object(Bucket=item['bucket'], Key=key)
             with self.connect() as db:
                 db.execute('DELETE FROM clips WHERE asset_id=?', (ident,))
                 db.execute('DELETE FROM assets WHERE id=?', (ident,))
@@ -419,10 +433,10 @@ class CloudMaterials:
                     self.delete(item['owner'], item['id'])
             with self.connect() as db:
                 db.execute('BEGIN IMMEDIATE')
-                staging = [row['key'] for row in db.execute('SELECT key FROM staging_cleanup WHERE expires<?', (time.time(),))]
-                for key in staging:
-                    self.cos().delete_object(Bucket=self.bucket, Key=key)
-                    db.execute('DELETE FROM staging_cleanup WHERE key=?', (key,))
+                staging = db.execute('SELECT * FROM staging_cleanup WHERE expires<?', (time.time(),)).fetchall()
+                for item in staging:
+                    self.cos(item['region']).delete_object(Bucket=item['bucket'], Key=item['key'])
+                    db.execute('DELETE FROM staging_cleanup WHERE key=?', (item['key'],))
         cache = self.folder / 'cache'
         for owner in cache.iterdir() if cache.is_dir() else ():
             with self.lock:

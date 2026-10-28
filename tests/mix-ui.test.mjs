@@ -10,6 +10,78 @@ const settle = async predicate => {
   assert.ok(predicate(), 'browser UI did not finish expected work');
 };
 
+test('switching material modes preserves copy and local catalog, remembers the account choice, and never uploads automatically', async () => {
+  const f = await fixture({ useShared: true, health: { configured: true, material_mode: 'local', material_library: { configured: true } } });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const copy = f.ctx.configs.mix.prompt;
+    const local = f.mod.getMixState().client;
+    assert.match(renderStudio('mix', f.ctx), /data-action="mix-material-mode"[^>]*data-mode="cloud"/);
+    f.mod.handleMixMaterialAction('mix-material-mode', { dataset: { mode: 'cloud' } }, f.ctx);
+    await settle(() => f.mod.getMixState().client?.mode === 'cloud' && !f.mod.getMixState().switchingMode);
+    assert.equal(local.active, false);
+    assert.equal(f.ctx.configs.mix.prompt, copy);
+    assert.equal(f.storage.get('mix-material-mode:account-a'), 'cloud');
+    assert.ok(f.databases.get('workbench-browser-materials:account-a').manifest['sub/video-0.mp4']);
+    assert.equal(f.calls.filter(call => call.url.endsWith('/uploads')).length, 0);
+    f.mod.stopMixMaterials();
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.equal(f.mod.getMixState().client.mode, 'cloud');
+    f.mod.handleMixMaterialAction('mix-material-mode', { dataset: { mode: 'local' } }, f.ctx);
+    await settle(() => f.mod.getMixState().client?.mode !== 'cloud' && !f.mod.getMixState().switchingMode);
+    assert.equal(f.mod.getMixState().fileCount, 1);
+    assert.equal(f.storage.get('mix-material-mode:account-a'), 'local');
+  } finally { f.restore(); }
+});
+
+test('a local job keeps its transfer client when switching to cloud and after reloading in cloud mode', async () => {
+  const job = { id, source: 'browser', device_id: 'c'.repeat(32), state: 'waiting_materials' };
+  const f = await fixture({ health: { configured: true, material_mode: 'local', material_library: { configured: true } },
+    fetchJob: url => Response.json(url === '/api/mix/jobs' ? { jobs: [job] } : job) });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const local = f.mod.getMixState().client;
+    f.mod.handleMixMaterialAction('mix-material-mode', { dataset: { mode: 'cloud' } }, f.ctx);
+    await settle(() => f.mod.getMixState().client?.mode === 'cloud' && !f.mod.getMixState().switchingMode);
+    assert.equal(local.active, true);
+    assert.equal(f.mod.getMixState().localTransfer, local);
+    local._report({ error: 'local-only-error' });
+    assert.notEqual(f.mod.getMixState().status.error, 'local-only-error');
+    f.mod.stopMixMaterials();
+    assert.equal(local.active, false);
+    await f.mod.initializeMixMaterials(f.ctx);
+    await settle(() => f.mod.getMixState().localTransfer?.connected);
+    assert.equal(f.mod.getMixState().client.mode, 'cloud');
+    assert.equal(f.mod.getMixState().job.id, id);
+    assert.equal(f.calls.filter(call => call.method === 'POST' && call.url.startsWith('/api/mix/jobs')).length, 0);
+  } finally { f.restore(); }
+});
+
+test('mode changes cannot abort uploads or bypass unconfigured cloud storage and do not leak between accounts', async () => {
+  const f = await fixture({ health: { configured: true, material_mode: 'local', material_library: { configured: false } } });
+  try {
+    await f.mod.initializeMixMaterials(f.ctx);
+    const state = f.mod.getMixState(), local = state.client;
+    f.mod.handleMixMaterialAction('mix-material-mode', { dataset: { mode: 'cloud' } }, f.ctx);
+    assert.equal(state.client, local);
+    state.health.material_library.configured = true;
+    local.scanning = true;
+    f.mod.handleMixMaterialAction('mix-material-mode', { dataset: { mode: 'cloud' } }, f.ctx);
+    assert.equal(state.client, local);
+    local.scanning = false;
+    f.mod.handleMixMaterialAction('mix-material-mode', { dataset: { mode: 'cloud' } }, f.ctx);
+    await settle(() => state.client.mode === 'cloud' && !state.switchingMode);
+    const cloud = state.client;
+    cloud.scanning = true;
+    f.mod.handleMixMaterialAction('mix-material-mode', { dataset: { mode: 'local' } }, f.ctx);
+    assert.equal(state.client, cloud);
+    globalThis.workspaceUser = { id: 'account-b' };
+    await f.mod.initializeMixMaterials(f.ctx);
+    assert.notEqual(state.client.mode, 'cloud');
+    assert.equal(cloud.active, false);
+  } finally { f.restore(); }
+});
+
 async function fixture({ files = 1, fetchJob, fetchAudio, fetchHealth, fetchMaterials, fetchCredits, fetchProgress, xhr, pending, useShared = false, health = { browser_materials: true, configured: true, indexing_configured: true, missing: [], voice_configured: true, default_voice_configured: true } } = {}) {
   const original = Object.fromEntries(['workspaceUser', 'document', 'window', 'location', 'indexedDB', 'localStorage', 'fetch', 'XMLHttpRequest'].map(key => [key, globalThis[key]]));
   const storage = new Map();
@@ -1079,7 +1151,7 @@ test('configured cloud library restores all counts and previews without a local 
     assert.match(html, /上传视频素材/);
     assert.match(html, /云端原片/);
     assert.match(html, /data-action="mix-material-delete"/);
-    assert.doesNotMatch(html, /本机原片|本机原始视频|选择本地素材文件夹|更换素材文件夹|mix-disconnect|保持网页/);
+    assert.doesNotMatch(html.replace(/<div class="mix-material-modes"[\s\S]*?<\/div>/, ''), /本机原片|本机原始视频|选择本地素材文件夹|更换素材文件夹|mix-disconnect|保持网页/);
   } finally { f.restore(); }
 });
 

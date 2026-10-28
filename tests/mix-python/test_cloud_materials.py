@@ -135,6 +135,41 @@ class CloudMaterialsTests(unittest.TestCase):
             self.library.create_upload('../owner', 'clip.mp4', 10)
         self.assertEqual(self.cos.objects, {})
 
+    def test_changing_upload_bucket_preserves_old_originals_proxies_and_staging(self):
+        old = self.index()
+        pending = self.library.create_upload(OWNER, 'pending.mp4', self.video.stat().st_size)
+        # Simulate existing metadata written before bucket locations were recorded.
+        with self.library.connect() as db:
+            db.execute('UPDATE assets SET bucket=NULL,region=NULL')
+            db.execute('UPDATE staging_cleanup SET bucket=NULL,region=NULL')
+        env = {**ENV, 'MIX_MATERIAL_COS_BUCKET': 'hj-1410143389',
+               'MIX_MATERIAL_COS_LEGACY_BUCKET': ENV['MIX_MATERIAL_COS_BUCKET']}
+        library = CloudMaterials(self.root, client=self.cos, env=env)
+        self.assertEqual(library.get(OWNER, old['id'])['bucket'], ENV['MIX_MATERIAL_COS_BUCKET'])
+        with patch.object(self.cos, 'get_presigned_url', wraps=self.cos.get_presigned_url) as signed:
+            library.signed_url(OWNER, old['id'])
+            self.assertEqual(signed.call_args.kwargs['Bucket'], ENV['MIX_MATERIAL_COS_BUCKET'])
+            fresh = library.create_upload(OWNER, 'new.mp4', self.video.stat().st_size)
+            self.assertEqual(signed.call_args.kwargs['Bucket'], 'hj-1410143389')
+        source = library.folder / 'cache' / OWNER / old['id'] / 'source.mp4'
+        source.unlink()
+        with patch.object(self.cos, 'download_file', wraps=self.cos.download_file) as download:
+            library.cache_source(OWNER, old['id'])
+            self.assertEqual(download.call_args.kwargs['Bucket'], ENV['MIX_MATERIAL_COS_BUCKET'])
+        with library.connect() as db:
+            clip = db.execute('SELECT * FROM clips WHERE asset_id=? LIMIT 1', (old['id'],)).fetchone()
+            db.execute('UPDATE staging_cleanup SET expires=0 WHERE key=?',
+                       (library.get(OWNER, pending['id'])['upload_key'],))
+        proxy = library.folder / 'cache' / OWNER / old['id'] / (str(clip['id']) + '-proxy.mp4')
+        proxy.unlink(missing_ok=True)
+        with patch.object(self.cos, 'download_file', wraps=self.cos.download_file) as download:
+            library.cache_proxy(OWNER, clip['id'])
+            self.assertEqual(download.call_args.kwargs['Bucket'], ENV['MIX_MATERIAL_COS_BUCKET'])
+        with patch.object(self.cos, 'delete_object', wraps=self.cos.delete_object) as delete:
+            library.cleanup()
+            self.assertEqual(delete.call_args.kwargs['Bucket'], ENV['MIX_MATERIAL_COS_BUCKET'])
+        self.assertEqual(library.get(OWNER, fresh['id'])['bucket'], 'hj-1410143389')
+
     def test_finalization_checks_size_and_revocable_staging_cannot_overwrite_source(self):
         content = self.video.read_bytes()
         ticket = self.library.create_upload(OWNER, 'sample.mp4', len(content))
