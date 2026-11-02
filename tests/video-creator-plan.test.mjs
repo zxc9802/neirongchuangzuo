@@ -94,7 +94,7 @@ test('unused references can have empty adoption details without retrying or ente
 
 test('Chinese narration must fit each shot rather than cramming all offer restrictions into the closing seconds', () => {
   const {input,output}=sample();
-  output.script.shots[1].voiceover='周一至周四使用，需提前一天预约，不含酒水，查看套餐详情，确认后到店使用。';
+  output.script.shots[1].voiceover='周一至周四使用，需提前一天预约，不含酒水，查看套餐详情，确认后到店使用。请提前核对日期与人数，使用前联系商家确认席位，不可与其他活动叠加。';
   assert.throws(()=>validateDirectorResult(output,input),e=>e.outputIssue==='invalid_voice_timing' && e.validationIssue.includes('minimumDuration'));
   output.script.shots[1].voiceover='需预约，不含酒水。';
   assert.equal(validateDirectorResult(output,input).script.shots.length,2);

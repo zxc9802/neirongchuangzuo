@@ -1,3 +1,4 @@
+import { narrationTarget, narrationDirection } from './narration-budget.mjs';
 import { OBSERVATION_SYSTEM, validateObservations, GROUNDING_RULES, validateGrounding, narrationRepairRequest, applyNarrationRepair, QUALITY_SYSTEM, validateQuality } from './director-quality.mjs';
 import { readFile } from 'node:fs/promises';
 import sharp from 'sharp';
@@ -15,7 +16,7 @@ const invalidOutput = (message, issue, detail) => Object.assign(creatorError(mes
 export function directorPacing(settings) {
   const duration = settings.duration;
   const min = Math.max(1, Math.ceil(duration / 4));
-  return { duration, suggestedShots: { min, max: Math.max(min, Math.floor(duration / 2.8)) },
+  return { duration, narration: narrationTarget(settings), suggestedShots: { min, max: Math.max(min, Math.floor(duration / 2.8)) },
     note: '这是节奏参考，不是固定模板。根据实拍可支持的独立内容和用户要求调整；明确要求长镜头时优先遵循用户要求，不为凑镜头虚构场景。' };
 }
 
@@ -31,9 +32,11 @@ function compileVideoPrompt(direction, shots, images, settings) {
   return [`生成${settings.duration}秒、${settings.ratio}、${settings.resolution}的视频。`, direction,
     '按以下分镜依次切换，时间轴覆盖全片；每个镜头只完成本镜头的展示重点，不把后续多个空间合并成一次长摇镜，不在结尾额外延长空景。',
     settings.generateAudio ? `旁白、配乐和环境声遵循全片设计，旁白语言：${VIDEO_LANGUAGES.find(l => l.id === settings.language)?.name || '中文'}。若有参考音频，仅参考声音，不采用其中无关台词。` : '静音视频，不生成旁白、音乐或环境声。',
+    narrationDirection(settings),
+    settings.generateAudio && '# 连续口播全文（只读一遍，下面逐镜旁白是同一全文的时间映射，不另起一遍）\n' + shots.map(s => s.voiceover).filter(Boolean).join('\n'),
     '# 完整分镜时间轴', timeline,
     '保持实拍支持的店铺布局、装修、产品和人物特征，不制造不存在的区域、客流、服务、产品或未经确认的宣传事实。'
-  ].join('\n\n');
+  ].filter(Boolean).join('\n\n');
 }
 
 export function validateDirectorResult(value, input) {
@@ -109,8 +112,8 @@ const SYSTEM = `你是起芽内容创作的同城到店视频编导。先观察�
 外文招牌、拼音和中文必须分别照实使用，不能把拼音反译成新中文店名，也不能将邻店文字拼到店名里；不能确认的部分不念、不另造字。只凭照片不能断言聊天听得清、私密不吵、分量实在、时令新鲜、服务及时等体验或经营事实。宣传理由用可见的空间、装饰、餐桌与产品呈现具体描述，替代这些无依据的结论。
 文案先于逐镜描述：先在创作方案中确定这条片子要打动哪类人、什么消费场景、一个有素材支撑的到店理由，再写一段连贯口播并安排到镜头。开头说观众的具体需求或选择理由，中段用一到两个真实产品/空间细节支撑，结尾顺势邀请到店或收藏；按素材自行组织，不套固定句式。把“看见什么”转成“观众为什么值得留意”：例如实拍确有圆桌和多盘菜，可用“约朋友吃饭，围一桌慢慢聊”表达邀请；不要只读“木桌、吊灯、菜摆满桌”。可写建议和邀请，不把建议冒充服务承诺或真实消费证言。
 整条旁白应像店主面对附近客人自然介绍，有明确主题和衔接。不要写成看图识物、逐镜报幕或空泛口号：“颜色很亮”“先看环境”“这份细节值得看”“别在门口站太久”不能独立承担卖点。形状颜色只在能支撑产品吸引力时使用，不为凑字数逐项罗列；不堆“宝藏、治愈、氛围感、绝绝子”等替换任何门店都成立的形容词。无需每镜说一句，完整的一句话可由连续镜头共同呈现；短片优先保住一个消费理由，减少支线，不能把完整表达压成互不相连的标签。事实不足时仍可围绕可见菜品组合、空间与消费邀请写有吸引力的口播，不因此退化为摄影说明；未知菜名、口味、制作方式和营业条件不补猜。
-逐镜头检查口播是否读得完：中文按每秒3—4字编排，不把整套使用条件塞进末尾3—5秒；长信息提前分散到多个镜头并保留完整限制。例如3秒镜头不应安排20多字旁白；需要更多口播时间就重分镜头长度或减少非必要文案，不以极快语速解决。演示动作与感受只描述角色当下表现，不以旁白宣称未经确认的真实消费经历。
-修改时结合前文，保留未要求改变的事实和设计。时长、口播语言和是否含音频必须符合settings。旁白按正常语速控制在每秒约3-4个汉字，不要求每个镜头都有旁白，给环境与画面留空间；静音时voiceover和sound为空，plan.audio三个字段均为空，不设计口播、配乐或拟音。标题和说明用中文；旁白按所选语言。声音参考只提供音色，不引用无关台词，不凭文件名猜测音色；背景音乐始终低于口播，与体验情绪相符；拟音贴合画面动作，不用热闹声伪造客流。纯摄影氛围可不加字幕，避免满屏文字。视频内字幕简洁、易读。
+逐镜头检查口播是否读得完：中文按自然利落的发音每秒5—6字编排，不把整套使用条件塞进末尾3—5秒；长信息提前分散到多个镜头并保留完整限制。例如3秒镜头不应安排30多字旁白；需要更多口播时间就重分镜头长度或减少非必要文案，不以极快语速解决。演示动作与感受只描述角色当下表现，不以旁白宣称未经确认的真实消费经历。
+修改时结合前文，保留未要求改变的事实和设计。时长、口播语言和是否含音频必须符合settings。中文普通门店宣传按pacing.narration给出的全片目标字数先写连贯口播，再按镜头分配；通常30秒140—160字。句子允许跨镜头，不强制每镜一句，避免逐镜停顿和整句说完后的长空档；用户指定慢节奏或留白时优先遵从，不为字数编造事实；静音时voiceover和sound为空，plan.audio三个字段均为空，不设计口播、配乐或拟音。标题和说明用中文；旁白按所选语言。声音参考只提供音色，不引用无关台词，不凭文件名猜测音色；背景音乐始终低于口播，与体验情绪相符；拟音贴合画面动作，不用热闹声伪造客流。纯摄影氛围可不加字幕，避免满屏文字。视频内字幕简洁、易读。
 返回前自行检查：时间轴是否完整覆盖settings.duration；连续镜头是否增加新信息；不同区域和景别是否有变化；最后一段是否有明确内容；每个画面和宣传信息是否有素材依据。存在重复空景或过长综合段时，在本次输出前自行重新编排。
 只输出一个JSON对象，无Markdown代码围栏。正常格式：{"kind":"script","text":"简要创作思路","assets":[{"id":"实际图片或声音ID","description":"可确认的素材内容；声音仅说明参考用途","role":"这份素材的职责","adopt":"采用哪些信息","exclude":"不采用哪些信息，可空"}],"warnings":[],"script":{"title":"脚本标题","summary":"主题与到店理由","plan":${JSON.stringify(DIRECTOR_PLAN_EXAMPLE)},"shots":[{"start":0,"end":3,"intent":"这个镜头贡献的新信息或体验节点","visual":"本镜头主体、空间、景别","action":"角色行动或物体动作，无需时可空","emotion":"该镜头的自然情绪，无需时可空","camera":"运镜和衔接","referenceIds":["实际图片ID"],"voiceover":"旁白，可空","sound":"该镜头的拟音与环境声，可空","caption":"字幕，可空"}]}}。assets须覆盖全部输入素材，每个ID只出现一次；不用的素材在role中说明不选用原因，不强制进入视频。plan.cast只写实际使用且有形象参考的角色，无人物则为[]；列出的角色图必须被相应镜头引用。keep与avoid各列1—8条具体约束。shots从0开始连续覆盖完整时长。系统会把plan、素材职责和全部shots完整编译为提示词，不要重复输出globalDirection或videoPrompt，不重复时间轴。需要补充信息时格式：{"kind":"clarification","text":"具体说明","questions":["需要商家补充的问题"],"warnings":[]}。只询问无法避开的必要事实，不要求顾客为缺失的选填资料反复补充。`;
 
@@ -164,7 +167,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
     const indexedObservations = observations?.map(o=>({...o,facts:o.facts.map((fact,index)=>({index,text:fact}))}));
     const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}] : content;
     const groundingSystem = observations ? '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n'+GROUNDING_RULES : '';
-    const system = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以每秒3—4字设计，例如15秒约45—60字，按实际表达留停顿，不为凑字堆描述，也不机械压成每镜6—9字。长句可拆到相邻镜头连续说，每镜仍不超过每秒4字，避免短镜头塞长句。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
+    const system = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以pacing.narration的全片字数为目标，先写自然连续的口播再分配画面；例如30秒通常140—160字。保留短换气，不为每次切镜停一秒以上，不机械压成每镜6—9字。长句可跨相邻镜头，实际发音约每秒5—6字，内容过密时先调整镜头时间，再删重复，不删除核心消费理由。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
     let budget = maxOutputTokens, correction = '';
     for (let attempt = 1; attempt <= 2; attempt++) {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
