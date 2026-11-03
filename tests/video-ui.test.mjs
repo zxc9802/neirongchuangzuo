@@ -478,6 +478,47 @@ test('saved progress uses a neutral waiting state and resumes or stops the same 
   assert.deepEqual(calls, ['/api/video-replica/tasks/recovery-task/resume', '/api/video-replica/tasks/recovery-task/cancel']);
 });
 
+test('deep generation exposes a preview-header cancel action that stops the same task once', async t => {
+  const task = { id: 'deep-cancel-task', mode: 'deep', model: STANDARD_MODEL, status: 'draft', createdAt: Date.now(),
+    replacements: {}, video: { ready: true }, canCancel: false };
+  const calls = []; let finishCancel;
+  const page = await fixture(t, { tasks: [task], apiFetch: (path, options) => {
+    if (options?.method !== 'POST') return;
+    calls.push(path);
+    if (path.endsWith('/start')) Object.assign(task, { status: 'running', canCancel: true });
+    if (path.endsWith('/cancel')) return new Promise(resolve => { finishCancel = () => {
+      Object.assign(task, { status: 'cancelled', canCancel: false }); resolve(Response.json({ task }));
+    }; });
+    return Response.json({ task });
+  } });
+  page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  page.node('#replica-submit').onclick(); await page.settle(); page.rebind();
+  assert.match(page.html(), /<header class="replica-preview-heading">[\s\S]*?id="replica-cancel"[^>]*>取消生成<\/button>[\s\S]*?<\/header>/);
+  assert.equal(page.html().split('id="replica-cancel"').length - 1, 1);
+  assert.doesNotMatch(page.html().match(/id="replica-cancel"[^>]*>/)[0], /hidden|disabled/);
+  page.node('#replica-cancel').onclick(); await page.settle();
+  assert.match(page.html().match(/id="replica-cancel"[^>]*>/)[0], /disabled/);
+  page.node('#replica-cancel').onclick(); await page.settle();
+  assert.equal(calls.filter(path => path.endsWith('/cancel')).length, 1);
+  finishCancel(); await page.settle();
+  assert.equal(task.status, 'cancelled');
+  assert.match(page.html().match(/id="replica-cancel"[^>]*>/)[0], /hidden/);
+  assert.deepEqual(calls, ['/api/video-replica/tasks', '/api/video-replica/tasks/deep-cancel-task/start', '/api/video-replica/tasks/deep-cancel-task/cancel']);
+});
+
+test('deep cancellation visibility follows polled task capabilities without rebuilding the source video', async t => {
+  const task = { id: 'deep-cancel-poll', mode: 'deep', model: STANDARD_MODEL, status: 'running', createdAt: Date.now(),
+    replacements: {}, video: { ready: true }, canCancel: false, sourceVideoUrl: '/source.mp4' };
+  const page = await fixture(t, { tasks: [task] });
+  page.recover(); await page.poll(); page.select(task.id); page.rebind();
+  const renders = page.renders();
+  task.canCancel = true; await page.poll();
+  assert.equal(page.node('#replica-cancel').hidden, false);
+  assert.equal(page.renders(), renders);
+  Object.assign(task, { status: 'cancelled', canCancel: false }); await page.poll();
+  assert.equal(page.node('#replica-cancel').hidden, true);
+});
+
 test('paused replicas show the specific reason and code instead of the generic recovery message, including polling updates', async t => {
   const task = { id: 'specific-failure', status: 'waiting', createdAt: Date.now(), code: 'VIDEO_GENERATION_FAILED',
     error: '第 2 段（14.4–23.5 秒）视频生成失败：生成结果可能涉及版权限制。',
