@@ -199,7 +199,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     task.referenceVideos[kind] = result;
     await save(task);
   }
-  const isExpired = task => !ACTIVE.has(task.status) && task.expiresAt <= now();
+  const isExpired = task => !ACTIVE.has(task.status) && !['completed', 'deleted'].includes(task.status) && task.expiresAt != null && task.expiresAt <= now();
   function serialize(key, action) {
     const pending = (locks.get(key) || Promise.resolve()).catch(() => {}).then(action);
     locks.set(key, pending);
@@ -687,8 +687,8 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     if (closing || fatal) return;
     // Retain the provider only to finish tasks submitted before H3 Max was removed.
     const taskProvider = providerFor(task, task.segments?.[0] || task);
-    if (isExpired(task)) {
-      if (task.status !== 'expired') {
+    if (isExpired(task) || task.status === 'deleted') {
+      if (!['expired', 'deleted'].includes(task.status)) {
         task.status = 'expired'; task.error = '素材和成片已超过保存期限。'; task.code = 'VIDEO_EXPIRED'; delete task.recovery; await save(task);
       }
       await reconcile(task);
@@ -954,6 +954,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
     }
   }
   async function processTask(task) {
+    if (task.status === 'deleted') return processVideoTask(task);
     await restoreFailureReason(task);
     if (isWan3Model(task.model) && task.status !== 'running') {
       // Partially submitted, stopped and held tasks can still occupy upstream slots.
@@ -989,7 +990,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       task.status = 'completed'; task.error = ''; delete task.code;
       delete task.recovery;
       task.completedAt = now();
-      task.expiresAt = now() + 3 * DAY;
+      task.expiresAt = null;
       await save(task); await reconcile(task);
       await cleanupTemporaryMaterials(task);
   }
@@ -1008,6 +1009,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       }
       catch (cause) {
         if (fatal) return;
+        if (task.status === 'deleted') return; // Retry file cleanup without reviving the task.
         if (cause.code === 'VIDEO_REFERENCE_COMPRESSION_FAILED') { await fail(task, cause.message, cause.code); return; }
         if (cause.code === 'VIDEO_SOURCE_STORAGE_NOT_CONFIGURED') { await fail(task, cause.message, cause.code); return; }
         if (task.status === 'reviewing' && await retryWan3(task, cause, task.segments?.[0] || task, true)) return;
@@ -1039,6 +1041,10 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const task = JSON.parse(await readFile(join(storageDir, entry.name, 'task.json'), 'utf8'));
       if (task.id !== entry.name || typeof task.userId !== 'string') throw new Error('Invalid video task');
       jobs.set(task.id, task);
+      if (task.status === 'completed' && task.expiresAt !== null) {
+        task.expiresAt = null;
+        await save(task);
+      }
       if (task.status === 'draft' && task.editMode === 'enhanced') {
         task.editMode = 'standard';
         await save(task);
@@ -1090,7 +1096,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         const valid = config.signingSecret && /^\d{13}$/.test(url.searchParams.get('expires') || '') && /^[a-f0-9]{64}$/.test(supplied)
           && timingSafeEqual(Buffer.from(supplied), Buffer.from(signature(source[1], source[2], expires)));
         // Keep the original signed URL usable while its generation is still active.
-        if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || (expires <= now() && !ACTIVE.has(task.status)) || expires !== task.startedAt + DAY || task.status === 'expired') throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
+        if (!['GET', 'HEAD'].includes(req.method) || !task || !valid || (expires <= now() && !ACTIVE.has(task.status)) || expires !== task.startedAt + DAY || ['expired', 'deleted'].includes(task.status)) throw error('素材链接不可用或已过期。', 403, 'VIDEO_SOURCE_FORBIDDEN');
         const kind = source[2], emotion = /^emotion-(\d{1,2})$/.exec(kind), part = /^segment-(\d)$/.exec(kind);
         if (emotion ? !task.video?.audio || !task.narration?.segments[Number(emotion[1])]
           : part ? !task.segments?.[Number(part[1])]?.cut : kind === 'generated' ? !task.rawReady : kind === 'narration' ? !task.narration?.ready : !task[kind]) throw error('素材尚未准备好。', 404, 'VIDEO_NOT_FOUND');
@@ -1114,7 +1120,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
           prompt: PROMPT, durations: DURATIONS, videoLimit: VIDEO_LIMIT, photoLimit: PHOTO_LIMIT, voiceLimit: VOICE_LIMIT }); return;
       }
       if (path === `${PREFIX}/tasks` && req.method === 'GET') {
-        const tasks = [...jobs.values()].filter(task => task.userId === userId).sort((a, b) => b.createdAt - a.createdAt).map(view);
+        const tasks = [...jobs.values()].filter(task => task.userId === userId && task.status !== 'deleted').sort((a, b) => b.createdAt - a.createdAt).map(view);
         json(res, 200, { tasks: url.searchParams.get('completed') === 'true' ? tasks.filter(task => task.status === 'completed') : tasks.slice(0, 50) }); return;
       }
       if (path === `${PREFIX}/tasks` && req.method === 'POST') {
@@ -1123,7 +1129,7 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         if (!UUID.test(body?.requestId)) throw error('任务编号无效。');
         await serialize('create', async () => {
           const existing = jobs.get(body.requestId);
-          if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); json(res, 200, { task: view(existing) }); return; }
+          if (existing) { if (existing.userId !== userId) throw error('任务不存在。', 404); if (existing.status === 'deleted') throw error('任务已删除。', 410, 'VIDEO_DELETED'); json(res, 200, { task: view(existing) }); return; }
           const model = selectedModel(body.model);
           if (body.mode !== undefined && !['classic', 'deep'].includes(body.mode)) throw error('复刻模式无效。', 400, 'VIDEO_MODE_INVALID');
           const deep = body.mode === 'deep', replacements = deep ? deepOptions(body.replacements) : undefined;
@@ -1140,6 +1146,18 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
       const match = /^\/api\/video-replica\/tasks\/([a-f0-9-]{36})(?:\/(video|photo|product|background|voice|options|model|duration|language|source-audio|analyze|speech|recheck|start|result|resume|cancel))?$/.exec(path);
       const task = match && jobs.get(match[1]);
       if (!task || task.userId !== userId) throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
+      if (!match[2] && req.method === 'DELETE') {
+        await serialize(task.id, async () => {
+          if (task.status !== 'deleted') {
+            if (!view(task).resultUrl) throw error('只能删除已完成且已结算的成片。', 409, 'VIDEO_NOT_READY');
+            task.status = 'deleted'; task.deletedAt = now();
+            await save(task);
+          }
+          await processVideoTask(task);
+          json(res, 200, { deleted: true });
+        }); return;
+      }
+      if (task.status === 'deleted') throw error('任务不存在。', 404, 'VIDEO_NOT_FOUND');
       if (!match[2] && req.method === 'GET') { json(res, 200, { task: view(task) }); return; }
       if (isExpired(task)) throw error('素材或成片已过期，请重新上传。', 410, 'VIDEO_EXPIRED');
       if (['video', ...DEEP_KINDS].includes(match[2]) && ['GET', 'HEAD'].includes(req.method)) {

@@ -8,6 +8,16 @@ export const LANGUAGES = [
 
 // Only interface copy is translated. Prompts, uploads and generated content keep their original language.
 const entries = [
+  ['到期', 'Expires', 'Tamat tempoh'],
+  ['到期清理', 'Removed on expiry', 'Dibuang apabila tamat tempoh'],
+  ['成片永久保存，仅在你主动删除时移除', 'Final videos are saved permanently until you delete them', 'Video akhir disimpan secara kekal sehingga anda memadamkannya'],
+  ['复刻成片永久保存', 'Replica videos are saved permanently', 'Video replika disimpan secara kekal'],
+  ['永久保存', 'Saved permanently', 'Disimpan secara kekal'],
+  ['仅在你主动删除时移除', 'Removed only when you delete it', 'Dibuang hanya apabila anda memadamkannya'],
+  ['删除成片', 'Delete final video', 'Padam video akhir'],
+  ['1:1 复刻成片永久保存，仅在你主动删除时移除。其他成品保留', '1:1 replica videos are saved permanently until you delete them. Other outputs are kept for', 'Video replika 1:1 disimpan secara kekal sehingga anda memadamkannya. Hasil lain disimpan selama'],
+  ['还没有{value0}成品', 'No {value0} creations yet', 'Belum ada hasil {value0}'],
+  ['还没有生成作品', 'No creations yet', 'Belum ada hasil ciptaan'],
   ["重命名素材", "Rename material", "Namakan semula bahan"],
   ["素材名称", "Material name", "Nama bahan"],
   ["账号已切换，请重新操作", "Account changed. Please try again.", "Akaun telah bertukar. Sila cuba lagi."],

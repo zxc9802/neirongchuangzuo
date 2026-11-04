@@ -24,6 +24,10 @@ function librarySnapshot(cache, indices = LIBRARY_TYPES.all, loading = indices.s
   return { rawMaterials, rawRecords, organization: cache.organization,
     materials: organizeAssets(rawMaterials, cache.organization), records: organizeAssets(rawRecords, cache.organization), errors: indices.map(index => cache.errors[index]).filter(Boolean), loading };
 }
+export function invalidateAssetLibrary() {
+  libraryCache?.controller.abort();
+  libraryCache = undefined;
+}
 function notifyLibrary(cache) { for (const listener of cache.listeners) listener(); }
 
 export function assetThumbnailUrl(item) {
@@ -210,11 +214,11 @@ function timestamp(value) {
   return new Date(value).getTime();
 }
 
-export function generatedAssetWindow(task, now = Date.now()) {
+export function generatedAssetWindow(task, now = Date.now(), permanent = false) {
   if (task?.status !== 'completed' || task.expired || task.outputExpired) return null;
   const completed = timestamp(task.completedAt ?? task.updatedAt ?? task.createdAt);
   const serverExpiry = timestamp(task.expiresAt);
-  const expires = Math.min(completed + RETENTION_MS, Number.isFinite(serverExpiry) ? serverExpiry : Infinity);
+  const expires = permanent ? Infinity : Math.min(completed + RETENTION_MS, Number.isFinite(serverExpiry) ? serverExpiry : Infinity);
   return Number.isFinite(completed) && completed <= now && expires > now ? { completed, expires } : null;
 }
 
@@ -234,7 +238,7 @@ export function collectGeneratedAssets(imageTasks = [], avatarTasks = [], now = 
     records.push({ key: `creative-video:${task.id}`, type: 'video', source: 'AI 视频', title: String(task.title || '同城到店视频').slice(0, 80), url, download: url + '?download=1', filename: 'qiya-video.mp4', ...window });
   }
   for (const task of videoTasks) {
-    const window = generatedAssetWindow(task, now);
+    const window = generatedAssetWindow(task, now, true);
     if (!window || !/^[a-f\d]{8}(?:-[a-f\d]{4}){3}-[a-f\d]{12}$/i.test(task.id || '') || task.billing && task.billing.status !== 'settled') continue;
     const url = `/api/video-replica/tasks/${task.id}/result`;
     if (task.resultUrl !== url) continue;
@@ -294,12 +298,12 @@ function renderResults(ctx) {
   const filters = `<div class="generated-assets-filters" role="group" aria-label="成品类型">${Object.entries(TYPES).map(([type, label]) => button('generated-assets-filter', `${label}<span>${type === 'all' ? records.length : records.filter(item => item.type === type).length}</span>`, type === state.type ? 'selected' : '', `data-type="${type}" aria-pressed="${type === state.type}"`)).join('')}</div>`;
   const errors = state.errors.length ? `<div class="generated-assets-errors" role="status">${state.errors.map(error => `<p>${esc(error)}</p>`).join('')}${button('generated-assets-refresh', '重新加载', 'textbutton')}</div>` : '';
   if (state.loading && !records.length) return filters + `<div class="generated-assets-empty" role="status">${icon('clock')}<h2>正在读取生成的作品</h2></div>`;
-  if (!filtered.length) return filters + errors + `<div class="generated-assets-empty">${icon('folder')}<h2>${state.deleted ? '暂无已删除作品' : records.length ? `近 3 天还没有${TYPES[state.type]}成品` : state.errors.length ? '暂时没有可展示的成品' : '近 3 天还没有生成作品'}</h2>${button('generated-assets-create', '去生成图片 ' + icon('arrow'), 'primary')}</div>`;
-  return filters + errors + `<div class="generated-assets-grid">${filtered.slice(0, state.limit).map(record => `<article class="generated-asset-card" data-asset-key="${esc(record.key)}" data-asset-group="records" draggable="false">${assetTools(record, ctx)}<button class="generated-asset-cover ${record.type}" data-action="generated-asset-preview" data-key="${esc(record.key)}" aria-label="${record.type === 'image' ? '查看图片' : record.type === 'video' ? '播放视频' : '试听配音'}：${esc(record.title)}">${record.type === 'image' ? `<img src="${esc(assetThumbnailUrl(record))}" alt="${esc(record.title)}" loading="lazy" decoding="async">` : record.type === 'video' ? `<video src="${esc(record.url)}" preload="metadata" muted playsinline aria-hidden="true"></video><span class="generated-asset-play">${icon('play')}</span>` : `<span class="generated-asset-audio">${icon('audio')}<small>生成配音</small></span>`}<span class="generated-asset-kind">${esc(record.source)} · ${TYPES[record.type]}</span></button><div class="generated-asset-copy"><h2 title="${esc(record.title)}">${esc(record.title)}</h2>${record.modelLabel ? `<p class="generated-asset-model">生成模型：${esc(record.modelLabel)}</p>` : ''}<time datetime="${new Date(record.completed).toISOString()}">${dateLabel(record.completed)} 生成</time><div class="generated-asset-footer"><span class="generated-asset-expiry ${record.expires - Date.now() <= 24 * 3600000 ? 'soon' : ''}" title="${dateLabel(record.expires)} 到期">${remainingLabel(record.expires)}</span><a href="${esc(record.download)}" download="${esc(record.filename)}" class="generated-asset-download" aria-label="下载${TYPES[record.type]}：${esc(record.title)}">${icon('save')}下载</a></div><small class="generated-asset-deadline">${dateLabel(record.expires)} 到期清理</small></div></article>`).join('')}</div>${filtered.length > state.limit ? `<div class="generated-assets-more">${button('generated-assets-more', '加载更多作品', 'secondary')}</div>` : ''}`;
+  if (!filtered.length) return filters + errors + `<div class="generated-assets-empty">${icon('folder')}<h2>${state.deleted ? '暂无已删除作品' : records.length ? `还没有${TYPES[state.type]}成品` : state.errors.length ? '暂时没有可展示的成品' : '还没有生成作品'}</h2>${button('generated-assets-create', '去生成图片 ' + icon('arrow'), 'primary')}</div>`;
+  return filters + errors + `<div class="generated-assets-grid">${filtered.slice(0, state.limit).map(record => `<article class="generated-asset-card" data-asset-key="${esc(record.key)}" data-asset-group="records" draggable="false">${assetTools(record, ctx)}<button class="generated-asset-cover ${record.type}" data-action="generated-asset-preview" data-key="${esc(record.key)}" aria-label="${record.type === 'image' ? '查看图片' : record.type === 'video' ? '播放视频' : '试听配音'}：${esc(record.title)}">${record.type === 'image' ? `<img src="${esc(assetThumbnailUrl(record))}" alt="${esc(record.title)}" loading="lazy" decoding="async">` : record.type === 'video' ? `<video src="${esc(record.url)}" preload="metadata" muted playsinline aria-hidden="true"></video><span class="generated-asset-play">${icon('play')}</span>` : `<span class="generated-asset-audio">${icon('audio')}<small>生成配音</small></span>`}<span class="generated-asset-kind">${esc(record.source)} · ${TYPES[record.type]}</span></button><div class="generated-asset-copy"><h2 title="${esc(record.title)}">${esc(record.title)}</h2>${record.modelLabel ? `<p class="generated-asset-model">生成模型：${esc(record.modelLabel)}</p>` : ''}<time datetime="${new Date(record.completed).toISOString()}">${dateLabel(record.completed)} 生成</time><div class="generated-asset-footer"><span class="generated-asset-expiry ${Number.isFinite(record.expires) && record.expires - Date.now() <= 24 * 3600000 ? 'soon' : ''}" title="${Number.isFinite(record.expires) ? dateLabel(record.expires) + ' 到期' : '永久保存'}">${Number.isFinite(record.expires) ? remainingLabel(record.expires) : '永久保存'}</span><a href="${esc(record.download)}" download="${esc(record.filename)}" class="generated-asset-download" aria-label="下载${TYPES[record.type]}：${esc(record.title)}">${icon('save')}下载</a></div><small class="generated-asset-deadline">${Number.isFinite(record.expires) ? dateLabel(record.expires) + ' 到期清理' : '仅在你主动删除时移除'}</small></div></article>`).join('')}</div>${filtered.length > state.limit ? `<div class="generated-assets-more">${button('generated-assets-more', '加载更多作品', 'secondary')}</div>` : ''}`;
 }
 
 export function renderGeneratedAssets(ctx) {
-  return `<section class="generated-assets-heading"><div><span class="generated-assets-eyebrow">我的创作</span><h1>我的资产</h1></div><div class="asset-heading-actions">${ctx.button('asset-upload', '上传素材', 'primary')}${ctx.button('generated-assets-refresh', ctx.icon('refresh') + '刷新资产', 'secondary')}</div></section><section id="asset-folder-panel">${renderAssetFolders(state, ctx)}</section><section id="asset-organization-tools">${organizationToolbar(ctx)}</section><section id="material-assets-results" aria-label="长期保存的素材">${renderMaterialResults(ctx)}</section><div id="asset-generated-section"${state.folderId ? ' hidden' : ''}><div class="material-assets-heading"><h2>生成作品</h2><span>近 3 天</span></div><div class="generated-assets-policy">${ctx.icon('clock')}<p>成品保留 <strong>3 天</strong>，移入素材文件夹后长期保留。</p></div><section id="generated-assets-results" aria-label="已生成素材">${renderResults(ctx)}</section></div>`;
+  return `<section class="generated-assets-heading"><div><span class="generated-assets-eyebrow">我的创作</span><h1>我的资产</h1></div><div class="asset-heading-actions">${ctx.button('asset-upload', '上传素材', 'primary')}${ctx.button('generated-assets-refresh', ctx.icon('refresh') + '刷新资产', 'secondary')}</div></section><section id="asset-folder-panel">${renderAssetFolders(state, ctx)}</section><section id="asset-organization-tools">${organizationToolbar(ctx)}</section><section id="material-assets-results" aria-label="长期保存的素材">${renderMaterialResults(ctx)}</section><div id="asset-generated-section"${state.folderId ? ' hidden' : ''}><div class="material-assets-heading"><h2>生成作品</h2><span>复刻成片永久保存</span></div><div class="generated-assets-policy">${ctx.icon('clock')}<p>1:1 复刻成片永久保存，仅在你主动删除时移除。其他成品保留 <strong>3 天</strong>，移入素材文件夹后长期保留。</p></div><section id="generated-assets-results" aria-label="已生成素材">${renderResults(ctx)}</section></div>`;
 }
 
 function paint() {
@@ -528,7 +532,7 @@ export function handleGeneratedAssetsAction(action, element, ctx) {
     if (!record) { paint(); ctx.toast('这份成品已到期，请刷新作品列表。'); return true; }
     const url = ctx.esc(record.url);
     const media = record.type === 'image' ? `<img src="${url}" alt="${ctx.esc(record.title)}">` : record.type === 'video' ? `<video src="${url}" controls playsinline preload="metadata" aria-label="生成视频"></video>` : `<div class="generated-preview-audio">${ctx.icon('audio')}<audio src="${url}" controls preload="metadata" aria-label="生成配音"></audio></div>`;
-    ctx.openModal(record.title, `${record.source} · ${dateLabel(record.expires)} 到期`, `<div id="generated-asset-preview" class="generated-asset-preview" data-expires="${record.expires}">${media}</div>${record.modelLabel ? `<p class="generated-asset-model">生成模型：${ctx.esc(record.modelLabel)}</p>` : ''}<footer class="modal-actions"><a class="primary" href="${ctx.esc(record.download)}" download="${ctx.esc(record.filename)}">${ctx.icon('save')}下载${TYPES[record.type]}</a></footer>`, true);
+    ctx.openModal(record.title, `${record.source} · ${Number.isFinite(record.expires) ? dateLabel(record.expires) + ' 到期' : '永久保存'}`, `<div id="generated-asset-preview" class="generated-asset-preview" data-expires="${record.expires}">${media}</div>${record.modelLabel ? `<p class="generated-asset-model">生成模型：${ctx.esc(record.modelLabel)}</p>` : ''}<footer class="modal-actions"><a class="primary" href="${ctx.esc(record.download)}" download="${ctx.esc(record.filename)}">${ctx.icon('save')}下载${TYPES[record.type]}</a></footer>`, true);
     return true;
   }
   return false;

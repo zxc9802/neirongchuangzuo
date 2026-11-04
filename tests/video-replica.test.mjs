@@ -1449,7 +1449,7 @@ test('running replicas survive a day-long wait and restart after the active asse
   assert.equal((await fetch(app.base + source.pathname)).status, 403);
   app.state.done = true;
   const completed = await app.until(id, task => task.status === 'completed');
-  assert.equal(completed.expiresAt, time + 3 * 86400_000);
+  assert.equal(completed.expiresAt, null);
   assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
   assert.equal((await fetch(app.base + source.pathname + source.search)).status, 403);
   assert.equal(app.state.generations, 1);
@@ -1584,21 +1584,44 @@ test('settlement retries keep the output private and never charge twice after a 
   assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
 });
 
-test('three-day expiry removes media while keeping deduplication and billing records', async t => {
+test('completed replicas remain playable past three days and migrate legacy expiry across restarts', async t => {
   let time = Date.now(); const app = await fixture(t, { now: () => time });
   const id = await app.init(); await app.upload(id); app.state.done = true; await app.call(`/tasks/${id}/start`, { body: {} });
-  await app.until(id, task => task.status === 'completed');
-  time += 3 * 86400_000 + 1;
-  assert.equal((await app.call(`/tasks/${id}/result`)).status, 410);
-  const cleanupDeadline = performance.now() + 15_000;
-  while (!JSON.parse(await readFile(join(app.root, 'video', id, 'task.json'), 'utf8')).cleaned && performance.now() < cleanupDeadline) await delay(50);
-  await assert.rejects(readFile(join(app.root, 'video', id, 'result.mp4')), { code: 'ENOENT' });
-  assert.equal((await app.current(id)).status, 'expired');
+  const completed = await app.until(id, task => task.status === 'completed');
+  assert.equal(completed.expiresAt, null);
+  for (const advance of [3 * 86400_000, 365 * 86400_000]) {
+    time += advance; await delay(60);
+    assert.equal((await app.current(id)).status, 'completed');
+    assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
+    assert.equal((await app.call(`/tasks/${id}/result?download=1`)).status, 200);
+  }
+  await app.close();
+  const taskPath = join(app.root, 'video', id, 'task.json');
+  const legacy = JSON.parse(await readFile(taskPath, 'utf8'));
+  legacy.expiresAt = completed.completedAt + 3 * 86400_000;
+  await writeFile(taskPath, JSON.stringify(legacy)); await app.open(); await delay(60);
+  assert.equal((await app.current(id)).status, 'completed');
+  assert.equal((await app.current(id)).expiresAt, null);
+  assert.equal(JSON.parse(await readFile(taskPath, 'utf8')).expiresAt, null);
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
+  const listed = (await (await app.call('/tasks?completed=true')).json()).tasks;
+  assert.deepEqual(listed.map(task => task.id), [id]);
   assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640);
   assert.equal(app.state.generations, 1);
 });
 
-test('three-day expiry erases private voice, ASR, VAD and download artifacts while retaining the text task and settled bill', async t => {
+test('replica deletion requires the owner, same origin and a completed settled result', async t => {
+  const app = await fixture(t), id = await app.init(); await app.upload(id);
+  assert.equal((await app.call(`/tasks/${id}`, { method: 'DELETE' })).status, 409);
+  await app.call(`/tasks/${id}/start`, { body: {} }); await app.until(id, task => task.status === 'running');
+  assert.equal((await app.call(`/tasks/${id}`, { method: 'DELETE' })).status, 409);
+  app.state.done = true; await app.until(id, task => task.status === 'completed');
+  assert.equal((await app.call(`/tasks/${id}`, { method: 'DELETE', owner: 'bob' })).status, 404);
+  assert.equal((await app.call(`/tasks/${id}`, { method: 'DELETE', headers: { origin: 'https://other.example' } })).status, 403);
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
+});
+
+test('manual deletion erases media and private artifacts while retaining deduplication and settled billing', async t => {
   let time = Date.now();
   const app = await fixture(t, { now: () => time,
     voice: async (_input, output) => { await writeFile(output, VIDEO); return { ready: true, duration: 3 }; }, speech: fakeSpeech() });
@@ -1626,7 +1649,9 @@ test('three-day expiry erases private voice, ASR, VAD and download artifacts whi
   await writeFile(join(taskFolder, 'narration', 'emotion-0.wav'), 'private emotion');
   await writeFile(join(taskFolder, 'narration', '0.wav'), 'private narration');
   time += 3 * 86400_000 + 1;
-  for (const kind of ['photo', 'video', 'voice', 'result']) assert.equal((await app.call(`/tasks/${id}/${kind}`)).status, 410);
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
+  assert.equal((await app.call(`/tasks/${id}`, { method: 'DELETE' })).status, 200);
+  for (const kind of ['photo', 'video', 'voice', 'result']) assert.equal((await app.call(`/tasks/${id}/${kind}`)).status, 404);
   let expired;
   const cleanupDeadline = performance.now() + 15_000;
   do {
@@ -1636,13 +1661,17 @@ test('three-day expiry erases private voice, ASR, VAD and download artifacts whi
   } while (performance.now() < cleanupDeadline);
   assert.equal(expired.cleaned, true);
   assert.deepEqual(await readdir(taskFolder), ['task.json']);
-  assert.equal(expired.status, 'expired'); assert.equal(expired.id, id); assert.equal(expired.userId, 'alice');
+  assert.equal(expired.status, 'deleted'); assert.equal(expired.deletedAt, time); assert.equal(expired.id, id); assert.equal(expired.userId, 'alice');
   assert.deepEqual(expired.speech, completed.speech); assert.deepEqual(expired.originalSpeech, completed.originalSpeech);
   assert.equal(expired.completedAt, completed.completedAt); assert.deepEqual(expired.billing, completed.billing);
   assert.deepEqual(await app.wallet.reservation('alice', id), reservation);
-  const current = await app.current(id);
-  assert.equal(current.sourcePhotoUrl, null); assert.equal(current.sourceVideoUrl, null); assert.equal(current.sourceVoiceUrl, null);
-  assert.equal(current.resultUrl, null); assert.equal(current.canRecheck, false);
+  assert.equal((await app.call(`/tasks/${id}`)).status, 404);
+  assert.deepEqual((await (await app.call('/tasks')).json()).tasks, []);
+  await app.close(); await app.open();
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 404);
+  assert.equal((await app.call(`/tasks/${id}`, { method: 'DELETE' })).status, 200);
+  assert.equal((await app.call('/tasks', { body: { requestId: id } })).status, 410);
+  assert.deepEqual((await (await app.call('/tasks?completed=true')).json()).tasks, []);
   assert.equal((await app.wallet.snapshot('alice')).available, TEST_BALANCE - 1640); assert.equal(app.state.generations, 1);
 });
 
@@ -3495,7 +3524,7 @@ test('Wan without COS configuration pauses before any generation and remains pau
   assert.equal((await app.current(id)).status, 'waiting'); assert.equal(app.state.generations, 0);
 });
 
-test('Wan refreshes queued COS signatures and deletes completed inputs before owner media expire', async t => {
+test('Wan refreshes queued COS signatures and preserves completed owner media until deletion', async t => {
   let at = Date.now();
   const app = await fixture(t, { now: () => at, config: { ...CONFIG, wan3Enabled: true, wan3AggregateEnabled: true } });
   const id = await app.init(); await app.upload(id);
@@ -3517,7 +3546,9 @@ test('Wan refreshes queued COS signatures and deletes completed inputs before ow
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/video`)).arrayBuffer()), VIDEO);
   assert.deepEqual(Buffer.from(await (await app.call(`/tasks/${id}/result`)).arrayBuffer()), VIDEO);
   at += 3 * 86400_000 + 1;
-  await app.until(id, task => task.status === 'expired' && app.state.cosDeletes.length === 2);
+  assert.equal((await app.current(id)).status, 'completed');
+  assert.equal((await app.call(`/tasks/${id}/result`)).status, 200);
+  assert.equal((await app.call(`/tasks/${id}`, { method: 'DELETE' })).status, 200);
   for (let i = 0; i < 100; i++) {
     if (JSON.parse(await readFile(path, 'utf8')).cleaned) break;
     await delay(10);
@@ -3736,7 +3767,9 @@ for (const model of [PREMIUM_MODEL, WAN3_MODEL]) test(model + ' submits the comp
   assert.deepEqual(Buffer.from(await (await app.call('/tasks/' + id + '/video')).arrayBuffer()), VIDEO);
   await app.close(); await app.open(); done = true;
   await app.until(id, task => task.status === 'completed'); assert.equal(preparations, 1);
-  at += 4 * 86400_000; await app.until(id, task => task.status === 'expired');
+  at += 4 * 86400_000;
+  assert.equal((await app.current(id)).status, 'completed');
+  assert.equal((await app.call(`/tasks/${id}`, { method: 'DELETE' })).status, 200);
   for (let i = 0; i < 100 && (await readdir(join(app.root, 'video', id))).some(name => name.includes('.reference.mp4')); i++) await delay(10);
   assert.equal((await readdir(join(app.root, 'video', id))).some(name => name.includes('.reference.mp4')), false);
 });

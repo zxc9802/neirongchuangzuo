@@ -2,7 +2,7 @@ import { uiLocale, t } from './workspace-preferences.js';
 import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malaysian-prices.js';
 import { openReplicaAssetPicker } from './replica-asset-picker.js';
-import { assetThumbnailUrl, uploadSharedMaterial } from './generated-assets.js';
+import { assetThumbnailUrl, uploadSharedMaterial, invalidateAssetLibrary } from './generated-assets.js';
 
 const API = '/api/video-replica';
 const DEFAULT_MODEL = 'doubao-seedance-2-0-260128';
@@ -211,7 +211,7 @@ function deepSource(ctx) {
 }
 function renderDeepReplica(ctx) {
   const task = state.current;
-  return `<div class="replica-deep-studio"><section class="replica-deep-editor" aria-label="深度复刻素材与设置"><header class="replica-deep-heading"><div class="replica-deep-title">${ctx.icon('replica')}<div><h1>深度复刻</h1><p>参考动作与镜头，替换人物、商品或背景</p></div></div><button type="button" id="replica-new" class="textbutton" ${state.busy ? 'disabled' : ''}>${ctx.icon('plus')}新建</button></header><div class="replica-mode-switch" role="group" aria-label="复刻模式"><button type="button" id="replica-mode-classic" aria-pressed="false" ${state.busy ? 'disabled' : ''}>原版复刻</button><button type="button" id="replica-mode-deep" aria-pressed="true" ${state.busy ? 'disabled' : ''}>深度复刻</button></div><div class="replica-deep-inputs">${deepInputs(ctx)}</div><div class="replica-deep-settings" role="region" aria-label="复刻设置与说明" tabindex="0">${deepSettings(ctx)}<div id="replica-submit-area" class="replica-submit-area">${submitArea(ctx)}</div></div></section><section class="replica-deep-preview" aria-label="深度复刻成片预览"><header class="replica-preview-heading"><h2>预览</h2><span>结果保留 3 天</span><button type="button" id="replica-cancel" class="secondary" ${task?.canCancel ? '' : 'hidden'} ${state.busy ? 'disabled' : ''}>取消生成</button></header><div class="replica-preview-content"><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div class="replica-preview-details" role="region" aria-label="成片说明与进度" tabindex="0"><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div></div></div></section><aside class="replica-deep-history" aria-label="最近的复刻"><header><h2>最近</h2><button type="button" id="replica-refresh" class="textbutton" title="刷新记录" aria-label="刷新记录">${ctx.icon('refresh')}</button></header><div id="replica-history" class="replica-history">${history(ctx)}</div></aside></div>`;
+  return `<div class="replica-deep-studio"><section class="replica-deep-editor" aria-label="深度复刻素材与设置"><header class="replica-deep-heading"><div class="replica-deep-title">${ctx.icon('replica')}<div><h1>深度复刻</h1><p>参考动作与镜头，替换人物、商品或背景</p></div></div><button type="button" id="replica-new" class="textbutton" ${state.busy ? 'disabled' : ''}>${ctx.icon('plus')}新建</button></header><div class="replica-mode-switch" role="group" aria-label="复刻模式"><button type="button" id="replica-mode-classic" aria-pressed="false" ${state.busy ? 'disabled' : ''}>原版复刻</button><button type="button" id="replica-mode-deep" aria-pressed="true" ${state.busy ? 'disabled' : ''}>深度复刻</button></div><div class="replica-deep-inputs">${deepInputs(ctx)}</div><div class="replica-deep-settings" role="region" aria-label="复刻设置与说明" tabindex="0">${deepSettings(ctx)}<div id="replica-submit-area" class="replica-submit-area">${submitArea(ctx)}</div></div></section><section class="replica-deep-preview" aria-label="深度复刻成片预览"><header class="replica-preview-heading"><h2>预览</h2><span>成片永久保存，仅在你主动删除时移除</span><button type="button" id="replica-cancel" class="secondary" ${task?.canCancel ? '' : 'hidden'} ${state.busy ? 'disabled' : ''}>取消生成</button></header><div class="replica-preview-content"><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div class="replica-preview-details" role="region" aria-label="成片说明与进度" tabindex="0"><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div></div></div></section><aside class="replica-deep-history" aria-label="最近的复刻"><header><h2>最近</h2><button type="button" id="replica-refresh" class="textbutton" title="刷新记录" aria-label="刷新记录">${ctx.icon('refresh')}</button></header><div id="replica-history" class="replica-history">${history(ctx)}</div></aside></div>`;
 }
 function switchMode(next) {
   if (state.busy || !['classic', 'deep'].includes(next) || mode === next) return;
@@ -290,7 +290,7 @@ function summary(ctx) {
   const task = state.current;
   const route = task?.languageRouting;
   const language = route ? `<span>原视频：${ctx.esc(languageName(route.source))} · 所选语言：${ctx.esc(languageName(route.target))} · ${route.translate ? '翻译配音并同步口型' : route.reason === 'same-language' ? '语言一致，沿用原方案' : '中文沿用原方案'}</span>` : '';
-  return task ? `<div><strong>${taskLabel(task)}</strong>${language}<span>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${segmentText(task) ? `<span>${ctx.esc(segmentText(task))}</span>` : ''}${task.captionCheck?.warning ? `<span>${ctx.esc(displayMessage(task.captionCheck.warning))}</span>` : ''}${task.audioCheck ? `<span>${task.audioCheck.originalAudioPreserved ? '已保留原视频声音。' : task.audioCheck.engine === 'indextts2' ? '已使用参考声音配音，并按新配音处理口型；请预览核对效果。' : task.audioCheck.warning ? ctx.esc(displayMessage(task.audioCheck.warning)) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a>` : ''}` : '';
+  return task ? `<div><strong>${taskLabel(task)}</strong>${language}<span>${modelName(task) ? ctx.esc(modelName(task)) + ' · ' : ''}${task.actualDuration || task.duration || '—'} 秒 · ${ctx.esc(task.ratio || '自动比例')} · ${ctx.esc(task.resolution || '720p')}${billingPointsText(task) ? ` · ${ctx.esc(billingPointsText(task))}` : ''}</span>${segmentText(task) ? `<span>${ctx.esc(segmentText(task))}</span>` : ''}${task.captionCheck?.warning ? `<span>${ctx.esc(displayMessage(task.captionCheck.warning))}</span>` : ''}${task.audioCheck ? `<span>${task.audioCheck.originalAudioPreserved ? '已保留原视频声音。' : task.audioCheck.engine === 'indextts2' ? '已使用参考声音配音，并按新配音处理口型；请预览核对效果。' : task.audioCheck.warning ? ctx.esc(displayMessage(task.audioCheck.warning)) : `${task.audioCheck.transcriptDifferences ? `台词有 ${ctx.esc(task.audioCheck.transcriptDifferences)} 字轻微识别差异` : '台词一致'} · 开口偏差 ${Math.abs(task.audioCheck.afterOffsetMs)} 毫秒；请预览核对台词、音色与口型。`}</span>` : ''}</div>${task.resultUrl ? `<a class="primary replica-download" href="${ctx.esc(task.resultUrl)}?download=1" download>下载成片</a><button type="button" id="replica-delete" class="textbutton" ${state.busy ? 'disabled' : ''}>删除成片</button>` : ''}` : '';
 }
 function playerStyle(task) {
   let width = Number(task?.video?.width), height = Number(task?.video?.height);
@@ -330,7 +330,7 @@ export function renderVideoReplica(ctx) {
     <div class="replica-layout"><section class="replica-form">${deepMode() ? deepInputs(ctx) : `<div class="replica-uploads">${slot('video', ctx)}${slot('photo', ctx)}${slot('voice', ctx)}</div>`}${modelPicker(ctx)}
       <p class="replica-note">${deepMode() ? '画面替换效果以实际生成结果为准，生成后请预览核对人脸、商品和背景。' : '请使用有权使用的视频和人物照片。人物相似度与表演效果以实际生成结果为准。'}</p>
       <div id="replica-submit-area" class="replica-submit-area">${submitArea(ctx)}</div></section>
-      <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>结果保留 3 天</span></div><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
+      <section class="replica-output"><div class="replica-output-title"><h2>成片预览</h2><span>成片永久保存，仅在你主动删除时移除</span></div><div id="replica-result" class="replica-player" style="${playerStyle(task)}">${result(ctx)}</div><div id="replica-result-summary" class="replica-result-summary">${summary(ctx)}</div><div id="replica-progress" class="replica-progress" aria-live="polite">${progress(ctx)}</div><div class="replica-history-heading"><h3>最近的复刻</h3><button type="button" id="replica-refresh" class="textbutton">刷新记录</button></div><div id="replica-history" class="replica-history">${history(ctx)}</div></section></div>`;
 }
 async function selectModel(id) {
   if (state.busy || state.current && state.current.status !== 'draft' || !MODELS.some(model => model.id === id) || deepMode() && id === MINIMAX_MODEL || !state.config?.enabled) return;
@@ -442,6 +442,19 @@ async function recoverTask(action) {
   catch { state.error = '正在确认任务状态，请稍后刷新记录。'; }
   finally { state.busy = false; refresh(); }
 }
+async function deleteResult() {
+  const task = state.current, owner = state.owner;
+  if (state.busy || !task?.resultUrl || !globalThis.confirm(t('删除后无法恢复，请先下载需要保留的成片。'))) return;
+  state.busy = true; state.error = ''; refresh();
+  try {
+    await request(`/tasks/${task.id}`, { method: 'DELETE' });
+    if (state.owner !== owner) return;
+    invalidateAssetLibrary();
+    state.tasks = state.tasks.filter(item => item.id !== task.id);
+    resetFiles(); state.current = null;
+  } catch (cause) { if (state.owner === owner) state.error = cause.message; }
+  finally { if (state.owner === owner) { state.busy = false; refresh(); } }
+}
 async function poll() {
   if (polling || state.busy || !context) return;
   polling = true;
@@ -532,6 +545,7 @@ export function bindVideoReplica(ctx) {
   const retry = document.querySelector('#replica-recheck'); if (retry) retry.onclick = () => { void recheck(); };
   const resume = document.querySelector('#replica-resume'); if (resume) resume.onclick = () => { void recoverTask('resume'); };
   const cancel = document.querySelector('#replica-cancel'); if (cancel) cancel.onclick = () => { void recoverTask('cancel'); };
+  document.querySelector('#replica-result-summary').onclick = event => { if (event.target.closest('#replica-delete')) void deleteResult(); };
   document.querySelector('#replica-submit').onclick = () => { void submit(); };
   document.querySelector('#replica-new').onclick = () => { resetFiles(); state.current = null; state.model = DEFAULT_MODEL; replacements = emptyReplacements(); state.error = ''; refresh(); };
   document.querySelector('#replica-refresh').onclick = () => { state.error = ''; state.pollError = ''; void poll(); };

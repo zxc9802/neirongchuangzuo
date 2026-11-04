@@ -121,7 +121,7 @@ for (const stage of ['create', 'upload']) test(`a stalled replica ${stage} reque
 });
 
 async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiFetch, assetFetch } = {}) {
-  const keys = ['workspaceUser', 'document', 'fetch', 'setInterval', 'clearInterval'];
+  const keys = ['workspaceUser', 'document', 'fetch', 'setInterval', 'clearInterval', 'confirm'];
   const original = Object.fromEntries(keys.map(key => [key, globalThis[key]]));
   const nodes = new Map();
   const node = selector => { if (!nodes.has(selector)) nodes.set(selector, { setAttribute(name, value) { this[name] = value; } }); return nodes.get(selector); };
@@ -130,6 +130,7 @@ async function fixture(t, { wallet = finiteWallet(), tasks = [], taskFetch, apiF
   globalThis.document = { body: { dataset: { page: 'replica' } }, querySelector: node };
   globalThis.setInterval = callback => { poll = callback; return 1; };
   globalThis.clearInterval = () => {};
+  globalThis.confirm = () => true;
   globalThis.fetch = async (path, options) => {
     if (path.startsWith('/api/assets/materials/')) {
       if (assetFetch) return assetFetch(path, options);
@@ -1270,4 +1271,23 @@ test('replacing a recoverable source imports its saved material without a second
   await page.node('#replica-video').onchange({ target: { files: [new File(['shorter'], 'short.mp4')] } });
   await page.settle();
   assert.deepEqual(calls, [{ path: `/api/video-replica/tasks/${task.id}/video`, method: 'POST', body: { assetId: `video-${'a'.repeat(64)}` } }]);
+});
+
+for (const mode of ['classic', 'deep']) test(`${mode} replica deletion confirms first and clears the completed preview and history`, async t => {
+  const task = { id: 'delete-result', mode, status: 'completed', createdAt: Date.now(), resultUrl: '/result.mp4', replacements: {} };
+  const requests = [], tasks = [task];
+  const page = await fixture(t, { tasks, apiFetch: (path, options) => {
+    if (options?.method !== 'DELETE') return;
+    requests.push(path); tasks.length = 0;
+    return Response.json({ deleted: true });
+  } });
+  page.recover(); await page.poll(); page.select(task.id);
+  assert.match(page.html(), /成片永久保存，仅在你主动删除时移除/);
+  assert.doesNotMatch(page.html(), /结果保留 3 天/);
+  assert.match(page.html(), /id="replica-delete"/);
+  const click = () => page.node('#replica-result-summary').onclick({ target: { closest: () => ({ id: 'replica-delete' }) } });
+  globalThis.confirm = () => false; click(); await page.settle(); assert.equal(requests.length, 0);
+  globalThis.confirm = () => true; click(); await page.settle();
+  assert.deepEqual(requests, ['/api/video-replica/tasks/delete-result']);
+  assert.doesNotMatch(page.html(), /id="replica-delete"|data-replica-task="delete-result"|src="\/result.mp4"/);
 });

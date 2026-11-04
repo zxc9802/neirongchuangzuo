@@ -378,3 +378,28 @@ test('restaurant assets appear after the first page while later pages are still 
   assert.equal(snapshot.records.length, 1);
   assert.equal(snapshot.loading, false);
 });
+
+test('completed replicas remain in assets permanently with no expiry date or countdown', async t => {
+  const completedAt = Date.now() - 365 * 24 * hour;
+  const task = { id, status: 'completed', completedAt, expiresAt: null, resultUrl: `/api/video-replica/tasks/${id}/result`, billing: { status: 'settled' } };
+  const records = collectGeneratedAssets([], [], Date.now(), [], [task]);
+  assert.equal(records.length, 1); assert.equal(records[0].expires, Infinity);
+  for (const status of ['deleted', 'expired', 'failed', 'running']) assert.equal(collectGeneratedAssets([], [], Date.now(), [], [{ ...task, status }]).length, 0);
+  assert.equal(collectGeneratedAssets([], [], Date.now(), [], [{ ...task, billing: { status: 'reserved' } }]).length, 0);
+  assert.equal(collectGeneratedAssets([], [], Date.now(), [], [{ ...task, resultUrl: 'https://other.example/result.mp4' }]).length, 0);
+  const previous = { document: globalThis.document, fetch: globalThis.fetch, workspaceUser: globalThis.workspaceUser }, nodes = new Map();
+  const node = selector => { if (!nodes.has(selector)) nodes.set(selector, { innerHTML: '', addEventListener() {} }); return nodes.get(selector); };
+  globalThis.workspaceUser = { id: crypto.randomUUID() };
+  globalThis.document = { body: { dataset: { page: 'assets' } }, querySelector: node };
+  globalThis.fetch = async path => Response.json(path === '/api/assets/materials' ? { materials: [] } : { tasks: path.startsWith('/api/video-replica/') ? [task] : [] });
+  t.after(() => { disposeGeneratedAssets(); Object.assign(globalThis, previous); });
+  let modal;
+  const ctx = { mode: 'assets', esc: value => String(value ?? ''), icon: () => '', button: () => '', openModal: (_title, description, content) => { modal = description + content; } };
+  bindGeneratedAssets(ctx);
+  for (let i = 0; i < 50 && !node('#generated-assets-results').innerHTML.includes('person-replica.mp4'); i++) await new Promise(resolve => setImmediate(resolve));
+  const html = node('#generated-assets-results').innerHTML;
+  assert.match(html, /永久保存/); assert.match(html, /仅在你主动删除时移除/);
+  assert.doesNotMatch(html, /Invalid Date|Infinity|剩余|到期清理/);
+  handleGeneratedAssetsAction('generated-asset-preview', { dataset: { key: `video:${id}` } }, ctx);
+  assert.match(modal, /永久保存/); assert.doesNotMatch(modal, /Invalid Date|到期/);
+});
