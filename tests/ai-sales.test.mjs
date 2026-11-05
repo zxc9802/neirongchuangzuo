@@ -26,8 +26,9 @@ test('sales requires character, voice and real materials; validates on-screen pl
   assert.throws(()=>assertSalesMaterials(assets,{generateAudio:false}),e=>e.code==='SALES_AUDIO_REQUIRED');
   assert.doesNotThrow(()=>assertSalesPlan(shots,plan,assets));
   for(const i of [0,2]){const next=structuredClone(shots);next[i].referenceIds=['food'];assert.throws(()=>assertSalesPlan(next,plan,assets),e=>e.outputIssue==='invalid_schema');}
-  const persona=structuredClone(shots);persona[0].referenceIds=['actor'];persona[1].referenceIds=['food'];persona[2].referenceIds=['actor'];
+  const persona=structuredClone(shots);persona[0].referenceIds=['actor','food'];persona[1].referenceIds=['food'];persona[2].referenceIds=['actor'];
   assert.doesNotThrow(()=>assertSalesPlan(persona,plan,assets));
+  const isolated=structuredClone(persona);isolated[0].referenceIds=['actor'];assert.throws(()=>assertSalesPlan(isolated,plan,assets),e=>e.outputIssue==='invalid_schema');
   persona[1].referenceIds=['actor'];assert.throws(()=>assertSalesPlan(persona,plan,assets),e=>e.outputIssue==='invalid_schema');
   assert.throws(()=>assertSalesPlan(shots,{cast:[]},assets));
   const input={skill:'ai-sales',settings:SALES_SETTINGS,assets};
