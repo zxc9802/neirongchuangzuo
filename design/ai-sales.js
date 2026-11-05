@@ -60,7 +60,7 @@ function update(s) {
   s.root.querySelectorAll('.sales-fields input,.sales-fields textarea').forEach(n=>n.disabled=Boolean(busy));
   s.root.querySelector('[data-sales=new]').disabled=Boolean(s.busy);
   s.root.querySelector('#sales-status').textContent=s.busy || pending(op?.status) ? s.activity || op?.progress || t('正在编导…') : pending(task?.status) ? t('视频生成中，可稍后回来查看') : missing.length ? t('请添加')+'：'+missing.join('、') : script&&!unchanged ? t('文案已修改，请重新编导') : t('素材已就绪');
-  s.root.querySelector('#sales-error').textContent=s.error || (op?.status==='failed'?op.error:'') || (task?.status==='failed'?task.error:'') || '';
+  s.root.querySelector('#sales-error').textContent=s.error || (op?.status==='failed'?op.error:'') || (task?.status==='failed'?task.error:'') || s.pollError || '';
   const usage=s.session?.operations.reduce((n,o)=>n+(o.billing?.usagePoints ?? o.billing?.chargedPoints ?? 0),0)||0;
   s.root.querySelector('#sales-usage').textContent=t('编导已消耗')+' '+usage+' '+t('积分');
   s.root.querySelector('#sales-quote').textContent=s.quote?t('预计')+' '+s.quote.points+' '+t('积分')+(s.quote.unlimited?' · '+t('无限积分'):''):'';
@@ -136,14 +136,15 @@ async function library(s, purpose) {
 }
 async function poll(s) {
   if(current!==s || s.polling || s.busy)return;s.polling=true;
+  const id=s.conversationId;
   try {
-    const id=s.conversationId;
     const [history,session]=await Promise.all([api('/conversations?module=ai-sales'),id?api('/conversations/'+id):Promise.resolve(null)]);
     if(current!==s || id!==s.conversationId || s.busy)return;
+    s.pollError='';
     s.conversations=history.conversations;
     if(session){const before=JSON.stringify(s.session?.operations.map(o=>o.billing));s.session=session.conversation;if(before!==JSON.stringify(s.session.operations.map(o=>o.billing)))void refreshWorkspaceCredits();}
     update(s);
-  }catch(e){if(current===s){s.error=e.message;update(s);}}finally{s.polling=false;}
+  }catch(e){if(current===s && id===s.conversationId && !s.busy){s.pollError=e.message;update(s);}}finally{s.polling=false;}
 }
 export function mountAiSales(root, ctx) {
   if(!canUseAiSales(globalThis.workspaceUser)){root.textContent=t('此账号暂未开放AI带货。');return;}
