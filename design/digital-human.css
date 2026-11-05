@@ -18,6 +18,7 @@
 .dh-upload-label {position:relative;cursor:pointer;overflow:hidden;}
 .dh-upload-label input[type=file] {position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer;font-size:0;}
 .dh-upload-label.is-disabled {opacity:.55;cursor:wait;pointer-events:none;}
+.dh-upload-label[data-dh-drop].is-dragover {outline:2px solid var(--blue,#1677ff);outline-offset:3px;background:var(--ui-raised,#f0f6ff);color:var(--ui-text,#334155);}
 .dh-avatar-upload {height:108px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:11px;border:1px dashed #b9cee9;border-radius:10px;background:#f7faff;color:#6a8bb9;font-size:14px;}
 .dh-avatar-upload:hover {background:#f0f6ff;border-color:#83b0ec;}
 .dh-avatar-upload .icon {width:23px;height:23px;}

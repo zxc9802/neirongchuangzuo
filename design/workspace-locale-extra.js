@@ -2090,6 +2090,10 @@ export const EXTRA_UI_COPY = {
     "en": "Upload a talking-head video",
     "ms": "Muat naik video bercakap di hadapan kamera"
   },
+  "点击或拖拽上传视频": {
+    "en": "Click or drop a video to upload",
+    "ms": "Klik atau seret video untuk dimuat naik"
+  },
   "上传口播形象视频": {
     "en": "Upload a video of the talking-head avatar",
     "ms": "Muat naik video avatar bercakap di hadapan kamera"

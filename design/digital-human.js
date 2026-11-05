@@ -86,7 +86,7 @@ function hydrate(ctx) {
 function uploadControl(ctx, kind, className, label) {
   const { icon, esc } = ctx;
   const busy = Boolean(state.upload);
-  return `<label class="${className} dh-upload-label ${busy ? 'is-disabled' : ''}" ${busy ? 'aria-disabled="true"' : ''}>${icon('plus')}<span>${esc(label)}</span><input type="file" data-dh-upload="${kind}" aria-label="${kind === 'avatar' ? '上传口播形象视频' : '上传参考声音'}" accept="${kind === 'avatar' ? '.mp4,.mov,.webm,.mkv,.m4v' : '.mp3,.wav,.m4a,.aac,.mp4,.mov'}" ${busy ? 'disabled' : ''}></label>`;
+  return `<label class="${className} dh-upload-label ${busy ? 'is-disabled' : ''}" ${kind === 'avatar' ? 'data-dh-drop="avatar" title="点击或拖拽上传视频"' : ''} ${busy ? 'aria-disabled="true"' : ''}>${icon('plus')}<span>${esc(label)}</span><input type="file" data-dh-upload="${kind}" aria-label="${kind === 'avatar' ? '上传口播形象视频' : '上传参考声音'}" accept="${kind === 'avatar' ? '.mp4,.mov,.webm,.mkv,.m4v' : '.mp3,.wav,.m4a,.aac,.mp4,.mov'}" ${busy ? 'disabled' : ''}></label>`;
 }
 
 function inlineError(ctx, text, section) {
@@ -102,7 +102,7 @@ function statusMarkup(ctx) {
 
 function materialsMarkup(ctx) {
   const avatar = currentAvatar(), cover = safeUrl(avatar?.coverUrl);
-  return `<div class="dh-field-heading"><label>出镜形象</label></div>${avatar ? `<div class="dh-selected-avatar"><button class="dh-selected-avatar-cover" data-action="dh-preview-media" data-kind="avatar" data-id="${ctx.esc(avatar.id)}" aria-label="预览形象：${ctx.esc(avatar.name)}">${cover ? `<img src="${ctx.esc(cover)}" alt="" loading="lazy">` : ctx.icon('avatar')}<span class="dh-cover-play">${ctx.icon('play')}</span></button><div class="dh-selected-avatar-copy"><strong>${ctx.esc(avatar.name)}</strong><small>${duration(avatar.durationSeconds)} · 已选中</small>${ctx.button('dh-browse-avatars', '更换形象', 'dh-link-button')}</div></div><div class="dh-avatar-bottom">${uploadControl(ctx, 'avatar', 'dh-small-upload', '上传新形象')}</div>` : `${uploadControl(ctx, 'avatar', 'dh-avatar-upload', '上传口播视频')}<div class="dh-avatar-guidance"><p>正面清晰的口播视频</p></div>${ctx.button('dh-browse-avatars', ctx.icon('folder') + '从素材库选择', 'dh-browse-button')}`}<p class="dh-upload-note">MP4 / MOV 等视频，最大 500 MB</p><div id="dh-upload-progress">${uploadProgress(ctx, 'avatar')}</div>`;
+  return `<div class="dh-field-heading"><label>出镜形象</label></div>${avatar ? `<div class="dh-selected-avatar"><button class="dh-selected-avatar-cover" data-action="dh-preview-media" data-kind="avatar" data-id="${ctx.esc(avatar.id)}" aria-label="预览形象：${ctx.esc(avatar.name)}">${cover ? `<img src="${ctx.esc(cover)}" alt="" loading="lazy">` : ctx.icon('avatar')}<span class="dh-cover-play">${ctx.icon('play')}</span></button><div class="dh-selected-avatar-copy"><strong>${ctx.esc(avatar.name)}</strong><small>${duration(avatar.durationSeconds)} · 已选中</small>${ctx.button('dh-browse-avatars', '更换形象', 'dh-link-button')}</div></div><div class="dh-avatar-bottom">${uploadControl(ctx, 'avatar', 'dh-small-upload', '上传新形象')}</div>` : `${uploadControl(ctx, 'avatar', 'dh-avatar-upload', '点击或拖拽上传视频')}<div class="dh-avatar-guidance"><p>正面清晰的口播视频</p></div>${ctx.button('dh-browse-avatars', ctx.icon('folder') + '从素材库选择', 'dh-browse-button')}`}<p class="dh-upload-note">MP4 / MOV 等视频，最大 500 MB</p><div id="dh-upload-progress">${uploadProgress(ctx, 'avatar')}</div>`;
 }
 
 function libraryTabsMarkup(ctx) {
@@ -485,6 +485,25 @@ export function bindDigitalHuman(ctx) {
   unsubscribeCredits?.(); unsubscribeCredits = subscribeWorkspaceCredits(patchGenerate);
   root = document.querySelector('.avatar-studio');
   if (!root) return;
+  for (const type of ['dragenter', 'dragover']) root.addEventListener(type, event => {
+    if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
+    event.preventDefault();
+    const zone = event.target.closest('[data-dh-drop="avatar"]');
+    event.dataTransfer.dropEffect = zone && !state.upload ? 'copy' : 'none';
+    if (zone && !state.upload) zone.classList.add('is-dragover');
+  }, { signal: binding.signal });
+  root.addEventListener('dragleave', event => {
+    const zone = event.target.closest('[data-dh-drop="avatar"]');
+    if (zone && !zone.contains(event.relatedTarget)) zone.classList.remove('is-dragover');
+  }, { signal: binding.signal });
+  root.addEventListener('drop', event => {
+    if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
+    event.preventDefault();
+    const zone = event.target.closest('[data-dh-drop="avatar"]');
+    if (!zone) return;
+    zone.classList.remove('is-dragover');
+    void uploadFile('avatar', event.dataTransfer.files?.[0], ctx);
+  }, { signal: binding.signal });
   root.addEventListener('input', event => {
     if (event.target.id === 'dh-script') updateScript(event.target.value, ctx);
     if (event.target.dataset.dhOption === 'emotionIntensity') {
