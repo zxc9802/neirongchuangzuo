@@ -8,6 +8,7 @@ import { createMixHandler } from './services/mix/server.mjs';
 import { loadAIConfig } from './services/ai/server.mjs';
 import { workspaceDataRoot } from './services/runtime-paths.mjs';
 import { loadWorkspaceSettings } from './services/runtime-settings.mjs';
+import { canUseAiSales } from './design/ai-sales-policy.js';
 import { getWorkspaceUser, workspaceAuthRequired } from './services/auth/workspace.mjs';
 import { dailyCallExemptAccount, withDailyCallPolicy } from './services/ai/call-policy.mjs';
 import { createCreditsLedger } from './services/credits/store.mjs';
@@ -40,7 +41,8 @@ const files = new Map([
   ['/video-replica.js', ['design/video-replica.js', 'text/javascript; charset=utf-8']],
   ['/replica-asset-picker.js', ['design/replica-asset-picker.js', 'text/javascript; charset=utf-8']],
   ['/video-replica.css', ['design/video-replica.css', 'text/css; charset=utf-8']],
-  ...['video-creator', 'video-creator-ui', 'video-creator-drafts', 'video-creator-sync', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ...['ai-sales', 'ai-sales-policy', 'video-creator', 'video-creator-ui', 'video-creator-drafts', 'video-creator-sync', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ['/ai-sales.css', ['design/ai-sales.css', 'text/css; charset=utf-8']],
   ['/video-creator.css', ['design/video-creator.css', 'text/css; charset=utf-8']],
   ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-upload', 'image-presets', 'image-preset-ui', 'generated-assets', 'model-labels', 'malaysian-prices'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
   ...['digital-human', 'digital-human-api'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),
@@ -152,6 +154,7 @@ export function createPreviewServer({ backendUrl = 'http://127.0.0.1:3001', publ
       return;
     }
     req.authenticatedUserId = user?.id;
+    req.aiSalesAllowed = canUseAiSales(user);
     req.callsUnlimited = user?.callsUnlimited === true;
     req.dailyCallExempt = !!user && dailyCallExemptAccount(user.account, runtimeSettings.AI_DAILY_EXEMPT_ACCOUNTS ?? 'zxc9911');
     if (path === '/api/workspace/credits') {

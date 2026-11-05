@@ -1,9 +1,10 @@
+import { assertSalesPlan, assertSalesNarration } from './sales.mjs';
 import { narrationTarget, narrationDirection } from './narration-budget.mjs';
 import { OBSERVATION_SYSTEM, validateObservations, GROUNDING_RULES, validateGrounding, narrationRepairRequest, applyNarrationRepair, QUALITY_SYSTEM, validateQuality } from './director-quality.mjs';
 import { readFile } from 'node:fs/promises';
 import sharp from 'sharp';
 import { setTimeout as delay } from 'node:timers/promises';
-import { VIDEO_SKILLS, VIDEO_LANGUAGES, videoAssetPurpose } from '../../design/video-catalog.js';
+import { ALL_VIDEO_SKILLS as VIDEO_SKILLS, VIDEO_LANGUAGES, videoAssetPurpose } from '../../design/video-catalog.js';
 import { parseDirectorOutput } from './director-structured-output.mjs';
 import { DIRECTOR_OUTPUT_TOKENS, readDirectorResponse, directorFailure, redactDirectorValue } from './director-response.mjs';
 import { skillDirection, verifyOfferFacts, offerClarification, offerDirection } from './skill-directions.mjs';
@@ -85,6 +86,7 @@ export function validateDirectorResult(value, input) {
   const globalDirection = text(s.globalDirection, 3000);
   const referenceImages = images.filter(a => used.has(a.id));
   const plan = normalizeDirectorPlan(s.plan, input, used, invalidOutput);
+  if (input.skill === 'ai-sales') { assertSalesPlan(shots, plan, input.assets); assertSalesNarration(shots, input.fixedNarration); }
   const remap = value => value.replace(/@?图片\s*(\d+)/g, (label, number) => {
     const source = images[Number(number) - 1]; if (!source) return label;
     const index = referenceImages.findIndex(a => a.id === source.id);

@@ -1,11 +1,13 @@
 import { observeTask, recordTaskError, taskTimeline } from './timeline.mjs';
 import { safeVideoError } from '../video/errors.mjs';
+import { join } from 'node:path';
 import { readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { createHash, createHmac, timingSafeEqual, randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import { VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, videoAssetPurpose, sameVideoScriptSettings } from '../../design/video-catalog.js';
+import { ALL_VIDEO_SKILLS as VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, videoAssetPurpose, sameVideoScriptSettings } from '../../design/video-catalog.js';
 import { createCreatorStore, UUID } from './store.mjs';
 import { createDirectorModel, creatorError } from './model.mjs';
+import { assertSalesMaterials, assertSalesPlan } from './sales.mjs';
 import { DIRECTOR_PLAN_VERSION } from './director-plan.mjs';
 import { DIRECTOR_OUTPUT_TOKENS, directorAttemptSummary } from './director-response.mjs';
 import { createCreatorProvider, creatorConfig } from './provider.mjs';
@@ -118,7 +120,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       if (meter.enabled) { const hold = await credits.reserveCost(scope); op.billing = { status: hold.status, exempt: hold.exempt, mode: 'api_cost' }; }
       op.status = 'running'; op.startedAt = now(); op.progress = '正在分析素材并编排分镜'; op.dispatched = true; await save(c);
       const result = await meter.run(scope, () => director.generate({ groundingVersion: 1, planningVersion: op.planningVersion || 1, skill: op.skill, settings: op.settings, message: op.message,
-        assets: op.assetIds.map(id => ({ ...c.assets.find(a => a.id === id) })),
+        assets: op.assetIds.map(id => ({ ...c.assets.find(a => a.id === id) })), fixedNarration: op.fixedNarration,
         history: c.operations.filter(o => o.skill === op.skill && o.status === 'completed' && o.result)
           .flatMap(o => [{ role: 'user', content: o.message }, { role: 'assistant', content: JSON.stringify(o.result) }]).slice(-10) }, { signal: controller.signal, onAttempt,
         onProgress: progress => { op.progress = progress; } }));
@@ -292,16 +294,36 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         await serveMedia(req, res, asset.path, asset.type === 'image' ? 'image/jpeg' : 'audio/wav'); return;
       }
       const userId = req.authenticatedUserId;
+      const salesAllowed = req.aiSalesAllowed === true;
+      const permitted = c => c.skill !== 'ai-sales' || salesAllowed;
+      const visible = c => permitted(c) && (!url.searchParams.has('module') || (url.searchParams.get('module') === 'ai-sales' ? c.skill === 'ai-sales' : c.skill !== 'ai-sales'));
+      const checkSkill = skill => { if (skill === 'ai-sales' && !salesAllowed) throw creatorError('此账号暂未开放AI带货。', 403, 'AI_SALES_FORBIDDEN'); };
+      if (url.searchParams.get('module') === 'ai-sales') checkSkill('ai-sales');
       if (!userId) throw creatorError('请先登录。', 401, 'UNAUTHENTICATED');
       if (req.headers['sec-fetch-site'] === 'cross-site') throw creatorError('请求来源无效。', 403, 'CREATOR_ORIGIN_DENIED');
       if (req.headers.origin && ![config.publicOrigin, publicOrigin, `http://${req.headers.host}`, `https://${req.headers.host}`].includes(req.headers.origin)) throw creatorError('请求来源无效。', 403, 'CREATOR_ORIGIN_DENIED');
       if (!['GET', 'HEAD'].includes(req.method) && closing) throw creatorError('服务正在重启，尚未发起生成。', 503, 'SERVICE_CLOSING');
+      if (route[0] === 'sales-preset') {
+        checkSkill('ai-sales');
+        if (req.method !== 'GET') throw creatorError('接口不存在。', 404);
+        const preset = [{ purpose: 'character', name: '毛义鹏人物.jpg', file: 'character.jpg', mime: 'image/jpeg' },
+          { purpose: 'voice', name: '毛义鹏声音.wav', file: 'voice.wav', mime: 'audio/wav' }];
+        const available = [];
+        for (const asset of preset) {
+          const path = join(storageDir, 'sales-preset', asset.file);
+          try { await readFile(path); available.push({ ...asset, path }); } catch (cause) { if (cause.code !== 'ENOENT') throw cause; }
+        }
+        if (route.length === 1) { json(res, 200, { assets: available.map(({ purpose, name, mime }) => ({ purpose, name, mime, url: `${PREFIX}/sales-preset/${purpose}` })) }); return; }
+        const asset = available.find(a => a.purpose === route[1]);
+        if (!asset) throw creatorError('默认人物或声音暂不可用，请自行上传。', 404);
+        await serveMedia(req, res, asset.path, asset.mime); return;
+      }
       if (route[0] === 'workspace' && route.length === 1) {
         if (req.method === 'GET') { const { userId: _, ...workspace } = await store.readWorkspace(userId); json(res, 200, workspace); return; }
         if (req.method === 'PATCH') { const input = await body(req, 512 * 1024); const { userId: _, ...workspace } = await store.updateWorkspace(userId, input.changes, now()); json(res, 200, workspace); return; }
       }
       if (route[0] === 'library' && req.method === 'GET') {
-        const assets = [...store.records.values()].filter(c => c.userId === userId).flatMap(c => c.assets.map(a => {
+        const assets = [...store.records.values()].filter(c => c.userId === userId && visible(c)).flatMap(c => c.assets.map(a => {
           const latest = c.tasks.filter(t => t.materials?.[a.id]).sort((a, b) => b.createdAt - a.createdAt)[0]?.materials[a.id];
           return { ...assetView(c, a), conversationId: c.id, createdAt: a.uploadedAt || c.createdAt,
             expiresAt: c.mediaExpiresAt, source: 'uploaded', status: now() >= c.mediaExpiresAt ? 'expired' : 'uploaded',
@@ -310,19 +332,20 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         const unique = new Map(); for (const asset of assets) if (!unique.has(asset.originKey || asset.id)) unique.set(asset.originKey || asset.id, {...asset, id:asset.originKey || asset.id});
         json(res, 200, { assets: [...unique.values()] }); return;
       }
-      if (route[0] === 'config' && req.method === 'GET') { json(res, 200, { skills: VIDEO_SKILLS.map(({ focus, ...s }) => s), models: VIDEO_MODELS, directorEnabled: director.enabled,
+      if (route[0] === 'config' && req.method === 'GET') { json(res, 200, { skills: VIDEO_SKILLS.filter(s => s.id !== 'ai-sales' || salesAllowed).map(({ focus, ...s }) => s), models: VIDEO_MODELS, directorEnabled: director.enabled,
         generationEnabled: Boolean(config.enabled), limits: { images: 30, characters: 10, audio: 1, imageBytes: VIDEO_IMAGE_MAX_BYTES - 1, audioBytes: VIDEO_AUDIO_MAX_BYTES }, costMode: meter.enabled, cnyPerSecond }); return; }
       if (route[0] === 'quote' && req.method === 'POST') {
         const settings = normalizeVideoSettings((await body(req)).settings), wallet = credits ? await credits.snapshot(userId) : null;
         json(res, 200, { points: points(settings.duration), affordable: !wallet || wallet.unlimited || wallet.available >= points(settings.duration), unlimited: wallet?.unlimited === true }); return;
       }
       if (route[0] === 'tasks' && route.length === 1 && req.method === 'GET') {
-        const tasks = [...store.records.values()].filter(c => c.userId === userId).flatMap(c => c.tasks.map(t => taskView(c, t))).sort((a, b) => b.createdAt - a.createdAt);
+        const tasks = [...store.records.values()].filter(c => c.userId === userId && visible(c)).flatMap(c => c.tasks.map(t => taskView(c, t))).sort((a, b) => b.createdAt - a.createdAt);
         json(res, 200, { tasks: tasks.filter(t => !url.searchParams.has('completed') || t.status === 'completed').slice(0, 100) }); return;
       }
       if (route[0] === 'tasks' && UUID.test(route[1] || '')) {
         const c = [...store.records.values()].find(c => c.userId === userId && c.tasks.some(t => t.id === route[1]));
         if (!c) throw creatorError('任务不存在。', 404, 'CREATOR_NOT_FOUND');
+        checkSkill(c.skill);
         const task = c.tasks.find(t => t.id === route[1]);
         if (route.length === 2 && req.method === 'GET') { json(res, 200, { task: taskView(c, task) }); return; }
         if (route[2] === 'result' && ['GET', 'HEAD'].includes(req.method)) {
@@ -336,23 +359,25 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       }
       if (route[0] !== 'conversations') throw creatorError('接口不存在。', 404);
       if (route.length === 1) {
-        if (req.method === 'GET') { json(res, 200, { conversations: [...store.records.values()].filter(c => c.userId === userId).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 50).map(c => ({ id: c.id, skill: c.skill, updatedAt: c.updatedAt, title: c.operations.findLast(o => o.result?.script)?.result.script.title || VIDEO_SKILLS.find(s => s.id === c.skill)?.name })) }); return; }
+        if (req.method === 'GET') { json(res, 200, { conversations: [...store.records.values()].filter(c => c.userId === userId && visible(c)).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 50).map(c => ({ id: c.id, skill: c.skill, updatedAt: c.updatedAt, title: c.operations.findLast(o => o.result?.script)?.result.script.title || VIDEO_SKILLS.find(s => s.id === c.skill)?.name })) }); return; }
         if (req.method === 'POST') {
-          const input = await body(req), id = input.requestId;
+          const input = await body(req), id = input.requestId; checkSkill(input.skill);
           if (!UUID.test(id || '') || !VIDEO_SKILLS.some(s => s.id === input.skill)) throw creatorError('创作方向无效。');
           await lock(id, async () => {
-            if (record(id)) { owned(id, userId); return; }
+            if (record(id)) { checkSkill(owned(id, userId).skill); return; }
             if ([...store.records.values()].filter(c => c.userId === userId).length >= 100) throw creatorError('创作记录较多，请稍后再试。', 429);
             const c = { id, userId, skill: input.skill, settings: normalizeVideoSettings(input.settings), createdAt: now(), updatedAt: now(), recordExpiresAt: now() + 30 * DAY, mediaExpiresAt: now() + 3 * DAY, assets: [], messages: [], operations: [], tasks: [] };
             await save(c); store.records.set(id, c);
           }); json(res, 201, { conversation: sessionView(owned(id, userId)) }); return;
         }
       }
-      const c = owned(route[1], userId);
+      const c = owned(route[1], userId); checkSkill(c.skill);
       if (route.length === 2 && req.method === 'GET') { json(res, 200, { conversation: sessionView(c) }); return; }
       if (route.length === 2 && req.method === 'PATCH') {
         const input = await body(req); await lock(c.id, async () => {
           live(c); if (active(c)) throw creatorError('请等待当前任务完成。', 409);
+          checkSkill(input.skill);
+          if ((c.skill === 'ai-sales') !== (input.skill === 'ai-sales')) throw creatorError('请在对应模块新建创作。', 409, 'CREATOR_MODULE_MISMATCH');
           if (!VIDEO_SKILLS.some(s => s.id === input.skill)) throw creatorError('请选择有效的创作方向。');
           c.skill = input.skill; c.settings = normalizeVideoSettings(input.settings); await save(c);
         }); json(res, 200, { conversation: sessionView(c) }); return;
@@ -405,9 +430,12 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         const input = await body(req); let operation, fresh = false;
         await lock(c.id, async () => {
           live(c); if (!UUID.test(input.requestId || '')) throw creatorError('编导操作标识无效。');
-          const fingerprint = hash({ settings: normalizeVideoSettings(input.settings), message: input.message?.trim(), skill: c.skill, expectedScriptId: input.expectedScriptId || null, assetIds: c.assets.map(a => a.id) });
+          if (c.skill === 'ai-sales' && input.fixedNarration !== undefined && (typeof input.fixedNarration !== 'string' || input.fixedNarration.length > 4000)) throw creatorError('指定文案需在4000字以内。');
+          const fixedNarration = c.skill === 'ai-sales' ? input.fixedNarration?.trim() || '' : undefined;
+          const fingerprint = hash({ settings: normalizeVideoSettings(input.settings), message: input.message?.trim(), skill: c.skill, expectedScriptId: input.expectedScriptId || null, assetIds: c.assets.map(a => a.id), ...(fixedNarration !== undefined ? { fixedNarration } : {}) });
           if (c.operations.some(o => o.id === input.requestId)) { operation = c.operations.find(o => o.id === input.requestId); if (operation.fingerprint !== fingerprint) throw creatorError('不能用同一操作标识修改需求或设置。', 409); return; }
           if ([...store.records.values()].some(x => x.userId === userId && x.operations.some(o => o.id === input.requestId))) throw creatorError('该操作标识已用于其他创作，请重新发起。', 409, 'DIRECTOR_REQUEST_CONFLICT');
+          if (c.skill === 'ai-sales') assertSalesMaterials(c.assets, input.settings);
           if (!director.enabled) throw creatorError('编导服务尚未配置。', 503, 'DIRECTOR_NOT_CONFIGURED');
           if (active(c)) throw creatorError('请等待当前任务完成。', 409);
           if ([...store.records.values()].filter(x => x.userId === userId).flatMap(x => x.operations).filter(scriptPending).length >= 2 || workers.size >= 3) throw creatorError('已有任务处理中，请稍后再试。', 429);
@@ -417,7 +445,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           const last = c.operations.findLast(o => o.status === 'completed');
           if ((input.expectedScriptId || null) !== (last?.id || null)) throw creatorError('脚本已更新，请刷新后继续修改。', 409, 'DIRECTOR_REVISION_CONFLICT');
           c.settings = normalizeVideoSettings(input.settings);
-          operation = { id: input.requestId, fingerprint, planningVersion: DIRECTOR_PLAN_VERSION, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
+          operation = { id: input.requestId, fingerprint, ...(fixedNarration !== undefined ? { fixedNarration } : {}), planningVersion: DIRECTOR_PLAN_VERSION, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
           c.operations.push(operation); c.recordExpiresAt = now() + 30 * DAY; await save(c); fresh = true;
         }); json(res, 202, { operation: operationView(operation), conversationId: c.id }); if (fresh) launch(operation.id, () => runScript(c, operation)); return;
       }
@@ -444,6 +472,12 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
               referenceImageIds = op.result.script.referenceImageIds;
               if (!referenceImageIds.length || referenceImageIds.some(id => !c.assets.some(a => a.id === id && a.type === 'image'))) throw creatorError('编导参考图片无效，请重新编导。', 409, 'SCRIPT_SETTINGS_CHANGED');
             }
+          }
+          if (c.skill === 'ai-sales') {
+            assertSalesMaterials(c.assets, settings);
+            const script = c.operations.find(o => o.id === input.scriptId && o.status === 'completed')?.result?.script;
+            if (!script || script.videoPrompt !== input.prompt.trim()) throw creatorError('请先生成并应用AI带货脚本。', 409, 'SALES_SCRIPT_REQUIRED');
+            assertSalesPlan(script.shots, script.plan, c.assets);
           }
           const model = VIDEO_MODELS.find(m => m.id === settings.model);
           if (referenceImageIds.length > model.maxImages) throw creatorError(`所选模型最多支持${model.maxImages}张图片，请选择video-max或新建创作。`, 400, 'CREATOR_MODEL_LIMIT');

@@ -299,6 +299,8 @@ async function loadOnce() {
     }) : Promise.resolve();
     const catalog = Promise.all([state.config ? Promise.resolve(state.config) : request('/config'), request('/tasks'), request('/conversations')]).then(([config, tasks, conversations]) => {
       if (state.owner !== account) return;
+      tasks.tasks = tasks.tasks.filter(task => task.skill !== 'ai-sales');
+      conversations.conversations = conversations.conversations.filter(c => c.skill !== 'ai-sales');
       const previous = state.tasks;
       const merged = tasks.tasks.map(task => settledSnapshot(previous.find(t => t.id === task.id), task));
       let changed = JSON.stringify(previous) !== JSON.stringify(merged) || JSON.stringify(state.conversations.map(({updatedAt, ...c}) => c)) !== JSON.stringify(conversations.conversations.map(({updatedAt, ...c}) => c)) || !state.config;
