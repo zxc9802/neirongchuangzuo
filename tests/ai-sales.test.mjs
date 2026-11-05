@@ -10,7 +10,7 @@ import sharp from 'sharp';
 import { canUseAiSales, SALES_SETTINGS } from '../design/ai-sales-policy.js';
 import { assertSalesMaterials, assertSalesPlan } from '../services/video-creator/sales.mjs';
 import { createVideoCreatorHandler } from '../services/video-creator/server.mjs';
-import { validateDirectorResult } from '../services/video-creator/model.mjs';
+import { validateDirectorResult, createDirectorModel } from '../services/video-creator/model.mjs';
 import { createPreviewServer } from '../preview.mjs';
 
 const assets=[{id:'actor',type:'image',purpose:'character'},{id:'food',type:'image',purpose:'reference'},{id:'voice',type:'audio',purpose:'voice'}];
@@ -75,4 +75,19 @@ test('sales API is gated, separates histories, survives reload, refuses direct g
   }
   const generate=await call('/conversations/'+id+'/generate',{requestId:randomUUID(),settings:SALES_SETTINGS,prompt:'只生成空镜'});
   assert.equal(generate.status,409);assert.equal((await generate.json()).code,'SALES_SCRIPT_REQUIRED');
+});
+
+
+test('fixed sales copy uses non-thinking Doubao planning with headroom; other modes retain their request options',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'sales-budget-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const image=join(root,'photo.jpg');await sharp({create:{width:100,height:100,channels:3,background:'#888'}}).jpeg().toFile(image);
+  const inputAssets=assets.map(a=>({...a,path:image}));
+  const output={kind:'script',script:{title:'创作挑战',plan,shots},assets:assets.map(a=>({id:a.id,description:'参考素材',role:'参考用途',adopt:'保留素材特征'}))};
+  for(const scenario of [{skill:'ai-sales',copy:'看看这款产品看看这款产品看看这款产品',model:'doubao-seed-2-1-pro-260915',disabled:true},{skill:'ai-sales',copy:'',model:'doubao-seed-2-1-pro-260915'},{skill:'store-discovery',copy:'',model:'doubao-seed-2-1-pro-260915'},{skill:'ai-sales',copy:'看看这款产品看看这款产品看看这款产品',model:'claude-opus-5-5'}]){
+    let body;
+    const director=createDirectorModel({config:{apiKey:'test',baseUrl:'https://test.invalid',videoDirectorModel:scenario.model},fetchImpl:async(_url,options)=>{body=JSON.parse(options.body);return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}),{headers:{'Content-Type':'application/json'}});}});
+    await director.generate({skill:scenario.skill,fixedNarration:scenario.copy,settings:SALES_SETTINGS,assets:inputAssets,history:[],message:'创作挑战'});
+    assert.equal(body.max_tokens,scenario.skill==='ai-sales'?32768:16384);
+    assert.deepEqual(body.thinking,scenario.disabled?{type:'disabled'}:undefined);
+  }
 });

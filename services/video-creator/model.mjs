@@ -177,7 +177,9 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
     const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}] : content;
     const groundingSystem = observations ? '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n'+GROUNDING_RULES : '';
     const system = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以pacing.narration的全片字数为目标，先写自然连续的口播再分配画面；例如30秒通常140—160字。保留短换气，不为每次切镜停一秒以上，不机械压成每镜6—9字。长句可跨相邻镜头，实际发音约每秒5—6字，内容过密时先调整镜头时间，再删重复，不删除核心消费理由。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
-    let budget = maxOutputTokens, correction = '';
+    const planningOptions = input.skill === 'ai-sales' && input.fixedNarration?.trim() && /^doubao-seed-2-1-/.test(writingModel)
+      ? { thinking: { type: 'disabled' } } : {};
+    let budget = input.skill === 'ai-sales' ? Math.max(maxOutputTokens, 32768) : maxOutputTokens, correction = '';
     for (let attempt = 1; attempt <= 2; attempt++) {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
       const record = { attempt: ++sequence, stage:'planning', startedAt: Date.now(), status: 'started', phase: 'request', model: writingModel,
@@ -190,7 +192,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
         response = await fetchImpl(config.baseUrl + '/chat/completions', { method: 'POST', redirect: 'error',
           headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: system }, { role: 'user', content: correction ? [...planningContent, { type: 'text', text: correction }] : planningContent }],
-            stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: budget, temperature: .45 }), signal: callSignal });
+            stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: budget, ...planningOptions, temperature: .45 }), signal: callSignal });
         record.phase = 'response'; record.httpStatus = response.status; record.contentType = response.headers.get('content-type') || '';
         record.providerRequestId = response.headers.get('x-api-request-id') || response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || null;
         await publish();
