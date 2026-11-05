@@ -221,11 +221,17 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
         }
         if(observations && result.kind==='script') {
           validateGrounding(candidate,observations);
+          let reviewFeedback;
           for(let reviewAttempt=0;reviewAttempt<2;reviewAttempt++) {
             try {
-              result.quality=await auxiliary('quality',QUALITY_SYSTEM+(input.skill==='ai-sales'?'\n\n'+SALES_PERSONA_REVIEW:''),JSON.stringify({observations:indexedObservations,request:input.message,script:candidate.script,assets:candidate.assets}),validateQuality);
+              result.quality=await auxiliary('quality',QUALITY_SYSTEM+(input.skill==='ai-sales'?'\n\n'+SALES_PERSONA_REVIEW:'')+(reviewFeedback?'\n本次复核上一次审核。独立核对脚本与素材，只保留未解决的实质错误。重复的融合指令、负面约束、可精简的文字属于编辑建议，不能阻断；不要把“符合要求”“不构成实质错误”“通过”列为issues。若只有编辑建议，返回{"passed":true,"issues":[]}；若确有素材或事实错误，仍须不通过。':''),JSON.stringify({observations:indexedObservations,request:input.message,script:candidate.script,assets:candidate.assets,...(reviewFeedback?{previousReview:reviewFeedback}:{})}),validateQuality);
               break;
             } catch(reviewError) {
+              if(reviewAttempt===0 && input.skill==='ai-sales' && reviewError.outputIssue==='quality_rejected' && !signal?.aborted) {
+                reviewFeedback=reviewError.validationIssue;
+                onProgress?.('正在复核脚本检查结果');
+                continue;
+              }
               const transient=['DIRECTOR_NETWORK_ERROR','DIRECTOR_TIMEOUT','DIRECTOR_STREAM_INCOMPLETE'].includes(reviewError.code)
                 || ['PROVIDER_ERROR','DIRECTOR_PROVIDER_ERROR'].includes(reviewError.code)&&([429,500,502,503,504].includes(reviewError.providerStatus)||/timed?\s*out|timeout|temporarily|overloaded/i.test(reviewError.validationIssue||''));
               if(reviewAttempt===1||!transient||signal?.aborted)throw reviewError;

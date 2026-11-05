@@ -91,3 +91,23 @@ test('fixed sales copy uses non-thinking Doubao planning with headroom; other mo
     assert.deepEqual(body.thinking,scenario.disabled?{type:'disabled'}:undefined);
   }
 });
+
+test('sales rechecks editorial rejection without replanning, but still blocks confirmed factual defects',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'sales-review-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#888'}}).jpeg().toFile(path);
+  const input={skill:'ai-sales',settings:SALES_SETTINGS,groundingVersion:1,assets:assets.map(a=>({...a,path})),history:[],message:'创作挑战'};
+  const observations=assets.map(a=>({id:a.id,kinds:[a.type==='audio'?'voice':a.purpose==='character'?'character':'scene'],facts:['参考素材'],uncertain:[]}));
+  const output={kind:'script',script:{title:'AI创作挑战',plan,shots:shots.map(s=>({...s,evidence:s.referenceIds.map(id=>({assetId:id,factIndexes:[0],use:id==='actor'?'character':'scene'}))}))},assets:assets.map(a=>({id:a.id,description:'参考素材',role:'参考用途',adopt:'保留特征'}))};
+  for(const factual of [false,true]){
+    let plans=0,reviews=0;const sent=[];
+    const model=createDirectorModel({config:{apiKey:'test',baseUrl:'https://test.invalid',videoDirectorModel:'doubao',imageTextModel:'claude'},fetchImpl:async(_url,opts)=>{
+      const body=JSON.parse(opts.body);sent.push(body);let value;
+      if(sent.length===1)value={observations};
+      else if(Array.isArray(body.messages[1].content)){plans++;value=output;}
+      else {reviews++;value=factual||reviews===1?{passed:false,issues:[{shot:1,reason:factual?'编造门店区域':'合成说明正确，但负面约束可以精简'}]}:{passed:true,issues:[]};}
+      return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(value)}}]});
+    }});
+    if(factual){await assert.rejects(model.generate(input),e=>e.outputIssue==='quality_rejected');assert.equal(plans,2);assert.equal(reviews,4);}
+    else {const result=await model.generate(input);assert.equal(result.quality.passed,true);assert.equal(plans,1);assert.equal(reviews,2);assert.match(sent.at(-1).messages[1].content,/previousReview/);}
+  }
+});
