@@ -126,7 +126,9 @@ function directorSystem(skill) {
   if (skill === 'ai-sales') common = common.split('\n').filter(line => !['素材用途由purpose', '先形成简短', '门店或环境介绍要主动梳理', '文案先于逐镜描述', '整条旁白应像店主'].some(prefix => line.startsWith(prefix))).join('\n')
     .replace('同城到店视频编导', 'AI视频创作者社媒人设编导')
     .replaceAll('具体到店理由', '具体AI创作展示目标').replaceAll('目标顾客与消费场景', '目标观众与创作案例')
-    .replaceAll('店家介绍、中性展示或角色演示视角', 'AI创作者讲解与案例成片展示的双层视角').replaceAll('主题与到店理由', '人设主题与案例亮点');
+    .replaceAll('店家介绍、中性展示或角色演示视角', 'AI创作者讲解与案例成片展示的双层视角')
+    .replaceAll('默认从店家介绍或中性展示视角表达', '创作者首尾以本人身份介绍作品，案例内部以面向行业顾客的宣传视角表达')
+    .replaceAll('主题与到店理由', '人设主题与案例亮点');
   if (skill === 'group-buy') common = common.replace('"warnings":[],"script":',
     '"warnings":[],"offerFacts":{"package":{"value":"","sourceQuote":""},"price":{"value":"","sourceQuote":""},"validity":{"value":"","sourceQuote":""},"conditions":{"value":"","sourceQuote":""}},"script":');
   return [common, skillDirection(skill)].filter(Boolean).join('\n\n');
