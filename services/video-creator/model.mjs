@@ -1,4 +1,4 @@
-import { assertSalesPlan, assertSalesNarration } from './sales.mjs';
+import { assertSalesPlan, assertSalesNarration, SALES_PERSONA_REVIEW } from './sales.mjs';
 import { narrationTarget, narrationDirection } from './narration-budget.mjs';
 import { OBSERVATION_SYSTEM, validateObservations, GROUNDING_RULES, validateGrounding, narrationRepairRequest, applyNarrationRepair, QUALITY_SYSTEM, validateQuality } from './director-quality.mjs';
 import { readFile } from 'node:fs/promises';
@@ -92,7 +92,8 @@ export function validateDirectorResult(value, input) {
     const index = referenceImages.findIndex(a => a.id === source.id);
     return index < 0 ? '未选用的上传图' : `图片${index + 1}`;
   });
-  const compiledDirection = [plan ? compileDirectorPlan(plan, assets, referenceImages, input.settings.generateAudio ? input.assets.filter(a => a.type === 'audio') : [], remap) : remap(globalDirection), offer && remap(offerDirection(offer.facts))].filter(Boolean).join('\n\n');
+  let compiledDirection = [plan ? compileDirectorPlan(plan, assets, referenceImages, input.settings.generateAudio ? input.assets.filter(a => a.type === 'audio') : [], remap) : remap(globalDirection), offer && remap(offerDirection(offer.facts))].filter(Boolean).join('\n\n');
+  if (input.skill === 'ai-sales') compiledDirection = compiledDirection.replace('到店理由：', '创作目的：').replace('目标顾客：', '目标观众：');
   const videoPrompt = plan || globalDirection ? compileVideoPrompt(compiledDirection, shots.map(shot => ({ ...shot, ...Object.fromEntries(['intent', 'visual', 'camera', 'action', 'emotion', 'sound', 'voiceover', 'caption'].map(key => [key, remap(shot[key] || '')])) })), referenceImages, input.settings)
     : [text(s.videoPrompt, 12000), offer && offerDirection(offer.facts)].filter(Boolean).join('\n\n');
   if (videoPrompt.length > 12000) throw invalidOutput('完整分镜内容过长，请精简后重新编导。', 'invalid_schema', { field: 'videoPrompt', actualLength: videoPrompt.length, maximumLength: 12000 });
@@ -122,6 +123,10 @@ const SYSTEM = `你是起芽内容创作的同城到店视频编导。先观察�
 function directorSystem(skill) {
   let common = skill === 'signature' ? SYSTEM.split('\n').filter(line => !line.startsWith('门店或环境介绍要主动梳理')).join('\n')
     .replace('例如30秒素材充足的环境介绍通常需要8—10个有区别的镜头，', '招牌体验按产品看点和可见细节安排景别变化，') : SYSTEM;
+  if (skill === 'ai-sales') common = common.split('\n').filter(line => !['素材用途由purpose', '先形成简短', '门店或环境介绍要主动梳理', '文案先于逐镜描述', '整条旁白应像店主'].some(prefix => line.startsWith(prefix))).join('\n')
+    .replace('同城到店视频编导', 'AI视频创作者社媒人设编导')
+    .replaceAll('具体到店理由', '具体AI创作展示目标').replaceAll('目标顾客与消费场景', '目标观众与创作案例')
+    .replaceAll('店家介绍、中性展示或角色演示视角', 'AI创作者讲解与案例成片展示的双层视角').replaceAll('主题与到店理由', '人设主题与案例亮点');
   if (skill === 'group-buy') common = common.replace('"warnings":[],"script":',
     '"warnings":[],"offerFacts":{"package":{"value":"","sourceQuote":""},"price":{"value":"","sourceQuote":""},"validity":{"value":"","sourceQuote":""},"conditions":{"value":"","sourceQuote":""}},"script":');
   return [common, skillDirection(skill)].filter(Boolean).join('\n\n');
@@ -214,7 +219,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
           validateGrounding(candidate,observations);
           for(let reviewAttempt=0;reviewAttempt<2;reviewAttempt++) {
             try {
-              result.quality=await auxiliary('quality',QUALITY_SYSTEM,JSON.stringify({observations:indexedObservations,request:input.message,script:candidate.script,assets:candidate.assets}),validateQuality);
+              result.quality=await auxiliary('quality',QUALITY_SYSTEM+(input.skill==='ai-sales'?'\n\n'+SALES_PERSONA_REVIEW:''),JSON.stringify({observations:indexedObservations,request:input.message,script:candidate.script,assets:candidate.assets}),validateQuality);
               break;
             } catch(reviewError) {
               const transient=['DIRECTOR_NETWORK_ERROR','DIRECTOR_TIMEOUT','DIRECTOR_STREAM_INCOMPLETE'].includes(reviewError.code)

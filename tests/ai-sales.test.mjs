@@ -25,7 +25,10 @@ test('sales requires character, voice and real materials; validates on-screen pl
   for(const a of assets)assert.throws(()=>assertSalesMaterials(assets.filter(x=>x!==a),SALES_SETTINGS),e=>e.code==='SALES_MATERIALS_REQUIRED');
   assert.throws(()=>assertSalesMaterials(assets,{generateAudio:false}),e=>e.code==='SALES_AUDIO_REQUIRED');
   assert.doesNotThrow(()=>assertSalesPlan(shots,plan,assets));
-  for(const i of [0,1,2]){const next=structuredClone(shots);next[i].referenceIds=['food'];assert.throws(()=>assertSalesPlan(next,plan,assets),e=>e.outputIssue==='invalid_schema');}
+  for(const i of [0,2]){const next=structuredClone(shots);next[i].referenceIds=['food'];assert.throws(()=>assertSalesPlan(next,plan,assets),e=>e.outputIssue==='invalid_schema');}
+  const persona=structuredClone(shots);persona[0].referenceIds=['actor'];persona[1].referenceIds=['food'];persona[2].referenceIds=['actor'];
+  assert.doesNotThrow(()=>assertSalesPlan(persona,plan,assets));
+  persona[1].referenceIds=['actor'];assert.throws(()=>assertSalesPlan(persona,plan,assets),e=>e.outputIssue==='invalid_schema');
   assert.throws(()=>assertSalesPlan(shots,{cast:[]},assets));
   const input={skill:'ai-sales',settings:SALES_SETTINGS,assets};
   const output={kind:'script',script:{title:'产品介绍',plan,shots},assets:assets.map(a=>({id:a.id,description:'参考素材',role:'参考用途',adopt:'保留素材特征'}))};
@@ -34,7 +37,7 @@ test('sales requires character, voice and real materials; validates on-screen pl
   assert.match(result.script.videoPrompt,/声音参考1/);
   assert.doesNotThrow(()=>validateDirectorResult(output,{...input,fixedNarration:'看看这款产品！看看这款产品。看看这款产品'}));
   assert.throws(()=>validateDirectorResult(output,{...input,fixedNarration:'不能修改我的定稿'}),e=>e.code==='DIRECTOR_INVALID_OUTPUT');
-  const missing=structuredClone(output);missing.script.shots[1].referenceIds=['food'];
+  const missing=structuredClone(output);missing.script.shots[0].referenceIds=['food'];
   assert.throws(()=>validateDirectorResult(missing,input),e=>e.code==='DIRECTOR_INVALID_OUTPUT');
   assert.doesNotThrow(()=>validateDirectorResult(missing,{...input,skill:'store-discovery'}));
 });

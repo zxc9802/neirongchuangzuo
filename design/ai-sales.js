@@ -15,7 +15,7 @@ async function api(path, options = {}) {
   if (!response.ok) throw Object.assign(new Error(data.error || t('请求失败，请重试。')), { status:response.status });
   return data;
 }
-const key = id => 'qiya-ai-sales:' + id;
+const key = id => 'qiya-ai-sales-persona-v2:' + id;
 function save(s) {
   try { localStorage.setItem(key(s.owner), JSON.stringify({ form:s.form, conversationId:s.conversationId, createId:s.createId, scriptRequest:s.scriptRequest, videoRequest:s.videoRequest })); }
   catch { s.ctx.toast(t('草稿未保存，请保留当前页面')); }
@@ -31,18 +31,18 @@ function needed(s) {
 function message(s) {
   return [s.form.name && `产品或门店：${s.form.name}`, s.form.goal && `卖点与要求：${s.form.goal}`,
     s.form.copy && `以下是用户定稿台词，按原文编排，保留全文，不重写、不删句：\n${s.form.copy}`,
-    '请根据实拍生成AI带货视频：指定人物开场，中段人物展示产品并穿插产品和场景镜头，人物收尾；保持角色形象、参考音色和产品一致。'].filter(Boolean).join('\n\n');
+    '请为义鹏创作社媒人设视频：他是展示自己用AI制作各类宣传片的创作者；开场提出本次创作挑战，中段展示实拍支持的行业宣传片案例，结尾回到义鹏介绍创作能力并邀请关注或咨询。门店是案例，推广主体是义鹏。不要整片写成食客探店或餐厅到店广告。'].filter(Boolean).join('\n\n');
 }
 function button(action, label, disabled = false, primary = false) {
   return `<button type="button" data-sales="${action}" class="${primary?'primary':'secondary'}" ${disabled?'disabled':''}>${esc(t(label))}</button>`;
 }
 function shell(s) {
-  s.root.innerHTML = `<div class="sales-shell"><header class="sales-heading"><div><h1>${t('AI带货')}</h1><p>${t('人物出镜，讲清产品卖点')}</p></div><span>30s · 480p · 9:16</span>${button('new','新建创作')}</header>
+  s.root.innerHTML = `<div class="sales-shell"><header class="sales-heading"><div><h1>${t('AI带货')}</h1><p>${t('用作品展示你的AI创作能力')}</p></div><span>30s · 480p · 9:16</span>${button('new','新建创作')}</header>
   <div class="sales-layout"><section class="sales-card"><h2>01 · ${t('素材与文案')}</h2><div class="sales-uploads">${[['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].map(([role,label])=>`<div><strong>${t(label)}</strong><label class="sales-upload">＋ ${t('上传')}<input type="file" data-role="${role}" accept="${role==='voice'?'audio/mpeg,audio/wav,.mp3,.wav':'image/jpeg,image/png,image/webp'}" ${role==='reference'?'multiple':''}></label><button type="button" class="textbutton" data-sales="library" data-role="${role}">${t('从资产库选择')}</button></div>`).join('')}</div><div id="sales-materials" class="sales-materials"></div>
-  <div class="sales-fields"><label>${t('产品或门店名称')}<input id="sales-name" maxlength="120" value="${esc(s.form.name)}"></label><label>${t('卖点与要求')}<textarea id="sales-goal" rows="3" maxlength="2000" placeholder="${t('介绍什么，吸引谁，希望观众做什么？')}">${esc(s.form.goal)}</textarea></label><label>${t('指定文案（可选）')}<textarea id="sales-copy" rows="7" maxlength="4000" placeholder="${t('已有文案可直接粘贴，编导按原文安排画面')}">${esc(s.form.copy)}</textarea></label></div>
-  <div id="sales-status" role="status" aria-live="polite"></div><p id="sales-error" role="alert"></p><div class="sales-actions">${button('script','生成带货脚本',true,true)}<small id="sales-usage"></small></div></section>
+  <div class="sales-fields"><label>${t('案例门店或行业')}<input id="sales-name" maxlength="120" value="${esc(s.form.name)}"></label><label>${t('本次想展示的AI能力')}<textarea id="sales-goal" rows="3" maxlength="2000" placeholder="${t('这次用什么素材做什么视频，想让商家看到什么？')}">${esc(s.form.goal)}</textarea></label><label>${t('指定文案（可选）')}<textarea id="sales-copy" rows="7" maxlength="4000" placeholder="${t('已有文案可直接粘贴，编导按原文安排画面')}">${esc(s.form.copy)}</textarea></label></div>
+  <div id="sales-status" role="status" aria-live="polite"></div><p id="sales-error" role="alert"></p><div class="sales-actions">${button('script','生成人设脚本',true,true)}<small id="sales-usage"></small></div></section>
   <section class="sales-card"><h2>02 · ${t('编导脚本')}</h2><div id="sales-script" class="sales-script"></div><div class="sales-actions">${button('generate','生成视频',true,true)}<small id="sales-quote"></small></div><h2>03 · ${t('视频成品')}</h2><div id="sales-result"></div></section></div>
-  <section class="sales-card sales-history"><h2>${t('我的带货任务')}</h2><div id="sales-history"></div></section></div>`;
+  <section class="sales-card sales-history"><h2>${t('我的人设视频')}</h2><div id="sales-history"></div></section></div>`;
   for (const field of ['name','goal','copy']) s.root.querySelector('#sales-'+field).oninput = e => { s.form[field]=e.target.value; s.scriptRequest=null; save(s); update(s); };
   s.root.querySelectorAll('input[type=file]').forEach(input => { input.onchange = () => { const files=[...input.files];input.value='';void action(s,()=>upload(s,files,input.dataset.role)); }; });
   s.root.onclick = e => { const b=e.target.closest('[data-sales]'); if(!b || b.disabled)return; e.preventDefault();void action(s,()=>handle(s,b.dataset.sales,b)); };
@@ -65,7 +65,7 @@ function update(s) {
   s.root.querySelector('#sales-usage').textContent=t('编导已消耗')+' '+usage+' '+t('积分');
   s.root.querySelector('#sales-quote').textContent=s.quote?t('预计')+' '+s.quote.points+' '+t('积分')+(s.quote.unlimited?' · '+t('无限积分'):''):'';
   setHtml(s.root,'#sales-materials',(s.session?.assets||[]).map(a=>`<figure>${a.expired?`<span>${t('文件已过期')}</span>`:a.type==='audio'?`<audio controls preload="metadata" src="${esc(a.url)}"></audio>`:`<a href="${esc(a.url)}" target="_blank" rel="noopener"><img src="${esc(a.url)}" alt="${esc(a.name)}"></a>`}<figcaption>${esc(a.name)}${!materialLocked(s)?`<button type="button" data-sales="remove" data-id="${a.id}" aria-label="${esc(t('删除')+' '+a.name)}">×</button>`:''}</figcaption></figure>`).join(''));
-  setHtml(s.root,'#sales-script',script?`<h3>${esc(script.title)}</h3>${markdownText(op.result.text||'')}<ol>${script.shots.map(shot=>`<li><strong>${shot.start}–${shot.end}s</strong><p>${esc(shot.visual)}</p><p>${esc(shot.action||'')}</p><blockquote>${esc(shot.voiceover)}</blockquote></li>`).join('')}</ol>${button('copy','复制脚本')}`:op?.result?markdownText([op.result.text,...op.result.questions||[]].join('\n\n')):`<p class="sales-empty">${t('上传素材，生成你的人物带货脚本')}</p>`);
+  setHtml(s.root,'#sales-script',script?`<h3>${esc(script.title)}</h3>${markdownText(op.result.text||'')}<ol>${script.shots.map(shot=>`<li><strong>${shot.start}–${shot.end}s</strong><p>${esc(shot.visual)}</p><p>${esc(shot.action||'')}</p><blockquote>${esc(shot.voiceover)}</blockquote></li>`).join('')}</ol>${button('copy','复制脚本')}`:op?.result?markdownText([op.result.text,...op.result.questions||[]].join('\n\n')):`<p class="sales-empty">${t('用实拍做案例，展示你的AI创作能力')}</p>`);
   const resultKey=task?.resultUrl||task?.status||'';
   if(s.resultKey!==resultKey){s.resultKey=resultKey;setHtml(s.root,'#sales-result',task?.resultUrl?`<video controls preload="metadata" src="${esc(task.resultUrl)}"></video><a class="secondary" href="${esc(task.resultUrl)}?download=1" download>${t('下载视频')}</a><p>${t('成品保留3天，请及时下载')}</p>`:`<p class="sales-empty">${pending(task?.status)?t('视频生成中，可稍后回来查看'):t('成片会显示在这里')}</p>`);}
   setHtml(s.root,'#sales-history',s.conversations.map(c=>`<button type="button" class="sales-history-row" data-sales="open" data-id="${c.id}" ${s.busy?'disabled':''}><strong>${esc(c.title)}</strong><span>${esc(new Date(c.updatedAt).toLocaleString())}</span></button>`).join('')||`<p>${t('还没有生成记录')}</p>`);
@@ -103,7 +103,7 @@ async function open(s,id) {
   s.session=conversation;s.conversationId=id;s.createId=null;s.scriptRequest=null;s.videoRequest=null;s.resultKey=null;
   const op=latest(s);if(op) {
     const source=op.message;
-    s.form={name:source.match(/^产品或门店：(.*)$/m)?.[1]||'',goal:source.match(/卖点与要求：([\s\S]*?)(?=\n\n以下是用户定稿|\n\n请根据实拍|$)/)?.[1]||'',copy:source.match(/以下是用户定稿台词，按原文编排，保留全文，不重写、不删句：\n([\s\S]*?)(?=\n\n请根据实拍|$)/)?.[1]||''};
+    s.form={name:source.match(/^产品或门店：(.*)$/m)?.[1]||'',goal:source.match(/卖点与要求：([\s\S]*?)(?=\n\n以下是用户定稿|\n\n请(?:根据实拍|为义鹏)|$)/)?.[1]||'',copy:source.match(/以下是用户定稿台词，按原文编排，保留全文，不重写、不删句：\n([\s\S]*?)(?=\n\n请(?:根据实拍|为义鹏)|$)/)?.[1]||''};
   }
   save(s);if(current===s)shell(s);
 }
