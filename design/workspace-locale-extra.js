@@ -1,5 +1,8 @@
 // Static interface translations; never sent to an AI service at runtime.
 export const EXTRA_UI_COPY = {
+  "拖拽原始口播视频到此处上传": { "en": "Drop original talking-head footage here to upload", "ms": "Seret video asal bercakap di hadapan kamera ke sini untuk dimuat naik" },
+  "点击或拖拽上传声音": { "en": "Click or drop audio to upload", "ms": "Klik atau seret audio untuk dimuat naik" },
+  "请一次上传一个素材文件。": { "en": "Upload one media file at a time.", "ms": "Muat naik satu fail media pada satu masa." },
   "人物、声音、商品、背景可自由组合": {"en":"Combine person, voice, product and background replacements","ms":"Gabungkan penggantian individu, suara, produk dan latar belakang"},
   "人物替换包含脸部、发型和服装，请上传能看清服装的参考图。": {"en":"Person replacement includes the face, hairstyle and clothing. Upload a reference image that clearly shows the clothing.","ms":"Penggantian individu merangkumi wajah, gaya rambut dan pakaian. Muat naik imej rujukan yang menunjukkan pakaian dengan jelas."},
   "（本机副本）": {"en":"(Local copy)","ms":"(Salinan setempat)"},

@@ -7,7 +7,7 @@ const settle = async () => { for (let i = 0; i < 12; i++) await new Promise(reso
 
 async function page(t) {
   const { document, window } = parseHTML('<html><body><main class="avatar-studio"></main></body></html>');
-  const storage = new Map(), notices = [], uploads = [];
+  const storage = new Map(), notices = [], uploads = [], voiceUploads = [];
   const originals = Object.fromEntries(['document', 'window', 'localStorage'].map(key => [key, globalThis[key]]));
   Object.assign(globalThis, { document, window, localStorage: {
     getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value),
@@ -28,6 +28,11 @@ async function page(t) {
     avatar = { id: 'uploaded', name: options.name, videoUrl: '/avatar.mp4' };
     return avatar;
   });
+  t.mock.method(api, 'createVoice', async (file, options) => {
+    voiceUploads.push(file);
+    options.onProgress(50);
+    return { id: `voice-${voiceUploads.length}`, name: options.name, audioUrl: '/voice.mp3' };
+  });
   const mod = await import(`../design/digital-human.js?upload=${crypto.randomUUID()}`);
   t.after(() => mod.disposeDigitalHuman());
   const ctx = { configs: { avatar: { prompt: '保留这段口播文案' } }, storeInfo: {}, esc: value => String(value ?? ''), icon: () => '',
@@ -37,8 +42,9 @@ async function page(t) {
   root.innerHTML = mod.renderDigitalHuman(ctx);
   mod.bindDigitalHuman(ctx);
   await settle();
-  return { root, uploads, notices, create, storage,
-    zone: () => root.querySelector('#dh-materials [data-dh-drop="avatar"]'),
+  return { root, uploads, voiceUploads, notices, create, storage,
+    zone: () => root.querySelector('#dh-materials'),
+    voiceZone: () => root.querySelector('[data-dh-drop="voice"]'),
     event(type, target, fields = {}) {
       const event = new window.Event(type, { bubbles: true, cancelable: true });
       Object.assign(event, { dataTransfer: { types: ['Files'], files: [], dropEffect: 'none' }, ...fields });
@@ -53,6 +59,7 @@ const transfer = (...files) => ({ types: ['Files'], files, dropEffect: 'none' })
 
 test('video drop targets show feedback, retain it across children, and ignore text drags', async t => {
   const ui = await page(t), zone = ui.zone(), child = zone.querySelector('span');
+  assert.equal(zone.dataset.dhDrop, 'avatar', 'the whole source area accepts original footage');
   assert.match(zone.textContent, /点击或拖拽上传视频/);
   const enter = ui.event('dragenter', child);
   assert.equal(enter.defaultPrevented, true);
@@ -65,6 +72,60 @@ test('video drop targets show feedback, retain it across children, and ignore te
   const text = ui.event('dragover', zone, { dataTransfer: { types: ['text/plain'] } });
   assert.equal(text.defaultPrevented, false);
   assert.equal(zone.classList.contains('is-dragover'), false);
+});
+
+test('original videos can be dropped on guidance and on an already selected avatar', async t => {
+  const ui = await page(t), file = video();
+  ui.event('drop', ui.zone().querySelector('.dh-upload-note'), { dataTransfer: transfer(file) });
+  await settle();
+  assert.deepEqual(ui.uploads, [file]);
+  const preview = ui.zone().querySelector('.dh-selected-avatar-cover');
+  assert.ok(preview);
+  ui.event('dragover', preview);
+  assert.equal(ui.zone().classList.contains('is-dragover'), true);
+  ui.event('drop', preview, { dataTransfer: transfer(file) });
+  await settle();
+  assert.deepEqual(ui.uploads, [file, file]);
+  assert.equal(ui.zone().classList.contains('is-dragover'), false);
+});
+
+test('reference audio and video drops save and select voices without changing the script', async t => {
+  const ui = await page(t);
+  assert.ok(ui.voiceZone(), 'reference voices accept dragged files');
+  const files = [new File(['audio'], '原声.wav', { type: 'audio/wav' }), new File(['video'], '人声.mov', { type: 'video/quicktime' })];
+  for (const file of files) {
+    ui.event('dragover', ui.zone());
+    const zone = ui.voiceZone(), over = ui.event('dragover', zone.querySelector('span'));
+    assert.equal(over.dataTransfer.dropEffect, 'copy');
+    assert.equal(ui.zone().classList.contains('is-dragover'), false, 'moving between zones clears the old highlight');
+    assert.equal(zone.classList.contains('is-dragover'), true);
+    ui.event('drop', zone, { dataTransfer: transfer(file) });
+    await settle();
+    const saved = JSON.parse(ui.storage.get('store-studio:digital-human:v1'));
+    assert.equal(saved.voiceId, `voice-${ui.voiceUploads.length}`);
+    assert.equal(saved.script, '保留这段口播文案');
+    assert.equal(ui.root.querySelector('#dh-voice-select').querySelector('[selected]').value, saved.voiceId);
+  }
+  assert.deepEqual(ui.voiceUploads, files);
+  assert.equal(ui.uploads.length, 0);
+});
+
+test('voice drop validation and multiple-file drops do not upload partial selections', async t => {
+  const ui = await page(t), oversized = new File(['audio'], '过大.wav', { type: 'audio/wav' });
+  assert.ok(ui.voiceZone());
+  Object.defineProperty(oversized, 'size', { value: 51 * 1024 * 1024 });
+  ui.event('drop', ui.voiceZone(), { dataTransfer: transfer(oversized) });
+  assert.match(ui.notices.at(-1), /不超过 50 MB/);
+  ui.event('drop', ui.voiceZone(), { dataTransfer: transfer(new File(['image'], '照片.png', { type: 'image/png' })) });
+  assert.match(ui.notices.at(-1), /请选择音频或带人声的视频/);
+  for (const zone of [ui.zone(), ui.voiceZone()]) {
+    ui.event('dragover', zone);
+    ui.event('drop', zone, { dataTransfer: transfer(video(), video()) });
+    assert.match(ui.notices.at(-1), /一次上传一个素材文件/);
+    assert.equal(zone.classList.contains('is-dragover'), false);
+  }
+  assert.equal(ui.uploads.length, 0);
+  assert.equal(ui.voiceUploads.length, 0);
 });
 
 test('dropping a video uploads it once and selects it without changing the script', async t => {
@@ -104,11 +165,29 @@ test('uploads block duplicate drops and file drops outside upload targets cannot
   assert.equal(over.dataTransfer.dropEffect, 'none');
   assert.equal(ui.zone().classList.contains('is-dragover'), false);
   ui.event('drop', ui.zone(), { dataTransfer: transfer(file) });
+  const voiceOver = ui.event('dragover', ui.voiceZone());
+  assert.equal(voiceOver.dataTransfer.dropEffect, 'none');
+  ui.event('drop', ui.voiceZone(), { dataTransfer: transfer(new File(['audio'], '原声.wav', { type: 'audio/wav' })) });
+  assert.equal(ui.voiceUploads.length, 0, 'video and voice uploads share the duplicate-upload guard');
   const outside = ui.event('drop', ui.root, { dataTransfer: transfer(file) });
   assert.equal(outside.defaultPrevented, true);
   assert.equal(ui.uploads.length, 1);
   complete();
   await settle();
+});
+
+test('a failed dropped upload unlocks the controls and can be retried', async t => {
+  const ui = await page(t), file = video();
+  ui.create.mock.mockImplementationOnce(async () => { throw new Error('上传连接中断，请重试'); });
+  ui.event('drop', ui.zone(), { dataTransfer: transfer(file) });
+  await settle();
+  assert.match(ui.notices.at(-1), /上传连接中断/);
+  assert.equal(ui.zone().querySelector('input').disabled, false);
+  assert.equal(ui.zone().classList.contains('is-dragover'), false);
+  ui.event('drop', ui.zone(), { dataTransfer: transfer(file) });
+  await settle();
+  assert.deepEqual(ui.uploads, [file]);
+  assert.equal(JSON.parse(ui.storage.get('store-studio:digital-human:v1')).avatarId, 'uploaded');
 });
 
 test('file picker changes still upload and reset the picker', async t => {

@@ -86,7 +86,7 @@ function hydrate(ctx) {
 function uploadControl(ctx, kind, className, label) {
   const { icon, esc } = ctx;
   const busy = Boolean(state.upload);
-  return `<label class="${className} dh-upload-label ${busy ? 'is-disabled' : ''}" ${kind === 'avatar' ? 'data-dh-drop="avatar" title="点击或拖拽上传视频"' : ''} ${busy ? 'aria-disabled="true"' : ''}>${icon('plus')}<span>${esc(label)}</span><input type="file" data-dh-upload="${kind}" aria-label="${kind === 'avatar' ? '上传口播形象视频' : '上传参考声音'}" accept="${kind === 'avatar' ? '.mp4,.mov,.webm,.mkv,.m4v' : '.mp3,.wav,.m4a,.aac,.mp4,.mov'}" ${busy ? 'disabled' : ''}></label>`;
+  return `<label class="${className} dh-upload-label ${busy ? 'is-disabled' : ''}" data-dh-drop="${kind}" title="${kind === 'avatar' ? '点击或拖拽上传视频' : '点击或拖拽上传声音'}" ${busy ? 'aria-disabled="true"' : ''}>${icon('plus')}<span>${esc(label)}</span><input type="file" data-dh-upload="${kind}" aria-label="${kind === 'avatar' ? '上传口播形象视频' : '上传参考声音'}" accept="${kind === 'avatar' ? '.mp4,.mov,.webm,.mkv,.m4v' : '.mp3,.wav,.m4a,.aac,.mp4,.mov'}" ${busy ? 'disabled' : ''}></label>`;
 }
 
 function inlineError(ctx, text, section) {
@@ -102,7 +102,7 @@ function statusMarkup(ctx) {
 
 function materialsMarkup(ctx) {
   const avatar = currentAvatar(), cover = safeUrl(avatar?.coverUrl);
-  return `<div class="dh-field-heading"><label>出镜形象</label></div>${avatar ? `<div class="dh-selected-avatar"><button class="dh-selected-avatar-cover" data-action="dh-preview-media" data-kind="avatar" data-id="${ctx.esc(avatar.id)}" aria-label="预览形象：${ctx.esc(avatar.name)}">${cover ? `<img src="${ctx.esc(cover)}" alt="" loading="lazy">` : ctx.icon('avatar')}<span class="dh-cover-play">${ctx.icon('play')}</span></button><div class="dh-selected-avatar-copy"><strong>${ctx.esc(avatar.name)}</strong><small>${duration(avatar.durationSeconds)} · 已选中</small>${ctx.button('dh-browse-avatars', '更换形象', 'dh-link-button')}</div></div><div class="dh-avatar-bottom">${uploadControl(ctx, 'avatar', 'dh-small-upload', '上传新形象')}</div>` : `${uploadControl(ctx, 'avatar', 'dh-avatar-upload', '点击或拖拽上传视频')}<div class="dh-avatar-guidance"><p>正面清晰的口播视频</p></div>${ctx.button('dh-browse-avatars', ctx.icon('folder') + '从素材库选择', 'dh-browse-button')}`}<p class="dh-upload-note">MP4 / MOV 等视频，最大 500 MB</p><div id="dh-upload-progress">${uploadProgress(ctx, 'avatar')}</div>`;
+  return `<div class="dh-field-heading"><label>出镜形象</label></div>${avatar ? `<div class="dh-selected-avatar"><button class="dh-selected-avatar-cover" data-action="dh-preview-media" data-kind="avatar" data-id="${ctx.esc(avatar.id)}" aria-label="预览形象：${ctx.esc(avatar.name)}">${cover ? `<img src="${ctx.esc(cover)}" alt="" loading="lazy">` : ctx.icon('avatar')}<span class="dh-cover-play">${ctx.icon('play')}</span></button><div class="dh-selected-avatar-copy"><strong>${ctx.esc(avatar.name)}</strong><small>${duration(avatar.durationSeconds)} · 已选中</small>${ctx.button('dh-browse-avatars', '更换形象', 'dh-link-button')}</div></div><div class="dh-avatar-bottom">${uploadControl(ctx, 'avatar', 'dh-small-upload', '上传新形象')}</div>` : `${uploadControl(ctx, 'avatar', 'dh-avatar-upload', '点击或拖拽上传视频')}<div class="dh-avatar-guidance"><p>正面清晰的口播视频</p></div>${ctx.button('dh-browse-avatars', ctx.icon('folder') + '从素材库选择', 'dh-browse-button')}`}<p class="dh-drop-hint">拖拽原始口播视频到此处上传</p><p class="dh-upload-note">MP4 / MOV 等视频，最大 500 MB</p><div id="dh-upload-progress">${uploadProgress(ctx, 'avatar')}</div>`;
 }
 
 function libraryTabsMarkup(ctx) {
@@ -155,7 +155,7 @@ function taskMarkup(ctx) {
 function voiceMarkup(ctx) {
   const { esc, icon, button } = ctx;
   const voice = currentVoice();
-  return `<div class="dh-field-heading"><label for="dh-voice-select">口播声音</label>${button('dh-manage-voices', '管理声音', 'dh-link-button')}</div>${state.errors.voices ? inlineError(ctx, state.errors.voices, 'voices') : ''}<div class="dh-voice-field"><span class="studio-voice-icon">${icon('audio')}</span><select id="dh-voice-select" data-dh-option="voiceId" aria-label="选择口播声音"><option value="">${state.voices.some(item => safeUrl(item.audioUrl)) ? '选择一个声音' : '先上传一段参考声音'}</option>${state.voices.map(item => `<option value="${esc(item.id)}" ${item.id === state.voiceId ? 'selected' : ''} ${safeUrl(item.audioUrl) ? '' : 'disabled'}>${esc(item.name)}${safeUrl(item.audioUrl) ? '' : '（待配置）'}</option>`).join('')}</select></div><div id="dh-voice-preview">${voicePreview(ctx, voice)}</div>${uploadControl(ctx, 'voice', 'dh-add-voice', '上传参考声音')}<p class="dh-voice-hint">建议 5–15 秒清晰人声，支持音频或视频</p><div id="dh-voice-upload-progress">${uploadProgress(ctx, 'voice')}</div>`;
+  return `<div class="dh-field-heading"><label for="dh-voice-select">口播声音</label>${button('dh-manage-voices', '管理声音', 'dh-link-button')}</div>${state.errors.voices ? inlineError(ctx, state.errors.voices, 'voices') : ''}<div class="dh-voice-field"><span class="studio-voice-icon">${icon('audio')}</span><select id="dh-voice-select" data-dh-option="voiceId" aria-label="选择口播声音"><option value="">${state.voices.some(item => safeUrl(item.audioUrl)) ? '选择一个声音' : '先上传一段参考声音'}</option>${state.voices.map(item => `<option value="${esc(item.id)}" ${item.id === state.voiceId ? 'selected' : ''} ${safeUrl(item.audioUrl) ? '' : 'disabled'}>${esc(item.name)}${safeUrl(item.audioUrl) ? '' : '（待配置）'}</option>`).join('')}</select></div><div id="dh-voice-preview">${voicePreview(ctx, voice)}</div>${uploadControl(ctx, 'voice', 'dh-add-voice', '点击或拖拽上传声音')}<p class="dh-voice-hint">建议 5–15 秒清晰人声，支持音频或视频</p><div id="dh-voice-upload-progress">${uploadProgress(ctx, 'voice')}</div>`;
 }
 
 function voicePreview(ctx, voice = currentVoice()) {
@@ -196,7 +196,7 @@ export function renderDigitalHuman(ctx) {
   <div class="dh-workspace">
     <section class="dh-generator" id="dh-generator" aria-labelledby="dh-generator-title">
       <div class="dh-generator-heading"><div><h2 id="dh-generator-title">制作口播视频</h2></div><span class="dh-generator-type">${icon('avatar')}视频数字人</span></div>
-      <div class="dh-composer"><div class="dh-avatar-setting" id="dh-materials">${materialsMarkup(ctx)}</div><div class="dh-composer-main">${ctx.renderBusinessEntry?.('avatar') || ''}<div class="dh-field-heading"><label for="dh-script">口播文案</label></div><div class="dh-script-box"><textarea id="dh-script" maxlength="5000" placeholder="填写口播文案">${esc(state.script)}</textarea><div><span id="dh-script-duration">${state.script.trim() ? `约 ${speechEstimate()} 秒口播` : ''}</span><small id="dh-script-count">${state.script.length} / 5000</small></div></div><div class="dh-script-ideas"><span>宣传方案</span>${button('dh-template', '使用方案口播稿', '', 'data-template="brief"')}${button('business-open', '重新整理宣传信息', '', 'data-mode="avatar"')}</div><section id="dh-voice" class="dh-voice-section" aria-label="口播声音">${voiceMarkup(ctx)}</section>${speedMarkup()}</div></div>
+      <div class="dh-composer"><div class="dh-avatar-setting" id="dh-materials" data-dh-drop="avatar">${materialsMarkup(ctx)}</div><div class="dh-composer-main">${ctx.renderBusinessEntry?.('avatar') || ''}<div class="dh-field-heading"><label for="dh-script">口播文案</label></div><div class="dh-script-box"><textarea id="dh-script" maxlength="5000" placeholder="填写口播文案">${esc(state.script)}</textarea><div><span id="dh-script-duration">${state.script.trim() ? `约 ${speechEstimate()} 秒口播` : ''}</span><small id="dh-script-count">${state.script.length} / 5000</small></div></div><div class="dh-script-ideas"><span>宣传方案</span>${button('dh-template', '使用方案口播稿', '', 'data-template="brief"')}${button('business-open', '重新整理宣传信息', '', 'data-mode="avatar"')}</div><section id="dh-voice" class="dh-voice-section" aria-label="口播声音">${voiceMarkup(ctx)}</section>${speedMarkup()}</div></div>
       <div class="dh-generation-controls"><div class="dh-engine-section"><label for="dh-engine-select">对口型模型</label><div id="dh-engine" class="dh-engine-picker">${engineMarkup(ctx)}</div></div><div class="dh-generate-footer"><div class="dh-generation-note"><div id="dh-service-status">${statusMarkup(ctx)}</div><p id="dh-credit-estimate" class="credit-estimate" title="${esc(MALAYSIAN_PRICE_NOTE)}">${esc(generationPriceText())}</p><p id="dh-generate-hint">${esc(hint || '')}</p></div>${button('dh-generate', icon('star') + '<span>立即生成</span>', 'studio-primary', hint ? `disabled title="${esc(hint)}"` : '')}</div></div>
       <details class="dh-advanced"><summary>${icon('settings')}高级设置${icon('chevron')}</summary><div class="dh-advanced-body"><label class="studio-field">视频适配<select data-dh-option="videoFit"><option value="smart" ${state.videoFit === 'smart' ? 'selected' : ''}>智能适配</option><option value="preserve" ${state.videoFit === 'preserve' ? 'selected' : ''}>保留原视频</option></select></label><div class="dh-emotion-field"><label class="dh-emotion-label" for="dh-emotion">表达强度<output id="dh-emotion-value">${Math.round(state.emotionIntensity * 100)}%</output></label><input id="dh-emotion" data-dh-option="emotionIntensity" type="range" min="0.1" max="0.85" step="0.05" value="${state.emotionIntensity}" aria-label="表达强度"><div class="dh-range-labels"><span>平稳</span><span>鲜明</span></div></div></div></details>
       <div id="dh-task-status">${taskMarkup(ctx)}</div>
@@ -485,24 +485,31 @@ export function bindDigitalHuman(ctx) {
   unsubscribeCredits?.(); unsubscribeCredits = subscribeWorkspaceCredits(patchGenerate);
   root = document.querySelector('.avatar-studio');
   if (!root) return;
+  const dropZone = target => target.closest('#dh-materials') || target.closest('[data-dh-drop]');
+  const clearDropFeedback = () => {
+    for (const zone of root.querySelectorAll('[data-dh-drop].is-dragover')) zone.classList.remove('is-dragover');
+  };
   for (const type of ['dragenter', 'dragover']) root.addEventListener(type, event => {
     if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
     event.preventDefault();
-    const zone = event.target.closest('[data-dh-drop="avatar"]');
+    const zone = dropZone(event.target);
+    clearDropFeedback();
     event.dataTransfer.dropEffect = zone && !state.upload ? 'copy' : 'none';
     if (zone && !state.upload) zone.classList.add('is-dragover');
   }, { signal: binding.signal });
   root.addEventListener('dragleave', event => {
-    const zone = event.target.closest('[data-dh-drop="avatar"]');
+    const zone = dropZone(event.target);
     if (zone && !zone.contains(event.relatedTarget)) zone.classList.remove('is-dragover');
   }, { signal: binding.signal });
   root.addEventListener('drop', event => {
     if (!Array.from(event.dataTransfer?.types || []).includes('Files')) return;
     event.preventDefault();
-    const zone = event.target.closest('[data-dh-drop="avatar"]');
-    if (!zone) return;
-    zone.classList.remove('is-dragover');
-    void uploadFile('avatar', event.dataTransfer.files?.[0], ctx);
+    const zone = dropZone(event.target);
+    clearDropFeedback();
+    if (!zone || state.upload) return;
+    const files = event.dataTransfer.files;
+    if (files?.length > 1) return ctx.toast('请一次上传一个素材文件。');
+    void uploadFile(zone.dataset.dhDrop, files?.[0], ctx);
   }, { signal: binding.signal });
   root.addEventListener('input', event => {
     if (event.target.id === 'dh-script') updateScript(event.target.value, ctx);
