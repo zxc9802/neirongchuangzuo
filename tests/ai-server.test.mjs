@@ -255,6 +255,14 @@ test('image sets require enough quota for the whole set before dispatch and succ
   assert.equal(calls, 2); assert.equal((await (await fetch(app.base + '/api/ai/usage')).json()).remaining.image, 1);
 });
 
+test('video director defaults to Kimi and respects explicit model overrides', () => {
+  const config=loadAIConfig({OPENLUX_VIDEO_DIRECTOR_MODEL:'',OPENLUX_VIDEO_OBSERVATION_MODEL:'',OPENLUX_IMAGE_TEXT_MODEL:''});
+  assert.equal(config.videoDirectorModel,'kimi-k3');
+  assert.equal(config.videoObservationModel,'gpt-6-luna');
+  assert.equal(config.imageTextModel,'claude-opus-5-5');
+  assert.equal(loadAIConfig({OPENLUX_VIDEO_DIRECTOR_MODEL:'custom-director'}).videoDirectorModel,'custom-director');
+});
+
 test('image configuration defaults to unlimited and preserves explicit finite or disabled settings', () => {
   const baseline = { AI_IMAGE_DAILY_LIMIT: '', AI_CHAT_DAILY_LIMIT: '', AI_REQUESTS_PER_MINUTE: '' };
   assert.deepEqual(loadAIConfig(baseline).limits, { imageDaily: null, chatDaily: 100, perMinute: 10 });
