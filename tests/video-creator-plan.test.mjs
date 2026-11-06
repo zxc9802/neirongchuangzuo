@@ -192,6 +192,26 @@ test('unavailable vision does not proceed to Claude planning and records the act
   assert.equal(calls.length,1);assert.equal(calls[0].model,'configured-vision');assert.equal(attempts.at(-1).model,'configured-vision');
 });
 
+test('subject mismatch audit repairs the referenced product without hardcoded food names or repeated observation',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'director-subject-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#625342'}}).jpeg().toFile(path);
+  const {input,output}=sample();input.groundingVersion=1;input.message='展示两款服装';input.assets.forEach(a=>{a.path=path;});
+  const observations=input.assets.map(a=>({id:a.id,kinds:[a.type==='audio'?'voice':a.id==='actor'?'character':'detail'],facts:[a.id==='space'?'蓝色衬衫':a.id==='unused'?'白色外套':'参考形象或音色'],uncertain:[]}));
+  output.script.shots[0].voiceover='看看这件白色外套';output.script.shots[0].visual='蓝色衬衫';
+  output.script.shots.forEach(s=>{s.evidence=s.referenceIds.map(id=>({assetId:id,factIndexes:[0],use:id==='actor'?'character':'detail'}));});
+  const corrected=structuredClone(output);corrected.script.shots[0].visual='白色外套';corrected.script.shots[0].referenceIds=['unused','actor'];corrected.script.shots[0].evidence[0].assetId='unused';
+  corrected.assets[0]={id:'unused',description:'白色外套',role:'产品主体',adopt:'白色外套的可见外观',exclude:''};
+  const replies=[{observations},output,{passed:false,issues:[{shot:1,reason:'台词点名白色外套，引用图及画面却是蓝色衬衫；应选择对应外套图。'}]},corrected,{passed:true,issues:[]}],sent=[];
+  const model=createDirectorModel({config:{apiKey:'test',baseUrl:'https://model.example/v1',videoDirectorModel:'kimi-k3',imageTextModel:'claude'},fetchImpl:async(_u,o)=>{sent.push(JSON.parse(o.body));return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(replies.shift())}}]});}});
+  const result=await model.generate(input);
+  assert.equal(sent.length,5);assert.equal(result.quality.passed,true);
+  assert.deepEqual(result.script.shots[0].referenceIds,['unused','actor']);
+  assert.equal(result.script.shots[0].voiceover,output.script.shots[0].voiceover);
+  assert.match(result.script.videoPrompt,/声画主体对应/);
+  assert.match(sent[2].messages[0].content,/而非只检查整套素材/);
+  assert.match(sent[3].messages[1].content.at(-1).text,/白色外套.*蓝色衬衫/);
+});
+
 test('narration correction receives exact overruns and preserves visuals without rerunning planning',async t=>{
   const root=await mkdtemp(join(tmpdir(),'director-voice-budget-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#625342'}}).jpeg().toFile(path);

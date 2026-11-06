@@ -34,6 +34,7 @@ function compileVideoPrompt(direction, shots, images, settings) {
     '按以下分镜依次切换，时间轴覆盖全片；每个镜头只完成本镜头的展示重点，不把后续多个空间合并成一次长摇镜，不在结尾额外延长空景。',
     settings.generateAudio ? `旁白、配乐和环境声遵循全片设计，旁白语言：${VIDEO_LANGUAGES.find(l => l.id === settings.language)?.name || '中文'}。若有参考音频，仅参考声音，不采用其中无关台词。` : '静音视频，不生成旁白、音乐或环境声。',
     narrationDirection(settings),
+    settings.generateAudio && '声画主体对应：按分镜台词实际说到的主体展示相应参考实物，组合可同框或连续切换。不要用同类商品替代被点名的商品，不要提前切到其他产品。保留自然运镜和节奏；抽象情绪及创作者介绍可由人物、环境承接。',
     settings.generateAudio && '# 连续口播全文（只读一遍，下面逐镜旁白是同一全文的时间映射，不另起一遍）\n' + shots.map(s => s.voiceover).filter(Boolean).join('\n'),
     '# 完整分镜时间轴', timeline,
     '保持实拍支持的店铺布局、装修、产品和人物特征，不制造不存在的区域、客流、服务、产品或未经确认的宣传事实。'
