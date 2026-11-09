@@ -1,3 +1,4 @@
+import { setSalesHtml as setHtml, renderSalesMaterials } from './ai-sales-render.js';
 import { canUseAiSales, SALES_SETTINGS } from './ai-sales-policy.js';
 import { VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES } from './video-catalog.js';
 import { t } from './workspace-preferences.js';
@@ -48,7 +49,6 @@ function shell(s) {
   s.root.onclick = e => { const b=e.target.closest('[data-sales]'); if(!b || b.disabled)return; e.preventDefault();void action(s,()=>handle(s,b.dataset.sales,b)); };
   update(s);
 }
-function setHtml(root, selector, html) { const node=root.querySelector(selector);if(node && node.innerHTML!==html)node.innerHTML=html; }
 function update(s) {
   if(current!==s)return;
   const op=latest(s), task=latestTask(s), busy=active(s), missing=needed(s), script=op?.status==='completed' && op.result?.script;
@@ -64,7 +64,7 @@ function update(s) {
   const usage=s.session?.operations.reduce((n,o)=>n+(o.billing?.usagePoints ?? o.billing?.chargedPoints ?? 0),0)||0;
   s.root.querySelector('#sales-usage').textContent=t('编导已消耗')+' '+usage+' '+t('积分');
   s.root.querySelector('#sales-quote').textContent=s.quote?t('预计')+' '+s.quote.points+' '+t('积分')+(s.quote.unlimited?' · '+t('无限积分'):''):'';
-  setHtml(s.root,'#sales-materials',(s.session?.assets||[]).map(a=>`<figure>${a.expired?`<span>${t('文件已过期')}</span>`:a.type==='audio'?`<audio controls preload="metadata" src="${esc(a.url)}"></audio>`:`<a href="${esc(a.url)}" target="_blank" rel="noopener"><img src="${esc(a.url)}" alt="${esc(a.name)}"></a>`}<figcaption>${esc(a.name)}${!materialLocked(s)?`<button type="button" data-sales="remove" data-id="${a.id}" aria-label="${esc(t('删除')+' '+a.name)}">×</button>`:''}</figcaption></figure>`).join(''));
+  renderSalesMaterials(s.root.querySelector('#sales-materials'), s.session?.assets || [], { locked:materialLocked(s), expiredLabel:t('文件已过期'), deleteLabel:t('删除') });
   setHtml(s.root,'#sales-script',script?`<h3>${esc(script.title)}</h3>${markdownText(op.result.text||'')}<ol>${script.shots.map(shot=>`<li><strong>${shot.start}–${shot.end}s</strong><p>${esc(shot.visual)}</p><p>${esc(shot.action||'')}</p><blockquote>${esc(shot.voiceover)}</blockquote></li>`).join('')}</ol>${button('copy','复制脚本')}`:op?.result?markdownText([op.result.text,...op.result.questions||[]].join('\n\n')):`<p class="sales-empty">${t('用实拍做案例，展示你的AI创作能力')}</p>`);
   const resultKey=task?.resultUrl||task?.status||'';
   if(s.resultKey!==resultKey){s.resultKey=resultKey;setHtml(s.root,'#sales-result',task?.resultUrl?`<video controls preload="metadata" src="${esc(task.resultUrl)}"></video><a class="secondary" href="${esc(task.resultUrl)}?download=1" download>${t('下载视频')}</a><p>${t('成品保留3天，请及时下载')}</p>`:`<p class="sales-empty">${pending(task?.status)?t('视频生成中，可稍后回来查看'):t('成片会显示在这里')}</p>`);}
