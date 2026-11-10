@@ -1,4 +1,5 @@
-import { assertSalesPlan, assertSalesNarration, SALES_PERSONA_REVIEW } from './sales.mjs';
+import { mapConcurrent } from '../../design/async-pool.js';
+import { assertSalesPlan, assertSalesNarration, SALES_PERSONA_REVIEW, SALES_ANONYMOUS_RULES } from './sales.mjs';
 import { narrationTarget, narrationDirection } from './narration-budget.mjs';
 import { OBSERVATION_SYSTEM, validateObservations, GROUNDING_RULES, validateGrounding, narrationRepairRequest, applyNarrationRepair, QUALITY_SYSTEM, validateQuality } from './director-quality.mjs';
 import { readFile } from 'node:fs/promises';
@@ -94,7 +95,7 @@ export function validateDirectorResult(value, input) {
     return index < 0 ? '未选用的上传图' : `图片${index + 1}`;
   });
   let compiledDirection = [plan ? compileDirectorPlan(plan, assets, referenceImages, input.settings.generateAudio ? input.assets.filter(a => a.type === 'audio') : [], remap) : remap(globalDirection), offer && remap(offerDirection(offer.facts))].filter(Boolean).join('\n\n');
-  if (input.skill === 'ai-sales') compiledDirection = compiledDirection.replace('到店理由：', '创作目的：').replace('目标顾客：', '目标观众：');
+  if (input.skill === 'ai-sales') compiledDirection = compiledDirection.replace('到店理由：', '创作目的：').replace('目标顾客：', '目标观众：') + '\n' + SALES_ANONYMOUS_RULES;
   const videoPrompt = plan || globalDirection ? compileVideoPrompt(compiledDirection, shots.map(shot => ({ ...shot, ...Object.fromEntries(['intent', 'visual', 'camera', 'action', 'emotion', 'sound', 'voiceover', 'caption'].map(key => [key, remap(shot[key] || '')])) })), referenceImages, input.settings)
     : [text(s.videoPrompt, 12000), offer && offerDirection(offer.facts)].filter(Boolean).join('\n\n');
   if (videoPrompt.length > 12000) throw invalidOutput('完整分镜内容过长，请精简后重新编导。', 'invalid_schema', { field: 'videoPrompt', actualLength: videoPrompt.length, maximumLength: 12000 });
@@ -145,10 +146,11 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
     const content = [{ type: 'text', text: JSON.stringify({ direction: VIDEO_SKILLS.find(s => s.id === input.skill), settings: input.settings, pacing: directorPacing(input.settings),
       planningVersion: input.planningVersion || 1, assets: input.assets.map(a => ({ id: a.id, type: a.type, purpose: videoAssetPurpose(a), label: a.type === 'image' ? `图片${images.indexOf(a) + 1}` : '声音参考', name: a.name })),
       history: input.history.slice(-10), request: input.message }) }];
-    for (let index = 0; index < images.length; index++) {
-      const bytes = await sharp(await readFile(images[index].path)).rotate().resize({ width: 960, height: 960, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
-      content.push({ type: 'text', text: `图片${index + 1}，ID=${images[index].id}` }, { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + bytes.toString('base64'), detail: 'high' } });
-    }
+    const preparedImages = await mapConcurrent(images, 3, async image => {
+      signal?.throwIfAborted();
+      return sharp(await readFile(image.path)).rotate().resize({ width: 960, height: 960, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
+    });
+    preparedImages.forEach((bytes,index) => content.push({ type:'text', text:`图片${index+1}，ID=${images[index].id}` }, { type:'image_url', image_url:{url:'data:image/jpeg;base64,'+bytes.toString('base64'),detail:'high'} }));
     let sequence = 0, observations;
     const auxiliary = async (stage, system, userContent, validate = value => value) => {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
@@ -177,7 +179,8 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
     const indexedObservations = observations?.map(o=>({...o,facts:o.facts.map((fact,index)=>({index,text:fact}))}));
     const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}] : content;
     const groundingSystem = observations ? '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n'+GROUNDING_RULES : '';
-    const system = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以pacing.narration的全片字数为目标，先写自然连续的口播再分配画面；例如30秒通常140—160字。保留短换气，不为每次切镜停一秒以上，不机械压成每镜6—9字。长句可跨相邻镜头，实际发音约每秒5—6字，内容过密时先调整镜头时间，再删重复，不删除核心消费理由。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
+    const baseSystem = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以pacing.narration的全片字数为目标，先写自然连续的口播再分配画面；例如30秒通常140—160字。保留短换气，不为每次切镜停一秒以上，不机械压成每镜6—9字。长句可跨相邻镜头，实际发音约每秒5—6字，内容过密时先调整镜头时间，再删重复，不删除核心消费理由。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
+    const system = baseSystem + (input.skill === 'ai-sales' ? '\n' + SALES_ANONYMOUS_RULES : '');
     const planningOptions = input.skill === 'ai-sales' && input.fixedNarration?.trim() && /^doubao-seed-2-1-/.test(writingModel)
       ? { thinking: { type: 'disabled' } } : {};
     let budget = input.skill === 'ai-sales' ? Math.max(maxOutputTokens, 32768) : maxOutputTokens, correction = '', previousCandidate;
@@ -227,7 +230,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
           let reviewFeedback;
           for(let reviewAttempt=0;reviewAttempt<2;reviewAttempt++) {
             try {
-              result.quality=await auxiliary('quality',QUALITY_SYSTEM+(input.skill==='ai-sales'?'\n\n'+SALES_PERSONA_REVIEW:'')+(reviewFeedback?'\n本次复核上一次审核。独立核对脚本与素材，只保留未解决的实质错误。重复的融合指令、负面约束、可精简的文字属于编辑建议，不能阻断；不要把“符合要求”“不构成实质错误”“通过”列为issues。若只有编辑建议，返回{"passed":true,"issues":[]}；若确有素材或事实错误，仍须不通过。':''),JSON.stringify({observations:indexedObservations,request:input.message,script:candidate.script,assets:candidate.assets,...(reviewFeedback?{previousReview:reviewFeedback}:{})}),validateQuality);
+              result.quality=await auxiliary('quality',QUALITY_SYSTEM+(input.skill==='ai-sales'?'\n\n'+SALES_PERSONA_REVIEW+'\n'+SALES_ANONYMOUS_RULES:'')+(reviewFeedback?'\n本次复核上一次审核。独立核对脚本与素材，只保留未解决的实质错误。重复的融合指令、负面约束、可精简的文字属于编辑建议，不能阻断；不要把“符合要求”“不构成实质错误”“通过”列为issues。若只有编辑建议，返回{"passed":true,"issues":[]}；若确有素材或事实错误，仍须不通过。':''),JSON.stringify({observations:indexedObservations,request:input.message,script:candidate.script,assets:candidate.assets,...(reviewFeedback?{previousReview:reviewFeedback}:{})}),validateQuality);
               break;
             } catch(reviewError) {
               if(reviewAttempt===0 && input.skill==='ai-sales' && reviewError.outputIssue==='quality_rejected' && !signal?.aborted) {
@@ -244,6 +247,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
           result.observations=observations;
           result.script.shots.forEach((shot,index)=>{shot.evidence=candidate.script.shots[index].evidence;});
           result.script.videoPrompt+='\n\n素材使用边界：'+observations.filter(o=>result.script.referenceImageIds?.includes(o.id)).map(o=>`图片${result.script.referenceImageIds.indexOf(o.id)+1}：${o.facts.join('；')}。${o.kinds.includes('poster')&&!o.kinds.includes('food')?'仅展示原有海报/菜单图案，不将印刷食物变成实物。':''}`).join('\n');
+          if(input.skill==='ai-sales') result.script.videoPrompt+='\n\n'+SALES_ANONYMOUS_RULES;
           if(result.script.videoPrompt.length>12000)throw invalidOutput('完整脚本超过长度限制。','invalid_schema',{field:'videoPrompt'});
         }
         record.status = 'completed'; record.phase = 'complete'; record.completedAt = Date.now(); await publish();

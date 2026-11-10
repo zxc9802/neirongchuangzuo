@@ -1,3 +1,4 @@
+import { mapConcurrent } from './async-pool.js';
 import { CLOUD_COLLECTIONS, createWorkspaceSync } from './video-creator-sync.js';
 import { uiLocale, t } from './workspace-preferences.js';
 import { markdownText } from './markdown.js';
@@ -238,21 +239,26 @@ async function upload(files, purpose) {
     }
     if (state.owner !== account || owner() !== account) return;
     const id = await ensureSession();
-    for (let index = 0; index < files.length; index++) {
+    let completedUploads = 0;
+    await mapConcurrent(files, 3, async (file, index) => {
       if (state.owner !== account) return;
-      const file = files[index], image = ['image/jpeg', 'image/png', 'image/webp'].includes(file.type), audio = ['audio/mpeg', 'audio/wav', 'audio/x-wav'].includes(file.type);
+      const image = ['image/jpeg', 'image/png', 'image/webp'].includes(file.type), audio = ['audio/mpeg', 'audio/wav', 'audio/x-wav'].includes(file.type);
       if (!image && !audio) throw new Error('图片支持 JPG、PNG、WebP，声音支持 MP3、WAV。');
       const assetPurpose = purpose || (audio ? 'voice' : 'reference');
       if (image && assetPurpose === 'voice' || audio && assetPurpose !== 'voice') throw new Error('请按当前入口选择图片或声音文件。');
       if (image ? file.size >= VIDEO_IMAGE_MAX_BYTES : file.size > VIDEO_AUDIO_MAX_BYTES) throw new Error(image ? '单张图片需小于50MB。' : '声音文件不能超过15MB。');
       if (state.session.assets.filter(a => a.type === (image ? 'image' : 'audio')).length >= (image ? 30 : 1)) throw new Error(image ? '最多添加30张图片。' : '最多选择一段声音参考。');
       if (assetPurpose === 'character' && state.session.assets.filter(a => videoAssetPurpose(a) === 'character').length >= 10) throw new Error('最多添加10张角色参考图。');
-      state.uploadLabel = `上传素材 ${index + 1}/${files.length}`; refresh();
-      let data; try { data = await request(`/conversations/${id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': assetPurpose }, body: file }); }
+      state.uploadLabel = `上传素材 ${completedUploads}/${files.length}`; refresh();
+      const assetId = crypto.randomUUID();
+      let data; try { data = await request(`/conversations/${id}/assets/${assetId}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': assetPurpose }, body: file }); }
       catch(cause) { throw Object.assign(new Error(`${file.name} 上传未完成：${cause.message}。已成功上传的素材会保留。`),{status:cause.status,code:cause.code}); }
-      if (state.owner !== account) return; saveSession(data.conversation);
-      if(uploadFolderId && uiRead('folders',[]).some(f=>f.id===uploadFolderId)) { const asset=data.conversation.assets.at(-1), key=asset.originKey||asset.id; uiWrite('asset-meta',[...uiRead('asset-meta',[]).filter(a=>a.id!==key),{id:key,folderId:uploadFolderId}]); }
-    }
+      if (state.owner !== account) return;
+      completedUploads++;
+      if ((data.conversation.version || 0) >= (state.session?.version || 0)) saveSession(data.conversation);
+      state.uploadLabel = `上传素材 ${completedUploads}/${files.length}`; refresh();
+      if(uploadFolderId && uiRead('folders',[]).some(f=>f.id===uploadFolderId)) { const asset=data.conversation.assets.find(a => a.id === assetId), key=asset.originKey||asset.id; uiWrite('asset-meta',[...uiRead('asset-meta',[]).filter(a=>a.id!==key),{id:key,folderId:uploadFolderId}]); }
+    });
     state.scriptId = null; state.referenceImageIds = null; state.quote = null; void quote();
     state.expandedMaterials = true;
   });
@@ -534,18 +540,21 @@ async function replaceMaterialSet(next, replacements = {}) {
   if (next.filter(a => a.type === 'image').length > 30) throw new Error('图片与角色参考合计最多30张。');
   if (next.filter(a => a.type === 'audio').length > 1) throw new Error('最多选择一段声音参考。');
   if (next.filter(a => videoAssetPurpose(a) === 'character').length > 10) throw new Error('最多添加10张角色参考图。');
-  const files = await Promise.all(next.map(async a => ({ file: await fileForAsset(a), purpose: videoAssetPurpose(a), origin: a })));
+  const files = await mapConcurrent(next, 3, async a => ({ file: await fileForAsset(a), purpose: videoAssetPurpose(a), origin: a }));
   if (state.owner !== account) return;
   // Build the replacement separately. A failed upload leaves the previous draft intact.
   const data = await request('/conversations', post({ requestId: crypto.randomUUID(), skill: state.skill, settings: state.settings }));
   let session = data.conversation; const ids = {};
-  for (const [index, item] of files.entries()) {
+  let completed = 0;
+  await mapConcurrent(files, 3, async ({file,purpose,origin}) => {
     if (state.owner !== account) return;
-    state.uploadLabel = `准备素材 ${index + 1}/${files.length}`; refresh();
-    const { file, purpose, origin } = item;
-    const uploaded = await request(`/conversations/${session.id}/assets/${crypto.randomUUID()}`, { method: 'PUT', headers: { 'Content-Type': file.type, 'X-File-Name': encodeURIComponent(file.name), 'X-Asset-Purpose': purpose }, body: file });
-    session = uploaded.conversation; ids[origin.id] = session.assets.at(-1).id;
-  }
+    const assetId = crypto.randomUUID();
+    state.uploadLabel = `准备素材 ${completed}/${files.length}`; refresh();
+    const uploaded = await request(`/conversations/${session.id}/assets/${assetId}`, { method:'PUT', headers:{'Content-Type':file.type,'X-File-Name':encodeURIComponent(file.name),'X-Asset-Purpose':purpose}, body:file });
+    if ((uploaded.conversation.version||0)>=(session.version||0)) session=uploaded.conversation;
+    ids[origin.id]=assetId; completed++;
+    if(state.owner===account){state.uploadLabel=`准备素材 ${completed}/${files.length}`;refresh();}
+  });
   if (state.owner !== account) return;
   persistDraft();
   if (previous.session && !previous.session.operations.length && !previous.session.tasks.length) uiWrite('hidden-drafts', [...new Set([...uiRead('hidden-drafts', []), previous.session.id])]);

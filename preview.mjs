@@ -41,7 +41,7 @@ const files = new Map([
   ['/video-replica.js', ['design/video-replica.js', 'text/javascript; charset=utf-8']],
   ['/replica-asset-picker.js', ['design/replica-asset-picker.js', 'text/javascript; charset=utf-8']],
   ['/video-replica.css', ['design/video-replica.css', 'text/css; charset=utf-8']],
-  ...['ai-sales', 'ai-sales-policy', 'ai-sales-render', 'video-creator', 'video-creator-ui', 'video-creator-drafts', 'video-creator-sync', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
+  ...['async-pool', 'ai-sales', 'ai-sales-policy', 'ai-sales-render', 'video-creator', 'video-creator-ui', 'video-creator-drafts', 'video-creator-sync', 'video-catalog'].map(name => [`/${name}.js`, [`design/${name}.js`, 'text/javascript; charset=utf-8']]),
   ['/ai-sales.css', ['design/ai-sales.css', 'text/css; charset=utf-8']],
   ['/video-creator.css', ['design/video-creator.css', 'text/css; charset=utf-8']],
   ...['home', 'studios', 'workbench', 'agent-chat', 'business-catalog', 'business-flow', 'material-catalog', 'image-generation', 'image-upload', 'image-presets', 'image-preset-ui', 'generated-assets', 'model-labels', 'malaysian-prices'].map(name=>[`/${name}.js`,[`design/${name}.js`,'text/javascript; charset=utf-8']]),

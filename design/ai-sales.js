@@ -1,3 +1,4 @@
+import { mapConcurrent } from './async-pool.js';
 import { setSalesHtml as setHtml, renderSalesMaterials } from './ai-sales-render.js';
 import { canUseAiSales, SALES_SETTINGS } from './ai-sales-policy.js';
 import { VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES } from './video-catalog.js';
@@ -29,22 +30,20 @@ function needed(s) {
   const assets = s.session?.assets || [];
   return [['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].filter(([role]) => !assets.some(a => a.purpose === role && !a.expired)).map(([,name]) => t(name));
 }
-function message(s) {
-  return [s.form.name && `产品或门店：${s.form.name}`, s.form.goal && `卖点与要求：${s.form.goal}`,
-    s.form.copy && `以下是用户定稿台词，按原文编排，保留全文，不重写、不删句：\n${s.form.copy}`,
-    '请为义鹏创作社媒人设视频：他是展示自己用AI制作各类宣传片的创作者；开场提出本次创作挑战，中段展示实拍支持的行业宣传片案例，结尾回到义鹏介绍创作能力并邀请关注或咨询。门店是案例，推广主体是义鹏。不要整片写成食客探店或餐厅到店广告。'].filter(Boolean).join('\n\n');
+function message() {
+  return '根据上传的实拍自动判断行业并创作文案，无需用户提供行业、店名或文案。为义鹏创作“用AI挑战不同行业宣传片”的社媒视频，推广他的AI创作能力。开场人物融入实拍场景提出挑战，中段展示行业广告作品，结尾回到创作者邀请关注或出题。全片口播、字幕、标题与生成画面都不出现具体店名、商场名、品牌标识或地址；招牌、菜单、杯盘等可辨店名应通过取景避开或自然去字处理，不替换为虚构店名。保留真实产品与空间特点，不把义鹏写成店老板或真实探店顾客。';
 }
+
 function button(action, label, disabled = false, primary = false) {
   return `<button type="button" data-sales="${action}" class="${primary?'primary':'secondary'}" ${disabled?'disabled':''}>${esc(t(label))}</button>`;
 }
 function shell(s) {
   s.root.innerHTML = `<div class="sales-shell"><header class="sales-heading"><div><h1>${t('AI带货')}</h1><p>${t('用作品展示你的AI创作能力')}</p></div><span>30s · 480p · 9:16</span>${button('new','新建创作')}</header>
-  <div class="sales-layout"><section class="sales-card"><h2>01 · ${t('素材与文案')}</h2><div class="sales-uploads">${[['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].map(([role,label])=>`<div><strong>${t(label)}</strong><label class="sales-upload">＋ ${t('上传')}<input type="file" data-role="${role}" accept="${role==='voice'?'audio/mpeg,audio/wav,.mp3,.wav':'image/jpeg,image/png,image/webp'}" ${role==='reference'?'multiple':''}></label><button type="button" class="textbutton" data-sales="library" data-role="${role}">${t('从资产库选择')}</button></div>`).join('')}</div><div id="sales-materials" class="sales-materials"></div>
-  <div class="sales-fields"><label>${t('案例门店或行业')}<input id="sales-name" maxlength="120" value="${esc(s.form.name)}"></label><label>${t('本次想展示的AI能力')}<textarea id="sales-goal" rows="3" maxlength="2000" placeholder="${t('这次用什么素材做什么视频，想让商家看到什么？')}">${esc(s.form.goal)}</textarea></label><label>${t('指定文案（可选）')}<textarea id="sales-copy" rows="7" maxlength="4000" placeholder="${t('已有文案可直接粘贴，编导按原文安排画面')}">${esc(s.form.copy)}</textarea></label></div>
+  <div class="sales-layout"><section class="sales-card"><h2>01 · ${t('素材')}</h2><div class="sales-uploads">${[['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].map(([role,label])=>`<div><strong>${t(label)}</strong><label class="sales-upload">＋ ${t('上传')}<input type="file" data-role="${role}" accept="${role==='voice'?'audio/mpeg,audio/wav,.mp3,.wav':'image/jpeg,image/png,image/webp'}" ${role==='reference'?'multiple':''}></label><button type="button" class="textbutton" data-sales="library" data-role="${role}">${t('从资产库选择')}</button></div>`).join('')}</div><div id="sales-materials" class="sales-materials"></div>
+
   <div id="sales-status" role="status" aria-live="polite"></div><p id="sales-error" role="alert"></p><div class="sales-actions">${button('script','生成人设脚本',true,true)}<small id="sales-usage"></small></div></section>
   <section class="sales-card"><h2>02 · ${t('编导脚本')}</h2><div id="sales-script" class="sales-script"></div><div class="sales-actions">${button('generate','生成视频',true,true)}<small id="sales-quote"></small></div><h2>03 · ${t('视频成品')}</h2><div id="sales-result"></div></section></div>
   <section class="sales-card sales-history"><h2>${t('我的人设视频')}</h2><div id="sales-history"></div></section></div>`;
-  for (const field of ['name','goal','copy']) s.root.querySelector('#sales-'+field).oninput = e => { s.form[field]=e.target.value; s.scriptRequest=null; save(s); update(s); };
   s.root.querySelectorAll('input[type=file]').forEach(input => { input.onchange = () => { const files=[...input.files];input.value='';void action(s,()=>upload(s,files,input.dataset.role)); }; });
   s.root.onclick = e => { const b=e.target.closest('[data-sales]'); if(!b || b.disabled)return; e.preventDefault();void action(s,()=>handle(s,b.dataset.sales,b)); };
   update(s);
@@ -54,7 +53,7 @@ function update(s) {
   const op=latest(s), task=latestTask(s), busy=active(s), missing=needed(s), script=op?.status==='completed' && op.result?.script;
   const unchanged=script && op.message===message(s);
   s.root.querySelectorAll('input[type=file],[data-sales=library]').forEach(n=>n.disabled=materialLocked(s));
-  s.root.querySelector('[data-sales=script]').disabled=Boolean(busy || missing.length || !(s.form.name.trim() || s.form.copy.trim()) || s.config?.directorEnabled===false);
+  s.root.querySelector('[data-sales=script]').disabled=Boolean(busy || missing.length || s.config?.directorEnabled===false);
   s.root.querySelector('[data-sales=generate]').disabled=Boolean(busy || !unchanged || missing.length || s.config?.generationEnabled===false || s.quote?.affordable===false || task?.scriptId===op?.id && ['completed','uncertain','expired'].includes(task?.status));
   s.root.querySelector('[data-sales=generate]').textContent=t(task?.canRecover?'恢复成片':task?.status==='failed'?'重新生成视频':'生成视频');
   s.root.querySelectorAll('.sales-fields input,.sales-fields textarea').forEach(n=>n.disabled=Boolean(busy));
@@ -91,11 +90,15 @@ async function upload(s, files, purpose) {
     if(f.size >= (purpose==='voice'?VIDEO_AUDIO_MAX_BYTES+1:VIDEO_IMAGE_MAX_BYTES))throw new Error(purpose==='voice'?t('声音文件不能超过15MB。'):t('单张图片需小于50MB。'));
   }
   const id=await ensureSession(s);
-  for(const [i,f] of files.entries()) {
-    s.activity=t('正在上传')+` ${i+1}/${files.length}`;update(s);
+  let completed = 0;
+  await mapConcurrent(files, 3, async f => {
+    s.activity=t('正在上传')+` ${completed}/${files.length}`;update(s);
     const result=await api(`/conversations/${id}/assets/${crypto.randomUUID()}`,{method:'PUT',headers:{'Content-Type':f.type,'X-File-Name':encodeURIComponent(f.name),'X-Asset-Purpose':purpose},body:f});
-    s.session=result.conversation;save(s);update(s);
-  }
+    if(current!==s)return;
+    completed++;
+    if((result.conversation.version||0)>=(s.session?.version||0))s.session=result.conversation;
+    s.activity=t('正在上传')+` ${completed}/${files.length}`;save(s);update(s);
+  });
 }
 async function open(s,id) {
   const {conversation}=await api('/conversations/'+id);
@@ -114,7 +117,7 @@ async function handle(s, actionName, b) {
   else if(actionName==='copy')await navigator.clipboard.writeText(latest(s).result.script.videoPrompt);
   else if(actionName==='library')await library(s,b.dataset.role);
   else if(actionName==='script') {
-    const id=await ensureSession(s),body={settings:SALES_SETTINGS,message:message(s),fixedNarration:s.form.copy,expectedScriptId:s.session.operations.findLast(o=>o.status==='completed')?.id||null};
+    const id=await ensureSession(s),body={settings:SALES_SETTINGS,message:message(s),expectedScriptId:s.session.operations.findLast(o=>o.status==='completed')?.id||null};
     if(!s.scriptRequest || s.scriptRequest.fingerprint!==JSON.stringify(body))s.scriptRequest={fingerprint:JSON.stringify(body),requestId:crypto.randomUUID()};save(s);
     const {operation}=await api(`/conversations/${id}/script`,post({...body,requestId:s.scriptRequest.requestId}));
     s.session.operations=[...s.session.operations.filter(o=>o.id!==operation.id),operation];s.videoRequest=null;

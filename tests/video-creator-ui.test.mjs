@@ -46,7 +46,7 @@ function composerApi() {
     if (path.endsWith('/tasks')) return Response.json({ tasks: data.tasks });
     if (path.endsWith('/conversations') && body) { data.conversation = { id: body.requestId, version: 1, skill: body.skill, settings: body.settings, assets: [], operations: [], tasks: [] }; return Response.json({ conversation: data.conversation }); }
     if (path.endsWith('/conversations')) return Response.json({ conversations: [] });
-    if (options?.method === 'PUT') { data.uploads.push(options); data.conversation.assets.push({ id: crypto.randomUUID(), name: decodeURIComponent(options.headers['X-File-Name']), type: options.headers['Content-Type'].startsWith('audio') ? 'audio' : 'image', purpose: options.headers['X-Asset-Purpose'], url: '/uploaded' }); return Response.json({ conversation: data.conversation }); }
+    if (options?.method === 'PUT') { data.uploads.push(options); data.conversation.version++; data.conversation.assets.push({ id: path.split('/').at(-1), name: decodeURIComponent(options.headers['X-File-Name']), type: options.headers['Content-Type'].startsWith('audio') ? 'audio' : 'image', purpose: options.headers['X-Asset-Purpose'], url: '/uploaded' }); return Response.json({ conversation: data.conversation }); }
     if (path.endsWith('/script')) { data.scriptCalls++; return Response.json({ error: '不应触发生成' }, { status: 400 }); }
     return Response.json({ conversation: data.conversation });
   };

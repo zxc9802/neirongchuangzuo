@@ -86,7 +86,9 @@ test('fixed sales copy uses non-thinking Doubao planning with headroom; other mo
   for(const scenario of [{skill:'ai-sales',copy:'看看这款产品看看这款产品看看这款产品',model:'doubao-seed-2-1-pro-260915',disabled:true},{skill:'ai-sales',copy:'',model:'doubao-seed-2-1-pro-260915'},{skill:'store-discovery',copy:'',model:'doubao-seed-2-1-pro-260915'},{skill:'ai-sales',copy:'看看这款产品看看这款产品看看这款产品',model:'claude-opus-5-5'}]){
     let body;
     const director=createDirectorModel({config:{apiKey:'test',baseUrl:'https://test.invalid',videoDirectorModel:scenario.model},fetchImpl:async(_url,options)=>{body=JSON.parse(options.body);return new Response(JSON.stringify({choices:[{message:{content:JSON.stringify(output)},finish_reason:'stop'}]}),{headers:{'Content-Type':'application/json'}});}});
-    await director.generate({skill:scenario.skill,fixedNarration:scenario.copy,settings:SALES_SETTINGS,assets:inputAssets,history:[],message:'创作挑战'});
+    const generated = await director.generate({skill:scenario.skill,fixedNarration:scenario.copy,settings:SALES_SETTINGS,assets:inputAssets,history:[],message:'创作挑战'});
+    if(scenario.skill==='ai-sales'){assert.match(body.messages[0].content,/匿名行业案例/);assert.match(generated.script.videoPrompt,/不能出现可辨认的具体店名/);}
+    else assert.doesNotMatch(body.messages[0].content,/匿名行业案例/);
     assert.equal(body.max_tokens,scenario.skill==='ai-sales'?32768:16384);
     assert.deepEqual(body.thinking,scenario.disabled?{type:'disabled'}:undefined);
   }
