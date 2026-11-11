@@ -17,8 +17,8 @@ const assets=[{id:'actor',type:'image',purpose:'character'},{id:'food',type:'ima
 const plan={objective:'展示实拍产品',audience:'附近顾客',perspective:'角色演示',storyArc:'人物介绍、产品展示、邀请到店',visualStyle:'自然明亮',cast:[{name:'主持人',role:'展示产品',appearance:'按人物照片',referenceIds:['actor']}],audio:{voiceDirection:'参考上传音色',music:'轻柔',ambience:'环境声'},keep:['实拍产品'],avoid:['虚构价格']};
 const shots=Array.from({length:3},(_,i)=>({start:i*10,end:(i+1)*10,referenceIds:['actor','food'],visual:'人物正面在实拍场景展示产品',action:'人物指向产品并面对镜头讲话',voiceover:'看看这款产品',caption:''}));
 test('only verified exact accounts have sales access, not nickname, phone or admin-looking roles',()=>{
-  for(const account of ['义鹏','admin'])assert.equal(canUseAiSales({id:'user',account}),true);
-  for(const user of [null,{account:'admin'},{id:'other',account:'other',nickname:'义鹏',role:'admin'},{id:'x',account:'毛义鹏'},{id:'x',account:'18257218250'}])assert.equal(canUseAiSales(user),false);
+  for(const account of ['义鹏','admin','zxc9911'])assert.equal(canUseAiSales({id:'user',account}),true);
+  for(const user of [null,{account:'admin'},{account:'zxc9911'},{id:'other',account:'other',nickname:'义鹏',role:'admin'},{id:'other',account:'other',nickname:'zxc9911'},{id:'x',account:'毛义鹏'},{id:'x',account:'18257218250'}])assert.equal(canUseAiSales(user),false);
 });
 test('sales requires character, voice and real materials; validates on-screen plan before provider submission',()=>{
   assert.doesNotThrow(()=>assertSalesMaterials(assets,SALES_SETTINGS));
@@ -48,7 +48,7 @@ test('server uses authenticated account, never forged permission headers',async 
   const stub=async(req,res)=>res.end(JSON.stringify({allowed:req.aiSalesAllowed}));stub.shutdown=async()=>{};
   const server=createPreviewServer({backendUrl:await listen(backend),authRequired:true,credits:{ready:Promise.resolve()},createVideoCreator:()=>stub});const base=await listen(server);
   t.after(async()=>{await server.shutdown();backend.closeAllConnections();await new Promise(r=>backend.close(r));});
-  for(const account of ['admin','ordinary']){const res=await fetch(base+'/api/video-creator/config',{headers:{cookie:'account='+account,'x-ai-sales-allowed':'true'}});assert.equal((await res.json()).allowed,account==='admin');}
+  for(const account of ['admin','zxc9911','ordinary']){const res=await fetch(base+'/api/video-creator/config',{headers:{cookie:'account='+account,'x-ai-sales-allowed':'true'}});assert.equal((await res.json()).allowed,account!=='ordinary');}
 });
 test('sales API is gated, separates histories, survives reload, refuses direct generation without approved script',async t=>{
   const root=await mkdtemp(join(tmpdir(),'ai-sales-'));let calls=0;
