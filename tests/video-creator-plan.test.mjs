@@ -239,7 +239,7 @@ test('HTTP 200 audit stream with upstream timeout retries only audit, preserving
     return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(sent.length===1?{observations}:sent.length===2?output:{passed:true,issues:[]})}}]});
   }});
   const result=await model.generate(input,{onAttempt:a=>attempts.push(a)});
-  assert.equal(sent.length,4);assert.deepEqual(sent[2],sent[3]);assert.equal(sent[2].max_tokens,4096);
+  assert.equal(sent.length,4);assert.deepEqual(sent[2],sent[3]);assert.equal(sent[2].max_tokens,16384);
   assert.equal(new Set(attempts.filter(a=>a.stage==='planning').map(a=>a.attempt)).size,1);
   assert.equal(result.quality.passed,true);assert.equal(result.script.shots[0].visual,output.script.shots[0].visual);
 });

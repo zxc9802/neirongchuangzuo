@@ -62,6 +62,21 @@ function script(input) {
   return { kind: 'script', text: '完成编排', assets: [], warnings: [], script: { title: '真实门店', summary: '店铺与产品', videoPrompt: '图片1慢推展示真实门店，保留原本装修。',
     shots: [{ start: 0, end: input.settings.duration, visual: '真实门店慢推', referenceIds: [input.assets[0].id], voiceover: '', caption: '', camera: '慢推' }] } };
 }
+
+test('incomplete review preserves a readable draft across restart but cannot approve video generation',async t=>{
+  const f=await fixture(t,{director:async input=>{
+    throw Object.assign(new Error('质量审核未完成，脚本已保留。'),{code:'DIRECTOR_QUALITY_INCOMPLETE',draftResult:script(input)});
+  }}),id=await f.init();await f.upload(id);
+  const opId=randomUUID();
+  assert.equal((await f.call(`/conversations/${id}/script`,{body:{requestId:opId,message:'介绍门店',settings}})).status,202);
+  let op=await f.until(async()=>{const o=(await f.current(id)).operations[0];return o?.status==='failed'&&o;});
+  assert.equal(op.code,'DIRECTOR_QUALITY_INCOMPLETE');assert.equal(op.result,undefined);
+  assert.equal(op.draftResult.script.title,'真实门店');
+  await f.close();await f.open();op=(await f.current(id)).operations[0];
+  assert.equal(op.draftResult.script.title,'真实门店');
+  assert.equal((await f.generate(id,randomUUID(),{scriptId:opId})).status,409);
+  assert.equal(f.state.generates,0);
+});
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-creator-'));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode: true }); await wallet.ready;

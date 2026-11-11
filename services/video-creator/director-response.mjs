@@ -1,6 +1,6 @@
 import { readCompletionStream } from '../restaurant/model-stream.mjs';
 
-export const DIRECTOR_OUTPUT_TOKENS = 16384;
+export const DIRECTOR_OUTPUT_TOKENS = 65536;
 export const DIRECTOR_RESPONSE_BYTES = 16 * 1024 * 1024;
 
 export function redactDirectorValue(value, secrets = []) {
@@ -14,7 +14,7 @@ export function redactDirectorValue(value, secrets = []) {
 
 export function directorAttemptSummary(attempt) {
   const { rawResponse, parsedResponse, responseContent, error, ...summary } = attempt;
-  return { ...summary, ...(error ? { error: { code: error.code, issue: error.issue, phase: error.phase, message: error.message } } : {}) };
+  return { ...summary, ...(error ? { error: { code: error.code, issue: error.issue, stage: error.stage, phase: error.phase, message: error.message } } : {}) };
 }
 
 export async function readDirectorResponse(response, maximumBytes = DIRECTOR_RESPONSE_BYTES) {
@@ -67,8 +67,9 @@ export function directorFailure(cause, phase, signal) {
   if (!pair && (cause.name === 'TimeoutError' || transport && signal?.reason?.name === 'TimeoutError')) pair = ['DIRECTOR_TIMEOUT', '编导等待超过时限，未取得完整脚本，请稍后重试。'];
   if (!pair && (cause.name === 'AbortError' || transport && signal?.aborted)) pair = ['DIRECTOR_INTERRUPTED', '编导请求已中断，请重新发起。'];
   if (!pair && phase === 'request' && !cause.status) pair = ['DIRECTOR_NETWORK_ERROR', '编导接口连接中断，未取得完整脚本，请稍后重试。'];
+  if (cause.stage === 'quality' && issue !== 'quality_rejected') pair = ['DIRECTOR_QUALITY_INCOMPLETE', '质量审核未完成，脚本已保留。'];
   const code = pair?.[0] || cause.code || 'DIRECTOR_INVALID_OUTPUT';
   const message = pair?.[1] || (/[\u3400-\u9fff]/.test(cause.message || '') ? cause.message : '编导未返回可用脚本，请重试。');
-  return { code, issue: issue || cause.code || 'unknown', phase, message, type: cause.name || 'Error',
+  return { code, issue: issue || cause.code || 'unknown', stage: cause.stage, phase, message, type: cause.name || 'Error',
     detail: String(cause.parseError || cause.validationIssue || cause.message || '').slice(0, 1500), stack: String(cause.stack || '').slice(0, 6000) };
 }

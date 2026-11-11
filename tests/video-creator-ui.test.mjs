@@ -79,6 +79,25 @@ test('a completed director script disables empty resubmission and stays applied 
   f.action('vc-send'); await delay(20); assert.equal(submissions, 2);
 });
 
+test('incomplete review displays the retained draft without an apply action', async t => {
+  const data=composerApi(),base=data.api;
+  data.api=async(path,options)=>{
+    if(path.endsWith('/script')) {
+      const body=JSON.parse(options.body);
+      const operation={id:body.requestId,skill:data.conversation.skill,status:'failed',settings:body.settings,message:body.message,
+        error:'质量审核未完成，脚本已保留。',draftResult:{script:{title:'已保留的门店脚本',videoPrompt:'待审核提示词',shots:[]}}};
+      data.conversation.operations.push(operation);data.conversation.version++;
+      return Response.json({operation});
+    }
+    return base(path,options);
+  };
+  const f=await fixture(t,data.api);
+  await f.useMaterial(new File(['photo'],'门店.jpg',{type:'image/jpeg'}),'photo');
+  f.action('vc-send');await delay(30);
+  assert.match(f.html(),/质量审核未完成/);assert.match(f.html(),/已保留的门店脚本/);
+  assert.doesNotMatch(f.html(),/data-action="vc-apply"/);
+});
+
 test('director displays metered usage for unlimited accounts and charged points for regular accounts', async t => {
   const data = composerApi(), base = data.api;
   data.api = async (path, options) => {

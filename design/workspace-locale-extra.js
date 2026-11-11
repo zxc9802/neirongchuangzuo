@@ -1,5 +1,6 @@
 // Static interface translations; never sent to an AI service at runtime.
 export const EXTRA_UI_COPY = {
+  "待审核脚本": { "en": "Script awaiting review", "ms": "Skrip menunggu semakan" },
   "拖入多张图片或点击上传": { "en": "Drop multiple images or click to upload", "ms": "Seret beberapa imej atau klik untuk muat naik" },
   "拖入声音或点击上传": { "en": "Drop audio or click to upload", "ms": "Seret audio atau klik untuk muat naik" },
   "拖入人物照或点击上传": { "en": "Drop a portrait or click to upload", "ms": "Seret foto individu atau klik untuk muat naik" },

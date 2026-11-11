@@ -89,7 +89,7 @@ test('fixed sales copy uses non-thinking Doubao planning with headroom; other mo
     const generated = await director.generate({skill:scenario.skill,fixedNarration:scenario.copy,settings:SALES_SETTINGS,assets:inputAssets,history:[],message:'创作挑战'});
     if(scenario.skill==='ai-sales'){assert.match(body.messages[0].content,/匿名行业案例/);assert.match(generated.script.videoPrompt,/不能出现可辨认的具体店名/);}
     else assert.doesNotMatch(body.messages[0].content,/匿名行业案例/);
-    assert.equal(body.max_tokens,scenario.skill==='ai-sales'?32768:16384);
+    assert.equal(body.max_tokens,65536);
     assert.deepEqual(body.thinking,scenario.disabled?{type:'disabled'}:undefined);
   }
 });

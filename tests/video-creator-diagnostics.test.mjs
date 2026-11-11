@@ -46,6 +46,51 @@ test('video writing model is independent from the vision and review models', asy
   assert.equal(attempts.find(entry => entry.stage === 'planning').model, 'doubao-seed-2-1-pro-260915');
 });
 
+test('truncated review raises only the review budget and keeps the completed script', async t => {
+  const { input, output } = await setup(t); input.groundingVersion = 1;
+  output.script.shots[0].evidence = [{ assetId: 'real-photo', factIndexes: [0], use: 'scene' }];
+  const sent = [], records = [];
+  const responses = [
+    completion(JSON.stringify({ observations: [{ id: 'real-photo', kinds: ['scene'], facts: ['门店空间'], uncertain: [] }] })),
+    completion(JSON.stringify(output)), completion('', 'length', 16384),
+    completion(JSON.stringify({ passed: true, issues: [] })),
+  ];
+  const model = createDirectorModel({ config, fetchImpl: async (_url, opts) => {
+    sent.push(JSON.parse(opts.body)); assert.ok(responses.length, 'must not replan');
+    return streamResponse(responses.shift());
+  } });
+  const result = await model.generate(input, { onAttempt: entry => records.push(entry) });
+  assert.equal(result.script.title, output.script.title); assert.equal(result.quality.passed, true);
+  assert.deepEqual(sent.map(call => call.max_tokens), [16384, 65536, 16384, 32768]);
+  assert.deepEqual(sent[2].messages, sent[3].messages);
+  assert.equal(records.filter(entry => entry.stage === 'planning' && entry.phase === 'request').length, 1);
+  const failure = records.find(entry => entry.stage === 'quality' && entry.status === 'failed');
+  assert.equal(failure.error.code, 'DIRECTOR_QUALITY_INCOMPLETE'); assert.equal(failure.error.stage, 'quality');
+});
+
+test('exhausted review retries stop with an explicit review failure and retained draft', async t => {
+  const { input, output } = await setup(t); input.groundingVersion = 1;
+  output.script.shots[0].evidence = [{ assetId: 'real-photo', factIndexes: [0], use: 'scene' }];
+  const sent = [], records = [];
+  const model = createDirectorModel({ config, fetchImpl: async (_url, opts) => {
+    const request = JSON.parse(opts.body); sent.push(request);
+    assert.ok(sent.length <= 4, 'review failures must never restart the writer');
+    return streamResponse(sent.length === 1
+      ? completion(JSON.stringify({ observations: [{ id: 'real-photo', kinds: ['scene'], facts: ['门店空间'], uncertain: [] }] }))
+      : sent.length === 2 ? completion(JSON.stringify(output)) : completion('', 'length', request.max_tokens));
+  } });
+  await assert.rejects(model.generate(input, { onAttempt: entry => records.push(entry) }), error => {
+    assert.equal(error.code, 'DIRECTOR_QUALITY_INCOMPLETE'); assert.equal(error.stage, 'quality');
+    assert.match(error.message, /质量审核未完成/); assert.match(error.message, /脚本已保留/);
+    assert.equal(error.draftResult.script.title, output.script.title);
+    assert.equal(error.draftResult.quality?.passed, undefined);
+    return true;
+  });
+  assert.deepEqual(sent.map(call => call.max_tokens), [16384, 65536, 16384, 32768]);
+  const lastPlan = records.findLast(entry => entry.stage === 'planning');
+  assert.equal(lastPlan.status, 'completed'); assert.equal(lastPlan.finishReason, 'stop');
+});
+
 test('a request timer expiring during later validation cannot relabel a quality rejection as network timeout',()=>{
   const signal=AbortSignal.abort(new DOMException('Timeout','TimeoutError'));
   const cause=Object.assign(new Error('脚本依据不符'),{code:'DIRECTOR_INVALID_OUTPUT',outputIssue:'quality_rejected'});
@@ -67,7 +112,7 @@ test('director raises output budget and preserves finish reason, raw wire respon
   const payload = completion(JSON.stringify(output));
   const result = await createDirectorModel({ config, fetchImpl: async (_url, opts) => { sent = JSON.parse(opts.body); return streamResponse(payload); } })
     .generate(input, { onAttempt: entry => attempts.push(entry) });
-  assert.equal(sent.max_tokens, 16384); assert.equal(result.kind, 'script');
+  assert.equal(sent.max_tokens, 65536); assert.equal(result.kind, 'script');
   const last = attempts.at(-1); assert.equal(last.finishReason, 'stop'); assert.equal(last.status, 'completed');
   assert.equal(last.providerRequestId, 'outer-receipt-id'); assert.equal(last.usage.completion_tokens, 20);
   assert.ok(last.rawResponse.includes('[DONE]')); assert.ok(last.parsedResponse.choices[0].message.content.includes('[REDACTED]'));
@@ -78,7 +123,7 @@ test('director raises output budget and preserves finish reason, raw wire respon
 
 test('completed truncation retries once with doubled output budget and does not reuse the partial script', async t => {
   const { input, output } = await setup(t); const sent = [], attempts = [];
-  const model = createDirectorModel({ config, fetchImpl: async (_url, opts) => {
+  const model = createDirectorModel({ config, maxOutputTokens: 16384, fetchImpl: async (_url, opts) => {
     sent.push(JSON.parse(opts.body)); return streamResponse(sent.length === 1 ? completion('{"kind":"script","script":', 'length', 16384) : completion(JSON.stringify(output)));
   } });
   const result = await model.generate(input, { onAttempt: entry => attempts.push(entry) });

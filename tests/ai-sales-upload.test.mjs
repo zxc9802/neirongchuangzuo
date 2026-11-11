@@ -57,6 +57,20 @@ test('dropping a batch uploads every image once with at most three transfers in 
   assert.equal(zone.getAttribute('aria-disabled'),'false');
 });
 
+test('a retained script remains visible after incomplete review without enabling video generation',async t=>{
+  const ui=await fixture(t,{assets:[
+    {id:'actor',type:'image',purpose:'character',name:'人物.jpg'},
+    {id:'voice',type:'audio',purpose:'voice',name:'声音.wav'},
+    {id:'scene',type:'image',purpose:'reference',name:'场景.jpg'},
+  ],operations:[{id:'draft-op',status:'failed',error:'质量审核未完成，脚本已保留。',draftResult:{
+    kind:'script',text:'已完成编排',script:{title:'保留的创作挑战',shots:[{start:0,end:30,visual:'真实门店',voiceover:'一起看看'}]},
+  }}]});
+  assert.match(ui.root.querySelector('#sales-script').textContent,/保留的创作挑战/);
+  assert.match(ui.root.querySelector('#sales-script').textContent,/待审核脚本/);
+  assert.equal(ui.root.querySelector('#sales-status').textContent,'待审核脚本');
+  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,true);
+});
+
 test('file drag feedback follows zones and children, while outside drops cannot navigate away',async t=>{
   const ui=await fixture(t),zone=ui.zone('reference'),child=zone.querySelector('span');
   const enter=ui.event('dragenter',child);

@@ -28,7 +28,7 @@ test('three modules send distinct directing briefs while retaining full canonica
     let attempts = 0;
     const result = await createDirectorModel({ config, fetchImpl: async (_url, opts) => {
       attempts++; const request = JSON.parse(opts.body); briefs.set(skill, request.messages[0].content);
-      assert.equal(request.model, 'claude-opus-5-5'); assert.equal(request.max_tokens, 16384);
+      assert.equal(request.model, 'claude-opus-5-5'); assert.equal(request.max_tokens, 65536);
       return Response.json({ choices: [{ message: { content: JSON.stringify(payload) }, finish_reason: 'stop' }] });
     } }).generate(input);
     assert.equal(attempts, 1); assert.equal(result.kind, 'script'); assert.equal(result.script.shots.length, 9);
