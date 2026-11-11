@@ -413,7 +413,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           }); json(res, 200, { conversation: sessionView(c) }); return;
         }
         if (req.method === 'DELETE') { await lock(c.id, async () => {
-          if (active(c) || c.tasks.length || c.operations.length) throw creatorError('素材已被脚本或视频引用，请新建创作后调整。', 409);
+          if (active(c) || c.tasks.length || c.operations.some(o => o.status !== 'failed')) throw creatorError('素材已被脚本或视频引用，请新建创作后调整。', 409);
           c.assets = c.assets.filter(a => a.id !== id); await save(c); if (asset) await rm(asset.path, { force: true });
         }); json(res, 200, { conversation: sessionView(c) }); return; }
       }

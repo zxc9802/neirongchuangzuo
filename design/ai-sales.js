@@ -25,7 +25,7 @@ function save(s) {
 const latest = s => s.session?.operations.at(-1);
 const latestTask = s => s.session?.tasks.at(-1);
 const active = s => s.busy || s.session?.operations.some(o => pending(o.status)) || s.session?.tasks.some(o => pending(o.status));
-const materialLocked = s => active(s) || Boolean(s.session?.operations.length || s.session?.tasks.length);
+const materialLocked = s => active(s) || Boolean(s.session?.operations.some(o=>o.status!=='failed') || s.session?.tasks.length);
 function needed(s) {
   const assets = s.session?.assets || [];
   return [['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].filter(([role]) => !assets.some(a => a.purpose === role && !a.expired)).map(([,name]) => t(name));
@@ -141,6 +141,7 @@ async function handle(s, actionName, b) {
   else if(actionName==='library')await library(s,b.dataset.role);
   else if(actionName==='script') {
     const id=await ensureSession(s),body={settings:SALES_SETTINGS,message:message(s),expectedScriptId:s.session.operations.findLast(o=>o.status==='completed')?.id||null};
+    if(s.session.operations.some(o=>o.id===s.scriptRequest?.requestId && o.status==='failed'))s.scriptRequest=null;
     if(!s.scriptRequest || s.scriptRequest.fingerprint!==JSON.stringify(body))s.scriptRequest={fingerprint:JSON.stringify(body),requestId:crypto.randomUUID()};save(s);
     const {operation}=await api(`/conversations/${id}/script`,post({...body,requestId:s.scriptRequest.requestId}));
     s.session.operations=[...s.session.operations.filter(o=>o.id!==operation.id),operation];s.videoRequest=null;

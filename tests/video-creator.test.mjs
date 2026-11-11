@@ -77,6 +77,24 @@ test('incomplete review preserves a readable draft across restart but cannot app
   assert.equal((await f.generate(id,randomUUID(),{scriptId:opId})).status,409);
   assert.equal(f.state.generates,0);
 });
+test('failed director operations do not permanently lock materials or lose their history',async t=>{
+  let fail=true;
+  const f=await fixture(t,{director:async input=>{if(fail)throw new Error('编导输出达到长度上限，未返回完整脚本。');return script(input);}});
+  const id=await f.init(),asset=await f.upload(id),request={requestId:randomUUID(),message:'介绍门店',settings};
+  assert.equal((await f.call(`/conversations/${id}/script`,{body:request})).status,202);
+  await f.until(async()=> (await f.current(id)).operations[0]?.status==='failed');
+  await f.close();await f.open();
+  const replay=await f.call(`/conversations/${id}/script`,{body:request});
+  assert.equal((await replay.json()).operation.status,'failed');assert.equal(f.state.scripts,1);
+  assert.equal((await f.call(`/conversations/${id}/assets/${asset}`,{method:'DELETE'})).status,200);
+  let c=await f.current(id);assert.equal(c.assets.length,0);assert.equal(c.operations[0].id,request.requestId);
+  const replacement=await f.upload(id);fail=false;
+  assert.equal((await f.call(`/conversations/${id}/script`,{body:{...request,requestId:randomUUID()}})).status,202);
+  c=await f.until(async()=>{const current=await f.current(id);return current.operations.at(-1)?.status==='completed'&&current;});
+  assert.equal(c.operations.length,2);assert.equal(f.state.scripts,2);
+  assert.equal((await f.call(`/conversations/${id}/assets/${replacement}`,{method:'DELETE'})).status,409);
+});
+
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'video-creator-'));
   const wallet = createCreditsLedger({ storageDir: join(root, 'credits'), databaseUrl: null, costMode: true }); await wallet.ready;

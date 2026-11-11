@@ -7,9 +7,9 @@ const settle = async () => { for(let i=0;i<12;i++)await new Promise(resolve=>set
 const photo = name => new File(['photo'], name || '产品.jpg', {type:'image/jpeg'});
 const transfer = files => ({types:['Files'], files, dropEffect:'none'});
 
-async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{}}={}) {
+async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{},beforeScript=async()=>({status:'queued'}),afterScript=async()=>{}}={}) {
   const {document,window}=parseHTML('<html><body><main></main></body></html>');
-  const session={id:'test',assets,operations,tasks:[],version:0}, uploads=[];
+  const session={id:'test',assets,operations,tasks:[],version:0}, uploads=[],scriptRequests=[];
   const storage=new Map([['qiya-ai-sales-persona-v2:user',JSON.stringify({conversationId:session.id})]]);
   const originals=Object.fromEntries(['document','window','localStorage','workspaceUser','fetch'].map(key=>[key,globalThis[key]]));
   let active=0,peak=0;
@@ -17,6 +17,17 @@ async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{}}={})
     if(url.endsWith('/config'))return Response.json({directorEnabled:true,generationEnabled:true});
     if(url.endsWith('/quote'))return Response.json({points:3750,unlimited:true});
     if(url.endsWith('/sales-preset'))return Response.json({assets:[]});
+    if(url.endsWith('/script') && options.method==='POST') {
+      const body=JSON.parse(options.body);scriptRequests.push(body);
+      let operation=session.operations.find(o=>o.id===body.requestId);
+      if(!operation){operation={id:body.requestId,message:body.message,...await beforeScript(body)};session.operations.push(operation);}
+      await afterScript(operation);
+      return Response.json({operation});
+    }
+    if(url.includes('/assets/') && options.method==='DELETE') {
+      session.assets=session.assets.filter(a=>a.id!==url.split('/').at(-1));session.version++;
+      return Response.json({conversation:session});
+    }
     if(url.includes('/assets/') && options.method==='PUT') {
       uploads.push({file:options.body,purpose:options.headers['X-Asset-Purpose']});active++;peak=Math.max(peak,active);
       try { await beforeUpload(options.body); } finally { active--; }
@@ -30,11 +41,54 @@ async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{}}={})
   t.after(()=>{disposeAiSales();for(const [key,value] of Object.entries(originals)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}});
   const root=document.querySelector('main');
   mountAiSales(root,{toast:()=>{}});await settle();
-  return {root,uploads,session,peak:()=>peak,zone:role=>root.querySelector(`[data-sales-drop="${role}"]`),event(type,target,fields={}) {
+  return {root,uploads,session,scriptRequests,async reload(){disposeAiSales();root.innerHTML='';mountAiSales(root,{toast:()=>{}});await settle();},peak:()=>peak,zone:role=>root.querySelector(`[data-sales-drop="${role}"]`),event(type,target,fields={}) {
     const event=new window.Event(type,{bubbles:true,cancelable:true});
     Object.assign(event,{dataTransfer:transfer([]),...fields});target.dispatchEvent(event);return event;
   }};
 }
+
+const readyAssets=()=>[
+  {id:'actor',type:'image',purpose:'character',name:'人物.jpg'},
+  {id:'voice',type:'audio',purpose:'voice',name:'声音.wav'},
+  {id:'scene',type:'image',purpose:'reference',name:'场景.jpg'},
+];
+for(const reload of [false,true])test(`retrying a failed script creates a new operation${reload?' after reload':''}`,async t=>{
+  let calls=0;
+  const ui=await fixture(t,{assets:readyAssets(),beforeScript:async()=>++calls===1
+    ?{status:'failed',error:'编导输出达到长度上限，未返回完整脚本。'}:{status:'queued'}});
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  assert.match(ui.root.querySelector('#sales-error').textContent,/长度上限/);
+  if(reload)await ui.reload();
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  assert.notEqual(ui.scriptRequests[1].requestId,ui.scriptRequests[0].requestId);
+  assert.equal(ui.session.operations.length,2);
+  assert.equal(ui.session.operations.at(-1).status,'queued');
+  assert.equal(ui.root.querySelector('#sales-error').textContent,'');
+});
+
+test('failed scripts allow deleting and replacing materials after reload',async t=>{
+  const ui=await fixture(t,{assets:readyAssets(),operations:[{id:'failed',status:'failed',error:'编导输出达到长度上限'}]});
+  await ui.reload();
+  assert.equal(ui.zone('reference').querySelector('input').disabled,false);
+  const remove=ui.root.querySelector('[data-sales=remove][data-id=scene]');assert.ok(remove);
+  ui.event('click',remove);await settle();
+  assert.equal(ui.session.assets.some(a=>a.id==='scene'),false);
+  ui.event('drop',ui.zone('reference'),{dataTransfer:transfer([photo('新场景.jpg')])});await settle();
+  assert.equal(ui.uploads.length,1);
+  assert.equal(ui.session.operations[0].id,'failed');
+});
+
+test('a lost script response reuses its request ID until the outcome is known',async t=>{
+  let requests=0;
+  const ui=await fixture(t,{assets:readyAssets(),afterScript:async()=>{if(++requests===1)throw new Error('连接中断');}});
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  assert.match(ui.root.querySelector('#sales-error').textContent,/连接中断/);
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  assert.equal(ui.scriptRequests.length,2);
+  assert.equal(ui.scriptRequests[1].requestId,ui.scriptRequests[0].requestId);
+  assert.equal(ui.session.operations.length,1);
+  assert.equal(ui.root.querySelector('#sales-error').textContent,'');
+});
 
 test('dropping a batch uploads every image once with at most three transfers in flight',async t=>{
   const releases=[];
