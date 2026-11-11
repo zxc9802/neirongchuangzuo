@@ -9,6 +9,10 @@ const stored = (kind, id, name) => ({ kind, id, name, filename: name + (kind ===
 const assets = [stored('photo', photoId, '已存人物'), stored('voice', voiceId, '已存声音')];
 const generatedId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
 
+const extractedVideo = (duration = 19) => new Response('extracted-video', { headers: {
+  'Content-Type': 'video/mp4', 'X-Video-Name': encodeURIComponent('抖音示例.mp4'), 'X-Video-Duration': String(duration),
+} });
+
 async function fixture(t, { fetchMedia, fetchMetadata, materials = [...assets], uploadFailure = false, tasks = [] } = {}) {
   const previous = { document: globalThis.document, fetch: globalThis.fetch, workspaceUser: globalThis.workspaceUser };
   const { document, window } = parseHTML('<html><body data-page="replica"><main></main><dialog id="modal"><div id="modal-body"></div></dialog></body></html>');
@@ -47,6 +51,72 @@ async function fixture(t, { fetchMedia, fetchMetadata, materials = [...assets], 
     choose: async key => { node(`[data-rap-key="${key}"]`).click(); await node('#rap-confirm').onclick(); await settle(); },
   };
 }
+
+test('Douyin extraction previews first, applies reference without immediate archival, then independently saves once', async t => {
+  const f = await fixture(t, { fetchMetadata: path => path.endsWith('/douyin') ? extractedVideo() : null });
+  const before = f.calls.length;
+  f.node('#replica-douyin').click();
+  f.node('#douyin-link').value = '分享 https://v.douyin.com/example/';
+  await f.node('#douyin-form').onsubmit({ preventDefault() {} });
+  assert.equal(f.node('#douyin-result').hidden, false);
+  assert.ok(f.node('#douyin-download').href.startsWith('blob:'));
+  assert.match(f.node('main').textContent, /原片.mp4/);
+  await f.node('#douyin-use').onclick();
+  assert.match(f.node('main').textContent, /抖音示例.mp4/);
+  assert.equal(f.calls.slice(before).filter(call => call.path.startsWith('/api/assets/materials/')).length, 0);
+  await f.node('#douyin-save').onclick(); await f.node('#douyin-save').onclick();
+  assert.equal(f.calls.slice(before).filter(call => call.path === '/api/assets/materials/video').length, 1);
+  assert.equal(f.node('#douyin-save').textContent, '已保存到资产库');
+  assert.ok(!f.calls.slice(before).some(call => call.path.includes('/tasks') && call.options?.method));
+  f.dialog.close();
+  f.node('#replica-mode-classic').click(); assert.equal(f.node('#replica-douyin'), null);
+  f.node('#replica-mode-deep').click(); assert.match(f.node('main').textContent, /抖音示例.mp4/);
+});
+
+test('saving an extracted video alone preserves current reference and asset failures remain retryable', async t => {
+  const f = await fixture(t, { uploadFailure: true, fetchMetadata: path => path.endsWith('/douyin') ? extractedVideo() : null });
+  f.node('#replica-douyin').click(); f.node('#douyin-link').value = 'https://v.douyin.com/example/';
+  await f.node('#douyin-form').onsubmit({ preventDefault() {} });
+  await f.node('#douyin-save').onclick();
+  assert.match(f.node('#douyin-status').textContent, /入库失败/);
+  assert.equal(f.node('#douyin-save').disabled, false);
+  assert.match(f.node('main').textContent, /原片.mp4/);
+  await f.node('#douyin-use').onclick(); assert.match(f.node('main').textContent, /抖音示例.mp4/);
+});
+
+test('overlong extracted video can be archived but cannot replace the reference', async t => {
+  const f = await fixture(t, { fetchMetadata: path => path.endsWith('/douyin') ? extractedVideo(90) : null });
+  f.node('#replica-douyin').click(); f.node('#douyin-link').value = 'https://v.douyin.com/example/';
+  await f.node('#douyin-form').onsubmit({ preventDefault() {} });
+  assert.equal(f.node('#douyin-use').disabled, true);
+  assert.match(f.node('#douyin-reference-hint').textContent, /2–60/);
+  await f.node('#douyin-use').onclick(); assert.match(f.node('main').textContent, /原片.mp4/);
+  await f.node('#douyin-save').onclick(); assert.equal(f.node('#douyin-save').textContent, '已保存到资产库');
+  assert.match(f.node('main').textContent, /原片.mp4/);
+});
+
+test('extraction errors and late completion after closing cannot replace the current reference', async t => {
+  let finish, slow = false;
+  const f = await fixture(t, { fetchMetadata: path => path.endsWith('/douyin') ? slow
+    ? new Promise(resolve => { finish = resolve; }) : Response.json({ error: '链接已失效' }, { status: 422 }) : null });
+  f.node('#replica-douyin').click(); f.node('#douyin-link').value = 'https://v.douyin.com/example/';
+  await f.node('#douyin-form').onsubmit({ preventDefault() {} });
+  assert.match(f.node('#douyin-status').textContent, /链接已失效/);
+  assert.equal(f.node('#douyin-extract').disabled, false); assert.match(f.node('main').textContent, /原片.mp4/);
+  slow = true;
+  const pending = f.node('#douyin-form').onsubmit({ preventDefault() {} });
+  f.dialog.close(); finish(extractedVideo()); await pending;
+  assert.equal(f.node('#douyin-result').hidden, true); assert.match(f.node('main').textContent, /原片.mp4/);
+});
+
+test('changing drafts while extraction is open does not assign the result to a different draft', async t => {
+  const f = await fixture(t, { fetchMetadata: path => path.endsWith('/douyin') ? extractedVideo() : null });
+  f.node('#replica-douyin').click(); f.node('#douyin-link').value = 'https://v.douyin.com/example/';
+  await f.node('#douyin-form').onsubmit({ preventDefault() {} });
+  f.node('#replica-new').click();
+  await f.node('#douyin-use').onclick();
+  assert.doesNotMatch(f.node('main').textContent, /抖音示例.mp4/);
+});
 
 test('enhanced editing switch is scoped to deep mode and keeps draft selections across mode changes', async t => {
   const f = await fixture(t);

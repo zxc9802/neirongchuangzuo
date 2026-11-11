@@ -9,6 +9,7 @@ import { createApiCostMeter } from '../credits/meter.mjs';
 import { loadAIConfig } from '../ai/server.mjs';
 import { createVideoProvider, videoConfig, VideoError, MODEL, MINIMAX_MODEL, MODELS, DURATIONS, PROMPT, PIXVERSE_MODEL, WAN_MODEL, isWan3Model } from './provider.mjs';
 import { safeVideoError } from './errors.mjs';
+import { createDouyinHandler } from './douyin.mjs';
 import { VIDEO_LIMIT, PHOTO_LIMIT, probeVideo, normalizeSeedanceVideo, removeVideoAudio, normalizePhoto, restoreSourceAudio, downloadVideo, serveMedia } from './media.mjs';
 import { prepareReferenceVideo } from './reference-video.mjs';
 import { DEEP_IMAGE_KINDS, DEEP_KINDS, DEEP_LABELS, deepImageKinds, isDeepReplica, isEnhancedEdit, preservesSourceAudio } from './deep-replica.mjs';
@@ -57,7 +58,7 @@ async function readJSON(req) {
 }
 
 export function createVideoHandler({ storageDir, env = process.env, publicOrigin, credits,
-  config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo,
+  config = videoConfig(env, publicOrigin), provider, falProvider, pixverseProvider, wanProvider, wan3Provider, fetchImpl = fetch, probe = probeVideo, douyin = createDouyinHandler(),
   photo = normalizePhoto, voice = normalizeVoice, restoreAudio = restoreSourceAudio, speech, captions = createCaptionService(env),
   narration, lipsync, voiceConversion, localization, heygen, subtitleRemoval, materialLibrary, providerStorage = createProviderStorage(env), download = downloadVideo,
   scenes = detectSceneCuts, cutSegment = cutVideoSegment, joinSegments = joinVideoSegments, prepareReference = prepareReferenceVideo,
@@ -1110,6 +1111,9 @@ export function createVideoHandler({ storageDir, env = process.env, publicOrigin
         const expected = publicOrigin ? new URL(publicOrigin).origin : `http://${req.headers.host}`;
         if (req.headers['sec-fetch-site'] === 'cross-site' || req.headers.origin && req.headers.origin !== expected) throw error('请求来源无效。', 403, 'VIDEO_ORIGIN_REJECTED');
         if (closing || fatal) throw error('视频服务暂时不可用，请稍后查询原任务。', 503, 'VIDEO_UNAVAILABLE');
+      }
+      if (path === `${PREFIX}/douyin` && req.method === 'POST') {
+        await douyin(req, res, (await readJSON(req))?.text); return;
       }
       if (path === `${PREFIX}/config` && req.method === 'GET') {
         const availableModels = models.filter(model => !isFalReplacement(model.id)).map(model => isWan3Model(model.id)

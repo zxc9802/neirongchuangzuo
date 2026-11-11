@@ -2,6 +2,7 @@ import { uiLocale, t } from './workspace-preferences.js';
 import { billingPointsText, creditEstimateText, observeCreditTask, refreshWorkspaceCredits, subscribeWorkspaceCredits, workspaceCreditsState } from './workspace-credits.js';
 import { MALAYSIAN_PRICE_NOTE, generationPrice, generationPoints } from './malaysian-prices.js';
 import { openReplicaAssetPicker } from './replica-asset-picker.js';
+import { openDouyinExtractor } from './douyin-extractor.js';
 import { assetThumbnailUrl, uploadSharedMaterial, invalidateAssetLibrary } from './generated-assets.js';
 
 const API = '/api/video-replica';
@@ -202,7 +203,7 @@ function deepSettings(ctx) {
   const locked = state.busy || state.current && state.current.status !== 'draft';
   const voiceSource = replacements.voice && (state.urls.voice || state.current?.sourceVoiceUrl);
   const source = state.urls.video || state.current?.sourceVideoUrl, saved = state.current?.video;
-  return `${source ? `<p class="replica-source-name" title="${ctx.esc(state.files.video?.name || selectedMaterials.video?.name || '参考视频')}">${ctx.esc(state.files.video?.name || selectedMaterials.video?.name || '参考视频已上传')}${saved?.duration ? `<span>${saved.duration} 秒</span>` : ''}</p>` : ''}${modelPicker(ctx)}${voiceSource ? `<audio class="replica-material-audio" src="${ctx.esc(voiceSource)}" controls preload="metadata" aria-label="声音参考试听"></audio>` : ''}<button type="button" class="replica-source-library" data-replica-select-video ${locked ? 'disabled' : ''}>从资产库选择参考视频</button><p class="replica-deep-guidance">人物替换包含脸部、发型和服装，请上传能看清服装的参考图。<br>${replacements.background ? '替换背景时清除原场景中的商品和道具；如需展示商品，请同时上传商品参考图。' : '未选择的项目保留原视频内容。'}<br>沿用原片的动作、镜头和时长，自由组合替换内容。</p>`;
+  return `${source ? `<p class="replica-source-name" title="${ctx.esc(state.files.video?.name || selectedMaterials.video?.name || '参考视频')}">${ctx.esc(state.files.video?.name || selectedMaterials.video?.name || '参考视频已上传')}${saved?.duration ? `<span>${saved.duration} 秒</span>` : ''}</p>` : ''}${modelPicker(ctx)}${voiceSource ? `<audio class="replica-material-audio" src="${ctx.esc(voiceSource)}" controls preload="metadata" aria-label="声音参考试听"></audio>` : ''}<button type="button" id="replica-douyin" class="replica-source-library" ${state.busy ? 'disabled' : ''}>抖音视频提取</button><button type="button" class="replica-source-library" data-replica-select-video ${locked ? 'disabled' : ''}>从资产库选择参考视频</button><p class="replica-deep-guidance">人物替换包含脸部、发型和服装，请上传能看清服装的参考图。<br>${replacements.background ? '替换背景时清除原场景中的商品和道具；如需展示商品，请同时上传商品参考图。' : '未选择的项目保留原视频内容。'}<br>沿用原片的动作、镜头和时长，自由组合替换内容。</p>`;
 }
 function deepSource(ctx) {
   const source = state.urls.video || state.current?.sourceVideoUrl;
@@ -355,7 +356,7 @@ async function selectModel(id) {
   catch (cause) { state.error = cause.message; }
   finally { state.busy = false; refresh(); }
 }
-async function selectFile(kind, file) {
+async function selectFile(kind, file, { archive = true } = {}) {
   if (!file) return;
   const limit = kind === 'video' ? 300 : kind === 'voice' ? 15 : 10;
   if (file.size > limit * 1024 * 1024) { state.error = `文件过大，${kind === 'video' ? '视频' : kind === 'voice' ? '声音参考' : '照片'}不能超过 ${limit} MB。`; refresh(); return; }
@@ -364,7 +365,7 @@ async function selectFile(kind, file) {
   state.files[kind] = file; state.urls[kind] = URL.createObjectURL(file); state.error = '';
   const owner = state.owner, upload = { pending: true, error: null };
   assetUploads.set(file, upload);
-  upload.promise = uploadSharedMaterial(kind, file).then(material => { upload.material = material; }).catch(cause => {
+  upload.promise = (archive ? uploadSharedMaterial(kind, file) : Promise.resolve()).then(material => { upload.material = material; }).catch(cause => {
     upload.error = cause;
     if (state.owner === owner && state.files[kind] === file) state.error = cause.message;
   }).finally(() => { upload.pending = false; if (state.owner === owner && state.files[kind] === file) refresh(); });
@@ -508,6 +509,17 @@ export function useReplicaMaterial(material, kind = material.kind) {
 }
 export function bindVideoReplica(ctx) {
   context = ctx;
+  const extract = document.querySelector('#replica-douyin');
+  if (extract) extract.onclick = () => {
+    const owner = state.owner, draft = state.current?.id, files = state.files;
+    const canUse = () => state.owner === owner && deepMode() && document.body.dataset.page === 'replica'
+      && !state.busy && state.files === files && state.current?.id === draft && (!state.current || state.current.status === 'draft');
+    openDouyinExtractor(ctx, { canUse, maxDuration: selectedModel().extendedDuration || selectedModel().maxDuration,
+      onUse: async file => {
+        if (!canUse()) throw new Error('当前任务已切换，请重新打开抖音视频提取。');
+        if (await selectFile('video', file, { archive: false }) === false) throw new Error(state.error);
+      } });
+  };
   if (!unsubscribeCredits) unsubscribeCredits = subscribeWorkspaceCredits(refreshCredits);
   document.querySelector('#replica-models').onchange = event => { void selectModel(event.target.value); };
   const fast = document.querySelector('#replica-wan3-fast');
