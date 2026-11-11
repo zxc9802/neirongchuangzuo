@@ -62,6 +62,29 @@ test('redirects outside Douyin are stopped before fetching and unavailable posts
   await assert.rejects(extractDouyinVideo(LINK, path, { fetchImpl: async () => new Response('打开 App'), download: () => assert.fail('no video to download') }), { status: 422 });
 });
 
+test('shared text and bare short links download playback redirected to the ZJ CDN', async t => {
+  const path = join(await folder(t), 'video.mp4');
+  const short = 'https://v.douyin.com/peNxUFr24-U/', id = '7703798873416415387';
+  const shared = `5.30 05/22 y@t.rR bNw:/ :2pm 30秒学会！用AI快速做出反转带货短剧（附提示词），即梦短剧工作室上线啦！# AIGC # 即梦短剧工作室 # 即梦AI # 即梦掌管AI短剧的神 # 青年创作者成长计划  ${short} 复制此链接，打开Dou音搜索，直接观看视频！`;
+  const cdn = 'https://v5-dy-ov-experiment.zjcdn.com/video.mp4';
+  for (const text of [shared, short]) {
+    const calls = [];
+    const result = await extractDouyinVideo(text, path, {
+      fetchImpl: async url => {
+        calls.push(url);
+        if (url === short) return new Response(null, { status: 302, headers: { Location: `https://www.iesdouyin.com/share/video/${id}/` } });
+        if (url.includes('/share/video/')) return new Response(html({ ...item, aweme_id: id }));
+        if (new URL(url).hostname === 'aweme.snssdk.com') return new Response(null, { status: 302, headers: { Location: cdn } });
+        assert.equal(url, cdn);
+        return new Response(VIDEO, { headers: { 'Content-Length': String(VIDEO.length) } });
+      },
+      probe: async output => { assert.deepEqual(await readFile(output), VIDEO); return { duration: 90, audio: true }; },
+    });
+    assert.equal(result.id, id); assert.equal(result.metadata.duration, 90);
+    assert.ok(calls.includes(cdn));
+  }
+});
+
 test('media downloader follows only Douyin CDN redirects and streams complete bytes to disk', async t => {
   const path = join(await folder(t), 'video.mp4'), calls = [];
   await downloadDouyinVideo('https://aweme.snssdk.com/aweme/v1/play/?video_id=example', path, { fetchImpl: async (url, options) => {
@@ -74,7 +97,7 @@ test('media downloader follows only Douyin CDN redirects and streams complete by
 
 test('media downloader rejects external redirects, oversized bodies and truncated streams', async t => {
   const path = join(await folder(t), 'video.mp4');
-  for (const location of ['https://127.0.0.1/private', 'https://douyinvod.com.evil.example/file', 'https://user:pass@v26.douyinvod.com/file']) {
+  for (const location of ['https://127.0.0.1/private', 'https://douyinvod.com.evil.example/file', 'https://user:pass@v26.douyinvod.com/file', 'https://zjcdn.com.evil.example/file', 'https://evilzjcdn.com/file', 'http://v5-dy-ov-experiment.zjcdn.com/file']) {
     let calls = 0;
     await assert.rejects(downloadDouyinVideo('https://aweme.snssdk.com/play/', path, { fetchImpl: async () => {
       calls++; return new Response(null, { status: 302, headers: { Location: location } });
