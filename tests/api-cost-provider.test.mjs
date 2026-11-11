@@ -4,13 +4,20 @@ import { mkdtemp,rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join,resolve } from 'node:path';
 import { createCreditsLedger } from '../services/credits/store.mjs';
-import { createProviderPrices,openluxRate,tokenCostCny } from '../services/credits/provider-costs.mjs';
+import { createProviderPrices,openluxRate,tokenCostCny,tokenQuoteCny } from '../services/credits/provider-costs.mjs';
 import { createApiCostMeter } from '../services/credits/meter.mjs';
 
 const card={type:'tokens',inputCnyMillion:20,outputCnyMillion:100,cacheRatio:.05,write5Ratio:1.25,write1hRatio:2,modelName:'claude',group:'AWS-Bedrock-2',fx:6.724};
 const reply=x=>new Response(JSON.stringify(x),{headers:{'Content-Type':'application/json'}});
 async function ledger(t){const root=await mkdtemp(join(tmpdir(),'qiya-cost-provider-'));const x=createCreditsLedger({storageDir:root,databaseUrl:null,costMode:true});await x.ready;t.after(async()=>{await x.close();assert.ok(resolve(root).startsWith(resolve(tmpdir())));await rm(root,{recursive:true,force:true});});return x;}
 
+test('native Gemini budgets include images and thinking; actual usage counts thoughts and cache once',()=>{
+  const body={model:'gemini-4-argon',contents:[{role:'user',parts:[{text:'产品'},{inlineData:{mimeType:'image/jpeg',data:'private-image'}}]}],generationConfig:{maxOutputTokens:65536}};
+  assert.ok(tokenQuoteCny(body,card)>65536*card.outputCnyMillion/1e6+16000*card.inputCnyMillion/1e6);
+  assert.equal(tokenCostCny({promptTokenCount:1000,candidatesTokenCount:100,thoughtsTokenCount:300,cachedContentTokenCount:200},card),
+    tokenCostCny({prompt_tokens:1000,completion_tokens:400,prompt_tokens_details:{cached_tokens:200}},card));
+  assert.throws(()=>tokenCostCny({promptTokenCount:1000},card),{code:'COST_USAGE_MISSING'});
+});
 test('token cost distinguishes cache hits, five minute writes and one hour writes',()=>{
   const usage={prompt_tokens:1000,completion_tokens:100,prompt_tokens_details:{cached_tokens:200,cache_write_tokens:300},claude_cache_creation_1_h_tokens:100,claude_cache_creation_5_m_tokens:200};
   assert.ok(Math.abs(tokenCostCny(usage,card)-.0292)<1e-12);

@@ -9,7 +9,7 @@ const transfer = files => ({types:['Files'], files, dropEffect:'none'});
 
 async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{},beforeScript=async()=>({status:'queued'}),afterScript=async()=>{}}={}) {
   const {document,window}=parseHTML('<html><body><main></main></body></html>');
-  const session={id:'test',assets,operations,tasks:[],version:0}, uploads=[],scriptRequests=[];
+  const session={id:'test',assets,operations,tasks:[],version:0}, uploads=[],scriptRequests=[],videoRequests=[];
   const storage=new Map([['qiya-ai-sales-persona-v2:user',JSON.stringify({conversationId:session.id})]]);
   const originals=Object.fromEntries(['document','window','localStorage','workspaceUser','fetch'].map(key=>[key,globalThis[key]]));
   let active=0,peak=0;
@@ -17,6 +17,10 @@ async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{},befo
     if(url.endsWith('/config'))return Response.json({directorEnabled:true,generationEnabled:true});
     if(url.endsWith('/quote'))return Response.json({points:3750,unlimited:true});
     if(url.endsWith('/sales-preset'))return Response.json({assets:[]});
+    if(url.endsWith('/generate') && options.method==='POST') {
+      const body=JSON.parse(options.body);videoRequests.push(body);
+      const task={...body,id:body.requestId,status:'running'};session.tasks.push(task);return Response.json({task});
+    }
     if(url.endsWith('/script') && options.method==='POST') {
       const body=JSON.parse(options.body);scriptRequests.push(body);
       let operation=session.operations.find(o=>o.id===body.requestId);
@@ -41,7 +45,7 @@ async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{},befo
   t.after(()=>{disposeAiSales();for(const [key,value] of Object.entries(originals)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}});
   const root=document.querySelector('main');
   mountAiSales(root,{toast:()=>{}});await settle();
-  return {root,uploads,session,scriptRequests,async reload(){disposeAiSales();root.innerHTML='';mountAiSales(root,{toast:()=>{}});await settle();},peak:()=>peak,zone:role=>root.querySelector(`[data-sales-drop="${role}"]`),event(type,target,fields={}) {
+  return {root,uploads,session,scriptRequests,videoRequests,async reload(){disposeAiSales();root.innerHTML='';mountAiSales(root,{toast:()=>{}});await settle();},peak:()=>peak,zone:role=>root.querySelector(`[data-sales-drop="${role}"]`),event(type,target,fields={}) {
     const event=new window.Event(type,{bubbles:true,cancelable:true});
     Object.assign(event,{dataTransfer:transfer([]),...fields});target.dispatchEvent(event);return event;
   }};
@@ -52,6 +56,32 @@ const readyAssets=()=>[
   {id:'voice',type:'audio',purpose:'voice',name:'声音.wav'},
   {id:'scene',type:'image',purpose:'reference',name:'场景.jpg'},
 ];
+test('sales defaults to Gemini, remembers Kimi and dispatches the chosen director only on request',async t=>{
+  const ui=await fixture(t,{assets:readyAssets()});
+  assert.equal(ui.root.querySelector('[data-director=gemini]').getAttribute('aria-pressed'),'true');
+  ui.event('click',ui.root.querySelector('[data-director=kimi]'));await ui.reload();
+  assert.equal(ui.root.querySelector('[data-director=kimi]').getAttribute('aria-pressed'),'true');
+  assert.equal(ui.scriptRequests.length,0);
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  assert.equal(ui.scriptRequests[0].directorModel,'kimi');
+  assert.ok(ui.root.querySelector('[data-director=direct]').disabled);
+});
+test('direct mode saves editable requirements and sends real image references without requesting a script',async t=>{
+  const ui=await fixture(t,{assets:readyAssets()});
+  ui.event('click',ui.root.querySelector('[data-director=direct]'));
+  assert.ok(ui.root.querySelector('[data-sales=script]').hidden);
+  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
+  const prompt=ui.root.querySelector('#sales-direct-prompt');
+  assert.match(prompt.value,/图片1：出镜人物/);assert.match(prompt.value,/图片2：真实产品/);assert.match(prompt.value,/声音参考1/);
+  prompt.value+='\n用产品特写开场';ui.event('input',prompt);await ui.reload();
+  assert.equal(ui.root.querySelector('[data-director=direct]').getAttribute('aria-pressed'),'true');
+  assert.match(ui.root.querySelector('#sales-direct-prompt').value,/用产品特写开场/);
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  assert.equal(ui.scriptRequests.length,0);assert.equal(ui.videoRequests.length,1);
+  const request=ui.videoRequests[0];assert.equal(request.directGeneration,true);assert.equal(request.scriptId,undefined);
+  assert.deepEqual(request.referenceImageIds,['actor','scene']);assert.match(request.prompt,/用产品特写开场/);
+  assert.ok(ui.root.querySelector('[data-sales=generate]').disabled);
+});
 for(const reload of [false,true])test(`retrying a failed script creates a new operation${reload?' after reload':''}`,async t=>{
   let calls=0;
   const ui=await fixture(t,{assets:readyAssets(),beforeScript:async()=>++calls===1

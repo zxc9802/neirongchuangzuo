@@ -7,6 +7,7 @@ import sharp from 'sharp';
 import { ALL_VIDEO_SKILLS as VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LANGUAGES, DEFAULT_VIDEO_SETTINGS, VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, videoAssetPurpose, sameVideoScriptSettings } from '../../design/video-catalog.js';
 import { createCreatorStore, UUID } from './store.mjs';
 import { createDirectorModel, creatorError } from './model.mjs';
+import { directorSelection } from './director-provider.mjs';
 import { assertSalesMaterials, assertSalesPlan } from './sales.mjs';
 import { DIRECTOR_PLAN_VERSION } from './director-plan.mjs';
 import { DIRECTOR_OUTPUT_TOKENS, directorAttemptSummary } from './director-response.mjs';
@@ -76,10 +77,10 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       timeline: taskTimeline(task, now()), timelineCoverage: task.timelineCoverage, events: task.events || [], settlement: task.settlement || null,
       materialProgress: { total: task.assetIds?.length || 0, prepared: Object.keys(task.materials || {}).length, approved: Object.values(task.materials || {}).filter(m => m.status === 2).length },
       canRecover: task.status === 'failed' && paid && Boolean(task.resultSource) && !expired,
-      prompt: task.prompt, scriptId: task.scriptId || null, referenceImageIds: task.assetIds?.filter(id => c.assets.find(a => a.id === id)?.type === 'image'),
+      prompt: task.prompt, scriptId: task.scriptId || null, directGeneration: task.directGeneration === true, referenceImageIds: task.assetIds?.filter(id => c.assets.find(a => a.id === id)?.type === 'image'),
       resultUrl: task.status === 'completed' && paid && !expired ? `${PREFIX}/tasks/${task.id}/result` : null };
   }
-  function operationView(op) { return { id: op.id, skill: op.skill, settings: op.settings, status: op.status, message: op.message, createdAt: op.createdAt,
+  function operationView(op) { return { id: op.id, skill: op.skill, directorModel: op.directorModel, settings: op.settings, status: op.status, message: op.message, createdAt: op.createdAt,
     startedAt: op.startedAt, completedAt: op.completedAt, diagnostics: op.diagnostics,
     progress: op.progress, result: op.status === 'completed' ? op.result : undefined, draftResult: op.status === 'failed' ? op.draftResult : undefined, error: op.error, code: op.code, billing: op.billing }; }
   const assetView = (c, a) => ({ id: a.id, originKey: a.libraryId || a.id, name: a.name, type: a.type, purpose: videoAssetPurpose(a), size: a.size, duration: a.duration, width: a.width, height: a.height, uploadedAt: a.uploadedAt,
@@ -119,7 +120,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
     try {
       if (meter.enabled) { const hold = await credits.reserveCost(scope); op.billing = { status: hold.status, exempt: hold.exempt, mode: 'api_cost' }; }
       op.status = 'running'; op.startedAt = now(); op.progress = '正在分析素材并编排分镜'; op.dispatched = true; await save(c);
-      const result = await meter.run(scope, () => director.generate({ groundingVersion: 1, planningVersion: op.planningVersion || 1, skill: op.skill, settings: op.settings, message: op.message,
+      const result = await meter.run(scope, () => director.generate({ groundingVersion: 1, planningVersion: op.planningVersion || 1, skill: op.skill, directorModel: op.directorModel, settings: op.settings, message: op.message,
         assets: op.assetIds.map(id => ({ ...c.assets.find(a => a.id === id) })), fixedNarration: op.fixedNarration,
         history: c.operations.filter(o => o.skill === op.skill && o.status === 'completed' && o.result)
           .flatMap(o => [{ role: 'user', content: o.message }, { role: 'assistant', content: JSON.stringify(o.result) }]).slice(-10) }, { signal: controller.signal, onAttempt,
@@ -433,7 +434,8 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           live(c); if (!UUID.test(input.requestId || '')) throw creatorError('编导操作标识无效。');
           if (c.skill === 'ai-sales' && input.fixedNarration !== undefined && (typeof input.fixedNarration !== 'string' || input.fixedNarration.length > 4000)) throw creatorError('指定文案需在4000字以内。');
           const fixedNarration = c.skill === 'ai-sales' ? input.fixedNarration?.trim() || '' : undefined;
-          const fingerprint = hash({ settings: normalizeVideoSettings(input.settings), message: input.message?.trim(), skill: c.skill, expectedScriptId: input.expectedScriptId || null, assetIds: c.assets.map(a => a.id), ...(fixedNarration !== undefined ? { fixedNarration } : {}) });
+          const directorModel = c.skill === 'ai-sales' || input.directorModel !== undefined ? directorSelection(input.directorModel).id : undefined;
+          const fingerprint = hash({ settings: normalizeVideoSettings(input.settings), message: input.message?.trim(), skill: c.skill, ...(directorModel ? { directorModel } : {}), expectedScriptId: input.expectedScriptId || null, assetIds: c.assets.map(a => a.id), ...(fixedNarration !== undefined ? { fixedNarration } : {}) });
           if (c.operations.some(o => o.id === input.requestId)) { operation = c.operations.find(o => o.id === input.requestId); if (operation.fingerprint !== fingerprint) throw creatorError('不能用同一操作标识修改需求或设置。', 409); return; }
           if ([...store.records.values()].some(x => x.userId === userId && x.operations.some(o => o.id === input.requestId))) throw creatorError('该操作标识已用于其他创作，请重新发起。', 409, 'DIRECTOR_REQUEST_CONFLICT');
           if (c.skill === 'ai-sales') assertSalesMaterials(c.assets, input.settings);
@@ -446,7 +448,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           const last = c.operations.findLast(o => o.status === 'completed');
           if ((input.expectedScriptId || null) !== (last?.id || null)) throw creatorError('脚本已更新，请刷新后继续修改。', 409, 'DIRECTOR_REVISION_CONFLICT');
           c.settings = normalizeVideoSettings(input.settings);
-          operation = { id: input.requestId, fingerprint, ...(fixedNarration !== undefined ? { fixedNarration } : {}), planningVersion: DIRECTOR_PLAN_VERSION, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
+          operation = { id: input.requestId, fingerprint, directorModel, ...(fixedNarration !== undefined ? { fixedNarration } : {}), planningVersion: DIRECTOR_PLAN_VERSION, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
           c.operations.push(operation); c.recordExpiresAt = now() + 30 * DAY; await save(c); fresh = true;
         }); json(res, 202, { operation: operationView(operation), conversationId: c.id }); if (fresh) launch(operation.id, () => runScript(c, operation)); return;
       }
@@ -455,7 +457,9 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         await lock(c.id, async () => {
           live(c); const settings = normalizeVideoSettings(input.settings);
           if (!UUID.test(input.requestId || '') || typeof input.prompt !== 'string' || !input.prompt.trim() || input.prompt.length > 12000) throw creatorError('请填写完整的视频提示词。');
+          if (input.directGeneration !== undefined && typeof input.directGeneration !== 'boolean' || input.directGeneration && input.scriptId) throw creatorError('直接生成不能同时指定编导脚本。');
           const fingerprint = hash({ settings, prompt: input.prompt.trim(), scriptId: input.scriptId || null, assetIds: c.assets.map(a => a.id),
+            ...(input.directGeneration ? { directGeneration: true } : {}),
             ...(input.referenceImageIds ? { referenceImageIds: input.referenceImageIds } : {}) });
           task = c.tasks.find(t => t.id === input.requestId); if (task) { if (task.fingerprint !== fingerprint) throw creatorError('同一任务不能重复提交不同内容。', 409); return; }
           if ([...store.records.values()].some(x => x.userId === userId && x.tasks.some(t => t.id === input.requestId))) throw creatorError('该任务标识已用于其他创作，请重新发起。', 409, 'VIDEO_REQUEST_CONFLICT');
@@ -476,16 +480,19 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           }
           if (c.skill === 'ai-sales') {
             assertSalesMaterials(c.assets, settings);
-            const script = c.operations.find(o => o.id === input.scriptId && o.status === 'completed')?.result?.script;
-            if (!script || script.videoPrompt !== input.prompt.trim()) throw creatorError('请先生成并应用AI带货脚本。', 409, 'SALES_SCRIPT_REQUIRED');
-            assertSalesPlan(script.shots, script.plan, c.assets);
+            if (input.directGeneration) assertSalesMaterials(c.assets.filter(a => a.type === 'audio' || referenceImageIds.includes(a.id)), settings);
+            else {
+              const script = c.operations.find(o => o.id === input.scriptId && o.status === 'completed')?.result?.script;
+              if (!script || script.videoPrompt !== input.prompt.trim()) throw creatorError('请先生成并应用AI带货脚本，或选择直接生成。', 409, 'SALES_SCRIPT_REQUIRED');
+              assertSalesPlan(script.shots, script.plan, c.assets);
+            }
           }
           const model = VIDEO_MODELS.find(m => m.id === settings.model);
           if (referenceImageIds.length > model.maxImages) throw creatorError(`所选模型最多支持${model.maxImages}张图片，请选择video-max或新建创作。`, 400, 'CREATOR_MODEL_LIMIT');
           if (settings.model === 'doubao-seedance-2-5-260628' && config.dedicated25 && !Object.values(config.dedicated25).every(Boolean)) throw creatorError('所选模型的独立接口配置不完整。', 503, 'CREATOR_MODEL_NOT_CONFIGURED');
           if ([...store.records.values()].filter(x => x.userId === userId).flatMap(x => x.tasks).filter(pending).length >= 2) throw creatorError('已有两条视频处理中，请稍后再试。', 429);
           if (c.tasks.length >= 20) throw creatorError('本次创作视频较多，请新建创作。');
-          task = { id: input.requestId, settings, skill: c.skill, scriptId: input.scriptId || null, title: c.operations.find(o => o.id === input.scriptId)?.result?.script?.title || VIDEO_SKILLS.find(s => s.id === c.skill).name,
+          task = { id: input.requestId, settings, skill: c.skill, scriptId: input.scriptId || null, directGeneration: input.directGeneration === true, title: c.operations.find(o => o.id === input.scriptId)?.result?.script?.title || VIDEO_SKILLS.find(s => s.id === c.skill).name,
             prompt: input.prompt.trim(), fingerprint, assetIds: [...referenceImageIds, ...(settings.generateAudio ? c.assets.filter(a => a.type === 'audio').map(a => a.id) : [])], status: 'reserving', createdAt: now(), startedAt: now() };
           c.tasks.push(task); c.recordExpiresAt = now() + 30 * DAY; await save(c);
           try {

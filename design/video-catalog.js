@@ -1,4 +1,9 @@
 import { SALES_DIRECTION } from './ai-sales-policy.js';
+export const VIDEO_DIRECTORS = [
+  { id: 'gemini', name: 'Gemini', model: 'gemini-4-argon' },
+  { id: 'kimi', name: 'Kimi', model: 'kimi-k3.1-pro' },
+];
+export const DEFAULT_VIDEO_DIRECTOR = 'gemini';
 export const VIDEO_SKILLS = [
   { id: 'store-discovery', name: '门店发现', description: '突出特色，给附近的人一个到店理由', focus: '找到照片支持的门店特色，展示环境、产品与服务，形成具体到店理由。' },
   { id: 'store-visit', name: '到店实录', description: '真实体验，建立消费信任', focus: '根据实拍编排一次连贯的到店体验，展现选择、体验与细节，没有实拍支持的服务环节不可编造。', placeholder: '想展示怎样的一次到店体验？', request: '分析实拍，编排一条有参与感的到店实录，展示到店体验与细节。' },

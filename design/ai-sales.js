@@ -1,7 +1,7 @@
 import { mapConcurrent } from './async-pool.js';
 import { setSalesHtml as setHtml, renderSalesMaterials } from './ai-sales-render.js';
 import { canUseAiSales, SALES_SETTINGS } from './ai-sales-policy.js';
-import { VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES } from './video-catalog.js';
+import { VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, VIDEO_DIRECTORS, DEFAULT_VIDEO_DIRECTOR } from './video-catalog.js';
 import { t } from './workspace-preferences.js';
 import { markdownText } from './markdown.js';
 import { refreshWorkspaceCredits } from './workspace-credits.js';
@@ -19,7 +19,7 @@ async function api(path, options = {}) {
 }
 const key = id => 'qiya-ai-sales-persona-v2:' + id;
 function save(s) {
-  try { localStorage.setItem(key(s.owner), JSON.stringify({ form:s.form, conversationId:s.conversationId, createId:s.createId, scriptRequest:s.scriptRequest, videoRequest:s.videoRequest })); }
+  try { localStorage.setItem(key(s.owner), JSON.stringify({ form:s.form, directorMode:s.directorMode, directPrompt:s.directPrompt, conversationId:s.conversationId, createId:s.createId, scriptRequest:s.scriptRequest, videoRequest:s.videoRequest })); }
   catch { s.ctx.toast(t('草稿未保存，请保留当前页面')); }
 }
 const latest = s => s.session?.operations.at(-1);
@@ -33,6 +33,9 @@ function needed(s) {
 function message() {
   return '根据上传的实拍自动判断行业并创作文案，无需用户提供行业、店名或文案。为义鹏创作“用AI挑战不同行业宣传片”的社媒视频，推广他的AI创作能力。开场人物融入实拍场景提出挑战，中段展示行业广告作品，结尾回到创作者邀请关注或出题。全片口播、字幕、标题与生成画面都不出现具体店名、商场名、品牌标识或地址；招牌、菜单、杯盘等可辨店名应通过取景避开或自然去字处理，不替换为虚构店名。保留真实产品与空间特点，不把义鹏写成店老板或真实探店顾客。';
 }
+function directPrompt(s) {
+  return s.directPrompt ?? `${message()}\n\n请直接生成30秒、9:16竖屏、有中文口播的视频。围绕这些真实素材自由发挥创意，以吸引观看、展示产品卖点和自然转化为目标，自主设计镜头、动作、节奏和转场，不虚构价格、效果或口碑。保持出镜人物身份及产品外形一致，人物照背景不作为产品场景。\n${(s.session?.assets || []).filter(a=>a.type==='image').map((a,i)=>`图片${i+1}：${a.purpose==='character'?'出镜人物形象参考，开场和结尾出镜':'真实产品与场景参考，保留其可见特征'}`).join('\n')}\n声音参考1仅用于音色参考，不复述参考音频中的台词。`;
+}
 
 function button(action, label, disabled = false, primary = false) {
   return `<button type="button" data-sales="${action}" class="${primary?'primary':'secondary'}" ${disabled?'disabled':''}>${esc(t(label))}</button>`;
@@ -41,11 +44,17 @@ function shell(s) {
   s.root.innerHTML = `<div class="sales-shell"><header class="sales-heading"><div><h1>${t('AI带货')}</h1><p>${t('用作品展示你的AI创作能力')}</p></div><span>30s · 480p · 9:16</span>${button('new','新建创作')}</header>
   <div class="sales-layout"><section class="sales-card"><h2>01 · ${t('素材')}</h2><div class="sales-uploads">${[['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].map(([role,label])=>`<div data-sales-drop="${role}"><strong>${t(label)}</strong><label class="sales-upload"><span>${t(role==='reference'?'拖入多张图片或点击上传':role==='voice'?'拖入声音或点击上传':'拖入人物照或点击上传')}</span><input type="file" data-role="${role}" aria-label="${t(label)}" accept="${role==='voice'?'audio/mpeg,audio/wav,.mp3,.wav':'image/jpeg,image/png,image/webp'}" ${role==='reference'?'multiple':''}></label><small class="sales-upload-hint">${t(role==='reference'?'JPG / PNG / WebP · 图片合计最多30张':role==='voice'?'MP3 / WAV · 1个声音':'JPG / PNG / WebP · 1张人物照')}</small><button type="button" class="textbutton" data-sales="library" data-role="${role}">${t('从资产库选择')}</button></div>`).join('')}</div><div id="sales-materials" class="sales-materials"></div>
 
+  <div class="sales-directors" role="group" aria-label="${t('编导方式')}">${[...VIDEO_DIRECTORS,{id:'direct',name:'直接生成'}].map(m=>`<button type="button" class="secondary" data-director="${m.id}" title="${esc(m.model || t('不使用编排模型'))}">${esc(t(m.name))}</button>`).join('')}</div><p id="sales-mode-hint" class="sales-mode-hint"></p>
   <div id="sales-status" role="status" aria-live="polite"></div><p id="sales-error" role="alert"></p><div class="sales-actions">${button('script','生成人设脚本',true,true)}<small id="sales-usage"></small></div></section>
-  <section class="sales-card"><h2>02 · ${t('编导脚本')}</h2><div id="sales-script" class="sales-script"></div><div class="sales-actions">${button('generate','生成视频',true,true)}<small id="sales-quote"></small></div><h2>03 · ${t('视频成品')}</h2><div id="sales-result"></div></section></div>
+  <section class="sales-card"><h2 id="sales-script-heading">02 · ${t('编导脚本')}</h2><div class="sales-fields sales-direct" hidden><label for="sales-direct-prompt">${t('视频生成要求')}</label><textarea id="sales-direct-prompt" rows="12" maxlength="12000"></textarea></div><div id="sales-script" class="sales-script"></div><div class="sales-actions">${button('generate','生成视频',true,true)}<small id="sales-quote"></small></div><h2>03 · ${t('视频成品')}</h2><div id="sales-result"></div></section></div>
   <section class="sales-card sales-history"><h2>${t('我的人设视频')}</h2><div id="sales-history"></div></section></div>`;
   s.root.querySelectorAll('input[type=file]').forEach(input => { input.onchange = () => { const files=[...input.files];input.value='';void action(s,()=>upload(s,files,input.dataset.role)); }; });
-  s.root.onclick = e => { const b=e.target.closest('[data-sales]'); if(!b || b.disabled)return; e.preventDefault();void action(s,()=>handle(s,b.dataset.sales,b)); };
+  s.root.querySelector('#sales-direct-prompt').oninput = e => {s.directPrompt=e.target.value;save(s);update(s);};
+  s.root.onclick = e => {
+    const mode=e.target.closest('[data-director]');
+    if(mode && !mode.disabled){s.directorMode=mode.dataset.director;s.error='';save(s);update(s);return;}
+    const b=e.target.closest('[data-sales]'); if(!b || b.disabled)return; e.preventDefault();void action(s,()=>handle(s,b.dataset.sales,b));
+  };
   const clearDrag = () => s.root.querySelectorAll('.is-dragover').forEach(n=>n.classList.remove('is-dragover'));
   s.root.ondragenter = s.root.ondragover = e => {
     if(!Array.from(e.dataTransfer?.types || []).includes('Files'))return;
@@ -71,15 +80,24 @@ function shell(s) {
 function update(s) {
   if(current!==s)return;
   const op=latest(s), task=latestTask(s), busy=active(s), missing=needed(s), result=op?.result || op?.draftResult, script=result?.script;
+  const direct=s.directorMode==='direct', prompt=directPrompt(s);
   const unchanged=op?.status==='completed' && script && op.message===message(s);
+  const sameVideo=direct ? task?.directGeneration && task.prompt===prompt.trim() : task?.scriptId===op?.id;
+  s.root.querySelectorAll('[data-director]').forEach(n=>{n.disabled=Boolean(busy);n.setAttribute('aria-pressed',String(n.dataset.director===s.directorMode));});
+  s.root.querySelector('#sales-mode-hint').textContent=t(direct?'直接把素材与生成要求交给视频模型，不使用编排模型。':s.directorMode==='kimi'?'Kimi 编导 · 最高思考强度':'Gemini 编导 · 最高思考强度');
+  s.root.querySelector('#sales-script-heading').textContent='02 · '+t(direct?'直接生成':'编导脚本');
+  s.root.querySelector('.sales-direct').hidden=!direct;
+  s.root.querySelector('#sales-script').hidden=direct;
+  const promptInput=s.root.querySelector('#sales-direct-prompt');if(promptInput.value!==prompt)promptInput.value=prompt;
   s.root.querySelectorAll('input[type=file],[data-sales=library]').forEach(n=>n.disabled=materialLocked(s));
   s.root.querySelectorAll('[data-sales-drop]').forEach(n=>{n.setAttribute('aria-disabled',String(Boolean(materialLocked(s))));if(materialLocked(s))n.classList.remove('is-dragover');});
-  s.root.querySelector('[data-sales=script]').disabled=Boolean(busy || missing.length || s.config?.directorEnabled===false);
-  s.root.querySelector('[data-sales=generate]').disabled=Boolean(busy || !unchanged || missing.length || s.config?.generationEnabled===false || s.quote?.affordable===false || task?.scriptId===op?.id && ['completed','uncertain','expired'].includes(task?.status));
+  s.root.querySelector('[data-sales=script]').hidden=direct;
+  s.root.querySelector('[data-sales=script]').disabled=Boolean(direct || busy || missing.length || s.config?.directorEnabled===false);
+  s.root.querySelector('[data-sales=generate]').disabled=Boolean(busy || (direct?!prompt.trim():!unchanged) || missing.length || s.config?.generationEnabled===false || s.quote?.affordable===false || sameVideo && ['completed','uncertain','expired'].includes(task?.status));
   s.root.querySelector('[data-sales=generate]').textContent=t(task?.canRecover?'恢复成片':task?.status==='failed'?'重新生成视频':'生成视频');
   s.root.querySelectorAll('.sales-fields input,.sales-fields textarea').forEach(n=>n.disabled=Boolean(busy));
   s.root.querySelector('[data-sales=new]').disabled=Boolean(s.busy);
-  s.root.querySelector('#sales-status').textContent=s.busy || pending(op?.status) ? s.activity || op?.progress || t('正在编导…') : pending(task?.status) ? t('视频生成中，可稍后回来查看') : missing.length ? t('请添加')+'：'+missing.join('、') : op?.draftResult ? t('待审核脚本') : script&&!unchanged ? t('文案已修改，请重新编导') : t('素材已就绪');
+  s.root.querySelector('#sales-status').textContent=s.busy || pending(op?.status) ? s.activity || op?.progress || t(direct?'正在提交…':'正在编导…') : pending(task?.status) ? t('视频生成中，可稍后回来查看') : missing.length ? t('请添加')+'：'+missing.join('、') : direct ? t('素材已就绪，可直接生成视频') : op?.draftResult ? t('待审核脚本') : script&&!unchanged ? t('文案已修改，请重新编导') : t('素材已就绪');
   s.root.querySelector('#sales-error').textContent=s.error || (op?.status==='failed'?op.error:'') || (task?.status==='failed'?task.error:'') || s.pollError || '';
   const usage=s.session?.operations.reduce((n,o)=>n+(o.billing?.usagePoints ?? o.billing?.chargedPoints ?? 0),0)||0;
   s.root.querySelector('#sales-usage').textContent=t('编导已消耗')+' '+usage+' '+t('积分');
@@ -127,6 +145,9 @@ async function open(s,id) {
   const {conversation}=await api('/conversations/'+id);
   if(conversation.skill!=='ai-sales')throw new Error(t('请在对应模块打开创作'));
   s.session=conversation;s.conversationId=id;s.createId=null;s.scriptRequest=null;s.videoRequest=null;s.resultKey=null;
+  const task=latestTask(s);
+  s.directorMode=task?.directGeneration ? 'direct' : latest(s)?.directorModel || DEFAULT_VIDEO_DIRECTOR;
+  s.directPrompt=task?.directGeneration ? task.prompt : undefined;
   const op=latest(s);if(op) {
     const source=op.message;
     s.form={name:source.match(/^产品或门店：(.*)$/m)?.[1]||'',goal:source.match(/卖点与要求：([\s\S]*?)(?=\n\n以下是用户定稿|\n\n请(?:根据实拍|为义鹏)|$)/)?.[1]||'',copy:source.match(/以下是用户定稿台词，按原文编排，保留全文，不重写、不删句：\n([\s\S]*?)(?=\n\n请(?:根据实拍|为义鹏)|$)/)?.[1]||''};
@@ -134,23 +155,26 @@ async function open(s,id) {
   save(s);if(current===s)shell(s);
 }
 async function handle(s, actionName, b) {
-  if(actionName==='new') {s.session=null;s.conversationId=null;s.createId=null;s.scriptRequest=null;s.videoRequest=null;s.form={name:'',goal:'',copy:''};s.resultKey=null;shell(s);await loadPreset(s);}
+  if(actionName==='new') {s.session=null;s.conversationId=null;s.createId=null;s.scriptRequest=null;s.videoRequest=null;s.directPrompt=undefined;s.form={name:'',goal:'',copy:''};s.resultKey=null;shell(s);await loadPreset(s);}
   else if(actionName==='open')await open(s,b.dataset.id);
   else if(actionName==='remove')s.session=(await api(`/conversations/${s.session.id}/assets/${b.dataset.id}`,{method:'DELETE'})).conversation;
   else if(actionName==='copy')await navigator.clipboard.writeText((latest(s).result || latest(s).draftResult).script.videoPrompt);
   else if(actionName==='library')await library(s,b.dataset.role);
   else if(actionName==='script') {
-    const id=await ensureSession(s),body={settings:SALES_SETTINGS,message:message(s),expectedScriptId:s.session.operations.findLast(o=>o.status==='completed')?.id||null};
+    const id=await ensureSession(s),body={settings:SALES_SETTINGS,directorModel:s.directorMode,message:message(s),expectedScriptId:s.session.operations.findLast(o=>o.status==='completed')?.id||null};
     if(s.session.operations.some(o=>o.id===s.scriptRequest?.requestId && o.status==='failed'))s.scriptRequest=null;
     if(!s.scriptRequest || s.scriptRequest.fingerprint!==JSON.stringify(body))s.scriptRequest={fingerprint:JSON.stringify(body),requestId:crypto.randomUUID()};save(s);
     const {operation}=await api(`/conversations/${id}/script`,post({...body,requestId:s.scriptRequest.requestId}));
     s.session.operations=[...s.session.operations.filter(o=>o.id!==operation.id),operation];s.videoRequest=null;
   } else if(actionName==='generate') {
     if(latestTask(s)?.canRecover) {const {task}=await api(`/tasks/${latestTask(s).id}/recover`,post({}));s.session.tasks=s.session.tasks.map(x=>x.id===task.id?task:x);return;}
-    const op=latest(s),script=op.result.script;
+    const op=latest(s),script=op?.result?.script;
+    const body=s.directorMode==='direct'
+      ? {settings:SALES_SETTINGS,directGeneration:true,prompt:directPrompt(s),referenceImageIds:s.session.assets.filter(a=>a.type==='image').map(a=>a.id)}
+      : {settings:SALES_SETTINGS,scriptId:op.id,prompt:script.videoPrompt,referenceImageIds:script.referenceImageIds};
     if(latestTask(s)?.status==='failed')s.videoRequest=null;
-    s.videoRequest ||= {requestId:crypto.randomUUID(),scriptId:op.id};save(s);
-    const {task}=await api(`/conversations/${s.session.id}/generate`,post({...s.videoRequest,settings:SALES_SETTINGS,prompt:script.videoPrompt,referenceImageIds:script.referenceImageIds}));
+    if(!s.videoRequest || s.videoRequest.fingerprint!==JSON.stringify(body))s.videoRequest={requestId:crypto.randomUUID(),fingerprint:JSON.stringify(body)};save(s);
+    const {task}=await api(`/conversations/${s.session.id}/generate`,post({...body,requestId:s.videoRequest.requestId}));
     s.session.tasks=[...s.session.tasks.filter(x=>x.id!==task.id),task];
   }
 }
@@ -177,7 +201,7 @@ export function mountAiSales(root, ctx) {
   if(!canUseAiSales(globalThis.workspaceUser)){root.textContent=t('此账号暂未开放AI带货。');return;}
   if(current?.root===root && root.querySelector('.sales-shell'))return;
   disposeAiSales();const owner=globalThis.workspaceUser.id;let saved={};try{saved=JSON.parse(localStorage.getItem(key(owner))||'{}');}catch{}
-  const s=current={root,ctx,owner,form:{name:'',goal:'',copy:'',...saved.form},conversationId:saved.conversationId,createId:saved.createId,scriptRequest:saved.scriptRequest,videoRequest:saved.videoRequest,session:null,conversations:[],resultKey:null,busy:false,error:''};
+  const s=current={root,ctx,owner,form:{name:'',goal:'',copy:'',...saved.form},directorMode:[...VIDEO_DIRECTORS.map(m=>m.id),'direct'].includes(saved.directorMode)?saved.directorMode:DEFAULT_VIDEO_DIRECTOR,directPrompt:saved.directPrompt,conversationId:saved.conversationId,createId:saved.createId,scriptRequest:saved.scriptRequest,videoRequest:saved.videoRequest,session:null,conversations:[],resultKey:null,busy:false,error:''};
   shell(s);
   void action(s,async()=>{[s.config,s.quote]=await Promise.all([api('/config'),api('/quote',post({settings:SALES_SETTINGS}))]);if(s.conversationId)s.session=(await api('/conversations/'+s.conversationId)).conversation;else await loadPreset(s);});
   s.timer=setInterval(()=>void poll(s),4000);

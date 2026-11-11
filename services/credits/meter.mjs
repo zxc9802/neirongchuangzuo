@@ -83,10 +83,12 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
       let body, rate, quoteCny, provider;
       try { if (openlux) {
         body = options.body instanceof FormData ? {model:options.body.get('model')} : JSON.parse(options.body);
-        const automatic = config.autoTextBilling === true && target.pathname.endsWith('/chat/completions');
+        const geminiModel = /^\/v1beta\/models\/([^/:]+):generateContent$/.exec(target.pathname)?.[1];
+        if (geminiModel) body = { ...body, model: geminiModel };
+        const automatic = config.autoTextBilling === true && (target.pathname.endsWith('/chat/completions') || Boolean(geminiModel));
         rate = automatic ? await prices.openluxAuto(body) : await prices.openlux(body.model); provider = 'openlux';
         quoteCny = rate.type === 'receipt' ? rate.quoteCny : rate.type === 'request' ? rate.requestCny : tokenQuoteCny(body,rate);
-        if (automatic) {
+        if (automatic && !geminiModel) {
           body = { ...body, stream: true, stream_options: { ...body.stream_options, include_usage: true } };
           options = { ...options, body: JSON.stringify(body) };
         }
@@ -135,7 +137,7 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
         return response;
       }
       try {
-        const costCny = tokenCostCny(payload?.usage,rate);
+        const costCny = tokenCostCny(payload?.usage || payload?.usageMetadata,rate);
         await finish(scope,receiptId,{costCny,...requestId || cleanId(payload?.id)?{providerRequestId:requestId || cleanId(payload.id)}:{}});
       } catch(error) {
         if (error.code==='COST_USAGE_MISSING') await pending(scope,receiptId,requestId);

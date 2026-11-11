@@ -7,6 +7,7 @@
 [data-sales-drop].is-dragover .sales-upload{border-color:var(--vc-selected-border);outline:2px solid var(--vc-selected-border);outline-offset:2px;background:var(--ui-surface)}
 .sales-shell,.sales-card,.sales-uploads>div,.sales-fields label{min-width:0}
 .sales-shell{width:100%;overflow-wrap:anywhere}
+.sales-directors{display:flex;flex-wrap:wrap;gap:8px;margin-top:22px}.sales-directors button{flex:1;min-width:80px;border-radius:9px;padding:8px 12px}.sales-directors button[aria-pressed=true]{color:var(--ui-surface);background:var(--ui-text);border-color:var(--ui-text)}.sales-mode-hint{color:var(--ui-muted);font-size:13px;line-height:1.6}.sales-direct[hidden],.sales-shell [data-sales=script][hidden]{display:none}
 .sales-layout{grid-template-columns:repeat(2,minmax(0,1fr))}
 .sales-heading,.sales-actions,.sales-history-row{flex-wrap:wrap}
 .sales-materials audio{min-width:0;max-width:100%}

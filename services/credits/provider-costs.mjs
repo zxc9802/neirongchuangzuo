@@ -19,6 +19,11 @@ export function openluxRate(pricing, status, modelName, group) {
 
 export function tokenCostCny(usage, rate) {
   if (rate.type !== 'tokens') throw unavailable('缺少Token计费单价。');
+  if (usage && 'promptTokenCount' in usage) usage = {
+    prompt_tokens: usage.promptTokenCount,
+    completion_tokens: Number.isSafeInteger(usage.candidatesTokenCount) ? usage.candidatesTokenCount + (usage.thoughtsTokenCount || 0) : undefined,
+    prompt_tokens_details: { cached_tokens: usage.cachedContentTokenCount || 0 },
+  };
   const input = count(usage?.prompt_tokens ?? usage?.input_tokens), output = count(usage?.completion_tokens ?? usage?.output_tokens);
   if (input === null || output === null) throw new CreditsError('供应商未返回完整用量，费用等待确认。', 503, 'COST_USAGE_MISSING');
   const details = usage.prompt_tokens_details || usage.input_tokens_details || {};
@@ -35,6 +40,10 @@ export function tokenCostCny(usage, rate) {
 }
 
 export function tokenQuoteCny(body, rate) {
+  if (body.contents) body = { ...body, max_tokens: body.generationConfig?.maxOutputTokens,
+    messages: [body.systemInstruction, ...body.contents].filter(Boolean).map(content => ({ role: content.role || 'system',
+      content: (content.parts || []).map(part => part.inlineData ? { type: 'image_url' } : { type: 'text', text: part.text || '' }) })),
+  };
   const images = (body.messages || []).flatMap(m => Array.isArray(m.content) ? m.content : []).filter(part => part.type === 'image_url').length;
   const text = JSON.stringify((body.messages || []).map(m => ({...m,content:Array.isArray(m.content)?m.content.filter(p=>p.type!=='image_url'):m.content})));
   // Opus 5.5 caps each image at 4,784 visual tokens: platform.claude.com/docs/en/build-with-claude/vision.

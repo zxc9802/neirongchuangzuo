@@ -18,6 +18,22 @@ async function wallet(t) {
   const dir=await mkdtemp(join(tmpdir(),'qiya-auto-cost-'));const credits=createCreditsLedger({storageDir:dir,databaseUrl:null,costMode:true});
   await credits.ready;await credits.reserveCost(scope);t.after(async()=>{await credits.close();await rm(dir,{recursive:true,force:true});});return credits;
 }
+test('native Gemini uses model URL for its quote and supplier receipt without rewriting the request', async t => {
+  const credits = await wallet(t);
+  const native = { systemInstruction: { parts: [{ text: '编导' }] }, contents: [{ role: 'user', parts: [{ text: '图片与需求' }] }],
+    generationConfig: { maxOutputTokens: 65536, thinkingConfig: { thinkingLevel: 'high' } } };
+  const meter = createApiCostMeter({ credits, config, sleep: async () => {}, prices: {
+    openluxAuto: async body => { assert.equal(body.model, 'gemini-4-argon'); assert.equal(body.generationConfig.maxOutputTokens, 65536); return { ...card, modelName: body.model }; },
+    openluxReceipt: async id => { assert.equal(id, 'gemini-receipt'); return { quota: 500, logIds: [3], groups: ['Aistudio-Gemini-1'] }; },
+  }, fetchImpl: async (_url, options) => {
+    assert.deepEqual(JSON.parse(options.body), native);
+    return Response.json({ candidates: [], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 10, thoughtsTokenCount: 500 } }, { headers: { 'x-api-request-id': 'gemini-receipt' } });
+  } });
+  await meter.run(scope, () => meter.fetch('https://api.openlux.ai/v1beta/models/gemini-4-argon:generateContent', { method: 'POST', body: JSON.stringify(native) }));
+  const done = await credits.settleCost(scope); assert.equal(done.settledUnits, 7000);
+  const item = Object.values(done.costItems)[0]; assert.equal(item.metadata.model, 'gemini-4-argon'); assert.equal(item.evidence.groups, 'Aistudio-Gemini-1');
+});
+
 test('automatic text uses supplier request IDs and actual quotas across changing groups',async t=>{
   const credits=await wallet(t);let calls=0;
   const meter=createApiCostMeter({credits,config,sleep:async()=>{},prices:{openluxAuto:async()=>card,openluxReceipt:async id=>({quota:id==='api-1'?250:500,logIds:[id==='api-1'?1:2],groups:[id==='api-1'?'Azure-Gpt-3':'Openai-Gpt-1']})},fetchImpl:async(url,options)=>{

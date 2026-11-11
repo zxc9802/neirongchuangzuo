@@ -1,4 +1,5 @@
 import { mapConcurrent } from '../../design/async-pool.js';
+import { directorSelection, directorRequest, geminiCompletion } from './director-provider.mjs';
 import { assertSalesPlan, assertSalesNarration, SALES_PERSONA_REVIEW, SALES_ANONYMOUS_RULES } from './sales.mjs';
 import { narrationTarget, narrationDirection } from './narration-budget.mjs';
 import { OBSERVATION_SYSTEM, validateObservations, GROUNDING_RULES, validateGrounding, narrationRepairRequest, applyNarrationRepair, QUALITY_SYSTEM, validateQuality } from './director-quality.mjs';
@@ -139,9 +140,10 @@ function directorSystem(skill) {
 export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300000, maxOutputTokens = DIRECTOR_OUTPUT_TOKENS } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 1200000) throw creatorError('编导等待时限配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 4096 || maxOutputTokens > 65536) throw creatorError('编导输出长度配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
-  const writingModel = config.videoDirectorModel || config.imageTextModel || config.chatModel;
   return { enabled: Boolean(config.apiKey), async generate(input, { signal, onProgress, onAttempt } = {}) {
     if (!config.apiKey) throw creatorError('编导服务尚未配置，请联系管理员。', 503, 'DIRECTOR_NOT_CONFIGURED');
+    const selected = input.directorModel === undefined ? null : directorSelection(input.directorModel);
+    const writingModel = selected?.model || config.videoDirectorModel || config.imageTextModel || config.chatModel;
     const images = input.assets.filter(a => a.type === 'image');
     const content = [{ type: 'text', text: JSON.stringify({ direction: VIDEO_SKILLS.find(s => s.id === input.skill), settings: input.settings, pacing: directorPacing(input.settings),
       planningVersion: input.planningVersion || 1, assets: input.assets.map(a => ({ id: a.id, type: a.type, purpose: videoAssetPurpose(a), label: a.type === 'image' ? `图片${images.indexOf(a) + 1}` : '声音参考', name: a.name })),
@@ -153,15 +155,18 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
     preparedImages.forEach((bytes,index) => content.push({ type:'text', text:`图片${index+1}，ID=${images[index].id}` }, { type:'image_url', image_url:{url:'data:image/jpeg;base64,'+bytes.toString('base64'),detail:'high'} }));
     let sequence = 0, observations;
     const auxiliary = async (stage, system, userContent, validate = value => value, outputTokens = stage === 'observation' ? Math.min(maxOutputTokens, 16384) : Math.min(maxOutputTokens, 4096)) => {
+      const selectedRepair = stage === 'narration_repair' && selected;
+      if (selectedRepair) outputTokens = maxOutputTokens;
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
       const entry = { attempt: ++sequence, stage, startedAt: Date.now(), status:'started', phase:'request', model:stage==='observation' ? config.videoObservationModel || 'gpt-6-luna' : stage === 'narration_repair' ? writingModel : config.imageTextModel || config.chatModel, maxOutputTokens:outputTokens, inputImageCount: stage==='observation'?images.length:0 };
       const publish=()=>onAttempt?.(redactDirectorValue(entry,[config.apiKey])); await publish();
       onProgress?.(({observation:'正在识别实拍内容',narration_repair:'正在精简旁白',quality:'正在检查素材依据与宣传内容'})[stage]);
       try {
-        const response=await fetchImpl(config.baseUrl+'/chat/completions',{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${config.apiKey}`,'Content-Type':'application/json'},
-          body:JSON.stringify({model:entry.model,messages:[{role:'system',content:system},{role:'user',content:userContent}],stream:true,stream_options:{include_usage:true},response_format:{type:'json_object'},max_tokens:entry.maxOutputTokens,temperature:.2}),signal:callSignal});
+        const request = selectedRepair ? directorRequest(config, selected, system, [{type:'text',text:userContent}], outputTokens)
+          : { url:config.baseUrl+'/chat/completions', body:{model:entry.model,messages:[{role:'system',content:system},{role:'user',content:userContent}],stream:true,stream_options:{include_usage:true},response_format:{type:'json_object'},max_tokens:entry.maxOutputTokens,temperature:.2} };
+        const response=await fetchImpl(request.url,{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${config.apiKey}`,'Content-Type':'application/json'},body:JSON.stringify(request.body),signal:callSignal});
         entry.httpStatus=response.status;entry.phase='response';entry.providerRequestId=response.headers.get('x-api-request-id')||response.headers.get('x-request-id');
-        Object.assign(entry,await readDirectorResponse(response));const payload=entry.payload;delete entry.payload;entry.parsedResponse=payload;
+        Object.assign(entry,await readDirectorResponse(response));const payload=selectedRepair && selected.id==='gemini' && response.ok ? geminiCompletion(entry.payload) : entry.payload;delete entry.payload;entry.parsedResponse=payload;
         entry.finishReason=payload?.choices?.[0]?.finish_reason;entry.usage=payload?.usage;
         if(!response.ok)throw creatorError('编导检查接口返回错误，请稍后重试。',502,'DIRECTOR_PROVIDER_ERROR');
         entry.phase='parse';const parsed=parseDirectorOutput(payload);entry.phase='validate';const result=validate(parsed.value);
@@ -178,31 +183,35 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
       observations=await auxiliary('observation',OBSERVATION_SYSTEM,observationContent,value=>validateObservations(value,input));
     }
     const indexedObservations = observations?.map(o=>({...o,facts:o.facts.map((fact,index)=>({index,text:fact}))}));
-    const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}] : content;
-    const groundingSystem = observations ? '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n'+GROUNDING_RULES : '';
+    const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}, ...(selected ? content.slice(1) : [])] : content;
+    const groundingSystem = observations ? (selected ? '\n你同时收到真实图片和独立观察清单。结合图片观察构图、光线、质感与创意可能，事实与evidence以observations中已确认的信息为准，不把uncertain当作事实。\n' : '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n')+GROUNDING_RULES : '';
     const baseSystem = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以pacing.narration的全片字数为目标，先写自然连续的口播再分配画面；例如30秒通常140—160字。保留短换气，不为每次切镜停一秒以上，不机械压成每镜6—9字。长句可跨相邻镜头，实际发音约每秒5—6字，内容过密时先调整镜头时间，再删重复，不删除核心消费理由。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
-    const system = baseSystem + (input.skill === 'ai-sales' ? '\n' + SALES_ANONYMOUS_RULES : '');
+    const system = baseSystem + (input.skill === 'ai-sales' ? '\n' + SALES_ANONYMOUS_RULES : '') + (selected ? '\n创意优先：在真实素材与人物身份约束内，以画面吸引力、观看欲和购买欲为编排目标。先找到最能让人停留的视觉钩子，再用产品质感、动作、景别、光影、声音与转场构成有推进的作品。自主决定镜头数量和节奏，不受示例镜头数量或固定运镜顺序限制，不为创新改造真实产品或虚构效果、价格与口碑。让卖点可见、行动邀请自然；AI带货同时保留创作者开场、行业案例展示与创作者收尾的人设结构。' : '');
     const planningOptions = input.skill === 'ai-sales' && input.fixedNarration?.trim() && /^doubao-seed-2-1-/.test(writingModel)
       ? { thinking: { type: 'disabled' } } : {};
     let budget = input.skill === 'ai-sales' ? Math.max(maxOutputTokens, 32768) : maxOutputTokens, correction = '', previousCandidate;
     for (let attempt = 1; attempt <= 2; attempt++) {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
       const record = { attempt: ++sequence, stage:'planning', startedAt: Date.now(), status: 'started', phase: 'request', model: writingModel,
-        maxOutputTokens: budget, inputImageCount: observations ? 0 : images.length, sourceImageCount: images.length, observationModel: observations ? config.videoObservationModel || 'gpt-6-luna' : undefined, historyMessageCount: input.history.slice(-10).length, finishReason: null };
+        maxOutputTokens: budget, inputImageCount: observations && !selected ? 0 : images.length, sourceImageCount: images.length, observationModel: observations ? config.videoObservationModel || 'gpt-6-luna' : undefined, historyMessageCount: input.history.slice(-10).length, finishReason: null };
       const publish = async () => { if (onAttempt) await onAttempt(redactDirectorValue(record, [config.apiKey])); };
       await publish();
       onProgress?.(attempt === 1 ? '正在分析素材并编排分镜' : '正在重新生成完整脚本');
       let payload, response;
       try {
-        response = await fetchImpl(config.baseUrl + '/chat/completions', { method: 'POST', redirect: 'error',
+        const userContent = correction ? [...planningContent, { type: 'text', text: correction }] : planningContent;
+        const request = selected ? directorRequest(config, selected, system, userContent, budget)
+          : { url:config.baseUrl + '/chat/completions', body:{ model: record.model, messages: [{ role: 'system', content: system }, { role: 'user', content: userContent }],
+            stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: budget, ...planningOptions, temperature: .45 } };
+        response = await fetchImpl(request.url, { method: 'POST', redirect: 'error',
           headers: { Authorization: `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: record.model, messages: [{ role: 'system', content: system }, { role: 'user', content: correction ? [...planningContent, { type: 'text', text: correction }] : planningContent }],
-            stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' }, max_tokens: budget, ...planningOptions, temperature: .45 }), signal: callSignal });
+          body: JSON.stringify(request.body), signal: callSignal });
         record.phase = 'response'; record.httpStatus = response.status; record.contentType = response.headers.get('content-type') || '';
         record.providerRequestId = response.headers.get('x-api-request-id') || response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || null;
         await publish();
         const received = await readDirectorResponse(response); Object.assign(record, received); payload = received.payload;
         if (!response.ok) throw creatorError(response.status === 429 ? '编导服务繁忙，请稍后再试。' : '编导接口返回错误，请稍后重试。', 502, 'DIRECTOR_PROVIDER_ERROR');
+        if (selected?.id === 'gemini') payload = geminiCompletion(payload);
         record.phase = 'parse'; record.parsedResponse = payload; delete record.payload;
         record.finishReason = payload?.choices?.[0]?.finish_reason || null; record.usage = payload?.usage;
         record.responseContent = payload?.choices?.[0]?.message?.content ?? '';

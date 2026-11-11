@@ -50,9 +50,11 @@ test('server uses authenticated account, never forged permission headers',async 
   t.after(async()=>{await server.shutdown();backend.closeAllConnections();await new Promise(r=>backend.close(r));});
   for(const account of ['admin','zxc9911','ordinary']){const res=await fetch(base+'/api/video-creator/config',{headers:{cookie:'account='+account,'x-ai-sales-allowed':'true'}});assert.equal((await res.json()).allowed,account!=='ordinary');}
 });
-test('sales API is gated, separates histories, survives reload, refuses direct generation without approved script',async t=>{
-  const root=await mkdtemp(join(tmpdir(),'ai-sales-'));let calls=0;
-  const handler=createVideoCreatorHandler({storageDir:root,aiConfig:{},config:{enabled:true,publicOrigin:'http://localhost',signingSecret:'test'},provider:{},director:{enabled:true,generate:async()=>{calls++;return{};}},voice:async(input,path)=>{await writeFile(path,'test');return{duration:10};}});
+test('sales API gates access, persists director choice and bypasses all directors only for explicit direct generation',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'ai-sales-'));let calls=0;const directors=[],videos=[];
+  const handler=createVideoCreatorHandler({storageDir:root,aiConfig:{},config:{enabled:true,publicOrigin:'http://localhost',signingSecret:'test'},
+    provider:{createMaterial:async()=>({id:randomUUID(),status:2}),generateCreative:async input=>{videos.push(input);return{taskId:'upstream'};},query:async()=>({taskId:'upstream'})},
+    director:{enabled:true,generate:async input=>{calls++;directors.push(input.directorModel);return{};}},voice:async(input,path)=>{await writeFile(path,'test');return{duration:10};}});
   await handler.ready;
   const app=createServer((req,res)=>{req.authenticatedUserId='same-test-owner';req.aiSalesAllowed=req.headers.cookie==='account=admin';void handler(req,res);});const base=await listen(app);
   t.after(async()=>{await handler.shutdown();app.closeAllConnections();await new Promise(r=>app.close(r));await rm(root,{recursive:true,force:true});});
@@ -75,6 +77,39 @@ test('sales API is gated, separates histories, survives reload, refuses direct g
   }
   const generate=await call('/conversations/'+id+'/generate',{requestId:randomUUID(),settings:SALES_SETTINGS,prompt:'只生成空镜'});
   assert.equal(generate.status,409);assert.equal((await generate.json()).code,'SALES_SCRIPT_REQUIRED');
+  const scriptPath='/conversations/'+id+'/script', generationPath='/conversations/'+id+'/generate';
+  const invalid=await call(scriptPath,{requestId:randomUUID(),settings:SALES_SETTINGS,message:'生成',directorModel:'direct'});
+  assert.equal(invalid.status,400);assert.equal(calls,0);
+  let previous=null;
+  for(const model of [undefined,'kimi']) {
+    const request={requestId:randomUUID(),settings:SALES_SETTINGS,message:'生成',directorModel:model,expectedScriptId:previous};
+    const res=await call(scriptPath,request);assert.equal(res.status,202);
+    assert.equal((await res.json()).operation.directorModel,model || 'gemini');
+    for(let i=0;i<100;i++) {
+      const {conversation}=await (await call('/conversations/'+id)).json();
+      if(conversation.operations.at(-1).status==='completed')break;
+      await new Promise(r=>setTimeout(r,10));
+    }
+    assert.equal((await call(scriptPath,{...request,directorModel:model?'gemini':'kimi'})).status,409);
+    previous=request.requestId;
+  }
+  assert.deepEqual(directors,['gemini','kimi']);
+  const direct={requestId:randomUUID(),settings:SALES_SETTINGS,prompt:'使用人物、产品与声音素材自由创作',directGeneration:true};
+  assert.equal((await call(generationPath,{...direct,scriptId:previous})).status,400);
+  assert.equal((await call(generationPath,direct,false)).status,403);
+  const {conversation}=await (await call('/conversations/'+id)).json();
+  const referenceImageIds=conversation.assets.filter(a=>a.type==='image').map(a=>a.id);
+  const withoutActor=conversation.assets.filter(a=>a.purpose==='reference').map(a=>a.id);
+  assert.equal((await call(generationPath,{...direct,referenceImageIds:withoutActor})).status,400);
+  const directResponse=await call(generationPath,{...direct,referenceImageIds});assert.equal(directResponse.status,202);
+  const task=(await directResponse.json()).task;assert.equal(task.directGeneration,true);assert.equal(task.scriptId,null);
+  assert.equal((await call(generationPath,{...direct,referenceImageIds})).status,202);
+  assert.equal((await call(generationPath,{...direct,referenceImageIds,prompt:'不同要求'})).status,409);
+  for(let i=0;i<100&&!videos.length;i++)await new Promise(r=>setTimeout(r,10));
+  assert.equal(calls,2);assert.equal(videos.length,1);assert.equal(videos[0].prompt,direct.prompt);
+  assert.equal(videos[0].imageIds.length,2);assert.equal(videos[0].audioIds.length,1);
+  const restored=(await (await call('/conversations/'+id)).json()).conversation.tasks.at(-1);
+  assert.equal(restored.directGeneration,true);assert.deepEqual(restored.referenceImageIds,referenceImageIds);
 });
 
 
