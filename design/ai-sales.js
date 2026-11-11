@@ -39,13 +39,33 @@ function button(action, label, disabled = false, primary = false) {
 }
 function shell(s) {
   s.root.innerHTML = `<div class="sales-shell"><header class="sales-heading"><div><h1>${t('AI带货')}</h1><p>${t('用作品展示你的AI创作能力')}</p></div><span>30s · 480p · 9:16</span>${button('new','新建创作')}</header>
-  <div class="sales-layout"><section class="sales-card"><h2>01 · ${t('素材')}</h2><div class="sales-uploads">${[['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].map(([role,label])=>`<div><strong>${t(label)}</strong><label class="sales-upload">＋ ${t('上传')}<input type="file" data-role="${role}" accept="${role==='voice'?'audio/mpeg,audio/wav,.mp3,.wav':'image/jpeg,image/png,image/webp'}" ${role==='reference'?'multiple':''}></label><button type="button" class="textbutton" data-sales="library" data-role="${role}">${t('从资产库选择')}</button></div>`).join('')}</div><div id="sales-materials" class="sales-materials"></div>
+  <div class="sales-layout"><section class="sales-card"><h2>01 · ${t('素材')}</h2><div class="sales-uploads">${[['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].map(([role,label])=>`<div data-sales-drop="${role}"><strong>${t(label)}</strong><label class="sales-upload"><span>${t(role==='reference'?'拖入多张图片或点击上传':role==='voice'?'拖入声音或点击上传':'拖入人物照或点击上传')}</span><input type="file" data-role="${role}" aria-label="${t(label)}" accept="${role==='voice'?'audio/mpeg,audio/wav,.mp3,.wav':'image/jpeg,image/png,image/webp'}" ${role==='reference'?'multiple':''}></label><small class="sales-upload-hint">${t(role==='reference'?'JPG / PNG / WebP · 图片合计最多30张':role==='voice'?'MP3 / WAV · 1个声音':'JPG / PNG / WebP · 1张人物照')}</small><button type="button" class="textbutton" data-sales="library" data-role="${role}">${t('从资产库选择')}</button></div>`).join('')}</div><div id="sales-materials" class="sales-materials"></div>
 
   <div id="sales-status" role="status" aria-live="polite"></div><p id="sales-error" role="alert"></p><div class="sales-actions">${button('script','生成人设脚本',true,true)}<small id="sales-usage"></small></div></section>
   <section class="sales-card"><h2>02 · ${t('编导脚本')}</h2><div id="sales-script" class="sales-script"></div><div class="sales-actions">${button('generate','生成视频',true,true)}<small id="sales-quote"></small></div><h2>03 · ${t('视频成品')}</h2><div id="sales-result"></div></section></div>
   <section class="sales-card sales-history"><h2>${t('我的人设视频')}</h2><div id="sales-history"></div></section></div>`;
   s.root.querySelectorAll('input[type=file]').forEach(input => { input.onchange = () => { const files=[...input.files];input.value='';void action(s,()=>upload(s,files,input.dataset.role)); }; });
   s.root.onclick = e => { const b=e.target.closest('[data-sales]'); if(!b || b.disabled)return; e.preventDefault();void action(s,()=>handle(s,b.dataset.sales,b)); };
+  const clearDrag = () => s.root.querySelectorAll('.is-dragover').forEach(n=>n.classList.remove('is-dragover'));
+  s.root.ondragenter = s.root.ondragover = e => {
+    if(!Array.from(e.dataTransfer?.types || []).includes('Files'))return;
+    e.preventDefault();clearDrag();
+    const zone=e.target.closest('[data-sales-drop]');
+    const allowed=zone && !materialLocked(s);
+    e.dataTransfer.dropEffect=allowed?'copy':'none';
+    if(allowed)zone.classList.add('is-dragover');
+  };
+  s.root.ondragleave = e => {
+    const zone=e.target.closest('[data-sales-drop]');
+    if(!zone?.contains(e.relatedTarget))clearDrag();
+  };
+  s.root.ondrop = e => {
+    const files=Array.from(e.dataTransfer?.files || []);
+    if(!files.length && !Array.from(e.dataTransfer?.types || []).includes('Files'))return;
+    e.preventDefault();clearDrag();
+    const zone=e.target.closest('[data-sales-drop]');
+    if(zone && files.length && !materialLocked(s))void action(s,()=>upload(s,files,zone.dataset.salesDrop));
+  };
   update(s);
 }
 function update(s) {
@@ -53,6 +73,7 @@ function update(s) {
   const op=latest(s), task=latestTask(s), busy=active(s), missing=needed(s), script=op?.status==='completed' && op.result?.script;
   const unchanged=script && op.message===message(s);
   s.root.querySelectorAll('input[type=file],[data-sales=library]').forEach(n=>n.disabled=materialLocked(s));
+  s.root.querySelectorAll('[data-sales-drop]').forEach(n=>{n.setAttribute('aria-disabled',String(Boolean(materialLocked(s))));if(materialLocked(s))n.classList.remove('is-dragover');});
   s.root.querySelector('[data-sales=script]').disabled=Boolean(busy || missing.length || s.config?.directorEnabled===false);
   s.root.querySelector('[data-sales=generate]').disabled=Boolean(busy || !unchanged || missing.length || s.config?.generationEnabled===false || s.quote?.affordable===false || task?.scriptId===op?.id && ['completed','uncertain','expired'].includes(task?.status));
   s.root.querySelector('[data-sales=generate]').textContent=t(task?.canRecover?'恢复成片':task?.status==='failed'?'重新生成视频':'生成视频');
@@ -81,8 +102,10 @@ async function ensureSession(s) {
   s.session=data.conversation;s.conversationId=s.session.id;save(s);return s.session.id;
 }
 async function upload(s, files, purpose) {
+  if(!files.length)return;
   if(materialLocked({...s,busy:false}))throw new Error(t('素材已用于脚本，请新建创作后调整'));
-  if(purpose!=='reference' && (files.length>1 || s.session?.assets.some(a=>a.purpose===purpose)))throw new Error(t('请先移除已有的人物或声音再替换'));
+  if(purpose!=='reference' && files.length>1)throw new Error(t('人物照和参考声音各支持1个文件；多张产品图片请拖入“产品与场景”。'));
+  if(purpose!=='reference' && s.session?.assets.some(a=>a.purpose===purpose))throw new Error(t('请先移除已有的人物或声音再替换'));
   const imageCount=s.session?.assets.filter(a=>a.type==='image').length||0;
   if(purpose!=='voice' && files.length+imageCount>30)throw new Error(t('最多上传30张图片。'));
   for(const f of files) {
@@ -159,7 +182,7 @@ export function mountAiSales(root, ctx) {
   s.timer=setInterval(()=>void poll(s),4000);
   s.language=()=>{if(current===s)shell(s);};window.addEventListener('workspace:languagechange',s.language);
 }
-export function disposeAiSales() {if(!current)return;save(current);clearInterval(current.timer);window.removeEventListener('workspace:languagechange',current.language);current.root.onclick=null;current=null;}
+export function disposeAiSales() {if(!current)return;save(current);clearInterval(current.timer);window.removeEventListener('workspace:languagechange',current.language);for(const event of ['onclick','ondragenter','ondragover','ondragleave','ondrop'])current.root[event]=null;current=null;}
 
 async function loadPreset(s) {
   const {assets}=await api('/sales-preset');

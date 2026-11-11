@@ -1,5 +1,12 @@
 // Static interface translations; never sent to an AI service at runtime.
 export const EXTRA_UI_COPY = {
+  "拖入多张图片或点击上传": { "en": "Drop multiple images or click to upload", "ms": "Seret beberapa imej atau klik untuk muat naik" },
+  "拖入声音或点击上传": { "en": "Drop audio or click to upload", "ms": "Seret audio atau klik untuk muat naik" },
+  "拖入人物照或点击上传": { "en": "Drop a portrait or click to upload", "ms": "Seret foto individu atau klik untuk muat naik" },
+  "JPG / PNG / WebP · 图片合计最多30张": { "en": "JPG / PNG / WebP · Up to 30 images in total", "ms": "JPG / PNG / WebP · Maksimum 30 imej keseluruhan" },
+  "MP3 / WAV · 1个声音": { "en": "MP3 / WAV · 1 audio file", "ms": "MP3 / WAV · 1 fail audio" },
+  "JPG / PNG / WebP · 1张人物照": { "en": "JPG / PNG / WebP · 1 portrait", "ms": "JPG / PNG / WebP · 1 foto individu" },
+  "人物照和参考声音各支持1个文件；多张产品图片请拖入“产品与场景”。": { "en": "Use one portrait and one reference audio file. Drop multiple product images in Products and scenes.", "ms": "Gunakan satu foto individu dan satu fail audio rujukan. Seret beberapa imej produk ke Produk dan suasana." },
   "拖拽原始口播视频到此处上传": { "en": "Drop original talking-head footage here to upload", "ms": "Seret video asal bercakap di hadapan kamera ke sini untuk dimuat naik" },
   "点击或拖拽上传声音": { "en": "Click or drop audio to upload", "ms": "Klik atau seret audio untuk dimuat naik" },
   "请一次上传一个素材文件。": { "en": "Upload one media file at a time.", "ms": "Muat naik satu fail media pada satu masa." },
