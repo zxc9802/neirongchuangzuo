@@ -127,6 +127,33 @@ async function fixture(t, options = {}) {
   return { state, wallet, call, init, upload, current, until, generate, close, open, root, image, get base() { return base; }, advance(ms) { clock += ms; } };
 }
 
+test('script jobs return immediately and are polled by job ID without resubmission or cross-account access', async t => {
+  let release;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const f = await fixture(t, { async director(input) { await waiting; return script(input); } }), id = await f.init();
+  t.after(() => release());
+  await f.upload(id); const requestId = randomUUID();
+  const body = { requestId, message: '突出商品', settings, directorModel: 'gemini' };
+  const submitted = await f.call(`/conversations/${id}/script`, { body });
+  assert.equal(submitted.status, 202);
+  const job = await submitted.json();
+  try {
+    assert.equal(job.jobId, requestId);
+    assert.equal(job.statusUrl, `/api/video-creator/conversations/${id}/operations/${requestId}`);
+    await f.until(() => f.state.scripts === 1);
+    assert.equal((await (await f.call(`/conversations/${id}/operations/${job.jobId}`)).json()).operation.status, 'running');
+    assert.equal((await f.call(`/conversations/${id}/script`, { body })).status, 202);
+    assert.equal((await f.call(`/conversations/${id}/operations/${job.jobId}`, { owner: 'bob' })).status, 404);
+  } finally { release(); }
+  const poll = () => f.call(job.statusUrl.replace('/api/video-creator', ''));
+  assert.equal((await f.current(id)).operations[0].id, job.jobId);
+  const completed = await f.until(async () => { const { operation } = await (await poll()).json(); return operation.status === 'completed' && operation; });
+  assert.equal(completed.result.script.title, '真实门店');
+  await f.close(); await f.open();
+  assert.equal((await (await poll()).json()).operation.status, 'completed');
+  assert.equal(f.state.scripts, 1);
+});
+
 test('reference purposes persist after restart, reach the director, enforce limits and cannot change on upload replay', async t => {
   let directorInput;
   const f = await fixture(t, { director(input) { directorInput = input; return script(input); } }), id = await f.init();

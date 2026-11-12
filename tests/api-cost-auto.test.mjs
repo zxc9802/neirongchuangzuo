@@ -7,6 +7,7 @@ import { createCreditsLedger } from '../services/credits/store.mjs';
 import { createProviderPrices } from '../services/credits/provider-costs.mjs';
 import { createApiCostMeter } from '../services/credits/meter.mjs';
 import { readCompletionStream } from '../services/restaurant/model-stream.mjs';
+import { readGeminiCompletionStream } from '../services/ai/gemini-stream.mjs';
 
 const json = data => new Response(JSON.stringify(data), {headers:{'Content-Type':'application/json'}});
 const card = {type:'receipt',modelName:'gpt-6-luna',group:'auto',fx:7,unitPrice:7/500000,quoteCny:.1};
@@ -49,6 +50,25 @@ test('automatic text uses supplier request IDs and actual quotas across changing
   assert.equal(items[0].evidence.groups,'Azure-Gpt-3');assert.equal(items[1].evidence.groups,'Openai-Gpt-1');
   assert.equal(items[0].providerRequestId,'api-1');assert.equal(calls,2);
 });
+test('native streaming Gemini keeps its protocol and settles the exact supplier receipt once', async t => {
+  const credits = await wallet(t); let calls = 0;
+  const native = { contents: [{ parts: [{ text: '编导' }] }], generationConfig: { maxOutputTokens: 65536 } };
+  const meter = createApiCostMeter({ credits, config, sleep: async () => {}, prices: {
+    openluxAuto: async body => { assert.equal(body.model, 'gemini-4-argon'); return { ...card, modelName: body.model }; },
+    openluxReceipt: async id => { assert.equal(id, 'stream-receipt'); return { quota: 500, logIds: [4], groups: ['Aistudio-Gemini-1'] }; },
+  }, fetchImpl: async (_url, options) => {
+    calls++; assert.deepEqual(JSON.parse(options.body), native);
+    return new Response('data: ' + JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }],
+      usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 10 } }) + '\n\n',
+      { headers: { 'content-type': 'text/event-stream', 'x-api-request-id': 'stream-receipt' } });
+  } });
+  const response = await meter.run(scope, () => meter.fetch('https://api.openlux.ai/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse', { method: 'POST', body: JSON.stringify(native) }));
+  assert.match(await response.text(), /finishReason/);
+  const done = await credits.settleCost(scope);
+  assert.equal(done.settledUnits, 7000); assert.equal(calls, 1);
+  const item = Object.values(done.costItems)[0]; assert.equal(item.metadata.model, 'gemini-4-argon');
+});
+
 test('late consumption records reconcile once without repeating a paid request',async t=>{
   const credits=await wallet(t);let available=false,calls=0;
   const meter=createApiCostMeter({credits,config,sleep:async()=>{},prices:{openluxAuto:async()=>card,openluxReceipt:async()=>available?{quota:1000,logIds:[123],groups:['Openai-Gpt-1']}:null},fetchImpl:async()=>{calls++;return new Response(stream,{headers:{'Content-Type':'text/event-stream','x-api-request-id':'late'}});}});
@@ -56,6 +76,26 @@ test('late consumption records reconcile once without repeating a paid request',
   await assert.rejects(credits.settleCost(scope),{code:'COST_CONFIRMATION_PENDING'});assert.ok((await credits.snapshot('alice')).held>0);
   available=true;await meter.reconcile(scope);await meter.reconcile(scope);
   const result=await credits.settleCost(scope);assert.equal(result.settledUnits,14000);assert.equal(calls,1);assert.equal(Object.values(result.costItems)[0].evidence.logIds,'123');
+});
+
+test('Gemini DONE completes billing and the response reader even when the gateway keeps HTTP open', async t => {
+  const credits = await wallet(t);
+  const wire = 'data: ' + JSON.stringify({ candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '{}' }] } }] }) + '\n\ndata: [DONE]\n\n';
+  let controller;
+  const meter = createApiCostMeter({ credits, config, sleep: async () => {}, prices: {
+    openluxAuto: async () => card, openluxReceipt: async () => ({ quota: 50, logIds: [5], groups: ['Aistudio-Gemini-1'] }),
+  }, fetchImpl: async () => new Response(new ReadableStream({ start(value) { controller = value; controller.enqueue(Buffer.from(wire)); } }),
+    { headers: { 'content-type': 'text/event-stream', 'x-api-request-id': 'kept-open' } }) });
+  let timer;
+  try {
+    const result = await Promise.race([
+      meter.run(scope, async () => readGeminiCompletionStream((await meter.fetch('https://api.openlux.ai/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse',
+        { method: 'POST', body: JSON.stringify({ contents: [], generationConfig: { maxOutputTokens: 4096 } }) })).body)),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('Gemini terminal event was ignored')), 1000); }),
+    ]);
+    assert.equal(result.candidates[0].finishReason, 'STOP');
+    assert.equal((await credits.settleCost(scope)).settledUnits, 700);
+  } finally { clearTimeout(timer); try { controller?.close(); } catch {} }
 });
 test('no exact receipt means no guessed cost from tokens, routing family or unrelated records',async t=>{
   const credits=await wallet(t);

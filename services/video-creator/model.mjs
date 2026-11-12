@@ -166,7 +166,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
           : { url:config.baseUrl+'/chat/completions', body:{model:entry.model,messages:[{role:'system',content:system},{role:'user',content:userContent}],stream:true,stream_options:{include_usage:true},response_format:{type:'json_object'},max_tokens:entry.maxOutputTokens,temperature:.2} };
         const response=await fetchImpl(request.url,{method:'POST',redirect:'error',headers:{Authorization:`Bearer ${config.apiKey}`,'Content-Type':'application/json'},body:JSON.stringify(request.body),signal:callSignal});
         entry.httpStatus=response.status;entry.phase='response';entry.providerRequestId=response.headers.get('x-api-request-id')||response.headers.get('x-request-id');
-        Object.assign(entry,await readDirectorResponse(response));const payload=selectedRepair && selected.id==='gemini' && response.ok ? geminiCompletion(entry.payload) : entry.payload;delete entry.payload;entry.parsedResponse=payload;
+        Object.assign(entry,await readDirectorResponse(response,undefined,selectedRepair ? selected.id : undefined));const payload=selectedRepair && selected.id==='gemini' && response.ok ? geminiCompletion(entry.payload) : entry.payload;delete entry.payload;entry.parsedResponse=payload;
         entry.finishReason=payload?.choices?.[0]?.finish_reason;entry.usage=payload?.usage;
         if(!response.ok)throw creatorError('编导检查接口返回错误，请稍后重试。',502,'DIRECTOR_PROVIDER_ERROR');
         entry.phase='parse';const parsed=parseDirectorOutput(payload);entry.phase='validate';const result=validate(parsed.value);
@@ -209,7 +209,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
         record.phase = 'response'; record.httpStatus = response.status; record.contentType = response.headers.get('content-type') || '';
         record.providerRequestId = response.headers.get('x-api-request-id') || response.headers.get('x-oneapi-request-id') || response.headers.get('x-request-id') || null;
         await publish();
-        const received = await readDirectorResponse(response); Object.assign(record, received); payload = received.payload;
+        const received = await readDirectorResponse(response, undefined, selected?.id); Object.assign(record, received); payload = received.payload;
         if (!response.ok) throw creatorError(response.status === 429 ? '编导服务繁忙，请稍后再试。' : '编导接口返回错误，请稍后重试。', 502, 'DIRECTOR_PROVIDER_ERROR');
         if (selected?.id === 'gemini') payload = geminiCompletion(payload);
         record.phase = 'parse'; record.parsedResponse = payload; delete record.payload;

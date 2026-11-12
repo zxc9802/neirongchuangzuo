@@ -7,12 +7,13 @@ const settle = async () => { for(let i=0;i<12;i++)await new Promise(resolve=>set
 const photo = name => new File(['photo'], name || '产品.jpg', {type:'image/jpeg'});
 const transfer = files => ({types:['Files'], files, dropEffect:'none'});
 
-async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{},beforeScript=async()=>({status:'queued'}),afterScript=async()=>{}}={}) {
+async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{},beforeScript=async()=>({status:'queued'}),afterScript=async()=>{},beforePoll=async()=>{}}={}) {
   const {document,window}=parseHTML('<html><body><main></main></body></html>');
-  const session={id:'test',assets,operations,tasks:[],version:0}, uploads=[],scriptRequests=[],videoRequests=[];
+  const session={id:'test',assets,operations,tasks:[],version:0}, uploads=[],scriptRequests=[],videoRequests=[],jobPolls=[];
   const storage=new Map([['qiya-ai-sales-persona-v2:user',JSON.stringify({conversationId:session.id})]]);
-  const originals=Object.fromEntries(['document','window','localStorage','workspaceUser','fetch'].map(key=>[key,globalThis[key]]));
-  let active=0,peak=0;
+  const originals=Object.fromEntries(['document','window','localStorage','workspaceUser','fetch','setInterval'].map(key=>[key,globalThis[key]]));
+  let active=0,peak=0,poll;
+  globalThis.setInterval=(callback,ms,...args)=>{if(ms===4000)poll=callback;return originals.setInterval(callback,ms,...args);};
   Object.assign(globalThis,{document,window,workspaceUser:{id:'user',account:'zxc9911'},localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)},fetch:async(url,options={})=>{
     if(url.endsWith('/config'))return Response.json({directorEnabled:true,generationEnabled:true});
     if(url.endsWith('/quote'))return Response.json({points:3750,unlimited:true});
@@ -26,8 +27,9 @@ async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{},befo
       let operation=session.operations.find(o=>o.id===body.requestId);
       if(!operation){operation={id:body.requestId,message:body.message,...await beforeScript(body)};session.operations.push(operation);}
       await afterScript(operation);
-      return Response.json({operation});
+      return Response.json({operation,jobId:operation.id});
     }
+    if(url.includes('/operations/')){jobPolls.push(url);await beforePoll();return Response.json({operation:session.operations.find(o=>o.id===url.split('/').at(-1))});}
     if(url.includes('/assets/') && options.method==='DELETE') {
       session.assets=session.assets.filter(a=>a.id!==url.split('/').at(-1));session.version++;
       return Response.json({conversation:session});
@@ -45,7 +47,7 @@ async function fixture(t, {assets=[],operations=[],beforeUpload=async()=>{},befo
   t.after(()=>{disposeAiSales();for(const [key,value] of Object.entries(originals)){if(value===undefined)delete globalThis[key];else globalThis[key]=value;}});
   const root=document.querySelector('main');
   mountAiSales(root,{toast:()=>{}});await settle();
-  return {root,uploads,session,scriptRequests,videoRequests,async reload(){disposeAiSales();root.innerHTML='';mountAiSales(root,{toast:()=>{}});await settle();},peak:()=>peak,zone:role=>root.querySelector(`[data-sales-drop="${role}"]`),event(type,target,fields={}) {
+  return {root,uploads,session,scriptRequests,videoRequests,jobPolls,async poll(){poll();await settle();},async reload(){disposeAiSales();root.innerHTML='';mountAiSales(root,{toast:()=>{}});await settle();},peak:()=>peak,zone:role=>root.querySelector(`[data-sales-drop="${role}"]`),event(type,target,fields={}) {
     const event=new window.Event(type,{bubbles:true,cancelable:true});
     Object.assign(event,{dataTransfer:transfer([]),...fields});target.dispatchEvent(event);return event;
   }};
@@ -56,6 +58,22 @@ const readyAssets=()=>[
   {id:'voice',type:'audio',purpose:'voice',name:'声音.wav'},
   {id:'scene',type:'image',purpose:'reference',name:'场景.jpg'},
 ];
+
+test('script job polling survives a transient read failure and a page reload without resubmitting',async t=>{
+  let fail=false;
+  const ui=await fixture(t,{assets:readyAssets(),beforePoll:async()=>{if(fail)throw new Error('poll interrupted');}});
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  const jobId=ui.scriptRequests[0].requestId;
+  fail=true;await ui.poll();
+  assert.match(ui.root.querySelector('#sales-error').textContent,/poll interrupted/);
+  fail=false;await ui.reload();await ui.poll();
+  assert.equal(ui.jobPolls.at(-1),'/api/video-creator/conversations/test/operations/'+jobId);
+  Object.assign(ui.session.operations[0],{status:'completed',result:{kind:'script',script:{title:'异步完成',shots:[]}}});
+  await ui.poll();
+  assert.match(ui.root.querySelector('#sales-script').textContent,/异步完成/);
+  assert.equal(ui.root.querySelector('#sales-error').textContent,'');
+  assert.equal(ui.scriptRequests.length,1);
+});
 test('sales defaults to Gemini, remembers Kimi and dispatches the chosen director only on request',async t=>{
   const ui=await fixture(t,{assets:readyAssets()});
   assert.equal(ui.root.querySelector('[data-director=gemini]').getAttribute('aria-pressed'),'true');

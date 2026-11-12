@@ -11,7 +11,7 @@ export function directorRequest(config, selected, system, content, maxTokens) {
   if (selected.id === 'gemini') {
     const parts = content.map(part => part.type === 'text' ? { text: part.text }
       : { inlineData: { mimeType: 'image/jpeg', data: part.image_url.url.split(',')[1] } });
-    return { url: base.replace(/\/v1$/, '/v1beta') + `/models/${selected.model}:generateContent`, body: {
+    return { url: base.replace(/\/v1$/, '/v1beta') + `/models/${selected.model}:streamGenerateContent?alt=sse`, body: {
       systemInstruction: { parts: [{ text: system }] }, contents: [{ role: 'user', parts }],
       generationConfig: { temperature: 1, topP: 1, maxOutputTokens: maxTokens,
         thinkingConfig: { thinkingLevel: 'high', includeThoughts: true }, responseMimeType: 'application/json' },

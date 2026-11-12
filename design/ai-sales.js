@@ -164,7 +164,8 @@ async function handle(s, actionName, b) {
     const id=await ensureSession(s),body={settings:SALES_SETTINGS,directorModel:s.directorMode,message:message(s),expectedScriptId:s.session.operations.findLast(o=>o.status==='completed')?.id||null};
     if(s.session.operations.some(o=>o.id===s.scriptRequest?.requestId && o.status==='failed'))s.scriptRequest=null;
     if(!s.scriptRequest || s.scriptRequest.fingerprint!==JSON.stringify(body))s.scriptRequest={fingerprint:JSON.stringify(body),requestId:crypto.randomUUID()};save(s);
-    const {operation}=await api(`/conversations/${id}/script`,post({...body,requestId:s.scriptRequest.requestId}));
+    const {operation,jobId}=await api(`/conversations/${id}/script`,post({...body,requestId:s.scriptRequest.requestId}));
+    s.scriptRequest.jobId=jobId || operation.id;
     s.session.operations=[...s.session.operations.filter(o=>o.id!==operation.id),operation];s.videoRequest=null;
   } else if(actionName==='generate') {
     if(latestTask(s)?.canRecover) {const {task}=await api(`/tasks/${latestTask(s).id}/recover`,post({}));s.session.tasks=s.session.tasks.map(x=>x.id===task.id?task:x);return;}
@@ -188,11 +189,13 @@ async function library(s, purpose) {
 async function poll(s) {
   if(current!==s || s.polling || s.busy)return;s.polling=true;
   const id=s.conversationId;
+  const jobId=pending(latest(s)?.status) ? latest(s).id : s.session && s.scriptRequest && !s.session.operations.some(o=>o.id===s.scriptRequest.requestId) ? s.scriptRequest.jobId || s.scriptRequest.requestId : null;
   try {
-    const [history,session]=await Promise.all([api('/conversations?module=ai-sales'),id?api('/conversations/'+id):Promise.resolve(null)]);
+    const [history,session,job]=await Promise.all([api('/conversations?module=ai-sales'),id && !jobId?api('/conversations/'+id):Promise.resolve(null),id && jobId?api(`/conversations/${id}/operations/${jobId}`):Promise.resolve(null)]);
     if(current!==s || id!==s.conversationId || s.busy)return;
     s.pollError='';
     s.conversations=history.conversations;
+    if(job){const before=JSON.stringify(latest(s)?.billing);s.session.operations=[...s.session.operations.filter(o=>o.id!==job.operation.id),job.operation];if(before!==JSON.stringify(job.operation.billing))void refreshWorkspaceCredits();}
     if(session){const before=JSON.stringify(s.session?.operations.map(o=>o.billing));s.session=session.conversation;if(before!==JSON.stringify(s.session.operations.map(o=>o.billing)))void refreshWorkspaceCredits();}
     update(s);
   }catch(e){if(current===s && id===s.conversationId && !s.busy){s.pollError=e.message;update(s);}}finally{s.polling=false;}

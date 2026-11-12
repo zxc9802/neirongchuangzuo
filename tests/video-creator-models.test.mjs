@@ -23,7 +23,7 @@ const response = (finishReason = 'STOP', text = JSON.stringify(output)) => ({ ca
 test('selected Gemini sends real images and creative direction with highest thinking, without changing shared vision config', async t => {
   const input = await sample(t); let sent;
   const result = await createDirectorModel({ config, fetchImpl: async (url, options) => {
-    assert.equal(url, 'https://api.openlux.ai/v1beta/models/gemini-4-argon:generateContent');
+    assert.equal(url, 'https://api.openlux.ai/v1beta/models/gemini-4-argon:streamGenerateContent?alt=sse');
     assert.equal(options.headers.Authorization, 'Bearer test-key'); sent = JSON.parse(options.body); return Response.json(response());
   } }).generate(input);
   assert.equal(result.kind, 'script'); assert.equal(result.usage.completion_tokens, 400);
@@ -35,6 +35,47 @@ test('selected Gemini sends real images and creative direction with highest thin
   assert.equal(photo.height, 160);
   assert.match(sent.systemInstruction.parts[0].text, /创意优先/); assert.match(sent.systemInstruction.parts[0].text, /购买欲/);
   assert.equal(config.imageTextModel, 'unrelated-vision-model');
+});
+
+test('Gemini streaming combines fragmented text, excludes thoughts and keeps final cumulative usage', async t => {
+  const input = await sample(t), attempts = [];
+  const text = JSON.stringify(output), split = Math.floor(text.length / 2);
+  const wire = [
+    { responseId: 'gemini-job', candidates: [{ content: { parts: [{ thought: true, text: 'private reasoning' }] } }] },
+    { candidates: [{ content: { parts: [{ text: text.slice(0, split) }] } }], usageMetadata: { promptTokenCount: 200, candidatesTokenCount: 30 } },
+    { ...response('STOP', text.slice(split)), responseId: 'gemini-job' },
+  ].map(value => 'data: ' + JSON.stringify(value) + '\r\n\r\n').join('');
+  const bytes = Buffer.from(wire);
+  const result = await createDirectorModel({ config, fetchImpl: async () => new Response(new ReadableStream({
+    start(controller) { for (let i = 0; i < bytes.length; i += 7) controller.enqueue(bytes.subarray(i, i + 7)); controller.close(); },
+  }), { headers: { 'content-type': 'text/event-stream' } }) }).generate(input, { onAttempt: entry => attempts.push(entry) });
+  assert.equal(result.script.title, output.script.title);
+  assert.equal(result.usage.completion_tokens, 400);
+  assert.equal(attempts.at(-1).finishReason, 'stop');
+  assert.equal(attempts.at(-1).parsedResponse.id, 'gemini-job');
+  assert.doesNotMatch(JSON.stringify(result), /private reasoning|not part of the script/);
+});
+
+test('Gemini unfinished streams fail without replaying a paid generation', async t => {
+  const input = await sample(t); let calls = 0;
+  const model = createDirectorModel({ config, fetchImpl: async () => {
+    calls++; return new Response('data: ' + JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify(output) }] } }] }) + '\n\n',
+      { headers: { 'content-type': 'text/event-stream' } });
+  } });
+  await assert.rejects(model.generate(input), { code: 'DIRECTOR_STREAM_INCOMPLETE' });
+  assert.equal(calls, 1);
+});
+
+test('Gemini streaming safety blocks and upstream failures stay distinct and do not trigger another generation', async t => {
+  const input = await sample(t);
+  for (const [payload, code] of [[{ promptFeedback: { blockReason: 'SAFETY' } }, 'MODEL_REFUSED'],
+    [{ error: { code: 503, message: 'unavailable' } }, 'DIRECTOR_PROVIDER_ERROR']]) {
+    let calls = 0;
+    const model = createDirectorModel({ config, fetchImpl: async () => { calls++; return new Response('data: ' + JSON.stringify(payload) + '\n\n',
+      { headers: { 'content-type': 'text/event-stream' } }); } });
+    await assert.rejects(model.generate(input), { code });
+    assert.equal(calls, 1);
+  }
 });
 
 test('Kimi switch uses the same image/history inputs and max reasoning on its own transport', async t => {
@@ -72,7 +113,7 @@ test('grounded Gemini receives original image pixels and evidence while retainin
   const candidate=structuredClone(output);candidate.script.shots[0].evidence=[{assetId:'product',factIndexes:[0],use:'detail'}];
   const model=createDirectorModel({config,fetchImpl:async(url,options)=>{
     const body=JSON.parse(options.body);sent.push(body);
-    if(url.includes(':generateContent'))return Response.json(response('STOP',JSON.stringify(candidate)));
+    if(url.includes(':streamGenerateContent'))return Response.json(response('STOP',JSON.stringify(candidate)));
     return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(sent.length===1
       ?{observations:[{id:'product',kinds:['detail'],facts:['黄色产品'],uncertain:[]}]}
       :{passed:true,issues:[]})}}]});
@@ -91,7 +132,7 @@ test('Gemini narration repairs stay on the selected model with full thinking hea
   candidate.script.shots[0].intent='展示产品细节';
   candidate.script.shots[0].voiceover='这一段很长很长的旁白不可能在四秒钟内读完，我们要把店内每一个具体区域的细节都讲出来。';
   const result=await createDirectorModel({config,fetchImpl:async(url,options)=>{
-    assert.match(url,/gemini-4-argon:generateContent$/);sent.push(JSON.parse(options.body));
+    assert.match(url,/gemini-4-argon:streamGenerateContent\?alt=sse$/);sent.push(JSON.parse(options.body));
     return Response.json(response('STOP',JSON.stringify(sent.length===1?candidate:{voiceovers:['亮色登场，看看产品细节']})));
   }}).generate(input);
   assert.equal(sent.length,2);assert.equal(sent[1].generationConfig.maxOutputTokens,65536);

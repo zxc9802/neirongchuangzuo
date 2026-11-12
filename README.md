@@ -37,6 +37,12 @@ Agent 支持文字多轮对话和参考图片。餐饮和通用图片可一次�
 
 服务启动后自动清理 72 小时前的生成结果，全失败任务的半成品立即清理，套图部分成功的可用成品继续按 72 小时保留，清理失败会记录告警并重试；`GET /api/ai/usage` 可查看额度和清理状态。关闭时等待已发出的任务完成再释放运行锁。部署与运行说明见 [本轮修复验收](docs/调用控制与清理验收-2026-09-30.md)。
 
+## 编导异步任务
+
+`POST /api/video-creator/conversations/:id/script` 接受请求后立即返回 HTTP 202、`jobId`、`statusUrl` 和任务快照。`jobId` 复用原有编导操作 ID；AI 带货页面每 4 秒查询该任务，刷新后从保存的创作恢复查询。相同 `requestId` 不重复生成，查询仍校验账号归属。完成状态为 `completed`，`failed` 返回原因，`settling` 表示费用待核对。
+
+Gemini 在后台通过原生 `streamGenerateContent?alt=sse` 接收分段结果，聚合正文和最终用量；思考文本不进入脚本。任务 ID 由本站生成，OpenLux Gemini 文档尚未提供可核实的供应商任务提交和查询协议。浏览器断开不取消后台生成；服务进程重启时正在生成的编导仍按现有规则标记中断，不自动重新付费提交。接口依据：[OpenLux Gemini](https://doc.openlux.ai/en/reference/gemini-v1beta)。
+
 ## 数字人开发服务
 
 在本仓库根目录执行：

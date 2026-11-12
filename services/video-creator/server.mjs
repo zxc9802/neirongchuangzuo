@@ -450,7 +450,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           c.settings = normalizeVideoSettings(input.settings);
           operation = { id: input.requestId, fingerprint, directorModel, ...(fixedNarration !== undefined ? { fixedNarration } : {}), planningVersion: DIRECTOR_PLAN_VERSION, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
           c.operations.push(operation); c.recordExpiresAt = now() + 30 * DAY; await save(c); fresh = true;
-        }); json(res, 202, { operation: operationView(operation), conversationId: c.id }); if (fresh) launch(operation.id, () => runScript(c, operation)); return;
+        }); json(res, 202, { jobId: operation.id, statusUrl: `${PREFIX}/conversations/${c.id}/operations/${operation.id}`, operation: operationView(operation), conversationId: c.id }); if (fresh) launch(operation.id, () => runScript(c, operation)); return;
       }
       if (route[2] === 'generate' && req.method === 'POST') {
         const input = await body(req); let task;

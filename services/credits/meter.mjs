@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID, createHash } from 'node:crypto';
 import { createProviderPrices, tokenCostCny, tokenQuoteCny } from './provider-costs.mjs';
 import { readCompletionStream } from '../restaurant/model-stream.mjs';
+import { readGeminiCompletionStream } from '../ai/gemini-stream.mjs';
 import { CreditsError } from './store.mjs';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -80,10 +81,10 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
         return response;
       }
       if (method !== 'POST') return fetchImpl(url,options);
-      let body, rate, quoteCny, provider;
+      let body, rate, quoteCny, provider, geminiModel;
       try { if (openlux) {
         body = options.body instanceof FormData ? {model:options.body.get('model')} : JSON.parse(options.body);
-        const geminiModel = /^\/v1beta\/models\/([^/:]+):generateContent$/.exec(target.pathname)?.[1];
+        geminiModel = /^\/v1beta\/models\/([^/:]+):(?:generateContent|streamGenerateContent)$/.exec(target.pathname)?.[1];
         if (geminiModel) body = { ...body, model: geminiModel };
         const automatic = config.autoTextBilling === true && (target.pathname.endsWith('/chat/completions') || Boolean(geminiModel));
         rate = automatic ? await prices.openluxAuto(body) : await prices.openlux(body.model); provider = 'openlux';
@@ -121,7 +122,7 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
       let payload;
       try {
         payload = response.headers.get('content-type')?.includes('text/event-stream')
-          ? await readCompletionStream(response.clone().body) : await response.clone().json();
+          ? await (geminiModel ? readGeminiCompletionStream : readCompletionStream)(response.clone().body) : await response.clone().json();
       } catch(error) { payload=error.providerPayload; }
       if (fal) {
         await pending(scope,receiptId,cleanId(payload?.request_id)); return response;

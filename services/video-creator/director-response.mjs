@@ -1,4 +1,5 @@
 import { readCompletionStream } from '../restaurant/model-stream.mjs';
+import { readGeminiCompletionStream } from '../ai/gemini-stream.mjs';
 
 export const DIRECTOR_OUTPUT_TOKENS = 65536;
 export const DIRECTOR_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -17,7 +18,7 @@ export function directorAttemptSummary(attempt) {
   return { ...summary, ...(error ? { error: { code: error.code, issue: error.issue, stage: error.stage, phase: error.phase, message: error.message } } : {}) };
 }
 
-export async function readDirectorResponse(response, maximumBytes = DIRECTOR_RESPONSE_BYTES) {
+export async function readDirectorResponse(response, maximumBytes = DIRECTOR_RESPONSE_BYTES, protocol) {
   const decoder = new TextDecoder(); let raw = '', bytes = 0;
   const reader = response.body?.getReader();
   try {
@@ -38,7 +39,7 @@ export async function readDirectorResponse(response, maximumBytes = DIRECTOR_RES
     if (!response.ok) return { rawResponse: raw, rawBytes: bytes, streamComplete: true };
     const streaming = response.headers.get('content-type')?.includes('text/event-stream') || /^(?:\s|:[^\n]*\n)*data:/.test(raw);
     let payload;
-    if (streaming) payload = await readCompletionStream(new Response(raw).body, maximumBytes);
+    if (streaming) payload = await (protocol === 'gemini' ? readGeminiCompletionStream : readCompletionStream)(new Response(raw).body, maximumBytes);
     else {
       try { payload = JSON.parse(raw.replace(/^\uFEFF/, '')); }
       catch { throw Object.assign(new Error('编导接口返回的响应不是合法JSON。'), { code: 'DIRECTOR_INVALID_JSON', outputIssue: 'transport_json', streamComplete: true }); }
