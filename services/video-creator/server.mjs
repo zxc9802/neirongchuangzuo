@@ -52,7 +52,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   probe = probeVideo, voice = normalizeVoice, now = Date.now, pollIntervalMs = 5000, logger = console } = {}) {
   const store = createCreatorStore(storageDir), locks = new Map(), workers = new Map(), controllers = new Map(), streams = new Set();
   const meter = createApiCostMeter({ credits, config: aiConfig, fetchImpl });
-  director ||= createDirectorModel({ config: aiConfig, fetchImpl: meter.fetch,
+  director ||= createDirectorModel({ config: { ...aiConfig, falKey: env.FAL_KEY || env.FAL_API_KEY || env.VIDEO_FAL_KEY }, fetchImpl: meter.fetch,
     timeoutMs: env.VIDEO_DIRECTOR_TIMEOUT_MS ? Number(env.VIDEO_DIRECTOR_TIMEOUT_MS) : 600000,
     maxOutputTokens: env.VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS ? Number(env.VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS) : DIRECTOR_OUTPUT_TOKENS });
   provider ||= createCreatorProvider(config, fetchImpl);

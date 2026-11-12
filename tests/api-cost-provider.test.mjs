@@ -6,6 +6,7 @@ import { join,resolve } from 'node:path';
 import { createCreditsLedger } from '../services/credits/store.mjs';
 import { createProviderPrices,openluxRate,tokenCostCny,tokenQuoteCny } from '../services/credits/provider-costs.mjs';
 import { createApiCostMeter } from '../services/credits/meter.mjs';
+import { directorRequest, directorSelection, fetchDirector } from '../services/video-creator/director-provider.mjs';
 
 const card={type:'tokens',inputCnyMillion:20,outputCnyMillion:100,cacheRatio:.05,write5Ratio:1.25,write1hRatio:2,modelName:'claude',group:'AWS-Bedrock-2',fx:6.724};
 const reply=x=>new Response(JSON.stringify(x),{headers:{'Content-Type':'application/json'}});
@@ -110,4 +111,22 @@ test('fal OpenRouter translation bills fractional units once, not one cent per r
   for(let i=0;i<2;i++)await meter.run(scope,()=>meter.fetch('https://queue.fal.run/openrouter/router/requests/translation-request'));
   const done=await x.settleCost(scope);assert.equal(done.settledUnits,Math.round(.0000232*6.718*1e6));
   assert.equal(Object.keys(done.costItems).length,1);
+});
+
+test('Carbon director queue settles the compatibility endpoint actual units once',async t=>{
+  const x=await ledger(t),scope={userId:'alice',taskId:'carbon-director'};await x.reserveCost(scope);
+  const id='01a1cec6-8ab8-7113-9ecb-5af9a3a71cfc';let posts=0;
+  const config={baseUrl:'https://api.openlux.ai/v1',falKey:'test'};
+  const meter=createApiCostMeter({credits:x,prices:{fal:async(model,key)=>{
+    assert.equal(model,'openrouter/router/openai/v1/chat/completions');assert.equal(key,'test');return {unit_price:.01,fx:6.718};
+  }},fetchImpl:async(url,options={})=>{
+    if(options.method==='POST'){posts++;return reply({request_id:id});}
+    if(url.endsWith('/status'))return reply({status:'COMPLETED'});
+    return new Response('{"choices":[]}',{headers:{'x-fal-billable-units':'0.58520000'}});
+  }});
+  const request=directorRequest(config,directorSelection('gemini'),'test',[{type:'text',text:'test'}],4096);
+  await meter.run(scope,()=>fetchDirector(request,config,{fetchImpl:meter.fetch}));
+  await meter.run(scope,()=>meter.fetch(`https://queue.fal.run/openrouter/router/requests/${id}`));
+  const done=await x.settleCost(scope);assert.equal(posts,1);assert.equal(Object.keys(done.costItems).length,1);
+  assert.equal(done.settledUnits,Math.round(.005852*6.718*1e6));
 });
