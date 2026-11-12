@@ -34,11 +34,13 @@ function queueFetch(onSubmit = () => {}, result = () => Response.json(completion
   };
 }
 
-test('Gemini uses fal Carbon with real pixels, history, high thinking and private credentials', async t => {
-  const input = await sample(t), attempts = []; let sent;
+for (const [directorModel, model] of [['gemini', 'google/gemini-4-carbon'], ['haiku', 'anthropic/claude-haiku-5.5']])
+test(`${directorModel} uses fal with real pixels, history, high thinking and private credentials`, async t => {
+  const input = { ...await sample(t), directorModel }, attempts = []; let sent;
   const result = await createDirectorModel({ config, fetchImpl: queueFetch(body => { sent = body; }) }).generate(input, { onAttempt: entry => attempts.push(entry) });
   assert.equal(result.kind, 'script'); assert.equal(result.usage.completion_tokens, 400);
-  assert.equal(sent.model, 'google/gemini-4-carbon'); assert.equal(sent.stream, false);
+  assert.equal(sent.model, model); assert.equal(sent.stream, false);
+  assert.equal(sent.top_p, directorModel === 'gemini' ? 1 : undefined);
   assert.deepEqual(sent.reasoning, { effort: 'high', exclude: true });
   assert.deepEqual(sent.response_format, { type: 'json_object' });
   assert.equal(sent.max_tokens, 65536); assert.equal(sent.temperature, 1);
@@ -73,15 +75,15 @@ test('completed truncated Carbon output retries with corrected input and a large
   assert.match(sent[1].messages[1].content.at(-1).text, /truncated/);
 });
 
-test('missing fal credentials fail before observation or any paid call', async t => {
+for (const directorModel of ['gemini', 'haiku'])test(`${directorModel} missing fal credentials fail before observation or any paid call`, async t => {
   let calls = 0;
   const model = createDirectorModel({ config: { ...config, falKey: '' }, fetchImpl: async () => { calls++; } });
-  await assert.rejects(model.generate({ ...await sample(t), groundingVersion: 1 }), { code: 'DIRECTOR_NOT_CONFIGURED' });
+  await assert.rejects(model.generate({ ...await sample(t), directorModel, groundingVersion: 1 }), { code: 'DIRECTOR_NOT_CONFIGURED' });
   assert.equal(calls, 0);
 });
 
-test('failed queue polling, ambiguous submissions and failed accepted results never resubmit', async t => {
-  const input = await sample(t);
+for (const directorModel of ['gemini', 'haiku'])test(`${directorModel} failed queue polling, ambiguous submissions and failed accepted results never resubmit`, async t => {
+  const input = { ...await sample(t), directorModel };
   for (const failure of ['status', 'result', 'submission']) {
     let posts = 0;
     const model = createDirectorModel({ config, fetchImpl: async (url, options = {}) => {
@@ -103,8 +105,8 @@ test('cancelled queue waits retain the request ID and never submit another job',
   assert.equal(posts, 1); assert.equal(attempts.at(-1).providerRequestId, requestId);
 });
 
-test('grounded Carbon keeps original images and independent factual review', async t => {
-  const input = { ...await sample(t), groundingVersion: 1 }, sent = [], candidate = structuredClone(output);
+for (const directorModel of ['gemini', 'haiku'])test(`grounded ${directorModel} keeps original images and independent factual review`, async t => {
+  const input = { ...await sample(t), directorModel, groundingVersion: 1 }, sent = [], candidate = structuredClone(output);
   candidate.script.shots[0].evidence = [{ assetId: 'product', factIndexes: [0], use: 'detail' }];
   let carbon;
   const falFetch = queueFetch(body => { carbon = body; }, () => Response.json(completion(candidate)));
@@ -119,8 +121,9 @@ test('grounded Carbon keeps original images and independent factual review', asy
   assert.equal(sent[1].model, config.imageTextModel);
 });
 
-test('narration repairs use Carbon with the same full thinking budget', async t => {
-  const input = { ...await sample(t), planningVersion: 2 }, candidate = structuredClone(output), sent = [];
+for (const [directorModel, model] of [['gemini', 'google/gemini-4-carbon'], ['haiku', 'anthropic/claude-haiku-5.5']])
+test(`narration repairs use ${directorModel} with the same full thinking budget`, async t => {
+  const input = { ...await sample(t), directorModel, planningVersion: 2 }, candidate = structuredClone(output), sent = [];
   candidate.assets = [{ id: 'product', description: '黄色产品', role: '产品主体', adopt: '保留可见形态' }];
   candidate.script.plan = { objective: '展示产品细节', audience: '对产品感兴趣的观众', perspective: '产品展示', storyArc: '从细节到整体', visualStyle: '自然明亮', cast: [], audio: { voiceDirection: '自然中文', music: '轻音乐', ambience: '轻声' }, keep: ['产品外形'], avoid: ['虚构效果'] };
   candidate.script.shots[0].intent = '展示产品细节';
@@ -128,7 +131,7 @@ test('narration repairs use Carbon with the same full thinking budget', async t 
   const result = await createDirectorModel({ config, fetchImpl: queueFetch(body => sent.push(body),
     () => Response.json(completion(sent.length === 1 ? candidate : { voiceovers: ['亮色登场，看看产品细节'] }))),
   }).generate(input);
-  assert.equal(sent.length, 2); assert.equal(sent[1].model, 'google/gemini-4-carbon');
+  assert.equal(sent.length, 2); assert.equal(sent[1].model, model);
   assert.equal(sent[1].max_tokens, 65536); assert.equal(sent[1].reasoning.effort, 'high');
   assert.equal(result.narrationRepaired, true);
 });

@@ -74,15 +74,18 @@ test('script job polling survives a transient read failure and a page reload wit
   assert.equal(ui.root.querySelector('#sales-error').textContent,'');
   assert.equal(ui.scriptRequests.length,1);
 });
-test('sales defaults to Gemini, remembers Kimi and dispatches the chosen director only on request',async t=>{
+for(const mode of ['kimi','haiku'])test(`sales defaults to Gemini, remembers ${mode} and dispatches the chosen director only on request`,async t=>{
   const ui=await fixture(t,{assets:readyAssets()});
   assert.equal(ui.root.querySelector('[data-director=gemini]').getAttribute('aria-pressed'),'true');
-  ui.event('click',ui.root.querySelector('[data-director=kimi]'));await ui.reload();
-  assert.equal(ui.root.querySelector('[data-director=kimi]').getAttribute('aria-pressed'),'true');
+  ui.event('click',ui.root.querySelector(`[data-director=${mode}]`));await ui.reload();
+  assert.equal(ui.root.querySelector(`[data-director=${mode}]`).getAttribute('aria-pressed'),'true');
+  if(mode==='haiku')assert.match(ui.root.querySelector('#sales-mode-hint').textContent,/Claude Haiku 5.5/);
   assert.equal(ui.scriptRequests.length,0);
   ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
-  assert.equal(ui.scriptRequests[0].directorModel,'kimi');
+  assert.equal(ui.scriptRequests[0].directorModel,mode);
   assert.ok(ui.root.querySelector('[data-director=direct]').disabled);
+  ui.event('click',ui.root.querySelector('[data-director=gemini]'));
+  assert.equal(ui.root.querySelector(`[data-director=${mode}]`).getAttribute('aria-pressed'),'true');
 });
 test('direct mode saves editable requirements and sends real image references without requesting a script',async t=>{
   const ui=await fixture(t,{assets:readyAssets()});

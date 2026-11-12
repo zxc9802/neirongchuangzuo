@@ -113,7 +113,7 @@ test('fal OpenRouter translation bills fractional units once, not one cent per r
   assert.equal(Object.keys(done.costItems).length,1);
 });
 
-test('Carbon director queue settles the compatibility endpoint actual units once',async t=>{
+for(const directorModel of ['gemini','haiku'])test(`${directorModel} director queue settles the compatibility endpoint actual units once`,async t=>{
   const x=await ledger(t),scope={userId:'alice',taskId:'carbon-director'};await x.reserveCost(scope);
   const id='01a1cec6-8ab8-7113-9ecb-5af9a3a71cfc';let posts=0;
   const config={baseUrl:'https://api.openlux.ai/v1',falKey:'test'};
@@ -124,7 +124,7 @@ test('Carbon director queue settles the compatibility endpoint actual units once
     if(url.endsWith('/status'))return reply({status:'COMPLETED'});
     return new Response('{"choices":[]}',{headers:{'x-fal-billable-units':'0.58520000'}});
   }});
-  const request=directorRequest(config,directorSelection('gemini'),'test',[{type:'text',text:'test'}],4096);
+  const request=directorRequest(config,directorSelection(directorModel),'test',[{type:'text',text:'test'}],4096);
   await meter.run(scope,()=>fetchDirector(request,config,{fetchImpl:meter.fetch}));
   await meter.run(scope,()=>meter.fetch(`https://queue.fal.run/openrouter/router/requests/${id}`));
   const done=await x.settleCost(scope);assert.equal(posts,1);assert.equal(Object.keys(done.costItems).length,1);

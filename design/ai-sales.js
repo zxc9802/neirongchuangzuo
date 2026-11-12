@@ -84,7 +84,7 @@ function update(s) {
   const unchanged=op?.status==='completed' && script && op.message===message(s);
   const sameVideo=direct ? task?.directGeneration && task.prompt===prompt.trim() : task?.scriptId===op?.id;
   s.root.querySelectorAll('[data-director]').forEach(n=>{n.disabled=Boolean(busy);n.setAttribute('aria-pressed',String(n.dataset.director===s.directorMode));});
-  s.root.querySelector('#sales-mode-hint').textContent=t(direct?'直接把素材与生成要求交给视频模型，不使用编排模型。':s.directorMode==='kimi'?'Kimi 编导 · 最高思考强度':'Gemini 编导 · 最高思考强度');
+  s.root.querySelector('#sales-mode-hint').textContent=t(direct?'直接把素材与生成要求交给视频模型，不使用编排模型。':s.directorMode==='haiku'?'Claude Haiku 5.5 编导 · 高思考强度':s.directorMode==='kimi'?'Kimi 编导 · 最高思考强度':'Gemini 编导 · 最高思考强度');
   s.root.querySelector('#sales-script-heading').textContent='02 · '+t(direct?'直接生成':'编导脚本');
   s.root.querySelector('.sales-direct').hidden=!direct;
   s.root.querySelector('#sales-script').hidden=direct;

@@ -1,7 +1,8 @@
 import { SALES_DIRECTION } from './ai-sales-policy.js';
 export const VIDEO_DIRECTORS = [
-  { id: 'gemini', name: 'Gemini 4 Carbon', model: 'google/gemini-4-carbon' },
+  { id: 'gemini', name: 'Gemini 4 Carbon', model: 'google/gemini-4-carbon', provider: 'fal' },
   { id: 'kimi', name: 'Kimi', model: 'kimi-k3.1-pro' },
+  { id: 'haiku', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5', provider: 'fal' },
 ];
 export const DEFAULT_VIDEO_DIRECTOR = 'gemini';
 export const VIDEO_SKILLS = [

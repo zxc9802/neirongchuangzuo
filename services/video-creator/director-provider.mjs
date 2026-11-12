@@ -3,16 +3,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 export function directorSelection(id = DEFAULT_VIDEO_DIRECTOR) {
   const selected = VIDEO_DIRECTORS.find(model => model.id === id);
-  if (!selected) throw Object.assign(new Error('请选择 Gemini 或 Kimi 编导。'), { status: 400, code: 'DIRECTOR_MODEL_INVALID' });
+  if (!selected) throw Object.assign(new Error('请选择可用的编导模型。'), { status: 400, code: 'DIRECTOR_MODEL_INVALID' });
   return selected;
 }
 
 export function directorRequest(config, selected, system, content, maxTokens) {
   const base = config.baseUrl.replace(/\/$/, '');
-  if (selected.id === 'gemini') {
+  if (selected.provider === 'fal') {
     return { url: 'https://queue.fal.run/openrouter/router/openai/v1/chat/completions', queue: true, body: {
       model: selected.model, messages: [{ role: 'system', content: system }, { role: 'user', content }],
-      stream: false, max_tokens: maxTokens, temperature: 1, top_p: 1,
+      stream: false, max_tokens: maxTokens, temperature: 1, ...(selected.id === 'gemini' ? { top_p: 1 } : {}),
       reasoning: { effort: 'high', exclude: true }, response_format: { type: 'json_object' },
     } };
   }
