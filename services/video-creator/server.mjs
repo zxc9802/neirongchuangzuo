@@ -8,7 +8,7 @@ import { ALL_VIDEO_SKILLS as VIDEO_SKILLS, VIDEO_MODELS, VIDEO_RATIOS, VIDEO_LAN
 import { createCreatorStore, UUID } from './store.mjs';
 import { createDirectorModel, creatorError } from './model.mjs';
 import { directorSelection } from './director-provider.mjs';
-import { selectPlannerMode } from './penshot.mjs';
+import { loadArkApiKey } from '../runtime-settings.mjs';
 import { assertSalesMaterials, assertSalesPlan } from './sales.mjs';
 import { DIRECTOR_PLAN_VERSION } from './director-plan.mjs';
 import { DIRECTOR_OUTPUT_TOKENS, directorAttemptSummary } from './director-response.mjs';
@@ -53,7 +53,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   probe = probeVideo, voice = normalizeVoice, now = Date.now, pollIntervalMs = 5000, logger = console } = {}) {
   const store = createCreatorStore(storageDir), locks = new Map(), workers = new Map(), controllers = new Map(), streams = new Set();
   const meter = createApiCostMeter({ credits, config: aiConfig, fetchImpl });
-  director ||= createDirectorModel({ config: { ...aiConfig, falKey: env.FAL_KEY || env.FAL_API_KEY || env.VIDEO_FAL_KEY, penshotUrl:env.PENSHOT_API_BASE_URL }, fetchImpl: meter.fetch,
+  director ||= createDirectorModel({ config: { ...aiConfig, falKey: env.FAL_KEY || env.FAL_API_KEY || env.VIDEO_FAL_KEY, arkKey: loadArkApiKey(env) }, fetchImpl: meter.fetch,
     timeoutMs: env.VIDEO_DIRECTOR_TIMEOUT_MS ? Number(env.VIDEO_DIRECTOR_TIMEOUT_MS) : 600000,
     maxOutputTokens: env.VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS ? Number(env.VIDEO_DIRECTOR_MAX_OUTPUT_TOKENS) : DIRECTOR_OUTPUT_TOKENS });
   provider ||= createCreatorProvider(config, fetchImpl);
@@ -81,7 +81,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       prompt: task.prompt, scriptId: task.scriptId || null, directGeneration: task.directGeneration === true, referenceImageIds: task.assetIds?.filter(id => c.assets.find(a => a.id === id)?.type === 'image'),
       resultUrl: task.status === 'completed' && paid && !expired ? `${PREFIX}/tasks/${task.id}/result` : null };
   }
-  function operationView(op) { return { id: op.id, skill: op.skill, directorModel: op.directorModel, plannerMode:op.plannerMode || 'native', settings: op.settings, status: op.status, message: op.message, createdAt: op.createdAt,
+  function operationView(op) { return { id: op.id, skill: op.skill, directorModel: op.directorModel, settings: op.settings, status: op.status, message: op.message, createdAt: op.createdAt,
     startedAt: op.startedAt, completedAt: op.completedAt, diagnostics: op.diagnostics,
     progress: op.progress, result: op.status === 'completed' ? op.result : undefined, draftResult: op.status === 'failed' ? op.draftResult : undefined, error: op.error, code: op.code, billing: op.billing }; }
   const assetView = (c, a) => ({ id: a.id, originKey: a.libraryId || a.id, name: a.name, type: a.type, purpose: videoAssetPurpose(a), size: a.size, duration: a.duration, width: a.width, height: a.height, uploadedAt: a.uploadedAt,
@@ -121,7 +121,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
     try {
       if (meter.enabled) { const hold = await credits.reserveCost(scope); op.billing = { status: hold.status, exempt: hold.exempt, mode: 'api_cost' }; }
       op.status = 'running'; op.startedAt = now(); op.progress = '正在分析素材并编排分镜'; op.dispatched = true; await save(c);
-      const result = await meter.run(scope, () => director.generate({ groundingVersion: 1, planningVersion: op.planningVersion || 1, skill: op.skill, directorModel: op.directorModel, plannerMode:op.plannerMode, operationId:op.id, settings: op.settings, message: op.message,
+      const result = await meter.run(scope, () => director.generate({ groundingVersion: 1, planningVersion: op.planningVersion || 1, skill: op.skill, directorModel: op.directorModel, settings: op.settings, message: op.message,
         assets: op.assetIds.map(id => ({ ...c.assets.find(a => a.id === id) })), fixedNarration: op.fixedNarration,
         history: c.operations.filter(o => o.skill === op.skill && o.status === 'completed' && o.result)
           .flatMap(o => [{ role: 'user', content: o.message }, { role: 'assistant', content: JSON.stringify(o.result) }]).slice(-10) }, { signal: controller.signal, onAttempt,
@@ -335,7 +335,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         const unique = new Map(); for (const asset of assets) if (!unique.has(asset.originKey || asset.id)) unique.set(asset.originKey || asset.id, {...asset, id:asset.originKey || asset.id});
         json(res, 200, { assets: [...unique.values()] }); return;
       }
-      if (route[0] === 'config' && req.method === 'GET') { json(res, 200, { skills: VIDEO_SKILLS.filter(s => s.id !== 'ai-sales' || salesAllowed).map(({ focus, ...s }) => s), models: VIDEO_MODELS, directorEnabled: director.enabled, penshotEnabled:Boolean(director.penshotEnabled),
+      if (route[0] === 'config' && req.method === 'GET') { json(res, 200, { skills: VIDEO_SKILLS.filter(s => s.id !== 'ai-sales' || salesAllowed).map(({ focus, ...s }) => s), models: VIDEO_MODELS, directorEnabled: director.enabled,
         generationEnabled: Boolean(config.enabled), limits: { images: 30, characters: 10, audio: 1, imageBytes: VIDEO_IMAGE_MAX_BYTES - 1, audioBytes: VIDEO_AUDIO_MAX_BYTES }, costMode: meter.enabled, cnyPerSecond }); return; }
       if (route[0] === 'quote' && req.method === 'POST') {
         const settings = normalizeVideoSettings((await body(req)).settings), wallet = credits ? await credits.snapshot(userId) : null;
@@ -436,10 +436,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           if (c.skill === 'ai-sales' && input.fixedNarration !== undefined && (typeof input.fixedNarration !== 'string' || input.fixedNarration.length > 4000)) throw creatorError('指定文案需在4000字以内。');
           const fixedNarration = c.skill === 'ai-sales' ? input.fixedNarration?.trim() || '' : undefined;
           const directorModel = c.skill === 'ai-sales' || input.directorModel !== undefined ? directorSelection(input.directorModel).id : undefined;
-          const plannerMode = selectPlannerMode(input.plannerMode);
-          if (plannerMode === 'penshot' && c.skill !== 'ai-sales') throw creatorError('PenShot 编排当前仅用于 AI 带货。', 400, 'PLANNER_MODE_INVALID');
-          if (plannerMode === 'penshot' && !director.penshotEnabled) throw creatorError('PenShot 服务尚未配置，请选择现有编导。', 503, 'PENSHOT_NOT_CONFIGURED');
-          const fingerprint = hash({ settings: normalizeVideoSettings(input.settings), message: input.message?.trim(), skill: c.skill, ...(directorModel ? { directorModel } : {}), ...(plannerMode === 'penshot' ? { plannerMode } : {}), expectedScriptId: input.expectedScriptId || null, assetIds: c.assets.map(a => a.id), ...(fixedNarration !== undefined ? { fixedNarration } : {}) });
+          const fingerprint = hash({ settings: normalizeVideoSettings(input.settings), message: input.message?.trim(), skill: c.skill, ...(directorModel ? { directorModel } : {}), expectedScriptId: input.expectedScriptId || null, assetIds: c.assets.map(a => a.id), ...(fixedNarration !== undefined ? { fixedNarration } : {}) });
           if (c.operations.some(o => o.id === input.requestId)) { operation = c.operations.find(o => o.id === input.requestId); if (operation.fingerprint !== fingerprint) throw creatorError('不能用同一操作标识修改需求或设置。', 409); return; }
           if ([...store.records.values()].some(x => x.userId === userId && x.operations.some(o => o.id === input.requestId))) throw creatorError('该操作标识已用于其他创作，请重新发起。', 409, 'DIRECTOR_REQUEST_CONFLICT');
           if (c.skill === 'ai-sales') assertSalesMaterials(c.assets, input.settings);
@@ -452,7 +449,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
           const last = c.operations.findLast(o => o.status === 'completed');
           if ((input.expectedScriptId || null) !== (last?.id || null)) throw creatorError('脚本已更新，请刷新后继续修改。', 409, 'DIRECTOR_REVISION_CONFLICT');
           c.settings = normalizeVideoSettings(input.settings);
-          operation = { id: input.requestId, fingerprint, directorModel, plannerMode, ...(fixedNarration !== undefined ? { fixedNarration } : {}), planningVersion: DIRECTOR_PLAN_VERSION, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
+          operation = { id: input.requestId, fingerprint, directorModel, ...(fixedNarration !== undefined ? { fixedNarration } : {}), planningVersion: DIRECTOR_PLAN_VERSION, status: 'queued', message: input.message.trim(), settings: c.settings, skill: c.skill, assetIds: c.assets.map(a => a.id), createdAt: now(), progress: '等待编导' };
           c.operations.push(operation); c.recordExpiresAt = now() + 30 * DAY; await save(c); fresh = true;
         }); json(res, 202, { jobId: operation.id, statusUrl: `${PREFIX}/conversations/${c.id}/operations/${operation.id}`, operation: operationView(operation), conversationId: c.id }); if (fresh) launch(operation.id, () => runScript(c, operation)); return;
       }

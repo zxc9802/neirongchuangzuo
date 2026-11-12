@@ -41,7 +41,11 @@ Agent 支持文字多轮对话和参考图片。餐饮和通用图片可一次�
 
 `POST /api/video-creator/conversations/:id/script` 接受请求后立即返回 HTTP 202、`jobId`、`statusUrl` 和任务快照。`jobId` 复用原有编导操作 ID；AI 带货页面每 4 秒查询该任务，刷新后从保存的创作恢复查询。相同 `requestId` 不重复生成，查询仍校验账号归属。完成状态为 `completed`，`failed` 返回原因，`settling` 表示费用待核对。
 
-Gemini 在后台通过原生 `streamGenerateContent?alt=sse` 接收分段结果，聚合正文和最终用量；思考文本不进入脚本。任务 ID 由本站生成，OpenLux Gemini 文档尚未提供可核实的供应商任务提交和查询协议。浏览器断开不取消后台生成；服务进程重启时正在生成的编导仍按现有规则标记中断，不自动重新付费提交。接口依据：[OpenLux Gemini](https://doc.openlux.ai/en/reference/gemini-v1beta)。
+AI 带货默认编导为 Doubao Seed 2.1 Pro（`doubao-seed-2-1-pro-260915`），通过火山方舟官方 `https://ark.cn-beijing.volces.com/api/v3/chat/completions` 直连；服务器优先读取 `ARK_API_KEY`，也可读取持久化数据目录内的 `.secrets/ark-api-key` 私密文件，以便网站更新后继续使用。文件权限应仅允许应用用户读取；不把密钥写入前端或版本库。编导启用深度思考与流式 JSON，合并正文和最终用量，思考文本不进入脚本；总输出预算同时限制回答和思考。Kimi、Claude Haiku 和直接生成仍保留。旧 Gemini 草稿在重新编导时改用 Doubao；历史结果不改写。PenShot 入口、调用服务、配置和部署文件已移除。
+
+火山方舟按响应的真实 token 用量和官方常规推理目录价记账：输入 6 元/百万 token，缓存命中输入 1.2 元/百万 token，输出（含思考）30 元/百万 token；没有用量凭据的调用保持待确认，不记为零费用。未主动创建付费缓存存储。实际火山账号账单可能受资源包或优惠影响。接口与价格依据：[Chat API](https://ark.volcengine.com/region:cn-beijing/docs/chat-api)、[模型价格](https://docs.volcengine.com/docs/ark/model-pricing?lang=zh)。
+
+任务 ID 由本站生成，浏览器断开不取消后台生成；服务进程重启时正在生成的编导仍按现有规则标记中断，不自动重新付费提交。
 
 ## 数字人开发服务
 

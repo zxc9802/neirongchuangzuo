@@ -5,15 +5,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
 import { createDirectorModel } from '../services/video-creator/model.mjs';
+import { directorSelection } from '../services/video-creator/director-provider.mjs';
 
-const config = { apiKey: 'test-key', falKey: 'existing-fal-key', baseUrl: 'https://api.openlux.ai/v1', imageTextModel: 'unrelated-vision-model' };
+const config = { apiKey: 'test-key', falKey: 'existing-fal-key', arkKey: 'fixture-ark-key', baseUrl: 'https://api.openlux.ai/v1', imageTextModel: 'unrelated-vision-model' };
 const endpoint = 'https://queue.fal.run/openrouter/router/openai/v1/chat/completions';
 const requestId = '01a1cec6-8ab8-7113-9ecb-5af9a3a71cfc';
 const resultUrl = `https://queue.fal.run/openrouter/router/requests/${requestId}`;
 async function sample(t) {
   const root = await mkdtemp(join(tmpdir(), 'director-models-')); t.after(() => rm(root, { recursive: true, force: true }));
   const path = join(root, 'product.jpg'); await sharp({ create: { width: 128, height: 160, channels: 3, background: '#ffc900' } }).jpeg().toFile(path);
-  return { directorModel: 'gemini', skill: 'signature', settings: { duration: 4, ratio: '9:16', resolution: '720p', language: 'zh', generateAudio: true },
+  return { directorModel: 'haiku', skill: 'signature', settings: { duration: 4, ratio: '9:16', resolution: '720p', language: 'zh', generateAudio: true },
     assets: [{ id: 'product', name: '产品', type: 'image', path }], history: [{ role: 'user', content: '保留黄色主体' }], message: '用新奇角度突出产品' };
 }
 const output = { kind: 'script', script: { title: '亮色开场', globalDirection: '保留产品外形，用特写到整体的揭示吸引观众。',
@@ -34,13 +35,49 @@ function queueFetch(onSubmit = () => {}, result = () => Response.json(completion
   };
 }
 
-for (const [directorModel, model] of [['gemini', 'google/gemini-4-carbon'], ['haiku', 'anthropic/claude-haiku-5.5']])
+test('Doubao and legacy Gemini selections use the official Ark stream with separate credentials and real pixels',async t=>{
+  assert.equal(directorSelection().id,'doubao');assert.equal(directorSelection('gemini').id,'doubao');
+  for(const directorModel of ['doubao','gemini']) {
+    const input={...await sample(t),directorModel},attempts=[];let sent,calls=0;
+    const result=await createDirectorModel({config,fetchImpl:async(url,options)=>{
+      calls++;assert.equal(url,'https://ark.cn-beijing.volces.com/api/v3/chat/completions');
+      assert.equal(options.headers.Authorization,'Bearer fixture-ark-key');assert.equal(options.redirect,'error');
+      sent=JSON.parse(options.body);
+      const providerOutput=JSON.parse(JSON.stringify(output).replaceAll('"product"','"asset-01"'));
+      const raw='data: '+JSON.stringify({id:'ark-test-id',choices:[{delta:{reasoning_content:'private thinking'}}]})+'\n\n'
+        +'data: '+JSON.stringify({id:'ark-test-id',choices:[{delta:{content:JSON.stringify(providerOutput)},finish_reason:'stop'}]})+'\n\n'
+        +'data: '+JSON.stringify({id:'ark-test-id',choices:[],usage:{prompt_tokens:200,completion_tokens:400}})+'\n\ndata: [DONE]\n\n';
+      return new Response(raw,{headers:{'Content-Type':'text/event-stream','x-request-id':'ark-test-id'}});
+    }}).generate(input,{onAttempt:a=>attempts.push(a)});
+    assert.equal(calls,1);assert.equal(result.kind,'script');assert.equal(sent.model,'doubao-seed-2-1-pro-260915');
+    assert.equal(sent.stream,true);assert.deepEqual(sent.stream_options,{include_usage:true});
+    assert.deepEqual(sent.thinking,{type:'enabled'});assert.equal(sent.reasoning_effort,'medium');
+    assert.equal(sent.max_completion_tokens,65536);assert.equal(sent.max_tokens,undefined);
+    assert.deepEqual(sent.response_format,{type:'json_object'});assert.equal(sent.messages[1].content.filter(p=>p.type==='image_url').length,1);
+    assert.equal(JSON.parse(sent.messages[1].content[0].text).assets[0].id,'asset-01');
+    assert.deepEqual(result.script.shots[0].referenceIds,['product']);
+    assert.equal(attempts.at(-1).providerRequestId,'ark-test-id');
+    assert.doesNotMatch(JSON.stringify(result),/private thinking|fixture-ark-key/);
+    assert.doesNotMatch(JSON.stringify(attempts),/fixture-ark-key|existing-fal-key|test-key/);
+  }
+});
+
+test('missing Ark credentials fail before observation, and provider diagnostics redact the Ark key',async t=>{
+  let calls=0;const input={...await sample(t),directorModel:'doubao',groundingVersion:1};
+  await assert.rejects(createDirectorModel({config:{...config,arkKey:''},fetchImpl:async()=>{calls++;}}).generate(input),{code:'DIRECTOR_NOT_CONFIGURED'});
+  assert.equal(calls,0);
+  const attempts=[];
+  await assert.rejects(createDirectorModel({config,fetchImpl:async()=>new Response('rejected fixture-ark-key',{status:401})}).generate({...input,groundingVersion:undefined},{onAttempt:a=>attempts.push(a)}),{code:'DIRECTOR_PROVIDER_ERROR'});
+  assert.doesNotMatch(JSON.stringify(attempts),/fixture-ark-key/);
+});
+
+for (const [directorModel, model] of [['haiku', 'anthropic/claude-haiku-5.5']])
 test(`${directorModel} uses fal with real pixels, history, high thinking and private credentials`, async t => {
   const input = { ...await sample(t), directorModel }, attempts = []; let sent;
   const result = await createDirectorModel({ config, fetchImpl: queueFetch(body => { sent = body; }) }).generate(input, { onAttempt: entry => attempts.push(entry) });
   assert.equal(result.kind, 'script'); assert.equal(result.usage.completion_tokens, 400);
   assert.equal(sent.model, model); assert.equal(sent.stream, false);
-  assert.equal(sent.top_p, directorModel === 'gemini' ? 1 : undefined);
+  assert.equal(sent.top_p, undefined);
   assert.deepEqual(sent.reasoning, { effort: 'high', exclude: true });
   assert.deepEqual(sent.response_format, { type: 'json_object' });
   assert.equal(sent.max_tokens, 65536); assert.equal(sent.temperature, 1);
@@ -65,7 +102,7 @@ test('Kimi preserves its own transport and existing credentials', async t => {
   assert.equal(sent.messages[1].content.filter(p => p.type === 'image_url').length, 1);
 });
 
-test('completed truncated Carbon output retries with corrected input and a larger budget', async t => {
+test('completed truncated Haiku output retries with corrected input and a larger budget', async t => {
   const input = await sample(t), sent = [];
   const result = await createDirectorModel({ config, maxOutputTokens: 16384,
     fetchImpl: queueFetch(body => sent.push(body), () => Response.json(sent.length === 1 ? completion('{', 'length') : completion())),
@@ -75,14 +112,14 @@ test('completed truncated Carbon output retries with corrected input and a large
   assert.match(sent[1].messages[1].content.at(-1).text, /truncated/);
 });
 
-for (const directorModel of ['gemini', 'haiku'])test(`${directorModel} missing fal credentials fail before observation or any paid call`, async t => {
+for (const directorModel of ['haiku'])test(`${directorModel} missing fal credentials fail before observation or any paid call`, async t => {
   let calls = 0;
   const model = createDirectorModel({ config: { ...config, falKey: '' }, fetchImpl: async () => { calls++; } });
   await assert.rejects(model.generate({ ...await sample(t), directorModel, groundingVersion: 1 }), { code: 'DIRECTOR_NOT_CONFIGURED' });
   assert.equal(calls, 0);
 });
 
-for (const directorModel of ['gemini', 'haiku'])test(`${directorModel} failed queue polling, ambiguous submissions and failed accepted results never resubmit`, async t => {
+for (const directorModel of ['haiku'])test(`${directorModel} failed queue polling, ambiguous submissions and failed accepted results never resubmit`, async t => {
   const input = { ...await sample(t), directorModel };
   for (const failure of ['status', 'result', 'submission']) {
     let posts = 0;
@@ -105,23 +142,28 @@ test('cancelled queue waits retain the request ID and never submit another job',
   assert.equal(posts, 1); assert.equal(attempts.at(-1).providerRequestId, requestId);
 });
 
-for (const directorModel of ['gemini', 'haiku'])test(`grounded ${directorModel} keeps original images and independent factual review`, async t => {
+for (const directorModel of ['haiku','doubao'])test(`grounded ${directorModel} keeps original images and independent factual review`, async t => {
   const input = { ...await sample(t), directorModel, groundingVersion: 1 }, sent = [], candidate = structuredClone(output);
   candidate.script.shots[0].evidence = [{ assetId: 'product', factIndexes: [0], use: 'detail' }];
   let carbon;
   const falFetch = queueFetch(body => { carbon = body; }, () => Response.json(completion(candidate)));
   const result = await createDirectorModel({ config, fetchImpl: async (url, options) => {
     if (url.startsWith('https://queue.fal.run/')) return falFetch(url, options);
+    if (url.startsWith('https://ark.cn-beijing.volces.com/')) {
+      assert.equal(options.headers.Authorization,'Bearer fixture-ark-key');
+      carbon=JSON.parse(options.body);return Response.json(completion(JSON.parse(JSON.stringify(candidate).replaceAll('"product"','"asset-01"'))));
+    }
     const body = JSON.parse(options.body); sent.push(body);
     return Response.json(completion(sent.length === 1 ? { observations: [{ id: 'product', kinds: ['detail'], facts: ['黄色产品'], uncertain: [] }] } : { passed: true, issues: [] }));
   } }).generate(input);
   assert.equal(sent.length, 2); assert.equal(result.quality.passed, true);
   assert.equal(carbon.messages[1].content.filter(p => p.image_url).length, 1);
   assert.match(carbon.messages[1].content[1].text, /黄色产品/);
+  if(directorModel==='doubao')assert.match(carbon.messages[0].content,/scene图片拍局部特写仍填scene/);
   assert.equal(sent[1].model, config.imageTextModel);
 });
 
-for (const [directorModel, model] of [['gemini', 'google/gemini-4-carbon'], ['haiku', 'anthropic/claude-haiku-5.5']])
+for (const [directorModel, model] of [['haiku', 'anthropic/claude-haiku-5.5']])
 test(`narration repairs use ${directorModel} with the same full thinking budget`, async t => {
   const input = { ...await sample(t), directorModel, planningVersion: 2 }, candidate = structuredClone(output), sent = [];
   candidate.assets = [{ id: 'product', description: '黄色产品', role: '产品主体', adopt: '保留可见形态' }];

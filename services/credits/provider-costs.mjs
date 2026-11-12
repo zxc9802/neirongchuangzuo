@@ -3,6 +3,14 @@ import { CreditsError } from './store.mjs';
 const unavailable = message => new CreditsError(message, 503, 'COST_PRICING_UNAVAILABLE');
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 
+export function arkRate(modelName) {
+  if (modelName !== 'doubao-seed-2-1-pro-260915') throw unavailable('该火山方舟模型的计费单价尚未配置。');
+  // Official standard-inference catalog, checked 2026-11-12 (CNY per million tokens).
+  // https://docs.volcengine.com/docs/ark/model-pricing?lang=zh
+  return { type:'tokens', modelName, group:'direct', fx:1, inputCnyMillion:6, outputCnyMillion:30,
+    cacheRatio:.2, write5Ratio:1, write1hRatio:1, steps:[] };
+}
+
 export function openluxRate(pricing, status, modelName, group) {
   const model = pricing?.data?.find(item => item.model_name === modelName), factor = pricing?.group_ratio?.[group];
   const fx = status?.data?.usd_exchange_rate;

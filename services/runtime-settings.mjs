@@ -1,9 +1,15 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { workspaceDataRoot } from './runtime-paths.mjs';
 
 const ROOT = fileURLToPath(new URL('../', import.meta.url));
-const ALLOWED = new Set(['PENSHOT_API_BASE_URL', 'WORKSPACE_DATA_DIR', 'WORKSPACE_LOCAL_UNLIMITED_CREDITS', 'RESTAURANT_DATABASE_URL', 'RESTAURANT_PACKAGE_DAILY_LIMIT',
+export function loadArkApiKey(env = process.env, root = ROOT) {
+  if (env.ARK_API_KEY) return env.ARK_API_KEY;
+  try { return readFileSync(join(workspaceDataRoot(env, root), '.secrets', 'ark-api-key'), 'utf8').trim(); }
+  catch (error) { if (error.code !== 'ENOENT') throw error; return ''; }
+}
+const ALLOWED = new Set(['ARK_API_KEY', 'WORKSPACE_DATA_DIR', 'WORKSPACE_LOCAL_UNLIMITED_CREDITS', 'RESTAURANT_DATABASE_URL', 'RESTAURANT_PACKAGE_DAILY_LIMIT',
   'AI_DAILY_EXEMPT_ACCOUNTS', 'CREDITS_BILLING_MODE',
   'RESTAURANT_PYTHON_BIN', 'RESTAURANT_SUBJECT_MODEL_PATH',
   'VIDEO_API_BASE_URL', 'VIDEO_PROJECT_CODE', 'VIDEO_ACCESS_KEY', 'VIDEO_SECRET_KEY', 'VIDEO_PUBLIC_BASE_URL', 'VIDEO_GENERATION_CNY_PER_SECOND',

@@ -113,8 +113,8 @@ test('fal OpenRouter translation bills fractional units once, not one cent per r
   assert.equal(Object.keys(done.costItems).length,1);
 });
 
-for(const directorModel of ['gemini','haiku'])test(`${directorModel} director queue settles the compatibility endpoint actual units once`,async t=>{
-  const x=await ledger(t),scope={userId:'alice',taskId:'carbon-director'};await x.reserveCost(scope);
+for(const directorModel of ['haiku'])test(`${directorModel} director queue settles the compatibility endpoint actual units once`,async t=>{
+  const x=await ledger(t),scope={userId:'alice',taskId:'haiku-director'};await x.reserveCost(scope);
   const id='01a1cec6-8ab8-7113-9ecb-5af9a3a71cfc';let posts=0;
   const config={baseUrl:'https://api.openlux.ai/v1',falKey:'test'};
   const meter=createApiCostMeter({credits:x,prices:{fal:async(model,key)=>{

@@ -7,15 +7,15 @@ const settle = async () => { for(let i=0;i<12;i++)await new Promise(resolve=>set
 const photo = name => new File(['photo'], name || '产品.jpg', {type:'image/jpeg'});
 const transfer = files => ({types:['Files'], files, dropEffect:'none'});
 
-async function fixture(t, {assets=[],operations=[],penshotEnabled=false,beforeUpload=async()=>{},beforeScript=async()=>({status:'queued'}),afterScript=async()=>{},beforePoll=async()=>{}}={}) {
+async function fixture(t, {assets=[],operations=[],savedDirector,beforeUpload=async()=>{},beforeScript=async()=>({status:'queued'}),afterScript=async()=>{},beforePoll=async()=>{}}={}) {
   const {document,window}=parseHTML('<html><body><main></main></body></html>');
   const session={id:'test',assets,operations,tasks:[],version:0}, uploads=[],scriptRequests=[],videoRequests=[],jobPolls=[];
-  const storage=new Map([['qiya-ai-sales-persona-v2:user',JSON.stringify({conversationId:session.id})]]);
+  const storage=new Map([['qiya-ai-sales-persona-v2:user',JSON.stringify({conversationId:session.id,directorMode:savedDirector})]]);
   const originals=Object.fromEntries(['document','window','localStorage','workspaceUser','fetch','setInterval'].map(key=>[key,globalThis[key]]));
   let active=0,peak=0,poll;
   globalThis.setInterval=(callback,ms,...args)=>{if(ms===4000)poll=callback;return originals.setInterval(callback,ms,...args);};
   Object.assign(globalThis,{document,window,workspaceUser:{id:'user',account:'zxc9911'},localStorage:{getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value)},fetch:async(url,options={})=>{
-    if(url.endsWith('/config'))return Response.json({directorEnabled:true,penshotEnabled,generationEnabled:true});
+    if(url.endsWith('/config'))return Response.json({directorEnabled:true,generationEnabled:true});
     if(url.endsWith('/quote'))return Response.json({points:3750,unlimited:true});
     if(url.endsWith('/sales-preset'))return Response.json({assets:[]});
     if(url.endsWith('/generate') && options.method==='POST') {
@@ -25,7 +25,7 @@ async function fixture(t, {assets=[],operations=[],penshotEnabled=false,beforeUp
     if(url.endsWith('/script') && options.method==='POST') {
       const body=JSON.parse(options.body);scriptRequests.push(body);
       let operation=session.operations.find(o=>o.id===body.requestId);
-      if(!operation){operation={id:body.requestId,message:body.message,plannerMode:body.plannerMode,directorModel:body.directorModel,...await beforeScript(body)};session.operations.push(operation);}
+      if(!operation){operation={id:body.requestId,message:body.message,directorModel:body.directorModel,...await beforeScript(body)};session.operations.push(operation);}
       await afterScript(operation);
       return Response.json({operation,jobId:operation.id});
     }
@@ -59,31 +59,13 @@ const readyAssets=()=>[
   {id:'scene',type:'image',purpose:'reference',name:'场景.jpg'},
 ];
 
-test('planner switch defaults to native, persists PenShot, sends its mode and disables reuse of an old script',async t=>{
-  const ui=await fixture(t,{assets:readyAssets(),penshotEnabled:true,beforeScript:async()=>({status:'completed',result:{kind:'script',script:{title:'镜头规划',videoPrompt:'真实素材',referenceImageIds:['actor','scene'],shots:[]}}})});
-  assert.equal(ui.root.querySelector('[data-planner=native]').getAttribute('aria-pressed'),'true');
-  ui.event('click',ui.root.querySelector('[data-planner=penshot]'));await ui.reload();
-  assert.equal(ui.root.querySelector('[data-planner=penshot]').getAttribute('aria-pressed'),'true');
-  assert.equal(ui.scriptRequests.length,0);
+test('legacy Gemini drafts migrate to Doubao and the PenShot entry is removed',async t=>{
+  const ui=await fixture(t,{assets:readyAssets(),savedDirector:'gemini'});
+  assert.equal(ui.root.querySelector('[data-director=doubao]').getAttribute('aria-pressed'),'true');
+  assert.equal(ui.root.querySelector('[data-director=gemini]'),null);
+  assert.equal(ui.root.querySelector('[data-planner]'),null);assert.doesNotMatch(ui.root.textContent,/PenShot|尚未配置/);
   ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
-  assert.equal(ui.scriptRequests[0].plannerMode,'penshot');
-  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
-  ui.event('click',ui.root.querySelector('[data-planner=native]'));
-  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,true);
-  assert.match(ui.root.querySelector('#sales-status').textContent,/编排方式/);
-  ui.event('click',ui.root.querySelector('[data-planner=penshot]'));
-  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
-});
-
-test('unconfigured PenShot explains why generation is unavailable and native mode stays usable',async t=>{
-  const ui=await fixture(t,{assets:readyAssets()});
-  ui.event('click',ui.root.querySelector('[data-planner=penshot]'));
-  assert.match(ui.root.querySelector('#sales-mode-hint').textContent,/服务尚未配置/);
-  assert.equal(ui.root.querySelector('[data-sales=script]').disabled,true);
-  ui.event('click',ui.root.querySelector('[data-planner=native]'));
-  assert.equal(ui.root.querySelector('[data-sales=script]').disabled,false);
-  ui.event('click',ui.root.querySelector('[data-director=direct]'));
-  assert.equal(ui.root.querySelector('.sales-planners').hidden,true);
+  assert.equal(ui.scriptRequests[0].directorModel,'doubao');
 });
 
 test('script job polling survives a transient read failure and a page reload without resubmitting',async t=>{
@@ -101,9 +83,9 @@ test('script job polling survives a transient read failure and a page reload wit
   assert.equal(ui.root.querySelector('#sales-error').textContent,'');
   assert.equal(ui.scriptRequests.length,1);
 });
-for(const mode of ['kimi','haiku'])test(`sales defaults to Gemini, remembers ${mode} and dispatches the chosen director only on request`,async t=>{
+for(const mode of ['kimi','haiku'])test(`sales defaults to Doubao, remembers ${mode} and dispatches the chosen director only on request`,async t=>{
   const ui=await fixture(t,{assets:readyAssets()});
-  assert.equal(ui.root.querySelector('[data-director=gemini]').getAttribute('aria-pressed'),'true');
+  assert.equal(ui.root.querySelector('[data-director=doubao]').getAttribute('aria-pressed'),'true');
   ui.event('click',ui.root.querySelector(`[data-director=${mode}]`));await ui.reload();
   assert.equal(ui.root.querySelector(`[data-director=${mode}]`).getAttribute('aria-pressed'),'true');
   if(mode==='haiku')assert.match(ui.root.querySelector('#sales-mode-hint').textContent,/Claude Haiku 5.5/);
@@ -111,7 +93,7 @@ for(const mode of ['kimi','haiku'])test(`sales defaults to Gemini, remembers ${m
   ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
   assert.equal(ui.scriptRequests[0].directorModel,mode);
   assert.ok(ui.root.querySelector('[data-director=direct]').disabled);
-  ui.event('click',ui.root.querySelector('[data-director=gemini]'));
+  ui.event('click',ui.root.querySelector('[data-director=doubao]'));
   assert.equal(ui.root.querySelector(`[data-director=${mode}]`).getAttribute('aria-pressed'),'true');
 });
 test('direct mode saves editable requirements and sends real image references without requesting a script',async t=>{

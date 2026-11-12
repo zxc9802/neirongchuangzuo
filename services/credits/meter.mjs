@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID, createHash } from 'node:crypto';
-import { createProviderPrices, tokenCostCny, tokenQuoteCny } from './provider-costs.mjs';
+import { createProviderPrices, tokenCostCny, tokenQuoteCny, arkRate } from './provider-costs.mjs';
 import { readCompletionStream } from '../restaurant/model-stream.mjs';
 import { readGeminiCompletionStream } from '../ai/gemini-stream.mjs';
 import { CreditsError } from './store.mjs';
@@ -58,7 +58,8 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
       if (scope?.legacy || scope?.aggregate) return fetchImpl(url,options);
       const openlux = target.hostname === 'api.openlux.ai' && method === 'POST';
       const fal = target.hostname === 'queue.fal.run';
-      if (!openlux && !fal) {
+      const ark = target.protocol === 'https:' && target.hostname === 'ark.cn-beijing.volces.com' && target.pathname === '/api/v3/chat/completions' && method === 'POST';
+      if (!openlux && !fal && !ark) {
         if (method==='POST' && ['api.302.ai','api.302ai.cn','openspeech.bytedance.com'].includes(target.hostname)) throw notReady();
         return fetchImpl(url,options);
       }
@@ -82,7 +83,9 @@ export function createApiCostMeter({ credits, config = {}, fetchImpl = fetch, pr
       }
       if (method !== 'POST') return fetchImpl(url,options);
       let body, rate, quoteCny, provider, geminiModel;
-      try { if (openlux) {
+      try { if (ark) {
+        body = JSON.parse(options.body); rate = arkRate(body.model); provider = 'ark'; quoteCny = tokenQuoteCny(body,rate);
+      } else if (openlux) {
         body = options.body instanceof FormData ? {model:options.body.get('model')} : JSON.parse(options.body);
         geminiModel = /^\/v1beta\/models\/([^/:]+):(?:generateContent|streamGenerateContent)$/.exec(target.pathname)?.[1];
         if (geminiModel) body = { ...body, model: geminiModel };

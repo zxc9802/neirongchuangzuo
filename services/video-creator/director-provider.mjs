@@ -2,6 +2,7 @@ import { VIDEO_DIRECTORS, DEFAULT_VIDEO_DIRECTOR } from '../../design/video-cata
 import { setTimeout as delay } from 'node:timers/promises';
 
 export function directorSelection(id = DEFAULT_VIDEO_DIRECTOR) {
+  if (id === 'gemini') id = 'doubao';
   const selected = VIDEO_DIRECTORS.find(model => model.id === id);
   if (!selected) throw Object.assign(new Error('请选择可用的编导模型。'), { status: 400, code: 'DIRECTOR_MODEL_INVALID' });
   return selected;
@@ -9,10 +10,17 @@ export function directorSelection(id = DEFAULT_VIDEO_DIRECTOR) {
 
 export function directorRequest(config, selected, system, content, maxTokens) {
   const base = config.baseUrl.replace(/\/$/, '');
+  if (selected.provider === 'ark') {
+    return { url: 'https://ark.cn-beijing.volces.com/api/v3/chat/completions', provider: 'ark', body: {
+      model: selected.model, messages: [{ role: 'system', content: system }, { role: 'user', content }],
+      stream: true, stream_options: { include_usage: true }, response_format: { type: 'json_object' },
+      max_completion_tokens: maxTokens, thinking: { type: 'enabled' }, reasoning_effort: 'medium', temperature: .45, top_p: .95,
+    } };
+  }
   if (selected.provider === 'fal') {
     return { url: 'https://queue.fal.run/openrouter/router/openai/v1/chat/completions', queue: true, body: {
       model: selected.model, messages: [{ role: 'system', content: system }, { role: 'user', content }],
-      stream: false, max_tokens: maxTokens, temperature: 1, ...(selected.id === 'gemini' ? { top_p: 1 } : {}),
+      stream: false, max_tokens: maxTokens, temperature: 1,
       reasoning: { effort: 'high', exclude: true }, response_format: { type: 'json_object' },
     } };
   }
@@ -24,7 +32,7 @@ export function directorRequest(config, selected, system, content, maxTokens) {
 }
 
 export async function fetchDirector(request, config, { fetchImpl, signal, onQueued } = {}) {
-  const headers = { Authorization: request.queue ? `Key ${config.falKey}` : `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' };
+  const headers = { Authorization: request.provider === 'ark' ? `Bearer ${config.arkKey}` : request.queue ? `Key ${config.falKey}` : `Bearer ${config.apiKey}`, 'Content-Type': 'application/json' };
   const response = await fetchImpl(request.url, { method: 'POST', redirect: 'error', headers, body: JSON.stringify(request.body), signal });
   if (!request.queue || !response.ok) return response;
   const job = await response.json();
