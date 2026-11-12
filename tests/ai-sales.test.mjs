@@ -51,10 +51,10 @@ test('server uses authenticated account, never forged permission headers',async 
   for(const account of ['admin','zxc9911','ordinary']){const res=await fetch(base+'/api/video-creator/config',{headers:{cookie:'account='+account,'x-ai-sales-allowed':'true'}});assert.equal((await res.json()).allowed,account!=='ordinary');}
 });
 test('sales API gates access, persists director choice and bypasses all directors only for explicit direct generation',async t=>{
-  const root=await mkdtemp(join(tmpdir(),'ai-sales-'));let calls=0;const directors=[],videos=[];
+  const root=await mkdtemp(join(tmpdir(),'ai-sales-'));let calls=0;const directors=[],planners=[],videos=[];
   const handler=createVideoCreatorHandler({storageDir:root,aiConfig:{},config:{enabled:true,publicOrigin:'http://localhost',signingSecret:'test'},
     provider:{createMaterial:async()=>({id:randomUUID(),status:2}),generateCreative:async input=>{videos.push(input);return{taskId:'upstream'};},query:async()=>({taskId:'upstream'})},
-    director:{enabled:true,generate:async input=>{calls++;directors.push(input.directorModel);return{};}},voice:async(input,path)=>{await writeFile(path,'test');return{duration:10};}});
+    director:{enabled:true,penshotEnabled:true,generate:async input=>{calls++;directors.push(input.directorModel);planners.push(input.plannerMode);return{};}},voice:async(input,path)=>{await writeFile(path,'test');return{duration:10};}});
   await handler.ready;
   const app=createServer((req,res)=>{req.authenticatedUserId='same-test-owner';req.aiSalesAllowed=req.headers.cookie==='account=admin';void handler(req,res);});const base=await listen(app);
   t.after(async()=>{await handler.shutdown();app.closeAllConnections();await new Promise(r=>app.close(r));await rm(root,{recursive:true,force:true});});
@@ -94,6 +94,18 @@ test('sales API gates access, persists director choice and bypasses all director
     previous=request.requestId;
   }
   assert.deepEqual(directors,['gemini','kimi','haiku']);
+  assert.deepEqual(planners,['native','native','native']);
+  const penshotRequest={requestId:randomUUID(),settings:SALES_SETTINGS,message:'生成',directorModel:'kimi',plannerMode:'penshot',expectedScriptId:previous};
+  assert.equal((await call(scriptPath,{...penshotRequest,plannerMode:'unknown'})).status,400);
+  const penshotResponse=await call(scriptPath,penshotRequest);assert.equal(penshotResponse.status,202);
+  assert.equal((await penshotResponse.json()).operation.plannerMode,'penshot');
+  assert.equal((await call(scriptPath,{...penshotRequest,plannerMode:'native'})).status,409);
+  for(let i=0;i<100;i++) {
+    const restored=(await (await call('/conversations/'+id)).json()).conversation.operations.at(-1);
+    if(restored.status==='completed'){assert.equal(restored.plannerMode,'penshot');break;}
+    await new Promise(r=>setTimeout(r,10));
+  }
+  assert.equal(planners.at(-1),'penshot');
   const direct={requestId:randomUUID(),settings:SALES_SETTINGS,prompt:'使用人物、产品与声音素材自由创作',directGeneration:true};
   assert.equal((await call(generationPath,{...direct,scriptId:previous})).status,400);
   assert.equal((await call(generationPath,direct,false)).status,403);
@@ -106,7 +118,7 @@ test('sales API gates access, persists director choice and bypasses all director
   assert.equal((await call(generationPath,{...direct,referenceImageIds})).status,202);
   assert.equal((await call(generationPath,{...direct,referenceImageIds,prompt:'不同要求'})).status,409);
   for(let i=0;i<100&&!videos.length;i++)await new Promise(r=>setTimeout(r,10));
-  assert.equal(calls,3);assert.equal(videos.length,1);assert.equal(videos[0].prompt,direct.prompt);
+  assert.equal(calls,4);assert.equal(videos.length,1);assert.equal(videos[0].prompt,direct.prompt);
   assert.equal(videos[0].imageIds.length,2);assert.equal(videos[0].audioIds.length,1);
   const restored=(await (await call('/conversations/'+id)).json()).conversation.tasks.at(-1);
   assert.equal(restored.directGeneration,true);assert.deepEqual(restored.referenceImageIds,referenceImageIds);

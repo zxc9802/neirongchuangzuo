@@ -1,5 +1,6 @@
 import { mapConcurrent } from '../../design/async-pool.js';
 import { directorSelection, directorRequest, fetchDirector } from './director-provider.mjs';
+import { createPenShotPlanner, selectPlannerMode, applyPenShotLayout } from './penshot.mjs';
 import { assertSalesPlan, assertSalesNarration, SALES_PERSONA_REVIEW, SALES_ANONYMOUS_RULES } from './sales.mjs';
 import { narrationTarget, narrationDirection } from './narration-budget.mjs';
 import { OBSERVATION_SYSTEM, validateObservations, GROUNDING_RULES, validateGrounding, narrationRepairRequest, applyNarrationRepair, QUALITY_SYSTEM, validateQuality } from './director-quality.mjs';
@@ -140,7 +141,10 @@ function directorSystem(skill) {
 export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300000, maxOutputTokens = DIRECTOR_OUTPUT_TOKENS } = {}) {
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 1200000) throw creatorError('编导等待时限配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
   if (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 4096 || maxOutputTokens > 65536) throw creatorError('编导输出长度配置无效。', 503, 'DIRECTOR_CONFIG_INVALID');
-  return { enabled: Boolean(config.apiKey), async generate(input, { signal, onProgress, onAttempt } = {}) {
+  const penshot = createPenShotPlanner({ baseUrl: config.penshotUrl, fetchImpl });
+  return { enabled: Boolean(config.apiKey), penshotEnabled: penshot.enabled, async generate(input, { signal, onProgress, onAttempt } = {}) {
+    const usePenShot = selectPlannerMode(input.plannerMode) === 'penshot';
+    if (usePenShot && !penshot.enabled) throw creatorError('PenShot 服务尚未配置，请选择现有编导。', 503, 'PENSHOT_NOT_CONFIGURED');
     if (!config.apiKey) throw creatorError('编导服务尚未配置，请联系管理员。', 503, 'DIRECTOR_NOT_CONFIGURED');
     const selected = input.directorModel === undefined ? null : directorSelection(input.directorModel);
     if (selected?.provider === 'fal' && !config.falKey) throw creatorError(`${selected.name} 编导的 fal 密钥尚未配置，请联系管理员。`, 503, 'DIRECTOR_NOT_CONFIGURED');
@@ -154,14 +158,14 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
       return sharp(await readFile(image.path)).rotate().resize({ width: 960, height: 960, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 80 }).toBuffer();
     });
     preparedImages.forEach((bytes,index) => content.push({ type:'text', text:`图片${index+1}，ID=${images[index].id}` }, { type:'image_url', image_url:{url:'data:image/jpeg;base64,'+bytes.toString('base64'),detail:'high'} }));
-    let sequence = 0, observations;
+    let sequence = 0, observations, penshotBoard;
     const auxiliary = async (stage, system, userContent, validate = value => value, outputTokens = stage === 'observation' ? Math.min(maxOutputTokens, 16384) : Math.min(maxOutputTokens, 4096)) => {
-      const selectedRepair = stage === 'narration_repair' && selected;
-      if (selectedRepair) outputTokens = maxOutputTokens;
+      const selectedRepair = ['narration_repair', 'penshot_script'].includes(stage) && selected;
+      if (stage === 'narration_repair' && selectedRepair) outputTokens = maxOutputTokens;
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
-      const entry = { attempt: ++sequence, stage, startedAt: Date.now(), status:'started', phase:'request', model:stage==='observation' ? config.videoObservationModel || 'gpt-6-luna' : stage === 'narration_repair' ? writingModel : config.imageTextModel || config.chatModel, maxOutputTokens:outputTokens, inputImageCount: stage==='observation'?images.length:0 };
+      const entry = { attempt: ++sequence, stage, startedAt: Date.now(), status:'started', phase:'request', model:stage==='observation' ? config.videoObservationModel || 'gpt-6-luna' : ['narration_repair','penshot_script'].includes(stage) ? writingModel : config.imageTextModel || config.chatModel, maxOutputTokens:outputTokens, inputImageCount: stage==='observation'?images.length:0 };
       const publish=()=>onAttempt?.(redactDirectorValue(entry,[config.apiKey,config.falKey])); await publish();
-      onProgress?.(({observation:'正在识别实拍内容',narration_repair:'正在精简旁白',quality:'正在检查素材依据与宣传内容'})[stage]);
+      onProgress?.(({observation:'正在识别实拍内容',penshot_script:'正在为 PenShot 准备剧本',narration_repair:'正在精简旁白',quality:'正在检查素材依据与宣传内容'})[stage]);
       try {
         const request = selectedRepair ? directorRequest(config, selected, system, [{type:'text',text:userContent}], outputTokens)
           : { url:config.baseUrl+'/chat/completions', body:{model:entry.model,messages:[{role:'system',content:system},{role:'user',content:userContent}],stream:true,stream_options:{include_usage:true},response_format:{type:'json_object'},max_tokens:entry.maxOutputTokens,temperature:.2} };
@@ -179,22 +183,44 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
         throw Object.assign(creatorError(entry.error.message,502,entry.error.code),{stage,outputIssue:entry.error.issue,validationIssue:entry.error.detail,providerStatus:entry.httpStatus,causeCode:failure.code});
       }
     };
-    if(input.groundingVersion===1) {
+    if(input.groundingVersion===1 || usePenShot) {
       const observationContent=[{type:'text',text:JSON.stringify({task:'识别下面随消息附带的真实图片，按图片ID返回观察结果。不要编排脚本。',assets:input.assets.map(a=>({id:a.id,type:a.type,purpose:videoAssetPurpose(a)}))})},...content.slice(1)];
       observations=await auxiliary('observation',OBSERVATION_SYSTEM,observationContent,value=>validateObservations(value,input));
     }
     const indexedObservations = observations?.map(o=>({...o,facts:o.facts.map((fact,index)=>({index,text:fact}))}));
-    const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}, ...(selected ? content.slice(1) : [])] : content;
-    const groundingSystem = observations ? (selected ? '\n你同时收到真实图片和独立观察清单。结合图片观察构图、光线、质感与创意可能，事实与evidence以observations中已确认的信息为准，不把uncertain当作事实。\n' : '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n')+GROUNDING_RULES : '';
+    let planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}, ...(selected ? content.slice(1) : [])] : content;
+    if (usePenShot) {
+      const draft = await auxiliary('penshot_script', `你是短视频编剧。根据 request、settings 和真实素材观察，写供 PenShot 分镜的完整中文剧本，包含情节、角色行动、场景、完整旁白和素材ID。遵守所选总时长，保留 fixedNarration 原文（若有）。可以自主选择素材，不强制每张进入视频。只采用 observations.facts，不将 uncertain 当事实，不编造价格、效果或口碑。只输出 {"script":"完整剧本文本"}，不返回分镜JSON。${input.skill === 'ai-sales' ? '\n保留创作者开场、行业作品展示、创作者收尾的人设结构。\n' + SALES_ANONYMOUS_RULES : ''}`,
+        JSON.stringify({ request: input.message, settings: input.settings, pacing: directorPacing(input.settings), assets: input.assets.map(({id,type,purpose,name})=>({id,type,purpose,name})), observations:indexedObservations, history:input.history.slice(-10), fixedNarration:input.fixedNarration }), value => {
+          if (!text(value?.script, 16000)) throw invalidOutput('PenShot 剧本文本不完整。', 'invalid_schema', { field:'script' });
+          return value.script;
+        }, Math.min(maxOutputTokens, 8192));
+      const entry = { attempt: ++sequence, stage:'penshot', model:'PenShot', startedAt:Date.now(), status:'started', phase:'request' };
+      const publish = () => onAttempt?.(redactDirectorValue(entry, [config.apiKey, config.falKey]));
+      await publish();
+      let board;
+      try {
+        board = await penshot.generate(draft + '\n\n编排约束：总时长' + input.settings.duration + '秒；只使用剧本中的真实素材，不生成新的参考图片；不强制使用全部上传图片。', {
+          operationId:input.operationId, signal, onProgress, onQueued:async id=>{entry.providerRequestId=id;await publish();} });
+        entry.status='completed';entry.phase='complete';entry.completedAt=Date.now();entry.parsedResponse=board;await publish();
+      } catch (cause) {
+        entry.status='failed';entry.completedAt=Date.now();entry.error=directorFailure(cause,entry.phase,signal);await publish();
+        throw Object.assign(creatorError(entry.error.message,cause.status || 502,entry.error.code),{stage:'penshot'});
+      }
+      penshotBoard=board;
+      planningContent = [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations, screenplay:draft, penshot:board,
+        task:'将 PenShot 分镜转为本系统规定的完整JSON。shots 必须与 instructions.fragments 一一对应且顺序一致，每镜增加 penshotFragmentId 字段，原样复制相应 fragment_id。保留其画面与运镜设计；系统会按 PenShot 时长比例适配所选总时长。从上传素材白名单绑定 referenceIds 并逐镜填写事实 evidence。禁止编造ID，禁止将新生成资产作为真实素材。保持完整旁白。若分镜违反事实或人设，返回 clarification 说明冲突，不重新采用原编导自由编排。' })}];
+    }
+    const groundingSystem = observations ? (selected && !usePenShot ? '\n你同时收到真实图片和独立观察清单。结合图片观察构图、光线、质感与创意可能，事实与evidence以observations中已确认的信息为准，不把uncertain当作事实。\n' : '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n')+GROUNDING_RULES : '';
     const baseSystem = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以pacing.narration的全片字数为目标，先写自然连续的口播再分配画面；例如30秒通常140—160字。保留短换气，不为每次切镜停一秒以上，不机械压成每镜6—9字。长句可跨相邻镜头，实际发音约每秒5—6字，内容过密时先调整镜头时间，再删重复，不删除核心消费理由。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
-    const system = baseSystem + (input.skill === 'ai-sales' ? '\n' + SALES_ANONYMOUS_RULES : '') + (selected ? '\n创意优先：在真实素材与人物身份约束内，以画面吸引力、观看欲和购买欲为编排目标。先找到最能让人停留的视觉钩子，再用产品质感、动作、景别、光影、声音与转场构成有推进的作品。自主决定镜头数量和节奏，不受示例镜头数量或固定运镜顺序限制，不为创新改造真实产品或虚构效果、价格与口碑。让卖点可见、行动邀请自然；AI带货同时保留创作者开场、行业案例展示与创作者收尾的人设结构。' : '');
+    const system = baseSystem + (input.skill === 'ai-sales' ? '\n' + SALES_ANONYMOUS_RULES : '') + (selected && !usePenShot ? '\n创意优先：在真实素材与人物身份约束内，以画面吸引力、观看欲和购买欲为编排目标。先找到最能让人停留的视觉钩子，再用产品质感、动作、景别、光影、声音与转场构成有推进的作品。自主决定镜头数量和节奏，不受示例镜头数量或固定运镜顺序限制，不为创新改造真实产品或虚构效果、价格与口碑。让卖点可见、行动邀请自然；AI带货同时保留创作者开场、行业案例展示与创作者收尾的人设结构。' : '');
     const planningOptions = input.skill === 'ai-sales' && input.fixedNarration?.trim() && /^doubao-seed-2-1-/.test(writingModel)
       ? { thinking: { type: 'disabled' } } : {};
-    let budget = input.skill === 'ai-sales' ? Math.max(maxOutputTokens, 32768) : maxOutputTokens, correction = '', previousCandidate;
+    let budget = usePenShot ? Math.min(maxOutputTokens, 16384) : input.skill === 'ai-sales' ? Math.max(maxOutputTokens, 32768) : maxOutputTokens, correction = '', previousCandidate;
     for (let attempt = 1; attempt <= 2; attempt++) {
       const callSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
       const record = { attempt: ++sequence, stage:'planning', startedAt: Date.now(), status: 'started', phase: 'request', model: writingModel,
-        maxOutputTokens: budget, inputImageCount: observations && !selected ? 0 : images.length, sourceImageCount: images.length, observationModel: observations ? config.videoObservationModel || 'gpt-6-luna' : undefined, historyMessageCount: input.history.slice(-10).length, finishReason: null };
+        maxOutputTokens: budget, inputImageCount: usePenShot || observations && !selected ? 0 : images.length, sourceImageCount: images.length, observationModel: observations ? config.videoObservationModel || 'gpt-6-luna' : undefined, historyMessageCount: input.history.slice(-10).length, finishReason: null, ...(usePenShot ? { plannerMode:'penshot' } : {}) };
       const publish = async () => { if (onAttempt) await onAttempt(redactDirectorValue(record, [config.apiKey, config.falKey])); };
       await publish();
       onProgress?.(attempt === 1 ? '正在分析素材并编排分镜' : '正在重新生成完整脚本');
@@ -215,7 +241,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
         record.finishReason = payload?.choices?.[0]?.finish_reason || null; record.usage = payload?.usage;
         record.responseContent = payload?.choices?.[0]?.message?.content ?? '';
         const parsed = parseDirectorOutput(payload); record.formatRepair = parsed.repair; record.phase = 'validate';
-        let candidate=parsed.value, result;
+        let candidate=usePenShot ? applyPenShotLayout(parsed.value,penshotBoard,input.settings.duration) : parsed.value, result;
         previousCandidate=candidate;
         if(observations)validateGrounding(candidate,observations);
         try { result=validateDirectorResult(candidate,input); }
