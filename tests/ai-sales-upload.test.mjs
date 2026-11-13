@@ -86,12 +86,13 @@ test('script job polling survives a transient read failure and a page reload wit
   assert.equal(ui.root.querySelector('#sales-error').textContent,'');
   assert.equal(ui.scriptRequests.length,1);
 });
-for(const mode of ['kimi','haiku'])test(`sales defaults to Doubao, remembers ${mode} and dispatches the chosen director only on request`,async t=>{
+for(const mode of ['kimi','haiku','hydrogen'])test(`sales defaults to Doubao, remembers ${mode} and dispatches the chosen director only on request`,async t=>{
   const ui=await fixture(t,{assets:readyAssets()});
   assert.equal(ui.root.querySelector('[data-director=doubao]').getAttribute('aria-pressed'),'true');
   ui.event('click',ui.root.querySelector(`[data-director=${mode}]`));await ui.reload();
   assert.equal(ui.root.querySelector(`[data-director=${mode}]`).getAttribute('aria-pressed'),'true');
   if(mode==='haiku')assert.match(ui.root.querySelector('#sales-mode-hint').textContent,/Claude Haiku 5.5/);
+  if(mode==='hydrogen')assert.match(ui.root.querySelector('#sales-mode-hint').textContent,/Gemini 4 Hydrogen.*高思考强度/);
   assert.equal(ui.scriptRequests.length,0);
   ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
   assert.equal(ui.scriptRequests[0].directorModel,mode);

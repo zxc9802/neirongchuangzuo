@@ -1,6 +1,7 @@
 import { SALES_DIRECTION } from './ai-sales-policy.js';
 export const VIDEO_DIRECTORS = [
   { id: 'doubao', name: 'Doubao Seed 2.1 Pro', model: 'doubao-seed-2-1-pro-260915', provider: 'ark' },
+  { id: 'hydrogen', name: 'Gemini 4 Hydrogen', model: 'google/gemini-4-hydrogen', provider: 'fal' },
   { id: 'kimi', name: 'Kimi', model: 'kimi-k3.1-pro' },
   { id: 'haiku', name: 'Claude Haiku 5.5', model: 'anthropic/claude-haiku-5.5', provider: 'fal' },
 ];

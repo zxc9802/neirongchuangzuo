@@ -117,7 +117,7 @@ test('sales API gates access, persists director choice and bypasses all director
   const invalid=await call(scriptPath,{requestId:randomUUID(),settings:SALES_SETTINGS,message:'生成',directorModel:'direct'});
   assert.equal(invalid.status,400);assert.equal(calls,0);
   let previous=null;
-  for(const model of [undefined,'kimi','haiku']) {
+  for(const model of [undefined,'kimi','haiku','hydrogen']) {
     const request={requestId:randomUUID(),settings:SALES_SETTINGS,message:'生成',directorModel:model,expectedScriptId:previous};
     const res=await call(scriptPath,request);assert.equal(res.status,202);
     assert.equal((await res.json()).operation.directorModel,model || 'doubao');
@@ -129,7 +129,7 @@ test('sales API gates access, persists director choice and bypasses all director
     assert.equal((await call(scriptPath,{...request,directorModel:model?'doubao':'kimi'})).status,409);
     previous=request.requestId;
   }
-  assert.deepEqual(directors,['doubao','kimi','haiku']);
+  assert.deepEqual(directors,['doubao','kimi','haiku','hydrogen']);
   const direct={requestId:randomUUID(),settings:SALES_SETTINGS,prompt:'使用人物、产品与声音素材自由创作',directGeneration:true};
   assert.equal((await call(generationPath,{...direct,scriptId:previous})).status,400);
   assert.equal((await call(generationPath,direct,false)).status,403);
@@ -142,7 +142,7 @@ test('sales API gates access, persists director choice and bypasses all director
   assert.equal((await call(generationPath,{...direct,referenceImageIds})).status,202);
   assert.equal((await call(generationPath,{...direct,referenceImageIds,prompt:'不同要求'})).status,409);
   for(let i=0;i<100&&!videos.length;i++)await new Promise(r=>setTimeout(r,10));
-  assert.equal(calls,3);assert.equal(videos.length,1);assert.equal(videos[0].prompt,direct.prompt);
+  assert.equal(calls,4);assert.equal(videos.length,1);assert.equal(videos[0].prompt,direct.prompt);
   assert.equal(videos[0].imageIds.length,2);assert.equal(videos[0].audioIds.length,1);
   const restored=(await (await call('/conversations/'+id)).json()).conversation.tasks.at(-1);
   assert.equal(restored.directGeneration,true);assert.deepEqual(restored.referenceImageIds,referenceImageIds);

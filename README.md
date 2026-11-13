@@ -47,6 +47,8 @@ AI 带货默认编导为 Doubao Seed 2.1 Pro（`doubao-seed-2-1-pro-260915`）�
 
 任务 ID 由本站生成，浏览器断开不取消后台生成；服务进程重启时正在生成的编导仍按现有规则标记中断，不自动重新付费提交。
 
+AI 带货与视频编导可切换到 Gemini 4 Hydrogen（`google/gemini-4-hydrogen`），复用 fal 的 OpenRouter 队列与现有 `FAL_KEY`。该选项启用高思考强度，保留图片、历史对话及独立事实审核，按 fal 返回的实际计费单位结算。默认编导仍为 Doubao。
+
 ## 数字人开发服务
 
 在本仓库根目录执行：

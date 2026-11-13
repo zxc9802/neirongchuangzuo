@@ -71,7 +71,7 @@ test('missing Ark credentials fail before observation, and provider diagnostics 
   assert.doesNotMatch(JSON.stringify(attempts),/fixture-ark-key/);
 });
 
-for (const [directorModel, model] of [['haiku', 'anthropic/claude-haiku-5.5']])
+for (const [directorModel, model] of [['haiku', 'anthropic/claude-haiku-5.5'], ['hydrogen', 'google/gemini-4-hydrogen']])
 test(`${directorModel} uses fal with real pixels, history, high thinking and private credentials`, async t => {
   const input = { ...await sample(t), directorModel }, attempts = []; let sent;
   const result = await createDirectorModel({ config, fetchImpl: queueFetch(body => { sent = body; }) }).generate(input, { onAttempt: entry => attempts.push(entry) });
@@ -112,14 +112,14 @@ test('completed truncated Haiku output retries with corrected input and a larger
   assert.match(sent[1].messages[1].content.at(-1).text, /truncated/);
 });
 
-for (const directorModel of ['haiku'])test(`${directorModel} missing fal credentials fail before observation or any paid call`, async t => {
+for (const directorModel of ['haiku', 'hydrogen'])test(`${directorModel} missing fal credentials fail before observation or any paid call`, async t => {
   let calls = 0;
   const model = createDirectorModel({ config: { ...config, falKey: '' }, fetchImpl: async () => { calls++; } });
   await assert.rejects(model.generate({ ...await sample(t), directorModel, groundingVersion: 1 }), { code: 'DIRECTOR_NOT_CONFIGURED' });
   assert.equal(calls, 0);
 });
 
-for (const directorModel of ['haiku'])test(`${directorModel} failed queue polling, ambiguous submissions and failed accepted results never resubmit`, async t => {
+for (const directorModel of ['haiku', 'hydrogen'])test(`${directorModel} failed queue polling, ambiguous submissions and failed accepted results never resubmit`, async t => {
   const input = { ...await sample(t), directorModel };
   for (const failure of ['status', 'result', 'submission']) {
     let posts = 0;
@@ -142,7 +142,7 @@ test('cancelled queue waits retain the request ID and never submit another job',
   assert.equal(posts, 1); assert.equal(attempts.at(-1).providerRequestId, requestId);
 });
 
-for (const directorModel of ['haiku','doubao'])test(`grounded ${directorModel} keeps original images and independent factual review`, async t => {
+for (const directorModel of ['haiku','doubao','hydrogen'])test(`grounded ${directorModel} keeps original images and independent factual review`, async t => {
   const input = { ...await sample(t), directorModel, groundingVersion: 1 }, sent = [], candidate = structuredClone(output);
   candidate.script.shots[0].evidence = [{ assetId: 'product', factIndexes: [0], use: 'detail' }];
   let carbon;
@@ -163,7 +163,7 @@ for (const directorModel of ['haiku','doubao'])test(`grounded ${directorModel} k
   assert.equal(sent[1].model, config.imageTextModel);
 });
 
-for (const [directorModel, model] of [['haiku', 'anthropic/claude-haiku-5.5']])
+for (const [directorModel, model] of [['haiku', 'anthropic/claude-haiku-5.5'], ['hydrogen', 'google/gemini-4-hydrogen']])
 test(`narration repairs use ${directorModel} with the same full thinking budget`, async t => {
   const input = { ...await sample(t), directorModel, planningVersion: 2 }, candidate = structuredClone(output), sent = [];
   candidate.assets = [{ id: 'product', description: '黄色产品', role: '产品主体', adopt: '保留可见形态' }];
