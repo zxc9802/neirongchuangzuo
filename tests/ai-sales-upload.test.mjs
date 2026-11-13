@@ -108,6 +108,7 @@ test('direct mode saves editable requirements and sends real image references wi
   const prompt=ui.root.querySelector('#sales-direct-prompt');
   assert.match(prompt.value,/图片1：出镜人物/);assert.match(prompt.value,/图片2：真实产品/);assert.match(prompt.value,/声音参考1/);
   assert.ok(prompt.value.includes(SALES_SCENE_CHARACTER_RULES));assert.doesNotMatch(prompt.value,/sceneFusionException/);
+  assert.match(prompt.value,/所有口播或讲解镜头全程出镜/);
   prompt.value+='\n用产品特写开场';ui.event('input',prompt);await ui.reload();
   assert.equal(ui.root.querySelector('[data-director=direct]').getAttribute('aria-pressed'),'true');
   assert.match(ui.root.querySelector('#sales-direct-prompt').value,/用产品特写开场/);

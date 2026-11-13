@@ -26,7 +26,7 @@ test('sales requires character, voice and real materials; validates on-screen pl
   assert.throws(()=>assertSalesMaterials(assets,{generateAudio:false}),e=>e.code==='SALES_AUDIO_REQUIRED');
   assert.doesNotThrow(()=>assertSalesPlan(shots,plan,assets));
   for(const i of [0,2]){const next=structuredClone(shots);next[i].referenceIds=['food'];assert.throws(()=>assertSalesPlan(next,plan,assets),e=>e.outputIssue==='invalid_schema');}
-  const persona=structuredClone(shots);persona[0].referenceIds=['actor','food'];persona[1].referenceIds=['food'];persona[2].referenceIds=['actor'];
+  const persona=structuredClone(shots);persona[0].referenceIds=['actor','food'];persona[1].referenceIds=['food'];persona[1].voiceover='';persona[2].referenceIds=['actor'];
   assert.doesNotThrow(()=>assertSalesPlan(persona,plan,assets));
   const isolated=structuredClone(persona);isolated[0].referenceIds=['actor'];assert.throws(()=>assertSalesPlan(isolated,plan,assets),e=>e.outputIssue==='invalid_schema');
   persona[1].referenceIds=['actor'];assert.throws(()=>assertSalesPlan(persona,plan,assets),e=>e.outputIssue==='invalid_schema');
@@ -43,6 +43,25 @@ test('sales requires character, voice and real materials; validates on-screen pl
   assert.throws(()=>validateDirectorResult(missing,input),e=>e.code==='DIRECTOR_INVALID_OUTPUT');
   assert.doesNotThrow(()=>validateDirectorResult(missing,{...input,skill:'store-discovery'}));
 });
+test('every spoken sales shot requires the reference character, including middle shots and fusion exceptions',()=>{
+  for(const index of [1,0,2]) {
+    const candidate=structuredClone(shots);candidate[index].referenceIds=['food'];
+    assert.throws(()=>assertSalesPlan(candidate,plan,assets),error=>error.code==='DIRECTOR_INVALID_OUTPUT' && JSON.parse(error.validationIssue).field==='sales.speakingCharacter');
+    candidate[index].sceneFusionException='近景加入人物会明显形变，保留原场景。';
+    assert.throws(()=>assertSalesPlan(candidate,plan,assets),error=>error.code==='DIRECTOR_INVALID_OUTPUT' && JSON.parse(error.validationIssue).field==='sales.speakingCharacter');
+  }
+  const conflict=structuredClone(shots);conflict[1].sceneFusionException='人物会形变，所以本镜不让人物入镜。';
+  assert.throws(()=>assertSalesPlan(conflict,plan,assets),error=>JSON.parse(error.validationIssue).field==='sales.speakingCharacter');
+});
+
+test('silent sales shots can omit the character, and spoken prompts identify the character in each shot',()=>{
+  const candidate=structuredClone(shots);candidate[0].referenceIds=['food'];candidate[0].voiceover='';candidate[2].referenceIds=['food'];candidate[2].voiceover='   ';
+  const input={skill:'ai-sales',settings:SALES_SETTINGS,assets};
+  const result=validateDirectorResult({kind:'script',script:{title:'人物讲解与空镜',plan,shots:candidate},assets:assets.map(a=>({id:a.id,role:'实拍参考'}))},input);
+  const middle=result.script.videoPrompt.split('镜头2｜')[1].split('镜头3｜')[0];
+  assert.match(middle,/人物口播/);assert.match(middle,/图片1/);assert.match(middle,/全程出镜/);
+});
+
 test('sales preserves director-decided deformation exceptions through validation and video compilation',()=>{
   const sceneAssets=assets.map(a=>a.id==='food'?{...a,id:'scene'}:a);
   const input={skill:'ai-sales',planningVersion:2,settings:SALES_SETTINGS,assets:sceneAssets};
@@ -52,29 +71,29 @@ test('sales preserves director-decided deformation exceptions through validation
   const reason='狭窄入口的近距离广角会使人物身形和门框结构明显拉伸，本镜保留原场景，不加入人物。';
   for(const index of [0,1,2]) {
     const candidate=structuredClone(output);
-    Object.assign(candidate.script.shots[index],{referenceIds:['scene'],visual:'保持原场景的空间结构，不加入人物',action:'保持场景原有布局',sceneFusionException:reason});
+    Object.assign(candidate.script.shots[index],{referenceIds:['scene'],voiceover:'',visual:'保持原场景的空间结构，不加入人物',action:'保持场景原有布局',sceneFusionException:reason});
     const result=validateDirectorResult(candidate,input);
     assert.equal(result.script.shots[index].sceneFusionException,reason);
     assert.deepEqual(result.script.shots[index].referenceIds,['scene']);
     assert.ok(result.script.videoPrompt.includes('人物与场景融合例外：'+reason));
-    if(index!==1)for(const invalid of ['', '  ', 1, 'x'.repeat(401)]) {
+    if(index!==1)for(const invalid of [1, 'x'.repeat(401)]) {
       candidate.script.shots[index].sceneFusionException=invalid;
       assert.throws(()=>validateDirectorResult(candidate,input),{code:'DIRECTOR_INVALID_OUTPUT'});
     }
   }
   const allUnsafe=structuredClone(output);allUnsafe.script.plan.cast=[];
-  allUnsafe.script.shots.forEach(shot=>Object.assign(shot,{referenceIds:['scene'],sceneFusionException:reason,visual:'保留原场景，创作者画外音讲解',action:'保持原场景不加入人物'}));
+  allUnsafe.script.shots.forEach(shot=>Object.assign(shot,{referenceIds:['scene'],voiceover:'',sceneFusionException:reason,visual:'保留原场景的无口播空镜',action:'保持原场景不加入人物'}));
   const result=validateDirectorResult(allUnsafe,input);
   assert.deepEqual(result.script.referenceImageIds,['scene']);
   assert.deepEqual(result.script.plan.cast,[]);
   delete allUnsafe.script.shots[0].sceneFusionException;
-  assert.throws(()=>validateDirectorResult(allUnsafe,input),{code:'DIRECTOR_INVALID_OUTPUT'});
+  assert.doesNotThrow(()=>validateDirectorResult(allUnsafe,input));
   allUnsafe.script.shots[0].sceneFusionException=reason;
   allUnsafe.script.shots[1].referenceIds.push('actor');
   assert.throws(()=>validateDirectorResult(allUnsafe,input),{code:'DIRECTOR_INVALID_OUTPUT'});
   const shifted=structuredClone(output),unused={id:'unused',type:'image',purpose:'reference'};
   shifted.assets.unshift({id:'unused',description:'未选素材',role:'不采用',adopt:''});
-  Object.assign(shifted.script.shots[1],{referenceIds:['scene'],sceneFusionException:'图片3的狭窄空间会使人物和门框明显拉伸，本镜保留原场景。'});
+  Object.assign(shifted.script.shots[1],{referenceIds:['scene'],voiceover:'',sceneFusionException:'图片3的狭窄空间会使人物和门框明显拉伸，本镜保留原场景。'});
   const remapped=validateDirectorResult(shifted,{...input,assets:[unused,...sceneAssets]});
   assert.match(remapped.script.videoPrompt,/融合例外：图片2的狭窄空间/);
 });
@@ -142,7 +161,7 @@ test('sales API gates access, persists director choice and bypasses all director
   assert.equal((await call(generationPath,{...direct,referenceImageIds})).status,202);
   assert.equal((await call(generationPath,{...direct,referenceImageIds,prompt:'不同要求'})).status,409);
   for(let i=0;i<100&&!videos.length;i++)await new Promise(r=>setTimeout(r,10));
-  assert.equal(calls,4);assert.equal(videos.length,1);assert.equal(videos[0].prompt,direct.prompt);
+  assert.equal(calls,4);assert.equal(videos.length,1);assert.equal(videos[0].prompt,direct.prompt+'\n\n'+SALES_SCENE_CHARACTER_RULES);
   assert.equal(videos[0].imageIds.length,2);assert.equal(videos[0].audioIds.length,1);
   const restored=(await (await call('/conversations/'+id)).json()).conversation.tasks.at(-1);
   assert.equal(restored.directGeneration,true);assert.deepEqual(restored.referenceImageIds,referenceImageIds);
@@ -213,12 +232,34 @@ test('sales corrects the latest rejected script through three rounds and deliver
   assert.ok(progress.some(value=>value.includes('按审核意见修正')));
 });
 
+test('sales repairs missing characters in spoken shots before review or delivery',async t=>{
+  const root=await mkdtemp(join(tmpdir(),'sales-speaking-'));t.after(()=>rm(root,{recursive:true,force:true}));
+  const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#888'}}).jpeg().toFile(path);
+  const input={skill:'ai-sales',planningVersion:2,groundingVersion:1,settings:SALES_SETTINGS,assets:assets.map(a=>({...a,path})),history:[],message:'生成AI创作案例'};
+  const observations=assets.map(a=>({id:a.id,kinds:[a.type==='audio'?'voice':a.purpose==='character'?'character':'scene'],facts:['真实素材'],uncertain:[]}));
+  const valid={kind:'script',assets:assets.map(a=>({id:a.id,description:'真实参考',role:'实拍参考',adopt:'保留特征'})),script:{title:'人物出镜讲解',plan,shots:shots.map(shot=>({...shot,intent:'人物在真实场景内讲解',evidence:shot.referenceIds.map(id=>({assetId:id,factIndexes:[0],use:id==='actor'?'character':'scene'}))}))}};
+  const invalid=structuredClone(valid);invalid.script.shots[1].referenceIds=['food'];invalid.script.shots[1].evidence=invalid.script.shots[1].evidence.filter(e=>e.assetId==='food');
+  let plans=0,reviews=0;const requests=[];
+  const result=await createDirectorModel({config:{apiKey:'test',baseUrl:'https://test.invalid',videoDirectorModel:'writer',imageTextModel:'review'},fetchImpl:async(_url,opts)=>{
+    const body=JSON.parse(opts.body);requests.push(body);let value;
+    if(requests.length===1)value={observations};
+    else if(Array.isArray(body.messages[1].content))value=++plans===1?invalid:valid;
+    else {reviews++;value={passed:true,issues:[]};}
+    return Response.json({choices:[{finish_reason:'stop',message:{content:JSON.stringify(value)}}]});
+  }}).generate(input);
+  assert.equal(plans,2);assert.equal(reviews,1);assert.equal(result.quality.passed,true);
+  assert.ok(requests.slice(1).every(request=>request.messages[0].content.includes(SALES_SCENE_CHARACTER_RULES)));
+  assert.match(requests[2].messages[1].content.at(-1).text,/sales.speakingCharacter/);
+  assert.deepEqual(result.script.shots[1].referenceIds,['actor','food']);
+  assert.match(result.script.videoPrompt,/人物口播/);
+});
+
 test('sales sends the same scene-person policy and deformation decision through planning, review and video output',async t=>{
   const root=await mkdtemp(join(tmpdir(),'sales-fusion-'));t.after(()=>rm(root,{recursive:true,force:true}));
   const path=join(root,'photo.jpg');await sharp({create:{width:80,height:80,channels:3,background:'#888'}}).jpeg().toFile(path);
   const sourceAssets=assets.map(a=>({...a,path}));
   const reason='当前场景为近距离倾斜视角，加入人物会明显拉伸身体和原有空间，本镜保留场景。';
-  const candidate={kind:'script',assets:assets.map(a=>({id:a.id,description:'真实参考',role:a.purpose==='character'?'因明显形变风险不采用人物':'实拍参考',adopt:'保留特征'})),script:{title:'创作者的场景案例',plan:{...plan,cast:[]},shots:shots.map(shot=>({...shot,intent:'保留原场景并以创作者画外音展示案例',referenceIds:['food'],sceneFusionException:reason,visual:'保持原场景，创作者画外音讲解',action:'镜头沿原场景平移',evidence:[{assetId:'food',factIndexes:[0],use:'scene'}]}))}};
+  const candidate={kind:'script',assets:assets.map(a=>({id:a.id,description:'真实参考',role:a.purpose==='character'?'因明显形变风险不采用人物':'实拍参考',adopt:'保留特征'})),script:{title:'创作者的场景案例',plan:{...plan,cast:[]},shots:shots.map(shot=>({...shot,intent:'保留原场景的无口播空镜',referenceIds:['food'],voiceover:'',sceneFusionException:reason,visual:'保持原场景的无口播空镜',action:'镜头沿原场景平移',evidence:[{assetId:'food',factIndexes:[0],use:'scene'}]}))}};
   const observations=assets.map(a=>({id:a.id,kinds:[a.type==='audio'?'voice':a.purpose==='character'?'character':'scene'],facts:['真实素材'],uncertain:[]}));
   const sent=[];
   const model=createDirectorModel({config:{apiKey:'test',baseUrl:'https://test.invalid',videoDirectorModel:'kimi',imageTextModel:'review'},fetchImpl:async(_url,opts)=>{

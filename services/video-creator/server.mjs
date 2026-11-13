@@ -10,6 +10,7 @@ import { createDirectorModel, creatorError } from './model.mjs';
 import { directorSelection } from './director-provider.mjs';
 import { loadArkApiKey } from '../runtime-settings.mjs';
 import { assertSalesMaterials, assertSalesPlan } from './sales.mjs';
+import { SALES_SCENE_CHARACTER_RULES } from '../../design/ai-sales-policy.js';
 import { DIRECTOR_PLAN_VERSION } from './director-plan.mjs';
 import { DIRECTOR_OUTPUT_TOKENS, directorAttemptSummary } from './director-response.mjs';
 import { createCreatorProvider, creatorConfig } from './provider.mjs';
@@ -197,7 +198,8 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
         if (closing) return;
         task.status = 'submitting'; task.dispatched = true; await save(c);
         try {
-          await accept(c, task, await provider.generateCreative({ ...task.settings, prompt: task.prompt,
+          const prompt = task.skill === 'ai-sales' && !task.prompt.includes(SALES_SCENE_CHARACTER_RULES) ? task.prompt + '\n\n' + SALES_SCENE_CHARACTER_RULES : task.prompt;
+          await accept(c, task, await provider.generateCreative({ ...task.settings, prompt,
             imageIds: task.assetIds.filter(id => c.assets.find(a => a.id === id).type === 'image').map(id => task.materials[id].id),
             audioIds: task.assetIds.filter(id => c.assets.find(a => a.id === id).type === 'audio').map(id => task.materials[id].id) }));
         } catch (cause) {
