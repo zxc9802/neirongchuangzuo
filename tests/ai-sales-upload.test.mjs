@@ -8,7 +8,7 @@ const settle = async () => { for(let i=0;i<12;i++)await new Promise(resolve=>set
 const photo = name => new File(['photo'], name || '产品.jpg', {type:'image/jpeg'});
 const transfer = files => ({types:['Files'], files, dropEffect:'none'});
 
-async function fixture(t, {assets=[],operations=[],savedDirector,beforeUpload=async()=>{},beforeScript=async()=>({status:'queued'}),afterScript=async()=>{},beforePoll=async()=>{}}={}) {
+async function fixture(t, {assets=[],operations=[],savedDirector,beforeUpload=async()=>{},beforeScript=async()=>({status:'queued'}),afterScript=async()=>{},afterVideo=async()=>{},beforePoll=async()=>{}}={}) {
   const {document,window}=parseHTML('<html><body><main></main></body></html>');
   const session={id:'test',assets,operations,tasks:[],version:0}, uploads=[],scriptRequests=[],videoRequests=[],jobPolls=[];
   const storage=new Map([['qiya-ai-sales-persona-v2:user',JSON.stringify({conversationId:session.id,directorMode:savedDirector})]]);
@@ -21,7 +21,9 @@ async function fixture(t, {assets=[],operations=[],savedDirector,beforeUpload=as
     if(url.endsWith('/sales-preset'))return Response.json({assets:[]});
     if(url.endsWith('/generate') && options.method==='POST') {
       const body=JSON.parse(options.body);videoRequests.push(body);
-      const task={...body,id:body.requestId,status:'running'};session.tasks.push(task);return Response.json({task});
+      let task=session.tasks.find(t=>t.id===body.requestId);
+      if(!task){task={...body,id:body.requestId,status:'running'};session.tasks.push(task);}
+      await afterVideo(task,body);return Response.json({task});
     }
     if(url.endsWith('/script') && options.method==='POST') {
       const body=JSON.parse(options.body);scriptRequests.push(body);
@@ -113,6 +115,60 @@ test('direct mode saves editable requirements and sends real image references wi
   const request=ui.videoRequests[0];assert.equal(request.directGeneration,true);assert.equal(request.scriptId,undefined);
   assert.deepEqual(request.referenceImageIds,['actor','scene']);assert.match(request.prompt,/用产品特写开场/);
   assert.ok(ui.root.querySelector('[data-sales=generate]').disabled);
+});
+for(const reload of [false,true])test(`a completed sales video can be generated again from the same script${reload?' after reload':''}`,async t=>{
+  const script={title:'可重复生成的脚本',shots:[],videoPrompt:'同一份分镜提示词',referenceImageIds:['actor','scene']};
+  const ui=await fixture(t,{assets:readyAssets(),beforeScript:async()=>({status:'completed',result:{kind:'script',script}})});
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  assert.equal(ui.videoRequests.length,1);
+  assert.ok(ui.root.querySelector('[data-sales=generate]').disabled);
+  const first=ui.videoRequests[0];ui.session.tasks[0].status='completed';
+  if(reload)await ui.reload();else await ui.poll();
+  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
+  assert.equal(ui.root.querySelector('[data-sales=generate]').textContent,'再次生成视频');
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  assert.equal(ui.videoRequests.length,2);
+  const second=ui.videoRequests[1];assert.notEqual(second.requestId,first.requestId);
+  assert.equal(second.scriptId,first.scriptId);assert.equal(second.prompt,first.prompt);
+  assert.deepEqual(second.referenceImageIds,first.referenceImageIds);
+  assert.equal(ui.scriptRequests.length,1);
+});
+test('a lost second video response retries its unconfirmed ID instead of creating a third render',async t=>{
+  let loseResponse=false;
+  const script={title:'同一脚本',shots:[],videoPrompt:'保持同一份分镜',referenceImageIds:['actor','scene']};
+  const ui=await fixture(t,{assets:readyAssets(),beforeScript:async()=>({status:'completed',result:{kind:'script',script}}),afterVideo:async()=>{if(loseResponse){loseResponse=false;throw new Error('连接中断');}}});
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  ui.session.tasks[0].status='completed';await ui.poll();
+  loseResponse=true;ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  assert.match(ui.root.querySelector('#sales-error').textContent,/连接中断/);
+  assert.equal(ui.videoRequests.length,2);assert.equal(ui.session.tasks.length,2);
+  assert.notEqual(ui.videoRequests[1].requestId,ui.videoRequests[0].requestId);
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  assert.equal(ui.videoRequests.length,3);
+  assert.equal(ui.videoRequests[2].requestId,ui.videoRequests[1].requestId);
+  assert.equal(ui.session.tasks.length,2);
+  await ui.reload();ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  assert.equal(ui.videoRequests.length,3);assert.ok(ui.root.querySelector('[data-sales=generate]').disabled);
+});
+for(const status of ['uncertain','settling'])test(`${status} video outcomes stay locked instead of launching another paid task`,async t=>{
+  const ui=await fixture(t,{assets:readyAssets(),savedDirector:'direct'});
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  ui.session.tasks[0].status=status;await ui.poll();
+  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,true);
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  assert.equal(ui.videoRequests.length,1);
+});
+test('direct generation also creates a fresh render after completion without calling a director',async t=>{
+  const ui=await fixture(t,{assets:readyAssets(),savedDirector:'direct'});
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  ui.session.tasks[0].status='completed';await ui.reload();
+  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
+  ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
+  assert.equal(ui.videoRequests.length,2);assert.equal(ui.scriptRequests.length,0);
+  assert.notEqual(ui.videoRequests[1].requestId,ui.videoRequests[0].requestId);
+  assert.equal(ui.videoRequests[1].prompt,ui.videoRequests[0].prompt);
 });
 for(const reload of [false,true])test(`retrying a failed script creates a new operation${reload?' after reload':''}`,async t=>{
   let calls=0;

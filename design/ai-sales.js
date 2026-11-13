@@ -93,8 +93,8 @@ function update(s) {
   s.root.querySelectorAll('[data-sales-drop]').forEach(n=>{n.setAttribute('aria-disabled',String(Boolean(materialLocked(s))));if(materialLocked(s))n.classList.remove('is-dragover');});
   s.root.querySelector('[data-sales=script]').hidden=direct;
   s.root.querySelector('[data-sales=script]').disabled=Boolean(direct || busy || missing.length || s.config?.directorEnabled===false);
-  s.root.querySelector('[data-sales=generate]').disabled=Boolean(busy || (direct?!prompt.trim():!unchanged) || missing.length || s.config?.generationEnabled===false || s.quote?.affordable===false || sameVideo && ['completed','uncertain','expired'].includes(task?.status));
-  s.root.querySelector('[data-sales=generate]').textContent=t(task?.canRecover?'恢复成片':task?.status==='failed'?'重新生成视频':'生成视频');
+  s.root.querySelector('[data-sales=generate]').disabled=Boolean(busy || (direct?!prompt.trim():!unchanged) || missing.length || s.config?.generationEnabled===false || s.quote?.affordable===false || sameVideo && ['uncertain','expired'].includes(task?.status));
+  s.root.querySelector('[data-sales=generate]').textContent=t(task?.canRecover?'恢复成片':sameVideo && task?.status==='completed'?'再次生成视频':task?.status==='failed'?'重新生成视频':'生成视频');
   s.root.querySelectorAll('.sales-fields input,.sales-fields textarea').forEach(n=>n.disabled=Boolean(busy));
   s.root.querySelector('[data-sales=new]').disabled=Boolean(s.busy);
   s.root.querySelector('#sales-status').textContent=s.busy || pending(op?.status) ? s.activity || op?.progress || t(direct?'正在提交…':'正在编导…') : pending(task?.status) ? t('视频生成中，可稍后回来查看') : missing.length ? t('请添加')+'：'+missing.join('、') : direct ? t('素材已就绪，可直接生成视频') : op?.draftResult ? t('待审核脚本') : script&&!unchanged ? t('编导模型或文案已修改，请重新编导') : t('素材已就绪');
@@ -173,7 +173,9 @@ async function handle(s, actionName, b) {
     const body=s.directorMode==='direct'
       ? {settings:SALES_SETTINGS,directGeneration:true,prompt:directPrompt(s),referenceImageIds:s.session.assets.filter(a=>a.type==='image').map(a=>a.id)}
       : {settings:SALES_SETTINGS,scriptId:op.id,prompt:script.videoPrompt,referenceImageIds:script.referenceImageIds};
-    if(latestTask(s)?.status==='failed')s.videoRequest=null;
+    // Keep an unconfirmed submission's ID when retrying after a lost response.
+    const requestedTask=s.session.tasks.find(task=>task.id===s.videoRequest?.requestId);
+    if(['failed','completed'].includes(requestedTask?.status))s.videoRequest=null;
     if(!s.videoRequest || s.videoRequest.fingerprint!==JSON.stringify(body))s.videoRequest={requestId:crypto.randomUUID(),fingerprint:JSON.stringify(body)};save(s);
     const {task}=await api(`/conversations/${s.session.id}/generate`,post({...body,requestId:s.videoRequest.requestId}));
     s.session.tasks=[...s.session.tasks.filter(x=>x.id!==task.id),task];

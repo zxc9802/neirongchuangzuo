@@ -317,7 +317,7 @@ test('applied director prompt retains every planned shot and maps references by 
   assert.throws(() => validateDirectorResult(incomplete, input), /总时长/);
 });
 
-test('full workflow: upload, director, apply, single idempotent render, correct MP4 download and cost settlement', async t => {
+test('full workflow: one script supports repeated renders with per-request idempotency and cost settlement', async t => {
   const f = await fixture(t), id = await f.init(), asset = await f.upload(id); await f.upload(id, asset);
   assert.equal((await f.current(id)).assets.length, 1);
   const opid = randomUUID(), input = { requestId: opid, message: '重点展示门店和招牌', settings, expectedScriptId: null };
@@ -346,6 +346,14 @@ test('full workflow: upload, director, apply, single idempotent render, correct 
   assert.equal((await f.call('/config', { owner: 'none' })).status, 401);
   assert.equal((await f.call(`/conversations/${id}`, { method: 'PATCH', body: { skill: 'signature', settings }, headers: { Origin: 'https://attacker.example' } })).status, 403);
   const assets = collectGeneratedAssets([], [], Date.now(), [], [], [task]); assert.equal(assets.length, 1); assert.equal(assets[0].source, 'AI 视频');
+  const secondId=randomUUID();assert.equal((await f.generate(id,secondId,{scriptId:opid})).status,202);
+  const second=await f.until(async()=> (await f.current(id)).tasks.find(x=>x.id===secondId&&x.status==='completed'));
+  assert.equal(f.state.generates,2);assert.equal(f.state.scripts,1);
+  assert.equal(second.scriptId,opid);assert.equal(second.prompt,task.prompt);
+  assert.equal(second.billing.chargedPoints,500);assert.equal((await f.wallet.snapshot('alice')).available,0);
+  assert.equal((await f.generate(id,secondId,{scriptId:opid})).status,202);
+  assert.equal(f.state.generates,2);assert.equal((await f.current(id)).tasks.length,2);
+  assert.equal((await f.call(`/tasks/${tid}/result`)).status,200);
 });
 
 test('director meters regular and unlimited accounts, replays once and restores historical usage from its ledger', async t => {
