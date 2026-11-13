@@ -1,6 +1,6 @@
 import { mapConcurrent } from './async-pool.js';
 import { setSalesHtml as setHtml, renderSalesMaterials } from './ai-sales-render.js';
-import { canUseAiSales, SALES_SETTINGS } from './ai-sales-policy.js';
+import { canUseAiSales, SALES_SETTINGS, SALES_SCENE_CHARACTER_RULES } from './ai-sales-policy.js';
 import { VIDEO_IMAGE_MAX_BYTES, VIDEO_AUDIO_MAX_BYTES, VIDEO_DIRECTORS, DEFAULT_VIDEO_DIRECTOR } from './video-catalog.js';
 import { t } from './workspace-preferences.js';
 import { markdownText } from './markdown.js';
@@ -31,10 +31,10 @@ function needed(s) {
   return [['character','出镜人物照'],['voice','参考声音'],['reference','产品与场景']].filter(([role]) => !assets.some(a => a.purpose === role && !a.expired)).map(([,name]) => t(name));
 }
 function message() {
-  return '根据上传的实拍自动判断行业并创作文案，无需用户提供行业、店名或文案。为义鹏创作“用AI挑战不同行业宣传片”的社媒视频，推广他的AI创作能力。开场人物融入实拍场景提出挑战，中段展示行业广告作品，结尾回到创作者邀请关注或出题。全片口播、字幕、标题与生成画面都不出现具体店名、商场名、品牌标识或地址；招牌、菜单、杯盘等可辨店名应通过取景避开或自然去字处理，不替换为虚构店名。保留真实产品与空间特点，不把义鹏写成店老板或真实探店顾客。';
+  return '根据上传的实拍自动判断行业并创作文案，无需用户提供行业、店名或文案。为义鹏创作“用AI挑战不同行业宣传片”的社媒视频，推广他的AI创作能力。开场由创作者提出挑战，中段展示行业广告作品，结尾回到创作者邀请关注或出题；人物出镜与场景融合遵循下述规则。全片口播、字幕、标题与生成画面都不出现具体店名、商场名、品牌标识或地址；招牌、菜单、杯盘等可辨店名应通过取景避开或自然去字处理，不替换为虚构店名。保留真实产品与空间特点，不把义鹏写成店老板或真实探店顾客。\n'+SALES_SCENE_CHARACTER_RULES;
 }
 function directPrompt(s) {
-  return s.directPrompt ?? `${message()}\n\n请直接生成30秒、9:16竖屏、有中文口播的视频。围绕这些真实素材自由发挥创意，以吸引观看、展示产品卖点和自然转化为目标，自主设计镜头、动作、节奏和转场，不虚构价格、效果或口碑。保持出镜人物身份及产品外形一致，人物照背景不作为产品场景。\n${(s.session?.assets || []).filter(a=>a.type==='image').map((a,i)=>`图片${i+1}：${a.purpose==='character'?'出镜人物形象参考，开场和结尾出镜':'真实产品与场景参考，保留其可见特征'}`).join('\n')}\n声音参考1仅用于音色参考，不复述参考音频中的台词。`;
+  return s.directPrompt ?? `${message()}\n\n请直接生成30秒、9:16竖屏、有中文口播的视频。围绕这些真实素材自由发挥创意，以吸引观看、展示产品卖点和自然转化为目标，自主设计镜头、动作、节奏和转场，不虚构价格、效果或口碑。保持出镜人物身份及产品外形一致，人物照背景不作为产品场景。\n${(s.session?.assets || []).filter(a=>a.type==='image').map((a,i)=>`图片${i+1}：${a.purpose==='character'?'出镜人物形象参考，开场和结尾默认出镜；明显形变风险时遵循上述融合例外':'真实产品与场景参考，保留其可见特征'}`).join('\n')}\n声音参考1仅用于音色参考，不复述参考音频中的台词。`;
 }
 
 function button(action, label, disabled = false, primary = false) {

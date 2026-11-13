@@ -1,6 +1,7 @@
 import { mapConcurrent } from '../../design/async-pool.js';
 import { directorSelection, directorRequest, fetchDirector } from './director-provider.mjs';
 import { assertSalesPlan, assertSalesNarration, SALES_PERSONA_REVIEW, SALES_ANONYMOUS_RULES } from './sales.mjs';
+import { SALES_SCENE_CHARACTER_RULES } from '../../design/ai-sales-policy.js';
 import { narrationTarget, narrationDirection } from './narration-budget.mjs';
 import { OBSERVATION_SYSTEM, validateObservations, GROUNDING_RULES, validateGrounding, narrationRepairRequest, applyNarrationRepair, QUALITY_SYSTEM, validateQuality } from './director-quality.mjs';
 import { readFile } from 'node:fs/promises';
@@ -29,6 +30,7 @@ function compileVideoPrompt(direction, shots, images, settings) {
     `镜头${index + 1}｜${shot.start}–${shot.end}秒｜参考${shot.referenceIds.map(label).join('、')}`,
     shot.intent && `镜头目的：${shot.intent}`, `画面：${shot.visual}`, shot.action && `动作与表演：${shot.action}`,
     shot.emotion && `情绪：${shot.emotion}`, shot.camera && `运镜与衔接：${shot.camera}`,
+    shot.sceneFusionException && `人物与场景融合例外：${shot.sceneFusionException}；沿用本镜头已编排的人物安排，不为出镜要求强行合成。`,
     settings.generateAudio && shot.sound && `环境声与拟音：${shot.sound}`,
     settings.generateAudio && shot.voiceover && `旁白：${shot.voiceover}`, shot.caption && `字幕：${shot.caption}`,
   ].filter(Boolean).join('\n')).join('\n\n');
@@ -73,6 +75,10 @@ export function validateDirectorResult(value, input) {
       if (text(shot[field], max)) detail[field] = text(shot[field], max);
     }
     if (!input.settings.generateAudio) delete detail.sound;
+    if (input.skill === 'ai-sales' && shot.sceneFusionException !== undefined) {
+      if (typeof shot.sceneFusionException !== 'string' || shot.sceneFusionException.trim().length > 400) throw invalidOutput('人物与场景融合例外说明不完整。', 'invalid_schema', { shot:index+1, field:'sceneFusionException' });
+      if (shot.sceneFusionException.trim()) detail.sceneFusionException = shot.sceneFusionException.trim();
+    }
     const voiceover = input.settings.generateAudio ? text(shot.voiceover, 800) : '';
     return { start: shot.start, end: shot.end, visual: text(shot.visual, 1600), camera: text(shot.camera, 500), ...detail,
       referenceIds: [...new Set(shot.referenceIds)], caption: text(shot.caption, 160), voiceover };
@@ -96,8 +102,8 @@ export function validateDirectorResult(value, input) {
     return index < 0 ? '未选用的上传图' : `图片${index + 1}`;
   });
   let compiledDirection = [plan ? compileDirectorPlan(plan, assets, referenceImages, input.settings.generateAudio ? input.assets.filter(a => a.type === 'audio') : [], remap) : remap(globalDirection), offer && remap(offerDirection(offer.facts))].filter(Boolean).join('\n\n');
-  if (input.skill === 'ai-sales') compiledDirection = compiledDirection.replace('到店理由：', '创作目的：').replace('目标顾客：', '目标观众：') + '\n' + SALES_ANONYMOUS_RULES;
-  const videoPrompt = plan || globalDirection ? compileVideoPrompt(compiledDirection, shots.map(shot => ({ ...shot, ...Object.fromEntries(['intent', 'visual', 'camera', 'action', 'emotion', 'sound', 'voiceover', 'caption'].map(key => [key, remap(shot[key] || '')])) })), referenceImages, input.settings)
+  if (input.skill === 'ai-sales') compiledDirection = compiledDirection.replace('到店理由：', '创作目的：').replace('目标顾客：', '目标观众：') + '\n' + SALES_ANONYMOUS_RULES + '\n' + SALES_SCENE_CHARACTER_RULES;
+  const videoPrompt = plan || globalDirection ? compileVideoPrompt(compiledDirection, shots.map(shot => ({ ...shot, ...Object.fromEntries(['intent', 'visual', 'camera', 'action', 'emotion', 'sound', 'voiceover', 'caption', 'sceneFusionException'].map(key => [key, remap(shot[key] || '')])) })), referenceImages, input.settings)
     : [text(s.videoPrompt, 12000), offer && offerDirection(offer.facts)].filter(Boolean).join('\n\n');
   if (videoPrompt.length > 12000) throw invalidOutput('完整分镜内容过长，请精简后重新编导。', 'invalid_schema', { field: 'videoPrompt', actualLength: videoPrompt.length, maximumLength: 12000 });
   return { kind: 'script', text: text(value.text, 3000) || text(s.title, 80), assets, warnings, ...(offer ? { offerFacts: offer.facts } : {}),
@@ -131,7 +137,8 @@ function directorSystem(skill) {
     .replaceAll('具体到店理由', '具体AI创作展示目标').replaceAll('目标顾客与消费场景', '目标观众与创作案例')
     .replaceAll('店家介绍、中性展示或角色演示视角', 'AI创作者讲解与案例成片展示的双层视角')
     .replaceAll('默认从店家介绍或中性展示视角表达', '创作者首尾以本人身份介绍作品，案例内部以面向行业顾客的宣传视角表达')
-    .replaceAll('主题与到店理由', '人设主题与案例亮点');
+    .replaceAll('主题与到店理由', '人设主题与案例亮点')
+    .replace('"caption":"字幕，可空"', '"caption":"字幕，可空","sceneFusionException":"仅在人物与场景融合会造成明显形变时填写具体原因，最多400字；正常融合或纯产品特写为空"');
   if (skill === 'group-buy') common = common.replace('"warnings":[],"script":',
     '"warnings":[],"offerFacts":{"package":{"value":"","sourceQuote":""},"price":{"value":"","sourceQuote":""},"validity":{"value":"","sourceQuote":""},"conditions":{"value":"","sourceQuote":""}},"script":');
   return [common, skillDirection(skill)].filter(Boolean).join('\n\n');

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { parseHTML } from 'linkedom';
 import { mountAiSales, disposeAiSales } from '../design/ai-sales.js';
+import { SALES_SCENE_CHARACTER_RULES } from '../design/ai-sales-policy.js';
 
 const settle = async () => { for(let i=0;i<12;i++)await new Promise(resolve=>setImmediate(resolve)); };
 const photo = name => new File(['photo'], name || '产品.jpg', {type:'image/jpeg'});
@@ -103,6 +104,7 @@ test('direct mode saves editable requirements and sends real image references wi
   assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
   const prompt=ui.root.querySelector('#sales-direct-prompt');
   assert.match(prompt.value,/图片1：出镜人物/);assert.match(prompt.value,/图片2：真实产品/);assert.match(prompt.value,/声音参考1/);
+  assert.ok(prompt.value.includes(SALES_SCENE_CHARACTER_RULES));assert.doesNotMatch(prompt.value,/sceneFusionException/);
   prompt.value+='\n用产品特写开场';ui.event('input',prompt);await ui.reload();
   assert.equal(ui.root.querySelector('[data-director=direct]').getAttribute('aria-pressed'),'true');
   assert.match(ui.root.querySelector('#sales-direct-prompt').value,/用产品特写开场/);
