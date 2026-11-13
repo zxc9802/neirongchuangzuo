@@ -83,7 +83,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
   }
   function operationView(op) { return { id: op.id, skill: op.skill, directorModel: op.directorModel, settings: op.settings, status: op.status, message: op.message, createdAt: op.createdAt,
     startedAt: op.startedAt, completedAt: op.completedAt, diagnostics: op.diagnostics,
-    progress: op.progress, result: op.status === 'completed' ? op.result : undefined, draftResult: op.status === 'failed' ? op.draftResult : undefined, error: op.error, code: op.code, billing: op.billing }; }
+    progress: op.progress, result: op.status === 'completed' ? op.result : undefined, draftResult: op.status === 'failed' ? op.draftResult : undefined, reviewIssues: op.reviewIssues, error: op.error, code: op.code, billing: op.billing }; }
   const assetView = (c, a) => ({ id: a.id, originKey: a.libraryId || a.id, name: a.name, type: a.type, purpose: videoAssetPurpose(a), size: a.size, duration: a.duration, width: a.width, height: a.height, uploadedAt: a.uploadedAt,
     expired: now() >= c.mediaExpiresAt, url: now() < c.mediaExpiresAt ? `${PREFIX}/conversations/${c.id}/assets/${a.id}` : null });
   const sessionView = c => ({ id: c.id, version: c.version, skill: c.skill, settings: c.settings, mediaExpiresAt: c.mediaExpiresAt,
@@ -131,6 +131,7 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
       c.messages = c.messages.slice(-20);
     } catch (cause) {
       if (cause.draftResult) op.draftResult = cause.draftResult;
+      if (cause.reviewIssues) op.reviewIssues = cause.reviewIssues;
       const issue = safe(cause); op.status = 'failed'; op.error = issue.error; op.code = issue.code; op.progress = '';
     } finally {
       op.completedAt = now(); await settle(scope, op);

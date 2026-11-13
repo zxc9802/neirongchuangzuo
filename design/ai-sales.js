@@ -79,7 +79,7 @@ function shell(s) {
 }
 function update(s) {
   if(current!==s)return;
-  const op=latest(s), task=latestTask(s), busy=active(s), missing=needed(s), result=op?.result || op?.draftResult, script=result?.script;
+  const op=latest(s), task=latestTask(s), busy=active(s), missing=needed(s), result=op?.status==='completed'?op.result:undefined, script=result?.script;
   const direct=s.directorMode==='direct', prompt=directPrompt(s);
   // Saved scripts remain valid when built-in director requirements change.
   const unchanged=op?.status==='completed' && script && op.directorModel===s.directorMode;
@@ -98,13 +98,13 @@ function update(s) {
   s.root.querySelector('[data-sales=generate]').textContent=t(task?.canRecover?'恢复成片':sameVideo && task?.status==='completed'?'再次生成视频':task?.status==='failed'?'重新生成视频':'生成视频');
   s.root.querySelectorAll('.sales-fields input,.sales-fields textarea').forEach(n=>n.disabled=Boolean(busy));
   s.root.querySelector('[data-sales=new]').disabled=Boolean(s.busy);
-  s.root.querySelector('#sales-status').textContent=s.busy || pending(op?.status) ? s.activity || op?.progress || t(direct?'正在提交…':'正在编导…') : pending(task?.status) ? t('视频生成中，可稍后回来查看') : missing.length ? t('请添加')+'：'+missing.join('、') : direct ? t('素材已就绪，可直接生成视频') : op?.draftResult ? t('待审核脚本') : script&&!unchanged ? t('编导模型或文案已修改，请重新编导') : t('素材已就绪');
+  s.root.querySelector('#sales-status').textContent=s.busy || pending(op?.status) ? s.activity || op?.progress || t(direct?'正在提交…':'正在编导…') : pending(task?.status) ? t('视频生成中，可稍后回来查看') : missing.length ? t('请添加')+'：'+missing.join('、') : direct ? t('素材已就绪，可直接生成视频') : op?.status==='failed' ? t('编导未完成，请重试') : script&&!unchanged ? t('编导模型或文案已修改，请重新编导') : t('素材已就绪');
   s.root.querySelector('#sales-error').textContent=s.error || (op?.status==='failed'?op.error:'') || (task?.status==='failed'?task.error:'') || s.pollError || '';
   const usage=s.session?.operations.reduce((n,o)=>n+(o.billing?.usagePoints ?? o.billing?.chargedPoints ?? 0),0)||0;
   s.root.querySelector('#sales-usage').textContent=t('编导已消耗')+' '+usage+' '+t('积分');
   s.root.querySelector('#sales-quote').textContent=s.quote?t('预计')+' '+s.quote.points+' '+t('积分')+(s.quote.unlimited?' · '+t('无限积分'):''):'';
   renderSalesMaterials(s.root.querySelector('#sales-materials'), s.session?.assets || [], { locked:materialLocked(s), expiredLabel:t('文件已过期'), deleteLabel:t('删除') });
-  setHtml(s.root,'#sales-script',script?`${op.draftResult?`<p>${t('待审核脚本')}</p>`:''}<h3>${esc(script.title)}</h3>${markdownText(result.text||'')}<ol>${script.shots.map(shot=>`<li><strong>${shot.start}–${shot.end}s</strong><p>${esc(shot.visual)}</p><p>${esc(shot.action||'')}</p><blockquote>${esc(shot.voiceover)}</blockquote></li>`).join('')}</ol>${button('copy','复制脚本')}`:op?.result?markdownText([op.result.text,...op.result.questions||[]].join('\n\n')):`<p class="sales-empty">${t('用实拍做案例，展示你的AI创作能力')}</p>`);
+  setHtml(s.root,'#sales-script',script?`<h3>${esc(script.title)}</h3>${markdownText(result.text||'')}<ol>${script.shots.map(shot=>`<li><strong>${shot.start}–${shot.end}s</strong><p>${esc(shot.visual)}</p><p>${esc(shot.action||'')}</p><blockquote>${esc(shot.voiceover)}</blockquote></li>`).join('')}</ol>${button('copy','复制脚本')}`:result?markdownText([result.text,...result.questions||[]].join('\n\n')):op?.status==='failed'?`<p class="sales-empty">${t('脚本尚未通过审核，未交付成稿。请重试编导。')}</p>${op.reviewIssues?.length?`<ul>${op.reviewIssues.map(issue=>`<li><strong>${issue.shot?`${t('镜头')}${issue.shot}`:t('全片')}</strong>：${esc(issue.reason)}</li>`).join('')}</ul>`:''}`:`<p class="sales-empty">${t(pending(op?.status)?'正在编导与审核，通过后将显示脚本':'用实拍做案例，展示你的AI创作能力')}</p>`);
   const resultKey=task?.resultUrl||task?.status||'';
   if(s.resultKey!==resultKey){s.resultKey=resultKey;setHtml(s.root,'#sales-result',task?.resultUrl?`<video controls preload="metadata" src="${esc(task.resultUrl)}"></video><a class="secondary" href="${esc(task.resultUrl)}?download=1" download>${t('下载视频')}</a><p>${t('成品保留3天，请及时下载')}</p>`:`<p class="sales-empty">${pending(task?.status)?t('视频生成中，可稍后回来查看'):t('成片会显示在这里')}</p>`);}
   setHtml(s.root,'#sales-history',s.conversations.map(c=>`<button type="button" class="sales-history-row" data-sales="open" data-id="${c.id}" ${s.busy?'disabled':''}><strong>${esc(c.title)}</strong><span>${esc(new Date(c.updatedAt).toLocaleString())}</span></button>`).join('')||`<p>${t('还没有生成记录')}</p>`);

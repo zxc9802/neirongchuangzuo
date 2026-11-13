@@ -63,17 +63,20 @@ function script(input) {
     shots: [{ start: 0, end: input.settings.duration, visual: '真实门店慢推', referenceIds: [input.assets[0].id], voiceover: '', caption: '', camera: '慢推' }] } };
 }
 
-test('incomplete review preserves a readable draft across restart but cannot approve video generation',async t=>{
+for(const rejected of [false,true])test(`${rejected?'rejected':'incomplete'} review preserves its draft and issues across restart but cannot approve video generation`,async t=>{
+  const reviewIssues=rejected?[{shot:3,reason:'旁白与素材不对应'}]:undefined;
   const f=await fixture(t,{director:async input=>{
-    throw Object.assign(new Error('质量审核未完成，脚本已保留。'),{code:'DIRECTOR_QUALITY_INCOMPLETE',draftResult:script(input)});
+    throw Object.assign(new Error('质量审核未完成，脚本已保留。'),{code:rejected?'DIRECTOR_INVALID_OUTPUT':'DIRECTOR_QUALITY_INCOMPLETE',reviewIssues,draftResult:script(input)});
   }}),id=await f.init();await f.upload(id);
   const opId=randomUUID();
   assert.equal((await f.call(`/conversations/${id}/script`,{body:{requestId:opId,message:'介绍门店',settings}})).status,202);
   let op=await f.until(async()=>{const o=(await f.current(id)).operations[0];return o?.status==='failed'&&o;});
-  assert.equal(op.code,'DIRECTOR_QUALITY_INCOMPLETE');assert.equal(op.result,undefined);
+  assert.equal(op.code,rejected?'DIRECTOR_INVALID_OUTPUT':'DIRECTOR_QUALITY_INCOMPLETE');assert.equal(op.result,undefined);
+  assert.deepEqual(op.reviewIssues,reviewIssues);
   assert.equal(op.draftResult.script.title,'真实门店');
   await f.close();await f.open();op=(await f.current(id)).operations[0];
   assert.equal(op.draftResult.script.title,'真实门店');
+  assert.deepEqual(op.reviewIssues,reviewIssues);
   assert.equal((await f.generate(id,randomUUID(),{scriptId:opId})).status,409);
   assert.equal(f.state.generates,0);
 });

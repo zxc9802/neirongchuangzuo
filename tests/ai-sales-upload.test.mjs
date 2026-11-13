@@ -235,18 +235,37 @@ test('dropping a batch uploads every image once with at most three transfers in 
   assert.equal(zone.getAttribute('aria-disabled'),'false');
 });
 
-test('a retained script remains visible after incomplete review without enabling video generation',async t=>{
+for(const rejected of [false,true])test(`an unapproved script is not delivered after ${rejected?'rejected':'incomplete'} review`,async t=>{
   const ui=await fixture(t,{assets:[
     {id:'actor',type:'image',purpose:'character',name:'人物.jpg'},
     {id:'voice',type:'audio',purpose:'voice',name:'声音.wav'},
     {id:'scene',type:'image',purpose:'reference',name:'场景.jpg'},
-  ],operations:[{id:'draft-op',status:'failed',error:'质量审核未完成，脚本已保留。',draftResult:{
+  ],operations:[{id:'draft-op',status:'failed',error:'审核未通过。',reviewIssues:rejected?[{shot:3,reason:'旁白与门口图片不对应 <img src=x onerror=alert(1)>'}]:undefined,draftResult:{
     kind:'script',text:'已完成编排',script:{title:'保留的创作挑战',shots:[{start:0,end:30,visual:'真实门店',voiceover:'一起看看'}]},
   }}]});
-  assert.match(ui.root.querySelector('#sales-script').textContent,/保留的创作挑战/);
-  assert.match(ui.root.querySelector('#sales-script').textContent,/待审核脚本/);
-  assert.equal(ui.root.querySelector('#sales-status').textContent,'待审核脚本');
+  assert.doesNotMatch(ui.root.querySelector('#sales-script').textContent,/保留的创作挑战|已完成编排/);
+  assert.match(ui.root.querySelector('#sales-script').textContent,/尚未通过审核/);
+  assert.equal(ui.root.querySelector('[data-sales=copy]'),null);
+  if(rejected){assert.match(ui.root.querySelector('#sales-script').textContent,/镜头3.*旁白与门口图片不对应/);assert.equal(ui.root.querySelector('#sales-script img'),null);}
+  assert.equal(ui.root.querySelector('#sales-status').textContent,'编导未完成，请重试');
   assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,true);
+});
+
+test('sales shows correction progress and delivers the script only when the operation completes',async t=>{
+  const ui=await fixture(t,{assets:readyAssets()});
+  ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
+  const op=ui.session.operations[0],script={title:'审核通过的脚本',shots:[],videoPrompt:'已修正的分镜',referenceImageIds:['actor','scene']};
+  Object.assign(op,{status:'running',progress:'正在按审核意见修正脚本（第2轮）',draftResult:{kind:'script',script}});
+  await ui.poll();await ui.reload();
+  assert.match(ui.root.querySelector('#sales-status').textContent,/按审核意见修正/);
+  assert.doesNotMatch(ui.root.querySelector('#sales-script').textContent,/审核通过的脚本/);
+  assert.equal(ui.root.querySelector('[data-sales=copy]'),null);
+  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,true);
+  Object.assign(op,{status:'completed',progress:'',result:{kind:'script',script}});await ui.poll();
+  assert.match(ui.root.querySelector('#sales-script').textContent,/审核通过的脚本/);
+  assert.ok(ui.root.querySelector('[data-sales=copy]'));
+  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
+  assert.equal(ui.scriptRequests.length,1);
 });
 
 test('file drag feedback follows zones and children, while outside drops cannot navigate away',async t=>{
