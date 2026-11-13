@@ -81,7 +81,8 @@ function update(s) {
   if(current!==s)return;
   const op=latest(s), task=latestTask(s), busy=active(s), missing=needed(s), result=op?.result || op?.draftResult, script=result?.script;
   const direct=s.directorMode==='direct', prompt=directPrompt(s);
-  const unchanged=op?.status==='completed' && script && op.message===message(s) && op.directorModel===s.directorMode;
+  // Saved scripts remain valid when built-in director requirements change.
+  const unchanged=op?.status==='completed' && script && op.directorModel===s.directorMode;
   const sameVideo=direct ? task?.directGeneration && task.prompt===prompt.trim() : task?.scriptId===op?.id;
   s.root.querySelectorAll('[data-director]').forEach(n=>{n.disabled=Boolean(busy);n.setAttribute('aria-pressed',String(n.dataset.director===s.directorMode));});
   s.root.querySelector('#sales-mode-hint').textContent=t(direct?'直接把素材与生成要求交给视频模型，不使用编排模型。':s.directorMode==='haiku'?'Claude Haiku 5.5 编导 · 高思考强度':s.directorMode==='kimi'?'Kimi 编导 · 最高思考强度':'Doubao Seed 2.1 Pro 编导 · 火山引擎直连 · 深度思考');

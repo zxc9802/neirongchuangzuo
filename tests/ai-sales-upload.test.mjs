@@ -116,7 +116,7 @@ test('direct mode saves editable requirements and sends real image references wi
   assert.deepEqual(request.referenceImageIds,['actor','scene']);assert.match(request.prompt,/用产品特写开场/);
   assert.ok(ui.root.querySelector('[data-sales=generate]').disabled);
 });
-for(const reload of [false,true])test(`a completed sales video can be generated again from the same script${reload?' after reload':''}`,async t=>{
+for(const historical of [false,true])for(const reload of [false,true])test(`a completed sales video can be generated again from ${historical?'a historical':'the same'} script${reload?' after reload':''}`,async t=>{
   const script={title:'可重复生成的脚本',shots:[],videoPrompt:'同一份分镜提示词',referenceImageIds:['actor','scene']};
   const ui=await fixture(t,{assets:readyAssets(),beforeScript:async()=>({status:'completed',result:{kind:'script',script}})});
   ui.event('click',ui.root.querySelector('[data-sales=script]'));await settle();
@@ -124,9 +124,15 @@ for(const reload of [false,true])test(`a completed sales video can be generated 
   assert.equal(ui.videoRequests.length,1);
   assert.ok(ui.root.querySelector('[data-sales=generate]').disabled);
   const first=ui.videoRequests[0];ui.session.tasks[0].status='completed';
+  if(historical)ui.session.operations[0].message=ui.scriptRequests[0].message.replace(SALES_SCENE_CHARACTER_RULES,'');
   if(reload)await ui.reload();else await ui.poll();
   assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
   assert.equal(ui.root.querySelector('[data-sales=generate]').textContent,'再次生成视频');
+  assert.equal(ui.root.querySelector('#sales-status').textContent,'素材已就绪');
+  ui.event('click',ui.root.querySelector('[data-director=kimi]'));
+  assert.ok(ui.root.querySelector('[data-sales=generate]').disabled);
+  ui.event('click',ui.root.querySelector('[data-director=doubao]'));
+  assert.equal(ui.root.querySelector('[data-sales=generate]').disabled,false);
   ui.event('click',ui.root.querySelector('[data-sales=generate]'));await settle();
   assert.equal(ui.videoRequests.length,2);
   const second=ui.videoRequests[1];assert.notEqual(second.requestId,first.requestId);
