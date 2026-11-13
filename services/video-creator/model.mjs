@@ -24,15 +24,16 @@ export function directorPacing(settings) {
     note: '这是节奏参考，不是固定模板。根据实拍可支持的独立内容和用户要求调整；明确要求长镜头时优先遵循用户要求，不为凑镜头虚构场景。' };
 }
 
-function compileVideoPrompt(direction, shots, images, settings, skill) {
+function compileVideoPrompt(direction, shots, images, settings, scenes) {
   const label = id => `图片${images.findIndex(a => a.id === id) + 1}`;
   const timeline = shots.map((shot, index) => [
     `镜头${index + 1}｜${shot.start}–${shot.end}秒｜参考${shot.referenceIds.map(label).join('、')}`,
     shot.intent && `镜头目的：${shot.intent}`, `画面：${shot.visual}`, shot.action && `动作与表演：${shot.action}`,
+    shot.referenceIds.some(id => scenes?.has(id)) && `人物与场景融合（人物参考${images.filter(a => a.purpose === 'character' && shot.referenceIds.includes(a.id)).map(a => label(a.id)).join('、')}；场景参考${shot.referenceIds.filter(id => scenes.has(id)).map(label).join('、')}）：参考人物全程自然置于本镜场景内，按实际空间选择站位和动作，匹配透视、尺度、光线色温、接触阴影和前后遮挡；不贴片、不悬浮，不遮挡展示主体，不用无人空镜代替。`,
     shot.emotion && `情绪：${shot.emotion}`, shot.camera && `运镜与衔接：${shot.camera}`,
     shot.sceneFusionException && `人物与场景融合例外：${shot.sceneFusionException}；沿用本镜头已编排的人物安排，不为出镜要求强行合成。`,
     settings.generateAudio && shot.sound && `环境声与拟音：${shot.sound}`,
-    settings.generateAudio && shot.voiceover && (skill === 'ai-sales' ? `人物口播（参考${images.filter(a => a.purpose === 'character' && shot.referenceIds.includes(a.id)).map(a => label(a.id)).join('、')}，全程出镜讲解，不用画外音或无人空镜代替）：${shot.voiceover}` : `旁白：${shot.voiceover}`), shot.caption && `字幕：${shot.caption}`,
+    settings.generateAudio && shot.voiceover && `旁白：${shot.voiceover}`, shot.caption && `字幕：${shot.caption}`,
   ].filter(Boolean).join('\n')).join('\n\n');
   return [`生成${settings.duration}秒、${settings.ratio}、${settings.resolution}的视频。`, direction,
     '按以下分镜依次切换，时间轴覆盖全片；每个镜头只完成本镜头的展示重点，不把后续多个空间合并成一次长摇镜，不在结尾额外延长空景。',
@@ -95,7 +96,8 @@ export function validateDirectorResult(value, input) {
   const globalDirection = text(s.globalDirection, 3000);
   const referenceImages = images.filter(a => used.has(a.id));
   const plan = normalizeDirectorPlan(s.plan, input, used, invalidOutput);
-  if (input.skill === 'ai-sales') { assertSalesPlan(shots, plan, input.assets); assertSalesNarration(shots, input.fixedNarration); }
+  const scenes = input.skill === 'ai-sales' ? assertSalesPlan(shots, plan, input.assets, input.observations) : null;
+  if (input.skill === 'ai-sales') assertSalesNarration(shots, input.fixedNarration);
   const remap = value => value.replace(/@?图片\s*(\d+)/g, (label, number) => {
     const source = images[Number(number) - 1]; if (!source) return label;
     const index = referenceImages.findIndex(a => a.id === source.id);
@@ -103,7 +105,7 @@ export function validateDirectorResult(value, input) {
   });
   let compiledDirection = [plan ? compileDirectorPlan(plan, assets, referenceImages, input.settings.generateAudio ? input.assets.filter(a => a.type === 'audio') : [], remap) : remap(globalDirection), offer && remap(offerDirection(offer.facts))].filter(Boolean).join('\n\n');
   if (input.skill === 'ai-sales') compiledDirection = compiledDirection.replace('到店理由：', '创作目的：').replace('目标顾客：', '目标观众：') + '\n' + SALES_ANONYMOUS_RULES + '\n' + SALES_SCENE_CHARACTER_RULES;
-  const videoPrompt = plan || globalDirection ? compileVideoPrompt(compiledDirection, shots.map(shot => ({ ...shot, ...Object.fromEntries(['intent', 'visual', 'camera', 'action', 'emotion', 'sound', 'voiceover', 'caption', 'sceneFusionException'].map(key => [key, remap(shot[key] || '')])) })), referenceImages, input.settings, input.skill)
+  const videoPrompt = plan || globalDirection ? compileVideoPrompt(compiledDirection, shots.map(shot => ({ ...shot, ...Object.fromEntries(['intent', 'visual', 'camera', 'action', 'emotion', 'sound', 'voiceover', 'caption', 'sceneFusionException'].map(key => [key, remap(shot[key] || '')])) })), referenceImages, input.settings, scenes)
     : [text(s.videoPrompt, 12000), offer && offerDirection(offer.facts)].filter(Boolean).join('\n\n');
   if (videoPrompt.length > 12000) throw invalidOutput('完整分镜内容过长，请精简后重新编导。', 'invalid_schema', { field: 'videoPrompt', actualLength: videoPrompt.length, maximumLength: 12000 });
   return { kind: 'script', text: text(value.text, 3000) || text(s.title, 80), assets, warnings, ...(offer ? { offerFacts: offer.facts } : {}),
@@ -138,7 +140,7 @@ function directorSystem(skill) {
     .replaceAll('店家介绍、中性展示或角色演示视角', 'AI创作者讲解与案例成片展示的双层视角')
     .replaceAll('默认从店家介绍或中性展示视角表达', '创作者首尾以本人身份介绍作品，案例内部以面向行业顾客的宣传视角表达')
     .replaceAll('主题与到店理由', '人设主题与案例亮点')
-    .replace('"caption":"字幕，可空"', '"caption":"字幕，可空","sceneFusionException":"仅在无口播镜头的人物融合会造成明显形变时填写具体原因，最多400字；有口播或讲解的镜头必须为空且人物出镜"');
+    .replace('"caption":"字幕，可空"', '"caption":"字幕，可空","sceneFusionException":"引用场景类素材的镜头必须为空且人物出镜；其他镜头仅在人物融合会明显形变时填写具体原因，最多400字"');
   if (skill === 'group-buy') common = common.replace('"warnings":[],"script":',
     '"warnings":[],"offerFacts":{"package":{"value":"","sourceQuote":""},"price":{"value":"","sourceQuote":""},"validity":{"value":"","sourceQuote":""},"conditions":{"value":"","sourceQuote":""}},"script":');
   return [common, skillDirection(skill)].filter(Boolean).join('\n\n');
@@ -194,6 +196,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
       observations=await auxiliary('observation',OBSERVATION_SYSTEM,observationContent,value=>validateObservations(value,input));
     }
     const indexedObservations = observations?.map(o=>({...o,facts:o.facts.map((fact,index)=>({index,text:fact}))}));
+    const validationInput = observations ? { ...input, observations } : input;
     const planningContent = observations ? [content[0], {type:'text',text:JSON.stringify({observations:indexedObservations})}, ...(selected ? content.slice(1) : [])] : content;
     const groundingSystem = observations ? (selected ? '\n你同时收到真实图片和独立观察清单。结合图片观察构图、光线、质感与创意可能，事实与evidence以observations中已确认的信息为准，不把uncertain当作事实。\n' : '\n本次采用独立视觉观察员：你收到的是逐图观察清单，不附图片像素。先阅读observations及uncertain，再编导；不要声称自己看过图片，不以未附像素为由忽略清单。图片ID用于交给视频生成器引用实拍；不要用常识补充清单中未确认的店内陈设、菜品、口味、人物身份或招牌文字。\n')+GROUNDING_RULES : '';
     const baseSystem = observations ? directorSystem(input.skill).replace('"caption":"字幕，可空"', '"caption":"字幕，可空","evidence":[{"assetId":"本镜头引用的图片ID","factIndexes":[0],"use":"scene"}]')+groundingSystem+'\nevidence只放在每个shots元素内，禁止放在script根级。先组织完整、有消费理由的一段口播，再分配镜头时长；中文普通宣传片以pacing.narration的全片字数为目标，先写自然连续的口播再分配画面；例如30秒通常140—160字。保留短换气，不为每次切镜停一秒以上，不机械压成每镜6—9字。长句可跨相邻镜头，实际发音约每秒5—6字，内容过密时先调整镜头时间，再删重复，不删除核心消费理由。不得照抄规则中的示例句作为本次文案。' : directorSystem(input.skill);
@@ -230,7 +233,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
         let candidate=assetAliases.length ? JSON.parse(replaceAssetIds(JSON.stringify(parsed.value),true)) : parsed.value, result;
         previousCandidate=candidate;
         if(observations)validateGrounding(candidate,observations);
-        try { result=validateDirectorResult(candidate,input); }
+        try { result=validateDirectorResult(candidate,validationInput); }
         catch(cause) {
           if(cause.outputIssue!=='invalid_voice_timing')throw cause;
           const request=narrationRepairRequest(candidate,input);let feedback;
@@ -243,7 +246,7 @@ export function createDirectorModel({ config, fetchImpl = fetch, timeoutMs = 300
               feedback=repairError.validationIssue;
             }
           }
-          result=validateDirectorResult(candidate,input); result.narrationRepaired=true;
+          result=validateDirectorResult(candidate,validationInput); result.narrationRepaired=true;
         }
         previousCandidate=candidate;
         if(observations && result.kind==='script') {

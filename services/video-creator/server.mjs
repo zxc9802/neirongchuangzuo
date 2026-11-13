@@ -486,9 +486,9 @@ export function createVideoCreatorHandler({ storageDir, env = process.env, publi
             assertSalesMaterials(c.assets, settings);
             if (input.directGeneration) assertSalesMaterials(c.assets.filter(a => a.type === 'audio' || referenceImageIds.includes(a.id)), settings);
             else {
-              const script = c.operations.find(o => o.id === input.scriptId && o.status === 'completed')?.result?.script;
+              const result = c.operations.find(o => o.id === input.scriptId && o.status === 'completed')?.result, script = result?.script;
               if (!script || script.videoPrompt !== input.prompt.trim()) throw creatorError('请先生成并应用AI带货脚本，或选择直接生成。', 409, 'SALES_SCRIPT_REQUIRED');
-              assertSalesPlan(script.shots, script.plan, c.assets);
+              assertSalesPlan(script.shots, script.plan, c.assets, result.observations);
             }
           }
           const model = VIDEO_MODELS.find(m => m.id === settings.model);
